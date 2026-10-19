@@ -1,0 +1,323 @@
+/***********************************************************************************
+||   Name:      DON_LAB_NAI.pkg
+||   Type:      PL/SQL
+||   Function:  Donor to Lab Nursing Audit Information Interface 
+||   Author:    Jeff Centilli
+||   Date:      01/26/98
+
+||   Date Mod     : 04.18.2011 
+||   Version      : 02      by: Hussein; replace user by lt_session_user.get_userid 
+                  : 03  by Ediwn to remove the chapter id from the donor
+                        parameter table
+                    04 by Edwin to include the ALL chapter ID in the
+                        donor_interdictions table check (08/26/13)
+
+************************************************************************************/
+set serveroutput on
+CREATE OR REPLACE PACKAGE don_lab_nai IS
+
+PROCEDURE interface_nursing_audit
+             (in_unit_id        IN      VARCHAR2,
+              in_from_date      IN      DATE,
+              in_to_date        IN      DATE,
+              in_chapter_id     IN      VARCHAR2,
+              io_interface_id   IN OUT  VARCHAR2);
+END don_lab_nai;
+/
+create or replace PACKAGE BODY don_lab_nai IS
+
+PROCEDURE interface_nursing_audit
+             (in_unit_id        IN        VARCHAR2,
+              in_from_date      IN        DATE,
+              in_to_date        IN        DATE,
+              in_chapter_id     IN        VARCHAR2,
+              io_interface_id   IN OUT    VARCHAR2) IS
+
+   c1_unit_id           varchar2(15);
+   c1_coll_date         date;
+   c1_chapter_id        varchar2(4);
+   err_num              number;
+   err_msg              varchar2(250);
+   number_attempts      number;
+   number_failures      number;
+   number_successes     number;
+   new_interface_flag   varchar2(1);
+   c1_audit_status      varchar2(1);
+   c1_audit_flag        varchar2(1);
+   c1_donor_id          varchar2(10);
+   c1_audit_count       number;
+   interface_id         varchar2(10);
+   new_interface_id     number;
+   default_from_date    number;
+   c1_donation_type     varchar2(5);
+   c1_hold_flag            VARCHAR2(1);
+
+CURSOR get_units IS
+  SELECT unit_id, coll_date, chapter_id
+    FROM units
+   WHERE coll_date BETWEEN
+            nvl(trunc(in_from_date), decode(in_unit_id,
+                     null, trunc(sysdate)-default_from_date, sysdate)) AND
+                     nvl(trunc(in_to_date), sysdate)
+     AND unit_id = nvl(in_unit_id, unit_id)
+     AND chapter_id = in_chapter_id
+     AND nvl(contract_id,'ZZZ') = 'INTERNAL'
+     AND nvl(nursing_audit_status, 'H') = 'H'
+UNION
+  SELECT unit_id, coll_date, chapter_id
+    FROM units
+   WHERE unit_id = nvl(in_unit_id, 'ZZZZZZZZZZ')
+     AND chapter_id = in_chapter_id
+     AND nvl(contract_id,'ZZZ') = 'INTERNAL'
+   ORDER BY 1;
+
+CURSOR get_interface_inters IS
+   SELECT lab_inter_code  inter_code
+     FROM donor_interdictions di, donor_valid_interdictions vi
+    WHERE di.donor_id = c1_donor_id
+      AND c1_coll_date between nvl(di.eff_date, sysdate) and
+                          nvl(di.term_date, sysdate+1)
+      AND di.inter_code = vi.inter_code
+      AND vi.lab_inter_code is not null
+      AND di.release_date is null
+      AND c1_coll_date between nvl(vi.eff_date, sysdate) and 
+                          nvl(vi.term_date, sysdate+1)
+   UNION
+   SELECT lab_inter_code 
+     FROM donation_interdictions di, donor_valid_interdictions vi
+    WHERE di.unit_id = c1_unit_id
+      AND c1_coll_date between di.coll_date and nvl(di.term_date, sysdate+1)
+      AND di.inter_code = vi.inter_code
+      AND vi.lab_inter_code is not null
+      AND di.release_date is null
+      AND c1_coll_date between vi.eff_date and nvl(vi.term_date, sysdate+1);
+BEGIN
+   dbms_output.enable(1000000);
+   number_attempts := 0;
+   number_failures := 0;
+   number_successes := 0;
+   c1_donation_type  := null;
+--
+   new_interface_flag := 'N';
+/*
+||     create a new interface ID
+*/
+   IF (io_interface_id is null) THEN
+      SELECT nvl(max_number,0) + 1
+        INTO new_interface_id
+        FROM number_generation
+       WHERE number_type = 'INTERFACE_ID'
+         AND chapter_id = in_chapter_id 
+         FOR UPDATE OF max_number;
+      IF (new_interface_id is not null) THEN
+         interface_id := 'NAUD'||
+                          rtrim(ltrim(to_char(new_interface_id, '099999')));
+         io_interface_id := interface_id;
+         UPDATE number_generation
+            SET max_number = new_interface_id
+          WHERE number_type = 'INTERFACE_ID'
+            AND chapter_id = in_chapter_id;
+            COMMIT;
+      END IF;
+   END IF;
+   BEGIN
+      SELECT to_number(parameter_value)
+        INTO default_from_date
+        FROM donor_valid_parameters
+       WHERE parameter_code = 'DNLB_AUDIT'
+         AND sysdate between eff_date and nvl(term_date, sysdate+1);
+   EXCEPTION
+      WHEN no_data_found THEN
+           default_from_date := 7;
+   END;
+
+   interface_id := io_interface_id;
+   dbms_output.put_line ('START of: '||interface_id);
+   BEGIN
+      SELECT 'Y'
+        INTO new_interface_flag
+        FROM interface_log
+       WHERE interface_id = io_interface_id;
+   EXCEPTION
+      WHEN no_data_found THEN
+         INSERT INTO interface_log VALUES
+            (io_interface_id, 'N_AUDIT', null, 0, sysdate, sysdate,
+             decode(substr(LT_USER_SESSION.get_userid,1,3),'OPS', substr(LT_USER_SESSION.get_userid,5), LT_USER_SESSION.get_userid),
+             0, 0, 0, in_chapter_id, 'AUDIT');
+         new_interface_flag := 'N';
+   END;
+   INSERT INTO interface_log_parms VALUES
+      (interface_id, in_chapter_id, in_unit_id, null, null, in_from_date,
+       in_to_date);
+   FOR c1 IN get_units  LOOP
+      c1_unit_id := c1.unit_id;
+      c1_coll_date := c1.coll_date;
+      c1_chapter_id := c1.chapter_id;
+      c1_audit_status := null;
+      c1_audit_flag := 'N';
+      number_attempts := number_attempts + 1;
+      c1_donation_type  := null;
+/*
+||
+||      Retrieve nursing audit information from the Donor system.
+||
+*/
+      BEGIN
+         SELECT donor_id, decode(n_audit_flag, null, null, 'O'),
+                decode(n_audit_flag, null, null, 'Y'), donation_type
+           INTO c1_donor_id, c1_audit_status, c1_audit_flag, c1_donation_type
+           FROM donations
+          WHERE unit_id = c1_unit_id
+            AND coll_date = c1_coll_date
+            AND chapter_id = in_chapter_id
+            AND donor_id is not null;
+      EXCEPTION
+         WHEN no_data_found THEN
+            c1_audit_status := null;
+            c1_audit_flag := null;
+            c1_donor_id := null;
+      END;
+/*
+||
+||      Update Nursing audit information in the Lab system.
+||
+*/
+      IF (c1_audit_status is not null) then
+         IF (c1_donor_id is not null) THEN
+            BEGIN
+               SELECT 'H'
+                 INTO c1_hold_flag
+                 FROM DUAL
+                WHERE EXISTS
+                      (SELECT 'X'
+                         FROM donor_interdictions di, 
+                              donor_valid_interdictions vi
+                        WHERE di.donor_id = c1_donor_id
+                          --AND di.chapter_id = c1_chapter_id
+                           AND decode(di.chapter_id, 'ALL', c1_chapter_id,
+                           di.chapter_id) = c1_chapter_id
+                          AND di.term_date is null
+                          AND di.inter_code = vi.inter_code
+                          AND vi.inter_type = 'HOLDS')
+                   OR EXISTS
+                      (SELECT 'X'
+                         FROM donation_interdictions di, 
+                              donor_valid_interdictions vi
+                        WHERE di.unit_id = c1_unit_id
+                          AND di.coll_date = c1_coll_date
+                          AND di.chapter_id = c1_chapter_id
+                          AND di.term_date is null
+                          AND di.inter_code = vi.inter_code
+                          AND vi.inter_type = 'HOLDS');
+            EXCEPTION
+               WHEN no_data_found THEN
+                    c1_hold_flag := null;
+            END;
+            IF (nvl(c1_hold_flag, 'Z') != 'H') THEN
+/*
+||     Select any donor interdictions that place a corresponding interdiction
+||     on the Lab system and make sure that the interdiction is on the LAB.
+*/
+               IF (rtrim(ltrim(c1_donation_type)) not in ('AU','TH')) THEN
+                  FOR c2 in get_interface_inters LOOP
+                     BEGIN
+                        INSERT INTO unit_interdictions
+                           (unit_id, coll_date, chapter_id, inter_code,
+                            insert_dats, inter_user_id, program_id)
+                        VALUES
+                           (c1_unit_id, c1_coll_date, c1_chapter_id, 
+                            c2.inter_code, sysdate, 'SYSTEM', 'DNLBU');
+                     EXCEPTION
+                        WHEN dup_val_on_index THEN
+                            null;
+                     END;
+                  END LOOP;
+               END IF;
+               BEGIN
+                  UPDATE units
+                     SET nursing_audit_flag = c1_audit_flag,
+                         nursing_audit_status = c1_audit_status
+                   WHERE unit_id = c1_unit_id
+                     AND coll_date = c1_coll_date
+                     AND chapter_id = c1_chapter_id;
+                  INSERT INTO interface_log_excp VALUES
+                     (io_interface_id, c1_unit_id, null, 'LABTODON', 
+                      'NAIOK', 'Y', in_chapter_id);
+                  number_successes := number_successes + 1;
+               EXCEPTION
+                  WHEN OTHERS THEN
+                     err_num := SQLCODE;
+                     err_msg := substr(SQLERRM,1,30);
+               END;
+            ELSE
+               ---Hold prevents interface from running
+               BEGIN
+                  UPDATE units
+                     SET nursing_audit_flag = 'Y', nursing_audit_status = 'H'
+                   WHERE unit_id = c1_unit_id
+                     AND coll_date = c1_coll_date
+                     AND chapter_id = c1_chapter_id;
+               INSERT INTO interface_log_excp VALUES
+                  (io_interface_id, c1_unit_id, null, 'LABTODON', 
+                   'NAREJ', 'N', in_chapter_id);
+               number_failures := number_failures + 1;
+               EXCEPTION
+                  WHEN OTHERS THEN
+                     err_num := SQLCODE;
+                     err_msg := substr(SQLERRM,1,30);
+               END;
+            END IF;
+         ELSE
+            ---Donor not attached
+            BEGIN
+               UPDATE units
+                  SET nursing_audit_flag = 'Y', nursing_audit_status = 'H'
+                WHERE unit_id = c1_unit_id
+                  AND coll_date = c1_coll_date
+                  AND chapter_id = c1_chapter_id;
+            INSERT INTO interface_log_excp VALUES
+               (io_interface_id, c1_unit_id, null, 'LABTODON', 
+                'NAREJ', 'N', in_chapter_id);
+            number_failures := number_failures + 1;
+            EXCEPTION
+               WHEN OTHERS THEN
+                  err_num := SQLCODE;
+                  err_msg := substr(SQLERRM,1,30);
+            END;
+         END IF;
+      ELSE
+         --- Registration Audit not performed yet.
+         BEGIN
+            UPDATE units
+               SET nursing_audit_flag = 'Y', nursing_audit_status = 'H'
+             WHERE unit_id = c1_unit_id
+               AND coll_date = c1_coll_date
+               AND chapter_id = c1_chapter_id;
+         INSERT INTO interface_log_excp VALUES
+            (io_interface_id, c1_unit_id, null, 'LABTODON', 
+             'NAREJ', 'N', in_chapter_id);
+         number_failures := number_failures + 1;
+         EXCEPTION
+            WHEN OTHERS THEN
+               err_num := SQLCODE;
+               err_msg := substr(SQLERRM,1,30);
+         END;
+      END IF;
+      COMMIT;
+   END LOOP;
+   UPDATE interface_log
+      SET no_of_units = no_of_units + number_attempts,
+          no_xfer_count = no_xfer_count + number_failures,
+          complete_count = complete_count + number_successes,
+          end_time = sysdate
+    WHERE interface_id = io_interface_id
+      AND chapter_id = in_chapter_id;
+     COMMIT;
+END; /*    Procedure  */
+END don_lab_nai;
+/
+
+grant execute on don_lab_nai to LT_LAB,UTIL,OPS$SRVSYS
+/
+create or replace public synonym don_lab_nai for don_lab_nai 
+/

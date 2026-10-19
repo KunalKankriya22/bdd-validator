@@ -1,0 +1,248 @@
+<div class="rextract-container" role="main">
+
+  <app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+  <!-- Filter Card -->
+  <section class="filter-card" aria-label="Search filters">
+    <div class="filter-row">
+
+      <!-- Contract ID -->
+      <mat-form-field appearance="fill" class="filter-field filter-field--contract">
+        <mat-label>Contract ID <span class="required-asterisk" aria-hidden="true">*</span></mat-label>
+        @if (contractsLoading()) {
+          <mat-spinner matSuffix diameter="16" class="field-spinner"></mat-spinner>
+        }
+        <mat-select
+          [formControl]="contractIdControl"
+          aria-required="true"
+          aria-label="Contract ID (required)">
+          <mat-select-trigger>{{ contractIdControl.value }}</mat-select-trigger>
+          <mat-option>
+            <ngx-mat-select-search
+              [formControl]="contractSearchCtrl"
+              placeholderLabel="Search..."
+              noEntriesFoundLabel="No data found">
+            </ngx-mat-select-search>
+          </mat-option>
+          @for (contract of filteredContracts(); track contract.contractId) {
+            <mat-option [value]="contract.contractId">{{ contract.contractId }} - {{ contract.company }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <!-- Contract Description -->
+      <div class="contract-description" aria-live="polite">
+        <span class="contract-description__label">Contract ID Description</span>
+        <span class="contract-description__value">{{ contractDescription() }}</span>
+      </div>
+
+      <!-- Parameter ID -->
+      <mat-form-field appearance="fill" class="filter-field filter-field--param">
+        <mat-label>Parameter ID <span class="required-asterisk" aria-hidden="true">*</span></mat-label>
+        @if (parametersLoading()) {
+          <mat-spinner matSuffix diameter="16" class="field-spinner"></mat-spinner>
+        }
+        <mat-select
+          [formControl]="paramIdControl"
+          aria-required="true"
+          aria-label="Parameter ID (required)">
+          @if (!parametersLoading() && parameters().length === 0) {
+            <mat-option disabled>No data found</mat-option>
+          }
+          @for (param of parameters(); track param.resultParmId) {
+            <mat-option [value]="param.resultParmId">{{ param.resultParmId }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <!-- Actions -->
+      <div class="filter-actions">
+        <button
+          mat-stroked-button
+          color="primary"
+          type="button"
+          [disabled]="!canRetrieve()"
+          (click)="onRetrieve()">
+          @if (batchesLoading()) {
+            <mat-spinner diameter="16" class="btn-spinner-sm"></mat-spinner>
+          }
+          RETRIEVE
+        </button>
+        <button
+          mat-button
+          type="button"
+          class="clear-all-btn"
+          (click)="onClearAll()">
+          CLEAR ALL
+        </button>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- Error Banner -->
+  @if (error()) {
+    <div class="error-banner" role="alert">
+      <mat-icon aria-hidden="true">error_outline</mat-icon>
+      <span>{{ error() }}</span>
+    </div>
+  }
+
+  <!-- Content: Empty State or Two-Panel -->
+  <div class="content-area">
+    @if (!hasResults()) {
+      <!-- Initial / Empty State -->
+      <div class="empty-state" role="status">
+        <div class="empty-icon-circle" aria-hidden="true">
+          <mat-icon>search</mat-icon>
+        </div>
+        <p class="empty-title">No Results to Display</p>
+        <p class="empty-subtitle">Please enter search criteria to view results</p>
+      </div>
+
+    } @else {
+      <!-- Two-Panel Layout -->
+      <div class="content-panels">
+
+        <!-- Left Panel: Batch List -->
+        <div class="batch-panel" role="navigation" aria-label="Batch list">
+          <div class="batch-panel-header">
+            Batches ({{ batches().length }})
+          </div>
+
+          @if (batchesLoading()) {
+            <div class="panel-loading" role="status" aria-live="polite">
+              <mat-spinner diameter="32"></mat-spinner>
+              <span class="sr-only">Loading batches…</span>
+            </div>
+          } @else if (batches().length === 0) {
+            <div class="panel-empty">
+              <p>No batches found for the selected criteria.</p>
+            </div>
+          } @else {
+            <div class="batch-list" role="list">
+              @for (batch of batches(); track batch.batchId) {
+                <button
+                  class="batch-item"
+                  role="listitem"
+                  [class.batch-item--selected]="selectedBatch()?.batchId === batch.batchId"
+                  (click)="onSelectBatch(batch)"
+                  [attr.aria-pressed]="selectedBatch()?.batchId === batch.batchId"
+                  [attr.aria-label]="batch.batchId + ', ' + batch.unitCount + ' units'">
+                  <span class="batch-item__id">{{ batch.batchId }}</span>
+                  <span class="batch-item__footer">
+                    <span class="batch-item__units">{{ batch.unitCount }} units</span>
+                  </span>
+                </button>
+              }
+            </div>
+          }
+        </div>
+
+        <!-- Right Panel: Batch Detail -->
+        <div class="detail-panel" role="region" aria-label="Batch detail">
+          @if (selectedBatch()) {
+            <div class="detail-header">
+              <span class="detail-header__batch-id">{{ selectedBatch()!.batchId }}</span>
+              <button
+                mat-raised-button
+                color="primary"
+                type="button"
+                class="extract-btn"
+                [disabled]="extracting()"
+                (click)="onExtract()">
+                @if (extracting()) {
+                  <mat-spinner diameter="18" class="btn-spinner-sm"></mat-spinner>
+                }
+                EXTRACT
+              </button>
+            </div>
+
+            @if (unitsLoading()) {
+              <div class="panel-loading" role="status" aria-live="polite">
+                <mat-spinner diameter="32"></mat-spinner>
+                <span class="sr-only">Loading unit details…</span>
+              </div>
+            } @else {
+              <div class="units-table-wrapper">
+                <table mat-table [dataSource]="units()" class="units-table" aria-label="Batch unit details">
+
+                  <!-- Batch Test ID -->
+                  <ng-container matColumnDef="batchTestId">
+                    <th mat-header-cell *matHeaderCellDef class="col-group-end">
+                      Batch Test ID ({{ batchTestCount() }})
+                    </th>
+                    <td mat-cell *matCellDef="let row" class="col-group-end">
+                      {{ row.batchTestId || '' }}
+                    </td>
+                  </ng-container>
+
+                  <!-- Unit ID -->
+                  <ng-container matColumnDef="unitId">
+                    <th mat-header-cell *matHeaderCellDef>
+                      Unit ID ({{ units().length }})
+                    </th>
+                    <td mat-cell *matCellDef="let row">{{ row.unitId }}</td>
+                  </ng-container>
+
+                  <!-- Check Digit -->
+                  <ng-container matColumnDef="chkDigit">
+                    <th mat-header-cell *matHeaderCellDef>Chk Digit</th>
+                    <td mat-cell *matCellDef="let row">{{ row.chkDigit }}</td>
+                  </ng-container>
+
+                  <!-- Outside Unit ID -->
+                  <ng-container matColumnDef="osUnitId">
+                    <th mat-header-cell *matHeaderCellDef>Outside Unit ID</th>
+                    <td mat-cell *matCellDef="let row">{{ row.osUnitId }}</td>
+                  </ng-container>
+
+                  <!-- OS Check Digit -->
+                  <ng-container matColumnDef="osChkDigit">
+                    <th mat-header-cell *matHeaderCellDef class="col-group-end">OS Chk Digit</th>
+                    <td mat-cell *matCellDef="let row" class="col-group-end">{{ row.osChkDigit }}</td>
+                  </ng-container>
+
+                  <!-- Unit Test ID -->
+                  <ng-container matColumnDef="testId">
+                    <th mat-header-cell *matHeaderCellDef>Unit Test ID</th>
+                    <td mat-cell *matCellDef="let row">{{ row.testId }}</td>
+                  </ng-container>
+
+                  <!-- Test Sequence -->
+                  <ng-container matColumnDef="testSeqNo">
+                    <th mat-header-cell *matHeaderCellDef>Test Sequence</th>
+                    <td mat-cell *matCellDef="let row">{{ row.testSeqNo }}</td>
+                  </ng-container>
+
+                  <!-- Result -->
+                  <ng-container matColumnDef="resultStatus1">
+                    <th mat-header-cell *matHeaderCellDef>Result</th>
+                    <td mat-cell *matCellDef="let row">{{ row.resultStatus1 }}</td>
+                  </ng-container>
+
+                  <!-- Collection Date -->
+                  <ng-container matColumnDef="collDate">
+                    <th mat-header-cell *matHeaderCellDef>Coll Date</th>
+                    <td mat-cell *matCellDef="let row">{{ row.collDate | date:'MM/dd/yyyy' }}</td>
+                  </ng-container>
+
+                  <tr mat-header-row *matHeaderRowDef="unitColumns; sticky: true"></tr>
+                  <tr mat-row *matRowDef="let row; columns: unitColumns;"></tr>
+
+                  <tr class="mat-mdc-no-data-row" *matNoDataRow>
+                    <td [attr.colspan]="unitColumns.length" class="no-data-cell">
+                      No unit data available for this batch.
+                    </td>
+                  </tr>
+                </table>
+              </div>
+            }
+          }
+        </div>
+
+      </div>
+    }
+  </div>
+
+</div>

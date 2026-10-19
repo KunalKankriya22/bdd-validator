@@ -1,0 +1,727 @@
+<!-- Root container (no longer a dialog, just panel content) -->
+<div class="donor-communications-panel">
+
+  <!-- Main View: visible only when no child panel is open -->
+  @if (!sidePanelOpen() && !viewLettersOpen() && !sendLetterOpen()) {
+  <div class="panel-content">
+
+    <!-- Initial Loading State -->
+    @if (initialLoading()) {
+      <div class="loading-container">
+        <mat-spinner diameter="50"></mat-spinner>
+        <p class="loading-text">Loading communications...</p>
+      </div>
+    }
+
+    <!-- Main Content -->
+    @if (!initialLoading()) {
+      <!-- Page Heading -->
+      <div class="panel-header">
+        <h2 class="panel-heading">Communication Log</h2>
+        <button
+          mat-icon-button
+          type="button"
+          aria-label="Close panel"
+          class="panel-close-btn"
+          (click)="onClose()">
+          <mat-icon>close</mat-icon>
+        </button>
+      </div>
+
+      <!-- Donor Info Section -->
+      @if (donorHeader()) {
+        <div class="donor-info-section">
+          <div class="info-row">
+            <div class="field-display-card">
+              <div class="field-label">Name</div>
+              <div class="field-value">{{ formatDonorName(donorHeader()?.name) }}</div>
+            </div>
+            <div class="field-display-card">
+              <div class="field-label">DOB</div>
+              <div class="field-value">{{ donorHeader()?.dateOfBirth ? formatDate(donorHeader()!.dateOfBirth!) : '-' }}</div>
+            </div>
+            <div class="field-display-card">
+              <div class="field-label">Sex</div>
+              <div class="field-value">{{ donorHeader()?.sex || '-' }}</div>
+            </div>
+            <div class="field-display-card">
+              <div class="field-label">ABO</div>
+              <div class="field-value">{{ donorHeader()?.abo || '-' }}</div>
+            </div>
+          </div>
+        </div>
+      }
+
+      <!-- Search Section (hidden when no communications) -->
+      @if (communications().length > 0) {
+      <div class="search-section">
+        <app-search-bar
+          [config]="searchBarConfig"
+          (search)="onSearch($event)">
+        </app-search-bar>
+      </div>
+      }
+
+      <!-- Data Table -->
+      <div class="table-container" [class.table-container--empty]="communications().length === 0">
+        <app-data-table
+          [config]="communicationsTableConfig"
+          [data]="filteredCommunications()"
+          [loading]="loading()"
+          (sortChange)="onTableSort($event)"
+          (rowClick)="onRowClick($event)">
+        </app-data-table>
+      </div>
+
+      <!-- Footer Section -->
+      <div class="footer-section">
+        @if (selectedNote() || selectedUserName()) {
+          <div class="selected-row-info">
+            <div class="selected-row-info__header">
+              <span class="selected-row-info__username">{{ selectedUserName() || '-' }}</span>
+            </div>
+            <div class="selected-row-info__notes">{{ selectedNote() || '-' }}</div>
+          </div>
+        }
+
+        <div class="footer-actions">
+          <button
+            mat-stroked-button
+            type="button"
+            (click)="onClose()"
+            class="side-panel__btn side-panel__btn--secondary">
+            CLOSE
+          </button>
+          <button
+            mat-stroked-button
+            type="button"
+            (click)="onNew()"
+            class="side-panel__btn side-panel__btn--secondary">
+            NEW
+          </button>
+          <button
+            mat-stroked-button
+            type="button"
+            (click)="onViewLetters()"
+            class="side-panel__btn side-panel__btn--secondary">
+            VIEW LETTERS
+          </button>
+          @if (!hideSendLetter) {
+          <button
+            mat-stroked-button
+            type="button"
+            (click)="onSendLetters()"
+            class="side-panel__btn side-panel__btn--secondary">
+            SEND LETTERS
+          </button>
+          }
+          <button
+            mat-stroked-button
+            type="button"
+            (click)="onDetails()"
+            [disabled]="filteredCommunications().length === 0"
+            class="side-panel__btn side-panel__btn--secondary">
+            DETAILS
+          </button>
+        </div>
+      </div>
+    }
+  </div>
+  }
+
+  <!-- CHILD PANEL: Form Panel (NEW/DETAILS) -->
+  @if (sidePanelOpen()) {
+      <app-side-panel-base
+        [title]="sidePanelMode() === 'new' ? 'Add New' : 'Details'"
+        [width]="'100%'"
+        [footerButtons]="getPanelButtons()"
+        (closePanel)="closeSidePanel()"
+        (buttonClick)="onPanelButtonClick($event)">
+
+        <ng-container panelContent>
+          <div class="form-panel-content">
+            <!-- DETAILS MODE: Read-only display -->
+            @if (sidePanelMode() === 'details' && sidePanelData()) {
+              <div class="details-display" [formGroup]="sidePanelForm">
+                <!-- Row 1: Date -->
+                <div class="detail-row">
+                  <div class="field-display-card">
+                    <div class="field-label">Date and Time</div>
+                    <div class="field-value">{{ panelCurrentDateTime() }}</div>
+                  </div>
+                </div>
+
+                <!-- Row 2: Type and Type Description -->
+                <div class="detail-row">
+                  <div class="field-display-card">
+                    <div class="field-label">Type</div>
+                    <div class="field-value">{{ sidePanelData()?.comType || '-' }}</div>
+                  </div>
+                  <div class="field-display-card">
+                    <div class="field-label">Type Description</div>
+                    <div class="field-value">{{ panelSelectedTypeDesc() || '-' }}</div>
+                  </div>
+                </div>
+
+                <!-- Row 3: Code and Code Description -->
+                <div class="detail-row">
+                  <div class="field-display-card">
+                    <div class="field-label">Code</div>
+                    <div class="field-value">{{ sidePanelData()?.comCode || '-' }}</div>
+                  </div>
+                  <div class="field-display-card">
+                    <div class="field-label">Code Description</div>
+                    <div class="field-value">{{ panelSelectedCodeDesc() || '-' }}</div>
+                  </div>
+                </div>
+
+                <!-- Row 4: Comments (editable when DLCOM access granted) -->
+                <div class="detail-row">
+                  <mat-form-field appearance="fill" class="form-field form-field--full-width" subscriptSizing="dynamic">
+                    <mat-label>Comments</mat-label>
+                    <textarea
+                      matInput
+                      formControlName="comments"
+                      cdkTextareaAutosize
+                      cdkAutosizeMinRows="3"
+                      cdkAutosizeMaxRows="6"
+                      maxlength="2000"
+                      (keydown)="panelPreventLeadingAndMultipleSpaces($event, 'comments')"
+                      (blur)="panelTrimTrailingSpaces('comments')">
+                    </textarea>
+                    <mat-hint align="end">{{ getPanelCommentsCharacterCount() }}</mat-hint>
+                    @if (sidePanelForm.get('comments')?.hasError('maxlength') && sidePanelForm.get('comments')?.touched) {
+                      <mat-error>Comments exceed maximum length (2000 characters)</mat-error>
+                    }
+                  </mat-form-field>
+                </div>
+
+                <!-- Row 5: User ID and User Name -->
+                <div class="detail-row">
+                  <div class="field-display-card">
+                    <div class="field-label">User ID</div>
+                    <div class="field-value">{{ sidePanelData()?.insertUser || '-' }}</div>
+                  </div>
+                  <div class="field-display-card">
+                    <div class="field-label">User Name</div>
+                    <div class="field-value">{{ sidePanelData()?.userName || sidePanelData()?.insertUser || '-' }}</div>
+                  </div>
+                </div>
+
+                <!-- Row 6: Action Code and Description (read-only) -->
+                <div class="detail-row">
+                  <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+                    <mat-label>Action Code</mat-label>
+                    <mat-select
+                      formControlName="actionCode"
+                      (selectionChange)="panelActionCodeSearchControl.reset()">
+                      @if (panelActionCodes().length > 0) {
+                        <mat-option>
+                          <ngx-mat-select-search
+                            [formControl]="panelActionCodeSearchControl"
+                            placeholderLabel="Search codes..."
+                            noEntriesFoundLabel="No matching codes">
+                          </ngx-mat-select-search>
+                        </mat-option>
+                      }
+                      @for (code of panelFilteredActionCodes(); track panelTrackByValue($index, code)) {
+                        <mat-option [value]="code.value">
+                          {{ code.label }}
+                        </mat-option>
+                      }
+                      @if (panelFilteredActionCodes().length === 0) {
+                        <mat-option disabled>
+                          No Data Available
+                        </mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+
+                  <mat-form-field appearance="fill" class="form-field form-field--readonly">
+                    <mat-label>Action Code Description</mat-label>
+                    <input matInput [value]="panelSelectedActionCodeDesc()" readonly>
+                  </mat-form-field>
+                </div>
+
+                <!-- Row 7: Target Date (read-only) and Action Date (editable when DLCOM access granted) -->
+                <div class="detail-row">
+                  <div class="field-display-card">
+                    <div class="field-label">Target Date</div>
+                    <div class="field-value">{{ formatDate(sidePanelData()?.targetDate) }}</div>
+                  </div>
+
+                  <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+                    <mat-label>Action Date</mat-label>
+                    <input
+                      matInput
+                      #detailsActionDateInput
+                      [matDatepicker]="detailsActionDatePicker"
+                      formControlName="actionDate"
+                      placeholder="DD-MON-YYYY"
+                      autocomplete="off"
+                      [errorStateMatcher]="actionDateErrorMatcher"
+                      (input)="onPanelActionDateInput($event)"
+                      (blur)="onPanelActionDateBlur(detailsActionDateInput)">
+                    <mat-datepicker-toggle matSuffix [for]="detailsActionDatePicker"></mat-datepicker-toggle>
+                    <mat-datepicker #detailsActionDatePicker></mat-datepicker>
+                    @if (getPanelActionDateError()) {
+                      <mat-error>{{ getPanelActionDateError() }}</mat-error>
+                    }
+                  </mat-form-field>
+                </div>
+              </div>
+            }
+
+            <!-- NEW MODE: Editable form -->
+            @if (sidePanelMode() === 'new' && sidePanelForm) {
+              <form [formGroup]="sidePanelForm">
+                <!-- Row 1: Date (readonly) -->
+                <div class="form-row">
+                  <mat-form-field appearance="fill" class="form-field form-field--readonly">
+                    <mat-label>Date</mat-label>
+                    <input matInput [value]="panelCurrentDateTime()" readonly>
+                  </mat-form-field>
+                </div>
+
+                <!-- Row 2: Type and Type Description -->
+                <div class="form-row">
+                  <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic" [hideRequiredMarker]="true">
+                    <mat-label>Type <span class="required-marker">*</span></mat-label>
+                    <mat-select
+                      formControlName="communicationType"
+                      [attr.aria-invalid]="sidePanelForm.get('communicationType')?.invalid && sidePanelForm.get('communicationType')?.touched"
+                      (selectionChange)="panelComTypeSearchControl.reset()">
+
+                      @if (panelCommunicationTypes().length > 0 && sidePanelMode() === 'new') {
+                        <mat-option>
+                          <ngx-mat-select-search
+                            [formControl]="panelComTypeSearchControl"
+                            placeholderLabel="Search types..."
+                            noEntriesFoundLabel="No matching types">
+                          </ngx-mat-select-search>
+                        </mat-option>
+                      }
+
+                      @for (type of panelFilteredComTypes(); track panelTrackByValue($index, type)) {
+                        <mat-option [value]="type.value">
+                          {{ type.label }}
+                        </mat-option>
+                      }
+
+                      @if (panelCommunicationTypes().length === 0) {
+                        <mat-option disabled>
+                          No Data Available
+                        </mat-option>
+                      }
+                    </mat-select>
+                    @if (sidePanelForm.get('communicationType')?.hasError('required') && sidePanelForm.get('communicationType')?.touched) {
+                      <mat-error>Type is required</mat-error>
+                    }
+                  </mat-form-field>
+
+                  <mat-form-field appearance="fill" class="form-field form-field--readonly">
+                    <mat-label>Type Description</mat-label>
+                    <input matInput [value]="panelSelectedTypeDesc()" readonly>
+                  </mat-form-field>
+                </div>
+
+                <!-- Row 3: Code and Code Description -->
+                <div class="form-row">
+                  <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic" [hideRequiredMarker]="true">
+                    <mat-label>Code <span class="required-marker">*</span></mat-label>
+                    <mat-select
+                      formControlName="communicationCode"
+                      [attr.aria-invalid]="sidePanelForm.get('communicationCode')?.invalid && sidePanelForm.get('communicationCode')?.touched"
+                      (selectionChange)="panelComCodeSearchControl.reset()">
+
+                      @if (panelLoadingCodes()) {
+                        <mat-option disabled>
+                          <mat-spinner diameter="20"></mat-spinner>
+                          Loading codes...
+                        </mat-option>
+                      } @else {
+                        @if (panelCommunicationCodes().length > 0 && sidePanelMode() === 'new') {
+                          <mat-option>
+                            <ngx-mat-select-search
+                              [formControl]="panelComCodeSearchControl"
+                              placeholderLabel="Search codes..."
+                              noEntriesFoundLabel="No matching codes">
+                            </ngx-mat-select-search>
+                          </mat-option>
+                        }
+
+                        @for (code of panelFilteredComCodes(); track panelTrackByValue($index, code)) {
+                          <mat-option [value]="code.value">
+                            {{ code.label }}
+                          </mat-option>
+                        }
+
+                        @if (panelCommunicationCodes().length === 0) {
+                          <mat-option disabled>
+                            No Data Available
+                          </mat-option>
+                        }
+                      }
+                    </mat-select>
+                    @if (sidePanelForm.get('communicationCode')?.hasError('required') && sidePanelForm.get('communicationCode')?.touched) {
+                      <mat-error>Code is required</mat-error>
+                    }
+                  </mat-form-field>
+
+                  <mat-form-field appearance="fill" class="form-field form-field--readonly">
+                    <mat-label>Code Description</mat-label>
+                    <input matInput [value]="panelSelectedCodeDesc()" readonly>
+                  </mat-form-field>
+                </div>
+
+                <!-- Row 4: Comments -->
+                <div class="form-row">
+                  <mat-form-field appearance="fill" class="form-field form-field--full-width" subscriptSizing="dynamic">
+                    <mat-label>Comments</mat-label>
+                    <textarea
+                      matInput
+                      formControlName="comments"
+                      cdkTextareaAutosize
+                      cdkAutosizeMinRows="3"
+                      cdkAutosizeMaxRows="6"
+                      maxlength="2000"
+                      (keydown)="panelPreventLeadingAndMultipleSpaces($event, 'comments')"
+                      (blur)="panelTrimTrailingSpaces('comments')">
+                    </textarea>
+                    <mat-hint align="end">{{ getPanelCommentsCharacterCount() }}</mat-hint>
+                    @if (sidePanelForm.get('comments')?.hasError('maxlength') && sidePanelForm.get('comments')?.touched) {
+                      <mat-error>Comments exceed maximum length (2000 characters)</mat-error>
+                    }
+                  </mat-form-field>
+                </div>
+
+                <!-- Row 5: User ID and Name (readonly) -->
+                <div class="form-row">
+                  <mat-form-field appearance="fill" class="form-field form-field--readonly">
+                    <mat-label>User ID</mat-label>
+                    <input matInput [value]="panelCurrentUser()" readonly>
+                  </mat-form-field>
+
+                  <mat-form-field appearance="fill" class="form-field form-field--readonly">
+                    <mat-label>User Name</mat-label>
+                    <input matInput [value]="panelCurrentUserName()" readonly>
+                  </mat-form-field>
+                </div>
+
+                <!-- Row 6: Action Code and Action Code Description -->
+                <div class="form-row">
+                  <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+                    <mat-label>Action Code</mat-label>
+                    <mat-select
+                      formControlName="actionCode"
+                      (selectionChange)="panelActionCodeSearchControl.reset()">
+
+                      @if (panelActionCodes().length > 0 && sidePanelMode() === 'new') {
+                        <mat-option>
+                          <ngx-mat-select-search
+                            [formControl]="panelActionCodeSearchControl"
+                            placeholderLabel="Search codes..."
+                            noEntriesFoundLabel="No matching codes">
+                          </ngx-mat-select-search>
+                        </mat-option>
+                      }
+
+                      @for (code of panelFilteredActionCodes(); track panelTrackByValue($index, code)) {
+                        <mat-option [value]="code.value">
+                          {{ code.label }}
+                        </mat-option>
+                      }
+
+                      @if (panelFilteredActionCodes().length === 0) {
+                        <mat-option disabled>
+                          No Data Available
+                        </mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+
+                  <mat-form-field appearance="fill" class="form-field form-field--readonly">
+                    <mat-label>Action Code Description</mat-label>
+                    <input matInput [value]="panelSelectedActionCodeDesc()" readonly>
+                  </mat-form-field>
+                </div>
+
+                <!-- Row 7: Target Date and Action Date -->
+                <div class="form-row">
+                  <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+                    <mat-label>Target Date</mat-label>
+                    <input
+                      matInput
+                      #targetDateNativeInput
+                      [matDatepicker]="panelTargetDatePicker"
+                      formControlName="targetDate"
+                      placeholder="DD-MON-YYYY"
+                      autocomplete="off"
+                      [errorStateMatcher]="targetDateErrorMatcher"
+                      (input)="onPanelTargetDateInput($event)"
+                      (blur)="onPanelTargetDateBlur(targetDateNativeInput)">
+                    <mat-datepicker-toggle matSuffix [for]="panelTargetDatePicker"></mat-datepicker-toggle>
+                    <mat-datepicker #panelTargetDatePicker></mat-datepicker>
+                    @if (getPanelTargetDateError()) {
+                      <mat-error>{{ getPanelTargetDateError() }}</mat-error>
+                    }
+                  </mat-form-field>
+
+                  <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+                    <mat-label>Action Date</mat-label>
+                    <input
+                      matInput
+                      #actionDateNativeInput
+                      [matDatepicker]="panelActionDatePicker"
+                      formControlName="actionDate"
+                      placeholder="DD-MON-YYYY"
+                      autocomplete="off"
+                      [errorStateMatcher]="actionDateErrorMatcher"
+                      (input)="onPanelActionDateInput($event)"
+                      (blur)="onPanelActionDateBlur(actionDateNativeInput)">
+                    <mat-datepicker-toggle matSuffix [for]="panelActionDatePicker"></mat-datepicker-toggle>
+                    <mat-datepicker #panelActionDatePicker></mat-datepicker>
+                    @if (getPanelActionDateError()) {
+                      <mat-error>{{ getPanelActionDateError() }}</mat-error>
+                    }
+                  </mat-form-field>
+                </div>
+              </form>
+            }
+          </div>
+        </ng-container>
+      </app-side-panel-base>
+  }
+
+  <!-- CHILD PANEL: View Letters -->
+  @if (viewLettersOpen()) {
+      <app-side-panel-base
+        [title]="'Communication Letter - ' + donorId"
+        [width]="'100%'"
+        [footerButtons]="getViewLettersButtons()"
+        (closePanel)="closeViewLetters()"
+        (buttonClick)="onViewLettersButtonClick($event)">
+
+        <ng-container panelContent>
+          <div class="letters-panel-content">
+            @if (lettersLoading()) {
+              <div class="loading-container">
+                <mat-spinner diameter="40"></mat-spinner>
+                <p>Loading letters...</p>
+              </div>
+            } @else {
+              <!-- Letter History Table -->
+              <div class="letter-history-section">
+                <app-data-table
+                  [config]="letterHistoryTableConfig"
+                  [data]="letterHistory()"
+                  [loading]="lettersLoading()"
+                  [highlightedRow]="selectedLetter()"
+                  (rowClick)="onLetterClick($event)">
+                </app-data-table>
+              </div>
+
+              <!-- Letter Preview -->
+              @if (letterText()) {
+                <div class="letter-preview-section">
+                  <div class="letter-preview-content">
+                    <pre>{{ letterText() }}</pre>
+                  </div>
+                </div>
+              } @else if (letterHistory().length > 0) {
+                <p class="no-selection">Select a letter to view its content</p>
+              }
+            }
+          </div>
+        </ng-container>
+      </app-side-panel-base>
+  }
+
+  <!-- CHILD PANEL: Send Letter -->
+  @if (sendLetterOpen()) {
+      <app-side-panel-base
+        [title]="'Send Letter'"
+        [width]="'100%'"
+        [footerButtons]="getSendLetterButtons()"
+        (closePanel)="closeSendLetter()"
+        (buttonClick)="onSendLetterButtonClick($event)">
+
+        <ng-container panelContent>
+          <div class="send-letter-panel-content">
+            @if (sendLetterLoading()) {
+              <div class="loading-container">
+                <mat-spinner diameter="40"></mat-spinner>
+                <p>Loading...</p>
+              </div>
+            } @else {
+              @if (sendLetterForm) {
+                <form [formGroup]="sendLetterForm">
+                  <!-- Row 1: Communication Type and Description -->
+                  <div class="form-row">
+                    <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic" [hideRequiredMarker]="true">
+                      <mat-label>Communication Type <span class="required-marker">*</span></mat-label>
+                      <mat-select
+                        formControlName="communicationType"
+                        (selectionChange)="panelComTypeSearchControl.reset(); onSendLetterTypeChange(); onSendLetterCodeChange()">
+
+                        @if (panelCommunicationTypes().length > 0) {
+                          <mat-option>
+                            <ngx-mat-select-search
+                              [formControl]="panelComTypeSearchControl"
+                              placeholderLabel="Search types..."
+                              noEntriesFoundLabel="No matching types">
+                            </ngx-mat-select-search>
+                          </mat-option>
+                        }
+
+                        @for (type of panelFilteredComTypes(); track type.value) {
+                          <mat-option [value]="type.value">
+                            {{ type.label }}
+                          </mat-option>
+                        }
+
+                        @if (panelCommunicationTypes().length === 0) {
+                          <mat-option disabled>
+                            No Data Available
+                          </mat-option>
+                        }
+                      </mat-select>
+                      @if (sendLetterForm.get('communicationType')?.hasError('required') && sendLetterForm.get('communicationType')?.touched) {
+                        <mat-error>Communication Type is required</mat-error>
+                      }
+                    </mat-form-field>
+
+                    <mat-form-field appearance="fill" class="form-field form-field--readonly" subscriptSizing="dynamic">
+                      <mat-label>Description</mat-label>
+                      <input matInput [value]="panelSelectedTypeDesc() || '-'" readonly>
+                    </mat-form-field>
+                  </div>
+
+                  <!-- Row 2: Communication Code and Description -->
+                  <div class="form-row">
+                    <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic" [hideRequiredMarker]="true">
+                      <mat-label>Communication Code <span class="required-marker">*</span></mat-label>
+                      <mat-select formControlName="communicationCode" (selectionChange)="panelComCodeSearchControl.reset(); onSendLetterCodeChange()">
+                        @if (panelLoadingCodes()) {
+                          <mat-option disabled>
+                            <mat-spinner diameter="20"></mat-spinner>
+                            Loading codes...
+                          </mat-option>
+                        } @else {
+                          @if (panelCommunicationCodes().length > 0) {
+                            <mat-option>
+                              <ngx-mat-select-search
+                                [formControl]="panelComCodeSearchControl"
+                                placeholderLabel="Search codes..."
+                                noEntriesFoundLabel="No matching codes">
+                              </ngx-mat-select-search>
+                            </mat-option>
+                          }
+
+                          @for (code of panelFilteredComCodes(); track code.value) {
+                            <mat-option [value]="code.value">
+                              {{ code.label }}
+                            </mat-option>
+                          }
+
+                          @if (panelCommunicationCodes().length === 0) {
+                            <mat-option disabled>
+                              No Data Available
+                            </mat-option>
+                          }
+                        }
+                      </mat-select>
+                      @if (sendLetterForm.get('communicationCode')?.hasError('required') && sendLetterForm.get('communicationCode')?.touched) {
+                        <mat-error>Communication Code is required</mat-error>
+                      }
+                    </mat-form-field>
+
+                    <mat-form-field appearance="fill" class="form-field form-field--readonly" subscriptSizing="dynamic">
+                      <mat-label>Description</mat-label>
+                      <input matInput [value]="panelSelectedCodeDesc() || '-'" readonly>
+                    </mat-form-field>
+                  </div>
+
+                  <!-- Row 3: Comments -->
+                  <div class="form-row">
+                    <mat-form-field appearance="fill" class="form-field form-field--full-width" subscriptSizing="dynamic">
+                      <mat-label>Comments</mat-label>
+                      <textarea
+                        matInput
+                        formControlName="comments"
+                        cdkTextareaAutosize
+                        cdkAutosizeMinRows="3"
+                        cdkAutosizeMaxRows="5">
+                      </textarea>
+                    </mat-form-field>
+                  </div>
+
+                  <!-- Row 4: Letter Code and Letter Description -->
+                  <div class="form-row">
+                    <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic" [hideRequiredMarker]="true">
+                      <mat-label>Letter Code <span class="required-marker">*</span></mat-label>
+                      <mat-select formControlName="letterCode"
+                      (selectionChange)="letterCodeSearchControl.reset(); onLetterCodeChange($event.value)"
+                      (closed)="onLetterCodeDropdownClosed()">
+                        @if (letterCodes().length > 0) {
+                          <mat-option>
+                            <ngx-mat-select-search
+                              [formControl]="letterCodeSearchControl"
+                              placeholderLabel="Search letter codes..."
+                              noEntriesFoundLabel="No matching letter codes">
+                            </ngx-mat-select-search>
+                          </mat-option>
+                        }
+
+                        @for (code of filteredLetterCodes(); track code.code) {
+                          <mat-option [value]="code.code">
+                            {{ code.code }} - {{ code.description }}
+                          </mat-option>
+                        }
+
+                        @if (letterCodes().length === 0) {
+                          <mat-option disabled>
+                            No Data Available
+                          </mat-option>
+                        }
+                      </mat-select>
+                      @if (sendLetterForm.get('letterCode')?.hasError('required') && sendLetterForm.get('letterCode')?.touched) {
+                        <mat-error>Letter Code is required</mat-error>
+                      }
+                    </mat-form-field>
+
+                    <div class="field-display-card">
+                      <div class="field-label">Letter Description</div>
+                      <div class="field-value">{{ selectedLetterCode()?.description || '-' }}</div>
+                    </div>
+                  </div>
+
+                  <!-- Row 5: Version Number and Version Date -->
+                  <div class="form-row">
+                    <div class="field-display-card">
+                      <div class="field-label">Version Number</div>
+                      <div class="field-value">{{ selectedLetterCode()?.versionNumber || '-' }}</div>
+                    </div>
+
+                    <div class="field-display-card">
+                      <div class="field-label">Version Date</div>
+                      <div class="field-value">{{ formatDate(selectedLetterCode()?.versionDate) }}</div>
+                    </div>
+                  </div>
+                </form>
+
+                <!-- Letter Preview -->
+                @if (generatedLetterText() || selectedLetterCode()?.letterText) {
+                  <div class="letter-preview-section">
+                    <div class="letter-preview-content">
+                      <pre>{{ generatedLetterText() || selectedLetterCode()?.letterText }}</pre>
+                    </div>
+                  </div>
+                }
+              }
+            }
+          </div>
+        </ng-container>
+      </app-side-panel-base>
+  }
+</div>

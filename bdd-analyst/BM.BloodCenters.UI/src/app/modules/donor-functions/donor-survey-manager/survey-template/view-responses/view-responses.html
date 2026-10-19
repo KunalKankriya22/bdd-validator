@@ -1,0 +1,358 @@
+<h1 class="cdk-visually-hidden">{{ pageTitle }}</h1>
+<app-page-header-with-breadcrumb [config]="headerConfig" />
+
+<!-- Subheader: back arrow + title -->
+<div class="responses-subheader">
+  <div class="responses-header">
+    <button mat-icon-button class="back-button" (click)="goBack()" aria-label="Go back to Survey Template">
+      <mat-icon>arrow_back</mat-icon>
+    </button>
+    <span class="header-title">{{ pageTitle }}</span>
+  </div>
+</div>
+
+<!-- Tabs -->
+<div class="tab-bar" role="tablist" aria-label="View responses by">
+  <button class="tab-button" role="tab"
+    id="tab-answers"
+    aria-controls="panel-answers"
+    [attr.aria-selected]="activeTab === 'answers'"
+    (click)="setActiveTab('answers')">
+    By Answers
+  </button>
+  <button class="tab-button" role="tab"
+    id="tab-statistics"
+    aria-controls="panel-statistics"
+    [attr.aria-selected]="activeTab === 'statistics'"
+    (click)="setActiveTab('statistics')">
+    Statistics
+  </button>
+</div>
+
+<div class="view-responses-container">
+  <!-- Loading -->
+  @if (isLoading) {
+    <div class="loading-container" role="status" aria-live="polite">
+      <mat-spinner diameter="40"></mat-spinner>
+      <span>Loading responses...</span>
+    </div>
+  }
+
+  <!-- By Answers Tab -->
+  @if (!isLoading && activeTab === 'answers') {
+    <div class="split-panel" id="panel-answers" role="tabpanel" aria-labelledby="tab-answers">
+      <!-- Left Panel: Questions & Answers -->
+      <div class="left-panel">
+        <div class="panel-toolbar">
+          <button mat-button class="filter-button"
+            [class.filter-button--active]="showLeftFilterPanel"
+            (click)="toggleLeftFilterPanel()"
+            aria-label="Open filter options" type="button">
+            <span class="filter-icon" aria-hidden="true"></span>
+            FILTER
+          </button>
+          @if (leftFilterChips.length > 0) {
+            <app-filter-chips
+              [chips]="leftFilterChips"
+              [maxVisible]="3"
+              (removeChip)="onLeftChipRemove($event)"
+              (clearAll)="onLeftClearAllChips()" />
+          }
+          <app-search-bar
+            [config]="questionSearchConfig"
+            (search)="onQuestionSearchChange($event)" />
+        </div>
+
+        <!-- Left Filter Panel Overlay -->
+        @if (showLeftFilterPanel) {
+          <div class="filter-overlay-backdrop" (click)="toggleLeftFilterPanel()"></div>
+          <div class="filter-overlay-panel" role="dialog" aria-modal="true" aria-label="Question filters" cdkTrapFocus cdkTrapFocusAutoCapture (keydown.escape)="toggleLeftFilterPanel()">
+            <div class="filter-panel__header">
+              <h2>Filters</h2>
+              <button mat-icon-button type="button" class="filter-panel__close" aria-label="Close filter panel" (click)="toggleLeftFilterPanel()">
+                <mat-icon>close</mat-icon>
+              </button>
+            </div>
+            <div class="filter-panel__content" [formGroup]="leftFilterForm">
+              <mat-form-field appearance="fill">
+                <mat-label>Sex</mat-label>
+                <mat-select formControlName="sex" aria-label="Filter by sex">
+                  <mat-option value="A">All</mat-option>
+                  <mat-option value="M">Male</mat-option>
+                  <mat-option value="F">Female</mat-option>
+                </mat-select>
+              </mat-form-field>
+              <mat-form-field appearance="fill">
+                <mat-label>Response Type</mat-label>
+                <mat-select formControlName="responseType" aria-label="Filter by response type">
+                  <mat-option value="S">Single</mat-option>
+                  <mat-option value="M">Multiple</mat-option>
+                  <mat-option value="C">Comment</mat-option>
+                  <mat-option value="R">Ranking</mat-option>
+                </mat-select>
+              </mat-form-field>
+            </div>
+            <div class="filter-panel__footer">
+              <div class="footer-actions">
+                <button mat-stroked-button type="button" class="clear-btn" (click)="clearLeftFilters()">CLEAR ALL</button>
+                <button mat-raised-button type="button" class="apply-btn" (click)="applyLeftFilter()" [disabled]="isLeftApplyDisabled">APPLY</button>
+              </div>
+            </div>
+          </div>
+        }
+
+        <!-- Questions List -->
+        <div class="questions-list">
+          @if (filteredQuestions.length === 0) {
+            <div class="empty-state" role="status" aria-live="polite">
+              <mat-icon class="left-panel-empty-icon" aria-hidden="true">edit</mat-icon>
+              <span>No questions found</span>
+            </div>
+          }
+          @for (question of filteredQuestions; track question.questionCode) {
+            <div class="question-block">
+              <div class="question-header">
+                <span class="question-code">{{ question.questionCode }}</span>
+                <div class="question-title-row">
+                  <span class="question-desc">{{ question.questionDesc }}</span>
+                  <div class="question-icons">
+                    <span class="tag-icon" [attr.aria-label]="getQuestionTypeLabel(question.responseType)">
+                      <img [src]="getTypeIconPath(question.responseType)" [alt]="getQuestionTypeLabel(question.responseType)">
+                    </span>
+                    <span class="tag-icon" [attr.aria-label]="getGenderLabel(question.gender)">
+                      <img [src]="getGenderIconPath(question.gender)" [alt]="getGenderLabel(question.gender)">
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div class="answers-list">
+                @for (answer of question.answers; track answer.answerCode; let i = $index) {
+                  <button class="answer-row" [class.selected]="isAnswerSelected(question, answer)"
+                    (click)="onAnswerClick(question, answer)"
+                    [attr.aria-label]="getAnswerLabel(question, answer) + ' - ' + answer.responseCount + ' responses'">
+                    <span class="answer-desc">@if (question.responseType !== 'C') {{{ i + 1 }}. }{{ getAnswerLabel(question, answer) }}</span>
+                    <span class="answer-count">{{ (answer.responseCount + '').padStart(2, '0') }} responses</span>
+                  </button>
+                }
+              </div>
+            </div>
+          }
+        </div>
+      </div>
+
+      <!-- Right Panel: Donors -->
+      <div class="right-panel">
+        <div class="panel-toolbar">
+          <button mat-button class="filter-button"
+            [class.filter-button--active]="showRightFilterPanel"
+            (click)="toggleRightFilterPanel()"
+            aria-label="Open filter options" type="button">
+            <span class="filter-icon" aria-hidden="true"></span>
+            FILTER
+          </button>
+          @if (rightFilterChips.length > 0) {
+            <app-filter-chips
+              [chips]="rightFilterChips"
+              [maxVisible]="3"
+              (removeChip)="onRightChipRemove($event)"
+              (clearAll)="onRightClearAllChips()" />
+          }
+          <app-search-bar
+            [config]="donorSearchConfig"
+            (search)="onDonorSearchChange($event)" />
+        </div>
+
+        <!-- Right Filter Panel Overlay -->
+        @if (showRightFilterPanel) {
+          <div class="filter-overlay-backdrop" (click)="toggleRightFilterPanel()"></div>
+          <div class="filter-overlay-panel" role="dialog" aria-modal="true" aria-label="Donor filters" cdkTrapFocus cdkTrapFocusAutoCapture (keydown.escape)="toggleRightFilterPanel()">
+            <div class="filter-panel__header">
+              <h2>Filters</h2>
+              <button mat-icon-button type="button" class="filter-panel__close" aria-label="Close filter panel" (click)="toggleRightFilterPanel()">
+                <mat-icon>close</mat-icon>
+              </button>
+            </div>
+            <div class="filter-panel__content" [formGroup]="rightFilterForm">
+              <mat-form-field appearance="fill">
+                <mat-label>Sex</mat-label>
+                <mat-select formControlName="sex" aria-label="Filter donors by sex">
+                  <mat-option value="A">All</mat-option>
+                  <mat-option value="M">Male</mat-option>
+                  <mat-option value="F">Female</mat-option>
+                </mat-select>
+              </mat-form-field>
+            </div>
+            <div class="filter-panel__footer">
+              <div class="footer-actions">
+                <button mat-stroked-button type="button" class="clear-btn" (click)="clearRightFilters()">CLEAR ALL</button>
+                <button mat-raised-button type="button" class="apply-btn" (click)="applyRightFilter()" [disabled]="isRightApplyDisabled">APPLY</button>
+              </div>
+            </div>
+          </div>
+        }
+
+        <!-- Donors Loading -->
+        @if (isDonorsLoading) {
+          <div class="loading-container" role="status" aria-live="polite">
+            <mat-spinner diameter="32"></mat-spinner>
+            <span>Loading donors...</span>
+          </div>
+        }
+
+        <!-- Donors Table -->
+        @if (!isDonorsLoading && selectedAnswer && filteredDonors.length > 0) {
+          <app-data-table
+            [config]="donorTableConfig"
+            [data]="filteredDonors"
+            (sortChange)="onDonorSortChange($event)"
+          />
+        }
+
+        @if (!isDonorsLoading && selectedAnswer && filteredDonors.length === 0 && donors.length > 0) {
+          <div class="empty-state" role="status" aria-live="polite">
+            <mat-icon aria-hidden="true">search_off</mat-icon>
+            <span>No records found</span>
+          </div>
+        }
+
+        @if (!isDonorsLoading && selectedAnswer && donors.length === 0) {
+          <div class="empty-state" role="status" aria-live="polite">
+            <mat-icon aria-hidden="true">person_off</mat-icon>
+            <span>No donors found for this answer</span>
+          </div>
+        }
+
+        @if (!isDonorsLoading && !selectedAnswer) {
+          <div class="empty-state" role="status" aria-live="polite">
+            <mat-icon aria-hidden="true">touch_app</mat-icon>
+            <span>Select an answer to view donors</span>
+          </div>
+        }
+      </div>
+    </div>
+  }
+
+  <!-- Statistics Tab -->
+  @if (!isLoading && activeTab === 'statistics') {
+    <div class="split-panel" id="panel-statistics" role="tabpanel" aria-labelledby="tab-statistics">
+      <!-- Left Panel: Questions List -->
+      <div class="left-panel">
+        <div class="panel-toolbar panel-toolbar--search-only">
+          <app-search-bar
+            [config]="statisticsSearchConfig"
+            (search)="onStatisticsSearchChange($event)" />
+        </div>
+
+        <div class="stat-questions-list">
+          @if (filteredStatQuestions.length === 0) {
+            <div class="empty-state" role="status" aria-live="polite">
+              <mat-icon class="left-panel-empty-icon" aria-hidden="true">edit</mat-icon>
+              <span>No questions found</span>
+            </div>
+          }
+          @for (question of filteredStatQuestions; track question.questionCode) {
+            <button class="stat-question-row" [class.selected]="isStatQuestionSelected(question)"
+              (click)="onStatQuestionClick(question)"
+              [attr.aria-label]="question.questionDesc + ' - ' + getTotalCount(question) + ' responses'">
+              <div class="stat-question-top">
+                <span class="stat-question-desc">{{ question.questionDesc }}</span>
+                <span class="stat-question-count">{{ (getTotalCount(question) + '').padStart(2, '0') }} responses</span>
+              </div>
+              <span class="stat-question-code">{{ question.questionCode }}</span>
+            </button>
+          }
+        </div>
+      </div>
+
+      <!-- Right Panel: Chart or Comments -->
+      <div class="right-panel">
+        @if (!selectedStatQuestion) {
+          <div class="empty-state" role="status" aria-live="polite">
+            <mat-icon aria-hidden="true">bar_chart</mat-icon>
+            <span>Select a question to view statistics</span>
+          </div>
+        }
+
+        @if (selectedStatQuestion) {
+          <div class="stat-scroll-container">
+          <div class="stat-chart-header">
+            <span class="stat-chart-title">Responses of {{ selectedStatQuestion.questionCode }}</span>
+          </div>
+
+          <!-- Type 1: Bar Chart for Single/Multiple -->
+          @if (selectedStatQuestion.responseType === 'S' || selectedStatQuestion.responseType === 'M') {
+            <div class="bar-chart" role="region" [attr.aria-label]="'Response distribution for ' + selectedStatQuestion.questionDesc">
+              @for (answer of selectedStatQuestion.answers; track answer.answerCode; let i = $index) {
+                @let total = getTotalCount(selectedStatQuestion);
+                @let percentage = getPercentage(answer.responseCount, total);
+                @let barWidth = getBarWidth(answer.responseCount, total);
+                <div class="bar-row">
+                  <span class="bar-label" [matTooltip]="answer.answerDesc || answer.answerCode" matTooltipPosition="below" matTooltipClass="bar-label-tooltip">{{ answer.answerDesc || answer.answerCode }}</span>
+                  <div class="bar-track" aria-hidden="true">
+                    <div class="bar-fill" [style.width.%]="barWidth" [style.background]="getBarColor(i)"></div>
+                  </div>
+                  <span class="bar-value">{{ answer.responseCount }} ({{ percentage }}%)</span>
+                </div>
+              }
+            </div>
+          }
+
+          <!-- Type 2: Comment Cards -->
+          @if (selectedStatQuestion.responseType === 'C') {
+            @if (isCommentsLoading) {
+              <div class="loading-container" role="status" aria-live="polite">
+                <mat-spinner diameter="32"></mat-spinner>
+                <span>Loading comments...</span>
+              </div>
+            }
+            @if (!isCommentsLoading) {
+              <div class="comments-list">
+                @if (comments.length === 0) {
+                  <div class="empty-state" role="status" aria-live="polite">
+                    <mat-icon aria-hidden="true">comment</mat-icon>
+                    <span>No comments found</span>
+                  </div>
+                }
+                @for (comment of comments; track $index) {
+                  <div class="comment-card">
+                    <p>{{ comment.answerComments || '-' }}</p>
+                  </div>
+                }
+              </div>
+            }
+          }
+
+          <!-- Type 3: Ranking Weighted Chart -->
+          @if (selectedStatQuestion.responseType === 'R') {
+            <div class="ranking-chart-container">
+              <div class="bar-chart ranking-chart" role="region"
+                [attr.aria-label]="'Ranking distribution for ' + selectedStatQuestion.questionDesc">
+                @for (answer of getRankedAnswers(selectedStatQuestion); track answer.answerCode; let i = $index) {
+                  <div class="ranking-bar-group">
+                    <div class="bar-row">
+                      <span class="bar-label" [matTooltip]="answer.answerDesc || answer.answerCode" matTooltipPosition="below" matTooltipClass="bar-label-tooltip">{{ answer.answerDesc || answer.answerCode }}</span>
+                      <div class="bar-track">
+                        <div class="bar-fill" [style.width.%]="answer.barWidth" [style.background]="getBarColor(i)"></div>
+                      </div>
+                    </div>
+                    <div class="rank-breakdown">
+                      @for (rank of answer.allRanks; track rank.rankCode) {
+                        <span class="rank-chip">{{ rank.rankLabel }}: {{ rank.rankCount }} resp.</span>
+                      }
+                    </div>
+                  </div>
+                }
+              </div>
+              <div class="ranking-direction-indicator" aria-hidden="true">
+                <span class="direction-label">Most Preferred</span>
+                <div class="direction-arrow"></div>
+                <span class="direction-label">Least Preferred</span>
+              </div>
+            </div>
+          }
+          </div>
+        }
+      </div>
+    </div>
+  }
+</div>

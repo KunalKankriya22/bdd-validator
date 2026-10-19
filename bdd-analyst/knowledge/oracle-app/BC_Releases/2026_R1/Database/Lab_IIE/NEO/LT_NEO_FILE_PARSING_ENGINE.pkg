@@ -1,0 +1,423 @@
+/* *********************************************************************************
+  Name              : LT_NEO_FILE_PARSING_ENGINE.pkg
+  Created By        : Kishore Gummadi
+  Date Of Creation  : 02/05/2014
+  Purpose           : This package will populate the API_INST_TEST_RESULTS
+                      table based on the data file in /tmp/qlab_util folder.
+
+  Version History
+  
+  Date         Version        Description
+  ---------------------------------------------------------------------------------
+  02/05/2014   01             Initial development - Kishore
+  02/18/2014   02             IM 9916 - If the value present in the machine result code 
+                              bucket matches with one of the values in the ERROR_CODE 
+                              field in the API_ERROR_HANDLING table, then populate the 
+                              value in the ERROR_CODE field in the API_INST_TEST_RESULTS 
+                              table instead of result field - Kishore
+  05/13/2014   03             SCR 20608 - Enable time zone changes
+  10/21/2014   04             Corrected the date format for the result date.
+
+  *********************************************************************************   */
+
+CREATE OR REPLACE PACKAGE LT_NEO_FILE_PARSING_ENGINE as
+  procedure insert_error_log(p_file_name in varchar2,
+                             p_err_msg in varchar2);
+
+  procedure add_log_entry(p_log_text in varchar2);  
+
+  procedure NEO_PARSER(p_machine_id in varchar2,
+                       p_chapter_id in varchar2,
+                       p_file_id in varchar2);
+
+  t_log_file           utl_file.file_type;
+END LT_NEO_FILE_PARSING_ENGINE;
+/
+
+create or replace package body LT_NEO_FILE_PARSING_ENGINE as
+
+  procedure insert_error_log(p_file_name in varchar2,
+                             p_err_msg in varchar2) is
+  begin
+    begin
+      insert into lifetrak_api_log
+        (external_id,
+         internal_id,
+         log_text,
+         source_id,
+         insert_date,
+         program_id)
+      values
+        (substr(p_file_name, 1, 15),
+         'NEO PARSING',
+         p_err_msg,
+         'NEO',
+         sysdate,
+         'LT_INST_FILE_PARSING_ENGINE');
+    exception
+      when others then
+        raise_application_error(-20050, 'Error while inserting into LIFETRAK_API_LOG table for file ' || p_file_name);
+    end;
+  end insert_error_log;
+
+  procedure add_log_entry(p_log_text in varchar2) is
+  begin
+    utl_file.putf(t_log_file, '%s\n', p_log_text);
+    utl_file.fflush(t_log_file);
+  end add_log_entry;
+
+  procedure NEO_PARSER(p_machine_id in varchar2,
+                       p_chapter_id in varchar2,
+                       p_file_id in varchar2) as
+
+    t_in_file              utl_file.file_type;
+    t_directory            master_codes.code_desc%type;
+    t_log_file_name        varchar2(200);
+    t_new_line             varchar2(1000);
+    t_prev_line            varchar2(1000);
+    t_line_num             number := 0;
+    t_hdr_first_char       varchar2(1);
+    t_ftr_first_char       varchar2(1);
+    t_rec_ctr              number := 0;
+    t_row_cnt              number := 0;
+    t_unit_lines_ctr       number := 0;
+    t_err_msg              varchar2(100);
+    t_unit_id              api_inst_test_results.unit_id%type;
+    t_machine_test_id      api_inst_test_results.machine_test_id%type;
+    t_machine_result       api_inst_test_results.machine_result%type;
+    t_error_code           api_inst_test_results.error_code%type;
+    t_result_date          api_inst_test_results.result_date%type;
+    t_result_user_id       api_inst_test_results.result_user_id%type;
+    t_skip_record          api_inst_test_results.skip_record%type := 'N';
+    t_site_id              api_inst_test_results.site_id%type := null;
+    t_test_start_loc       number := 0;
+    t_test_end_loc         number := 0;
+    t_test_length          number := 0;
+    t_unit_start_loc       number := 0;
+    t_unit_end_loc         number := 0;
+    t_unit_length          number := 0;
+    t_res_start_loc        number := 0;
+    t_res_end_loc          number := 0;
+    t_res_length           number := 0;
+    t_res_dt_start_loc     number := 0;
+    t_res_dt_end_loc       number := 0;
+    t_res_dt_length        number := 0;
+    t_res_usrid_start_loc  number := 0;
+    t_res_usrid_end_loc    number := 0;
+    t_res_usrid_length     number := 0;
+    t_tot_recs_parsed      number := 0;
+    t_timezone_active      varchar2(1);
+    t_start_time           varchar2(30);
+    t_end_time             varchar2(30);
+    t_sysdate              date;
+    t_count                number := 0;
+    log_error_and_exit     exception;
+    rollback_and_exit      exception;
+  begin
+    -- Uncommented by Kishore on 05/13/2014. SCR 20608
+    -- Check if time zone is active
+    begin
+      select nvl(time_zone_enabled, 'N')  
+        into t_timezone_active
+        from lt_application_config;
+    exception
+      when no_data_found then
+        t_timezone_active := 'N';
+      when others then
+        t_err_msg := 'Error: ' || SQLCODE || ' - ' || SQLERRM;
+        raise rollback_and_exit;
+    end;
+
+    if t_timezone_active = 'Y' then
+      t_sysdate := lifetrack_timezone_convert.get_local_time(p_chapter_id, sysdate);
+    else
+      t_sysdate := sysdate;
+    end if;
+    -- End of uncommented section
+
+    --t_sysdate := sysdate; -- Commented by Kishore on 05/13/2014. SCR 20608
+
+    -- Delete from API_INST_TEST_RESULTS table if records from the input file exist
+    begin
+      delete from API_INST_TEST_RESULTS
+       where file_id = p_file_id
+         and machine_id = p_machine_id
+         and chapter_id = p_chapter_id;
+    exception
+      when others then
+        t_err_msg := 'Delete Error: ' || SQLCODE || ' - ' || SQLERRM;
+        raise rollback_and_exit;
+    end;
+
+    -- Create a log file name
+    begin
+      select 'NEO_PARSER_' || p_file_id || '_' || 
+             to_char(t_sysdate, 'YYYYMMDDHHMISS') || '.r'
+        into t_log_file_name from dual;
+    exception
+      when others then
+        t_err_msg := 'Error in getting logfilename ... Aborting';
+        raise log_error_and_exit;
+    end;
+
+    -- Check if the header and footer lines exist
+    begin
+      select code_desc
+        into t_directory 
+        from master_codes 
+       where code_type = 'LOGDR' 
+         and code = 'ILOG';
+    exception
+      when no_data_found then
+        t_err_msg := 'Error: Interface Directory not found in MASTER_CODES table';
+        raise log_error_and_exit;
+      when others then
+        t_err_msg := 'Error: ' || SQLCODE || ' - ' || SQLERRM;
+        raise log_error_and_exit;
+    end;
+
+    t_start_time := to_char(t_sysdate, 'MM-DD-YYYY HH24:MI:SS');
+    t_log_file := utl_file.fopen(t_directory, t_log_file_name, 'w');
+    t_in_file := utl_file.fopen(t_directory, p_file_id, 'R');
+
+    add_log_entry(' NEO Parser Log ');
+    add_log_entry('----------------------------------');
+    add_log_entry(' ');
+    add_log_entry('File parsing start time: ' || t_start_time);
+    add_log_entry('File Name  : ' || p_file_id);
+    add_log_entry('Log Name   : ' || t_log_file_name);
+    add_log_entry('----------------------------------------');
+
+    if utl_file.is_open(t_in_file) then
+      loop
+        begin
+          utl_file.get_line(t_in_file, t_new_line);
+          t_line_num := t_line_num + 1;
+        
+          if t_line_num = 1 then
+            t_hdr_first_char := substr(t_new_line, 1, 1);
+          end if;
+          
+          if t_hdr_first_char = 'H' then
+            null;
+          else
+            t_err_msg := 'Error: Header is missing in the file';
+            raise log_error_and_exit;
+          end if;
+
+          if t_new_line is null then
+            exit;
+          end if;
+
+          t_rec_ctr := t_rec_ctr + 1;
+          t_prev_line := t_new_line;
+        exception
+          when no_data_found then
+            exit;
+        end;
+      end loop;
+    end if;
+
+    utl_file.fclose(t_in_file);
+
+    t_row_cnt := t_rec_ctr;
+    t_ftr_first_char := substr(t_prev_line, 1, 1);
+
+    if t_ftr_first_char = 'L' then
+      null;
+    else
+      t_err_msg := 'Error: Footer is missing in the file';
+      raise log_error_and_exit;
+    end if;
+
+    -- Process the data file
+    t_new_line := null;
+    t_rec_ctr := 0;
+
+    t_in_file := utl_file.fopen(t_directory, p_file_id, 'R');
+
+    if utl_file.is_open(t_in_file) then
+      loop
+        begin
+          utl_file.get_line(t_in_file, t_new_line);
+          --dbms_output.put_line(t_new_line);
+          t_rec_ctr := t_rec_ctr + 1;
+
+          if t_new_line is null then
+            exit;
+          end if;
+
+          if t_rec_ctr not in (1, t_row_cnt) then -- Ignore the first and last rows
+            -- Check if "P", "O", "R" lines exist for the unit
+            if t_unit_lines_ctr = 0 then
+              t_skip_record := 'N';
+            end if;
+            
+            t_unit_lines_ctr := t_unit_lines_ctr + 1;
+
+            begin
+              if substr(t_new_line, 1, 1) = 'P' and t_unit_lines_ctr = 1 then
+                null;
+              elsif substr(t_new_line, 1, 1) = 'O' and t_unit_lines_ctr = 2 then
+                t_unit_start_loc := instr(t_new_line, '|', 1, 2) + 1;
+                t_unit_end_loc := instr(t_new_line, '|', 1, 3);
+                t_unit_length := t_unit_end_loc - t_unit_start_loc;
+                t_unit_id := substr(t_new_line, t_unit_start_loc, t_unit_length);
+                
+                t_test_start_loc := instr(t_new_line, '|', 1, 4) + 1;
+                t_test_end_loc := instr(t_new_line, '|', 1, 5);
+                t_test_length := t_test_end_loc - t_test_start_loc;
+                t_machine_test_id := replace(substr(t_new_line, t_test_start_loc, t_test_length), '^', '');
+              elsif substr(t_new_line, 1, 1) = 'R' and t_unit_lines_ctr = 3 then
+                t_res_start_loc := instr(t_new_line, '|', 1, 3) + 1;
+                t_res_end_loc := instr(t_new_line, '|', 1, 4);
+                t_res_length := t_res_end_loc - t_res_start_loc;
+                t_machine_result := substr(t_new_line, t_res_start_loc, t_res_length);
+                -- Added by Kishore on 02/18/2014. IM 9916
+                begin
+                  select count(*)
+                    into t_count
+                    from api_inst_error_handling
+                   where machine_id = p_machine_id
+                     and chapter_id = p_chapter_id
+                     and error_code = t_machine_result
+                     and t_sysdate between eff_date and nvl(term_date, t_sysdate + 1);
+                exception
+                  when others then
+                    t_err_msg := 'Error: ' || SQLCODE || ' - ' || SQLERRM;
+                    raise log_error_and_exit;
+                end;
+
+                if t_count > 0 then
+                  t_error_code := t_machine_result;
+                  t_machine_result := null;
+                end if;
+                -- End of change
+
+                t_res_usrid_start_loc := instr(t_new_line, '|', 1, 10) + 1;
+                t_res_usrid_end_loc := instr(t_new_line, '|', 1, 11);
+                t_res_usrid_length := t_res_usrid_end_loc - t_res_usrid_start_loc;
+                t_result_user_id := substr(t_new_line, t_res_usrid_start_loc, t_res_usrid_length);
+                
+                t_res_dt_start_loc := instr(t_new_line, '|', 1, 12) + 1;
+                t_res_dt_end_loc := instr(t_new_line, '|', 1, 13);
+                t_res_dt_length := t_res_dt_end_loc - t_res_dt_start_loc;
+                --t_result_date := to_date(substr(t_new_line, t_res_dt_start_loc, t_res_dt_length), 'YYYYMMDDHHMISS'); -- Commented by Kishore on 10/21/2014
+                t_result_date := to_date(substr(t_new_line, t_res_dt_start_loc, t_res_dt_length), 'YYYYMMDDHH24MISS'); -- Added by Kishore on 10/21/2014
+              else
+                t_err_msg := 'Error: Record missing at line ' || to_char(t_rec_ctr);
+                raise rollback_and_exit;
+              end if;
+            exception
+              when others then
+                t_skip_record := 'Y';
+                t_err_msg := 'Error: ' || SQLCODE || ' - ' || SQLERRM;
+                insert_error_log(p_file_id, t_err_msg);
+            end;
+
+            if t_unit_lines_ctr = 3 then
+              -- Insert the record in API_INST_TEST_RESULTS table
+              begin
+                insert into API_INST_TEST_RESULTS
+                  (machine_id, chapter_id, file_id,
+                   unit_id, machine_test_id, machine_result,
+                   absorbance, result_date, result_user_id,
+                   error_code, skip_record, upload_status, 
+                   insert_date, insert_user, site_id, 
+                   parsed_by)
+                values
+                  (p_machine_id, p_chapter_id, p_file_id,
+                   t_unit_id, t_machine_test_id, t_machine_result,
+                   '0', t_result_date, t_result_user_id,
+                   t_error_code, t_skip_record, 'P', 
+                   sysdate, user, t_site_id, 
+                   'LT');
+
+                t_tot_recs_parsed := t_tot_recs_parsed + 1;
+              exception
+                when others then
+                  t_err_msg := 'Error: ' || SQLCODE || ' - ' || SQLERRM;
+                  insert_error_log(p_file_id, t_err_msg);
+              end;
+            
+              t_unit_lines_ctr := 0;
+            end if; -- if t_unit_lines_ctr = 3 then
+          end if; -- if t_rec_ctr not in (1, t_row_cnt) then
+        exception
+          when no_data_found then
+            exit;
+        end;
+      end loop;
+    end if; -- if utl_file.is_open(t_in_file) then
+
+    utl_file.fclose(t_in_file);
+    add_log_entry('No. of Records parsed: ' || to_char(t_tot_recs_parsed));
+    add_log_entry('NEO file parsing successfully completed');
+
+    t_end_time := to_char(t_sysdate, 'MM-DD-YYYY HH24:MI:SS');
+    add_log_entry('Program End Time: ' || t_end_time);
+    add_log_entry(' ');
+    add_log_entry('*********************End****************************');
+    utl_file.fclose(t_log_file);
+
+    commit;
+  exception
+    when utl_file.invalid_mode then
+      insert_error_log(p_file_id, 'Invalid Mode Parameter');
+      commit;
+    when utl_file.invalid_path then
+      insert_error_log(p_file_id, 'Invalid File Location');
+      commit;
+    when utl_file.invalid_filehandle then
+      insert_error_log(p_file_id, 'Invalid Filehandle');
+      commit;
+    when utl_file.invalid_operation then
+      insert_error_log(p_file_id, 'Invalid Operation');
+      commit;
+    when utl_file.read_error then
+      insert_error_log(p_file_id, 'Read Error');
+      commit;
+    when utl_file.internal_error then
+      insert_error_log(p_file_id, 'Internal Error');
+      commit;
+    when utl_file.charsetmismatch then
+      insert_error_log(p_file_id, 'Opened With FOPEN_NCHAR But Later I/O Inconsistent');
+      commit;
+    when utl_file.file_open then
+      insert_error_log(p_file_id, 'File Already Opened');
+      commit;
+    when utl_file.invalid_maxlinesize then
+      insert_error_log(p_file_id,'Line Size Exceeds 32K');
+      commit;
+    when utl_file.invalid_filename then
+      insert_error_log(p_file_id, 'Invalid File Name');
+      commit;
+    when utl_file.access_denied then
+      insert_error_log(p_file_id, 'File Access Denied By');
+      commit;
+    when utl_file.invalid_offset then
+      insert_error_log(p_file_id, 'FSEEK Param Less Than 0');
+      commit;
+    when log_error_and_exit then
+      insert_error_log(p_file_id, t_err_msg);
+      commit;
+    when rollback_and_exit then
+      rollback;
+      insert_error_log(p_file_id, t_err_msg);
+      commit;
+    when others then
+      insert_error_log(p_file_id, SQLCODE || ' - ' || SQLERRM);
+      commit;
+  end NEO_PARSER;
+
+end LT_NEO_FILE_PARSING_ENGINE;
+
+/
+
+Create or Replace Public Synonym LT_NEO_FILE_PARSING_ENGINE for LT_NEO_FILE_PARSING_ENGINE
+
+/
+
+Grant execute on LT_NEO_FILE_PARSING_ENGINE to PUBLIC
+
+/

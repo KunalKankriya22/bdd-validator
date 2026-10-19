@@ -1,0 +1,409 @@
+<div class="layout-wrapper">
+  <a href="#results-section" class="skip-link">Skip to results</a>
+  <main class="donors-by-events-query" role="main">
+
+    <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+    <!-- Query Panel -->
+    <div class="query-panel">
+      <form [formGroup]="searchForm" (ngSubmit)="onRetrieve()" class="query-form">
+        <div class="query-row">
+
+          <!-- Search by -->
+          <mat-form-field appearance="fill" class="query-field query-field--search-type" subscriptSizing="dynamic">
+            <mat-label>Search by</mat-label>
+            <mat-select formControlName="searchType" required (openedChange)="!$event && searchTypeSearchControl.setValue('')">
+              <mat-option>
+                <ngx-mat-select-search [formControl]="searchTypeSearchControl" placeholderLabel="Search..." noEntriesFoundLabel="No results found" [disableScrollToActiveOnOptionsChanged]="true"></ngx-mat-select-search>
+              </mat-option>
+              @for (type of filteredSearchTypes(); track type.code) {
+                <mat-option [value]="type.code">{{ type.description }}</mat-option>
+              }
+            </mat-select>
+            <mat-error *ngIf="searchForm.get('searchType')?.hasError('required')">Search by is required</mat-error>
+          </mat-form-field>
+
+          <!-- Value -->
+          @if (showValueField) {
+            <div class="value-field-wrapper">
+              <mat-form-field appearance="fill" subscriptSizing="dynamic" [class]="'query-field ' + (hasValueCodeDropdown ? 'query-field--value-wide' : 'query-field--value')">
+                <mat-label>{{ valueFieldLabel }}</mat-label>
+                @if (hasValueCodeDropdown) {
+                  <mat-select formControlName="code" (openedChange)="!$event && valueCodeSearchControl.setValue('')">
+                    <mat-option>
+                      <ngx-mat-select-search [formControl]="valueCodeSearchControl" placeholderLabel="Search..." noEntriesFoundLabel="No results found" [disableScrollToActiveOnOptionsChanged]="true"></ngx-mat-select-search>
+                    </mat-option>
+                    <mat-option value="">-- All --</mat-option>
+                    @for (vc of filteredValueCodes(); track vc.code) {
+                      <mat-option [value]="vc.code">{{ vc.code }} - {{ vc.description }}</mat-option>
+                    }
+                  </mat-select>
+                } @else {
+                  <input matInput
+                         formControlName="code"
+                         [placeholder]="valuePlaceholder"
+                         type="text"
+                         [maxlength]="getInputMaxLength()"
+                         (keypress)="onNumericKeyPress($event)"
+                         (input)="onNumericInput($event); searchForm.get('code')?.markAsTouched()">
+                }
+                <mat-error *ngIf="searchForm.get('code')?.hasError('pattern')">
+                  Only numeric values allowed
+                </mat-error>
+                <mat-error *ngIf="searchForm.get('code')?.hasError('maxlength')">
+                  {{ getMaxLengthErrorMessage() }}
+                </mat-error>
+                <mat-error *ngIf="searchForm.get('code')?.hasError('required')">
+                  {{ valueFieldLabel }} is required
+                </mat-error>
+              </mat-form-field>
+            </div>
+          }
+
+          <!-- Drive (FirstTimeFixed only) -->
+          @if (hasDrivesDropdown) {
+            <mat-form-field appearance="fill" class="query-field query-field--drive" subscriptSizing="dynamic">
+              <mat-label>Drive</mat-label>
+              <mat-select formControlName="driveId" (change)="searchForm.get('driveId')?.markAsTouched()" (openedChange)="!$event && driveSearchControl.setValue('')">
+                @if (isLoadingDrives()) {
+                  <mat-option disabled>
+                    <mat-spinner diameter="20" class="drive-loading-spinner" aria-label="Loading drives"></mat-spinner>
+                    <span>Loading drives...</span>
+                  </mat-option>
+                } @else {
+                  <mat-option>
+                    <ngx-mat-select-search [formControl]="driveSearchControl" placeholderLabel="Search drives..." noEntriesFoundLabel="No drives found" [disableScrollToActiveOnOptionsChanged]="true"></ngx-mat-select-search>
+                  </mat-option>
+                  <mat-option value="">-- Select Drive --</mat-option>
+                  @for (d of filteredDrivesLov(); track d.driveId) {
+                    <mat-option [value]="d.driveId">{{ d.description }}</mat-option>
+                  }
+                }
+              </mat-select>
+              <mat-error *ngIf="searchForm.get('driveId')?.hasError('required')">
+                Drive is required
+              </mat-error>
+            </mat-form-field>
+          }
+
+          <!-- Include Pin Mailed Checkbox (GallonDonors only) -->
+          @if (showPinMailedCheckbox) {
+            <div class="pin-mailed-checkbox-wrapper">
+              <mat-checkbox formControlName="includePinMailed" class="pin-mailed-checkbox">
+                Include Pin Mailed?
+              </mat-checkbox>
+            </div>
+          }
+
+          <div class="vertical-divider"></div>
+
+          <!-- From Date -->
+          <mat-form-field appearance="fill" class="query-field query-field--date" subscriptSizing="dynamic">
+            <mat-label>From Date</mat-label>
+            <input matInput
+                   #fromDateInput
+                   [matDatepicker]="fromPicker"
+                   formControlName="startDate"
+                   placeholder="DD-MMM-YYYY"
+                   required
+                   [max]="maxDate"
+                   (input)="onDateInput('startDate', fromDateInput)"
+                   (blur)="onDateBlur('startDate', fromDateInput)"
+                   [attr.aria-invalid]="f['startDate'].invalid && f['startDate'].touched">
+            <mat-datepicker-toggle matSuffix [for]="fromPicker" aria-label="Choose from date"></mat-datepicker-toggle>
+            <mat-datepicker #fromPicker></mat-datepicker>
+            @let fromDateError = getFromDateError();
+            @if (fromDateError) {
+              <mat-error>{{ fromDateError }}</mat-error>
+            }
+          </mat-form-field>
+
+          <!-- To Date -->
+          <mat-form-field appearance="fill" class="query-field query-field--date" subscriptSizing="dynamic">
+            <mat-label>To Date</mat-label>
+            <input matInput
+                   #toDateInput
+                   [matDatepicker]="toPicker"
+                   formControlName="endDate"
+                   placeholder="DD-MMM-YYYY"
+                   required
+                   [min]="minToDate"
+                   [max]="maxDate"
+                   (input)="onDateInput('endDate', toDateInput)"
+                   (blur)="onDateBlur('endDate', toDateInput)"
+                   [attr.aria-invalid]="f['endDate'].invalid && f['endDate'].touched">
+            <mat-datepicker-toggle matSuffix [for]="toPicker" aria-label="Choose to date"></mat-datepicker-toggle>
+            <mat-datepicker #toPicker></mat-datepicker>
+            @let toDateError = getToDateError();
+            @if (toDateError) {
+              <mat-error>{{ toDateError }}</mat-error>
+            }
+          </mat-form-field>
+
+          <!-- RETRIEVE Button -->
+          <button type="submit" mat-stroked-button class="retrieve-button" [disabled]="isRetrieveDisabled">
+            RETRIEVE
+          </button>
+
+        </div>
+      </form>
+    </div>
+
+    <!-- Results Section -->
+    <div id="results-section" class="results-section" tabindex="-1">
+
+      @if (hasSearched()) {
+        <div class="table-wrapper">
+          <!-- Loading Overlay -->
+          @if (isSearching()) {
+            <div class="table-loading-overlay" role="status" aria-live="polite" aria-atomic="true">
+              <div class="table-loading-spinner">
+                <mat-spinner diameter="48" aria-label="Loading donor search results"></mat-spinner>
+                <p class="loading-message">Retrieving donors...</p>
+              </div>
+            </div>
+          }
+
+          <div class="table-responsive" [class.table-loading]="isSearching()">
+              <table mat-table [dataSource]="dataSource" class="results-table" multiTemplateDataRows aria-label="Donors by Events Query Results">
+
+                <!-- Expand Column -->
+                <ng-container matColumnDef="expand">
+                  <th mat-header-cell *matHeaderCellDef style="width:48px">
+                    <button mat-icon-button class="expand-btn" (click)="toggleExpandAll()"
+                      [attr.aria-label]="isAllExpanded ? 'Collapse all rows' : 'Expand all rows'">
+                      <mat-icon aria-hidden="true">{{ isAllExpanded ? 'keyboard_arrow_up' : 'keyboard_arrow_down' }}</mat-icon>
+                    </button>
+                  </th>
+                  <td mat-cell *matCellDef="let row">
+                    <button mat-icon-button class="expand-btn" (click)="toggleExpand(row, $event)"
+                      [attr.aria-label]="(isExpanded(row) ? 'Collapse' : 'Expand') + ' details for donor ' + row.donorName"
+                      [attr.aria-expanded]="isExpanded(row)">
+                      <mat-icon aria-hidden="true">{{ isExpanded(row) ? 'keyboard_arrow_up' : 'keyboard_arrow_down' }}</mat-icon>
+                    </button>
+                  </td>
+                </ng-container>
+
+                <!-- Donor ID -->
+                <ng-container matColumnDef="donorId">
+                  <th mat-header-cell *matHeaderCellDef>
+                    <button class="column-header--sortable" (click)="onDonorIdSort()" aria-label="Sort by Donor ID">
+                      <span>Donor ID</span>
+                      <mat-icon class="sort-icon">{{ getDonorIdSortIcon() }}</mat-icon>
+                    </button>
+                  </th>
+                  <td mat-cell *matCellDef="let row">{{ row.donorId }}</td>
+                </ng-container>
+
+                <!-- Donor Name -->
+                <ng-container matColumnDef="donorName">
+                  <th mat-header-cell *matHeaderCellDef>Donor Name</th>
+                  <td mat-cell *matCellDef="let row">{{ row.donorName }}</td>
+                </ng-container>
+
+                <!-- Date of Birth -->
+                <ng-container matColumnDef="dateOfBirth">
+                  <th mat-header-cell *matHeaderCellDef>Date of Birth</th>
+                  <td mat-cell *matCellDef="let row">{{ formatDate(row.dateOfBirth) }}</td>
+                </ng-container>
+
+                <!-- Day -->
+                <ng-container matColumnDef="dobDay">
+                  <th mat-header-cell *matHeaderCellDef>Day of Birth</th>
+                  <td mat-cell *matCellDef="let row">{{ row.dobDay || '-' }}</td>
+                </ng-container>
+
+                <!-- Sex -->
+                <ng-container matColumnDef="gender">
+                  <th mat-header-cell *matHeaderCellDef>Sex</th>
+                  <td mat-cell *matCellDef="let row">{{ row.gender || '-' }}</td>
+                </ng-container>
+
+                <!-- ABO -->
+                <ng-container matColumnDef="bloodType">
+                  <th mat-header-cell *matHeaderCellDef>ABO</th>
+                  <td mat-cell *matCellDef="let row">{{ row.bloodType || 'N/A' }}</td>
+                </ng-container>
+
+                <!-- Units -->
+                <ng-container matColumnDef="totalDonations">
+                  <th mat-header-cell *matHeaderCellDef>Units</th>
+                  <td mat-cell *matCellDef="let row">{{ row.totalDonations ?? '-' }}</td>
+                </ng-container>
+
+                <!-- Credits -->
+                <ng-container matColumnDef="totalCredits">
+                  <th mat-header-cell *matHeaderCellDef>Credits</th>
+                  <td mat-cell *matCellDef="let row">{{ row.totalCredits ?? '-' }}</td>
+                </ng-container>
+
+                <!-- Gallons -->
+                <ng-container matColumnDef="totalGallons">
+                  <th mat-header-cell *matHeaderCellDef>Gallons</th>
+                  <td mat-cell *matCellDef="let row">{{ row.totalGallons ?? '-' }}</td>
+                </ng-container>
+
+                <!-- Last Date -->
+                <ng-container matColumnDef="lastDonationDate">
+                  <th mat-header-cell *matHeaderCellDef>Last Date</th>
+                  <td mat-cell *matCellDef="let row">{{ formatDate(row.lastDonationDate) }}</td>
+                </ng-container>
+
+                <!-- Last Unit ID -->
+                <ng-container matColumnDef="lastUnitId">
+                  <th mat-header-cell *matHeaderCellDef>Last Unit ID</th>
+                  <td mat-cell *matCellDef="let row">{{ row.lastUnitId || '-' }}</td>
+                </ng-container>
+
+                <!-- Actions -->
+                <ng-container matColumnDef="actions">
+                  <th mat-header-cell *matHeaderCellDef class="actions-header"></th>
+                  <td mat-cell *matCellDef="let row" class="actions-cell">
+                    <button mat-icon-button class="action-menu-btn" [matMenuTriggerFor]="rowMenu" (click)="$event.stopPropagation()" aria-label="Row actions">
+                      <mat-icon>more_vert</mat-icon>
+                    </button>
+                    <mat-menu #rowMenu="matMenu" xPosition="before">
+                      <button mat-menu-item (click)="onRowAction('viewAlternateAddress', row)">View Alternate Address</button>
+                      <button mat-menu-item (click)="onRowAction('viewCommunicationLog', row)">View Communication Log</button>
+                      <button mat-menu-item (click)="onRowAction('viewAttributes', row)">View Attributes</button>
+                      <button mat-menu-item (click)="onRowAction('viewInterdictions', row)">Interdictions</button>
+                      <button mat-menu-item (click)="onRowAction('donorHistory', row)">Donations</button>
+                      <button mat-menu-item (click)="onRowAction('donorEligibility', row)">Donor Eligibility</button>
+                      <button mat-menu-item (click)="onRowAction('demographics', row)">Demographics</button>
+                      <button mat-menu-item (click)="onRowAction('donorCard', row)">Donor Card</button>
+                    </mat-menu>
+                  </td>
+                </ng-container>
+
+                <!-- Expand Detail Row -->
+                <ng-container matColumnDef="expandedDetail">
+                  <td mat-cell *matCellDef="let row" [attr.colspan]="tableColumns.length" class="detail-cell">
+                    <div class="expand-detail-content" [class.expand-detail-content--open]="isExpanded(row)">
+                      <div class="detail-item">
+                        <span class="detail-label">Business Phone</span>
+                        <span class="detail-value">{{ row.dayPhoneNo || '—' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Home Phone</span>
+                        <span class="detail-value">{{ row.homePhoneNo || '—' }}</span>
+                      </div>
+                      <div class="detail-item detail-item--full">
+                        <span class="detail-label">Address</span>
+                        <span class="detail-value">{{ row.donorAddress || '—' }}</span>
+                      </div>
+                    </div>
+                  </td>
+                </ng-container>
+
+                <tr mat-header-row *matHeaderRowDef="tableColumns; sticky: true"></tr>
+                <tr mat-row *matRowDef="let row; columns: tableColumns;" class="data-row"></tr>
+                <tr mat-row *matRowDef="let row; columns: ['expandedDetail']"
+                  class="detail-row"
+                  [class.detail-row--expanded]="isExpanded(row)"></tr>
+              </table>
+          </div>
+
+          @if (dataSource.length === 0 && !isSearching()) {
+            <div class="empty-state">
+              <mat-icon aria-hidden="true">search</mat-icon>
+              <p class="empty-title">No donors found matching the search criteria.</p>
+            </div>
+          }
+
+          @if (totalCount() > 0) {
+            <mat-paginator
+              [length]="totalCount()"
+              [pageSize]="pageSize"
+              [pageSizeOptions]="[10, 25, 50, 100]"
+              [pageIndex]="pageIndex"
+              [showFirstLastButtons]="true"
+              (page)="onPageChange({ pageIndex: $event.pageIndex, pageSize: $event.pageSize, previousPageIndex: $event.previousPageIndex ?? 0 })">
+            </mat-paginator>
+          }
+        </div>
+      }
+
+      <!-- Initial empty state -->
+      @if (!hasSearched() && !isSearching()) {
+        <div class="empty-state empty-state--centered">
+          <mat-icon aria-hidden="true">search</mat-icon>
+          <p class="empty-title">No Results to Display</p>
+          <p class="empty-hint">Please enter Search criteria to view Results.</p>
+        </div>
+      }
+
+    </div>
+
+  </main>
+
+  <!-- Donor Eligibility Side Panel -->
+  @if (showEligibilityPanel && selectedDonorForEligibility) {
+    <div class="side-panel-overlay" (click)="closeEligibilityPanel()"></div>
+    <div class="side-panel">
+      <app-donor-eligibility-panel
+        [donor]="selectedDonorForEligibility"
+        (select)="onEligibilitySelected($event)"
+        (closePanel)="closeEligibilityPanel()">
+      </app-donor-eligibility-panel>
+    </div>
+  }
+
+  <!-- Donor Interdictions Side Panel -->
+  @if (showInterdictionsPanel && selectedDonorIdForInterdictions) {
+    <div class="side-panel-overlay" (click)="closeInterdictionsPanel()"></div>
+    <div class="side-panel">
+      <div class="side-panel-container">
+        <div class="side-panel-header">
+          <h2 class="side-panel-title">Donor Interdictions</h2>
+          <button type="button" mat-icon-button class="side-panel-close" aria-label="Close panel" (click)="closeInterdictionsPanel()">
+            <mat-icon>close</mat-icon>
+          </button>
+        </div>
+        <div class="side-panel-content-wrapper">
+          <app-donor-interdictions-content
+            [donorId]="selectedDonorIdForInterdictions"
+            (closePanel)="closeInterdictionsPanel()">
+          </app-donor-interdictions-content>
+        </div>
+      </div>
+    </div>
+  }
+
+  <!-- Donor Attributes Side Panel -->
+  @if (showAttributesPanel && selectedDonorIdForAttributes) {
+    <div class="side-panel-overlay" (click)="closeAttributesPanel()"></div>
+    <div class="side-panel">
+      <app-donor-attributes
+        [inputDonorId]="selectedDonorIdForAttributes"
+        (closePanelEvent)="closeAttributesPanel()">
+      </app-donor-attributes>
+    </div>
+  }
+
+  <!-- Donor Demographics Side Panel -->
+  @if (showDemographicsPanel && selectedDonorIdForDemographics) {
+    <div class="side-panel-overlay" (click)="closeDemographicsPanel()"></div>
+    <div class="side-panel">
+      <app-donor-demographics
+        [inputDonorId]="selectedDonorIdForDemographics"
+        (closePanelEvent)="closeDemographicsPanel()">
+      </app-donor-demographics>
+    </div>
+  }
+
+  <!-- Donor Communications Side Panel -->
+  @if (showCommunicationsPanel && selectedDonorForCommunications) {
+    <div class="side-panel-overlay" (click)="closeCommunicationsPanel()"></div>
+    <div class="side-panel">
+      <app-donor-communications
+        [donorId]="selectedDonorForCommunications.donorId"
+        [donorName]="selectedDonorForCommunications.donorName"
+        [dob]="selectedDonorForCommunications.dateOfBirth ? selectedDonorForCommunications.dateOfBirth.toString() : ''"
+        [sex]="selectedDonorForCommunications.gender ?? ''"
+        [abo]="selectedDonorForCommunications.bloodType ?? ''"
+        (closePanel)="closeCommunicationsPanel()">
+      </app-donor-communications>
+    </div>
+  }
+
+</div>

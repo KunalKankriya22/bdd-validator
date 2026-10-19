@@ -1,0 +1,276 @@
+<div class="fasttrak-config-page">
+  <div class="page-wrapper">
+    <h1 class="cdk-visually-hidden">{{ pageTitle() }}</h1>
+
+    <!-- Part 1: Page Header with Breadcrumb -->
+    <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+    <!-- Tabs (below header) -->
+    <mat-tab-group
+      [(selectedIndex)]="selectedTabIndex"
+      (selectedTabChange)="onTabChange($event)"
+      class="fasttrak-tabs"
+      aria-label="FastTrak Web Configuration tabs">
+
+      <!-- Tab 1: Resource Configuration -->
+      <mat-tab>
+        <ng-template mat-tab-label>
+          <span class="tab-label">Resource Configuration</span>
+        </ng-template>
+
+        <div class="resource-config-tab">
+          <!-- Part 2: Search Card -->
+          <div class="search-card">
+            <div class="search-form">
+              <!-- Type Dropdown -->
+              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="type-select">
+                <mat-label>Type</mat-label>
+                <mat-select
+                  #typeSelect
+                  [formControl]="typeControl"
+                  (openedChange)="onTypeSelectOpened($event)">
+                  <mat-select-trigger>
+                    {{ typeControl.value || '' }}
+                  </mat-select-trigger>
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="typeSearchControl"
+                      [autofocus]="false"
+                      placeholderLabel="Search..."
+                      noEntriesFoundLabel="">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @let filteredTypes = (filteredTypeOptions$ | async) ?? [];
+                  @if (filteredTypes.length === 0) {
+                    <mat-option disabled class="no-data-option">No Data Available</mat-option>
+                  } @else {
+                    @for (option of filteredTypes; track option.value) {
+                      <mat-option [value]="option.value">
+                        {{ option.label }}
+                      </mat-option>
+                    }
+                  }
+                </mat-select>
+              </mat-form-field>
+
+              <!-- Code Dropdown -->
+              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="code-select">
+                <mat-label>Code</mat-label>
+                <mat-select
+                  #codeSelect
+                  [formControl]="codeControl"
+                  [compareWith]="compareCode"
+                  (openedChange)="onCodeSelectOpened($event)">
+                  <mat-select-trigger>
+                    {{ codeControl.value?.code || '' }}
+                  </mat-select-trigger>
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="codeSearchControl"
+                      [autofocus]="false"
+                      placeholderLabel="Search..."
+                      noEntriesFoundLabel="">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @if (isLoadingCodes) {
+                    <mat-option disabled>
+                      <div style="display: flex; align-items: center; gap: 8px;">
+                        <mat-spinner diameter="18" aria-label="Loading codes"></mat-spinner>
+                        <span>Loading...</span>
+                      </div>
+                    </mat-option>
+                  } @else {
+                    @let filteredCodes = (filteredCodes$ | async) ?? [];
+                    @if (filteredCodes.length === 0) {
+                      <mat-option disabled class="no-data-option">No Data Available</mat-option>
+                    } @else {
+                      @for (option of filteredCodes; track option.code) {
+                        <mat-option [value]="option">
+                          {{ option.code }}
+                        </mat-option>
+                      }
+                    }
+                  }
+                </mat-select>
+              </mat-form-field>
+
+              <!-- Description (read-only) -->
+              <div class="description-field">
+                <label id="desc-label" class="field-label">Description</label>
+                <div class="description-value" aria-labelledby="desc-label">{{ selectedCodeDetail || '' }}</div>
+              </div>
+
+              <!-- Retrieve Button -->
+              <button mat-raised-button class="btn-retrieve"
+                      (click)="onRetrieve()"
+                      [disabled]="!isRetrieveEnabled || isLoading">
+                RETRIEVE
+              </button>
+            </div>
+          </div>
+
+          <!-- Part 3: Listing -->
+          <div class="listing-card">
+            <div class="listing-toolbar">
+              <div class="listing-toolbar__left">
+                <button
+                  #filterBtn
+                  type="button"
+                  mat-button
+                  class="filter-button"
+                  [class.filter-button--active]="isFilterOpen"
+                  [attr.aria-expanded]="isFilterOpen"
+                  aria-haspopup="true"
+                  cdkOverlayOrigin
+                  #filterTrigger="cdkOverlayOrigin"
+                  (click)="toggleFilter()">
+                  <mat-icon>filter_list</mat-icon>
+                  <span>FILTER</span>
+                </button>
+
+                <div class="listing-toolbar__chips-wrapper" *ngIf="hasActiveFilters()">
+                  <app-filter-chips
+                    [chips]="filterChips"
+                    [maxVisible]="2"
+                    [strictChipLimit]="true"
+                    (removeChip)="onRemoveFilterChip($event)"
+                    (clearAll)="clearAllFilters()">
+                  </app-filter-chips>
+                </div>
+              </div>
+
+              <div class="listing-toolbar__actions">
+                <button
+                  mat-stroked-button
+                  class="listing-toolbar__add-btn"
+                  [disabled]="!isAddNewResourceEnabled"
+                  (click)="onAddNewResource()"
+                  type="button">
+                  <mat-icon>add</mat-icon>
+                  ADD NEW RESOURCE
+                </button>
+
+                <div class="listing-toolbar__search">
+                  <mat-icon class="listing-toolbar__search-icon">search</mat-icon>
+                  <input
+                    class="listing-toolbar__search-input"
+                    type="text"
+                    placeholder="Search by location link or description..."
+                    aria-label="Search by location link or description"
+                    (input)="onSearch($any($event.target).value)">
+                </div>
+              </div>
+            </div>
+
+            <!-- Filter Panel Overlay -->
+            <ng-template
+              cdkConnectedOverlay
+              [cdkConnectedOverlayOrigin]="filterTrigger"
+              [cdkConnectedOverlayOpen]="isFilterOpen"
+              [cdkConnectedOverlayHasBackdrop]="true"
+              [cdkConnectedOverlayBackdropClass]="'cdk-overlay-transparent-backdrop'"
+              [cdkConnectedOverlayOffsetY]="16"
+              cdkConnectedOverlayPanelClass="filter-overlay-panel"
+              (backdropClick)="closeFilter()"
+              (detach)="closeFilter()">
+              <app-resource-filter
+                cdkTrapFocus
+                [cdkTrapFocusAutoCapture]="true"
+                [currentFilters]="appliedResourceFilters"
+                (apply)="applyFilters($event)"
+                (close)="closeFilter()">
+              </app-resource-filter>
+            </ng-template>
+
+            <app-data-table
+              [config]="resourceTableConfig"
+              [data]="filteredResources"
+              [loading]="isLoading"
+              (rowAction)="onResourceRowAction($event)"
+              (pageChange)="onPageChange($event)"
+              (sortChange)="onSortChange($event)">
+            </app-data-table>
+          </div>
+        </div>
+      </mat-tab>
+
+      <!-- Tab 2: Donor Response Configuration -->
+      <mat-tab>
+        <ng-template mat-tab-label>
+          <span class="tab-label">Donor Response Configuration</span>
+        </ng-template>
+
+        <div class="donor-response-tab">
+          <div class="donor-response-card">
+            <h2 class="card-title">Donor Response Configuration</h2>
+
+            <form [formGroup]="donorResponseForm">
+              <div class="toggle-field">
+                <mat-slide-toggle
+                  [checked]="donorResponseForm.get('onlineResponsesFlag')?.value"
+                  (change)="onFlagChange('onlineResponsesFlag', $event.checked)"
+                  aria-describedby="online-responses-desc">
+                  <strong>Online Responses Flag</strong>
+                </mat-slide-toggle>
+                <p id="online-responses-desc" class="toggle-description">
+                  When this setting is enabled the system allows users to download donor questionnaire responses
+                  submitted online through the FastTrak Donor Response system.
+                </p>
+              </div>
+
+              <div class="toggle-field">
+                <mat-slide-toggle
+                  [checked]="donorResponseForm.get('multiLanguageFlag')?.value"
+                  (change)="onFlagChange('multiLanguageFlag', $event.checked)"
+                  aria-describedby="multi-language-desc">
+                  <strong>Multi Language Flag</strong>
+                </mat-slide-toggle>
+                <p id="multi-language-desc" class="toggle-description">
+                  When this setting is enabled donors can select and complete the questionnaire in multiple configured
+                  languages instead of the default English.
+                </p>
+              </div>
+
+              <div class="field-row">
+                <mat-form-field appearance="fill" [class.has-error]="getDonorEffectiveDateError()">
+                  <mat-label>Effective Date</mat-label>
+                  <input matInput [matDatepicker]="effectivePicker" formControlName="effectiveDate" [min]="minDate"
+                         [errorStateMatcher]="donorEffDateErrorMatcher"
+                         required
+                         aria-required="true"
+                         (input)="onDonorEffectiveDateInput($event)">
+                  <mat-datepicker-toggle matSuffix [for]="effectivePicker"></mat-datepicker-toggle>
+                  <mat-datepicker #effectivePicker></mat-datepicker>
+                  <mat-error *ngIf="getDonorEffectiveDateError()">{{ getDonorEffectiveDateError() }}</mat-error>
+                </mat-form-field>
+
+                <mat-form-field appearance="fill" [class.has-error]="getDonorTerminationDateError()">
+                  <mat-label>Termination Date</mat-label>
+                  <input matInput [matDatepicker]="terminationPicker" formControlName="terminationDate"
+                         [matDatepickerFilter]="donorTerminationDateFilter"
+                         [errorStateMatcher]="donorTermDateErrorMatcher"
+                         (input)="onDonorTerminationDateInput($event)">
+                  <mat-datepicker-toggle matSuffix [for]="terminationPicker"></mat-datepicker-toggle>
+                  <mat-datepicker #terminationPicker></mat-datepicker>
+                  <mat-error *ngIf="getDonorTerminationDateError()">{{ getDonorTerminationDateError() }}</mat-error>
+                </mat-form-field>
+              </div>
+            </form>
+
+            <div class="donor-response-actions">
+              <button mat-button type="button" class="clear-changes-button"
+                      (click)="onClearDonorResponseChanges()" [disabled]="!isDonorResponseDirty">
+                CLEAR CHANGES
+              </button>
+              <button mat-raised-button type="button" class="save-button"
+                      (click)="onSaveDonorResponseConfig()"
+                      [disabled]="!isDonorResponseDirty || isSaving">
+                SAVE
+              </button>
+            </div>
+          </div>
+        </div>
+      </mat-tab>
+    </mat-tab-group>
+  </div>
+</div>

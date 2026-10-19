@@ -1,0 +1,284 @@
+<div class="graded-donors-query-container">
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+  <div class="content-wrapper">
+    <!-- Search Criteria Section -->
+    <div class="search-criteria-section">
+      <form [formGroup]="queryForm" class="query-form">
+        <div class="form-row">
+          <!-- Unit/Deferral ID -->
+          <div class="form-field-wrapper">
+            <mat-form-field appearance="fill" class="form-field">
+              <mat-label>Unit/Deferral ID</mat-label>
+              <input
+                matInput
+                formControlName="unitId"
+                [matAutocomplete]="unitIdAuto"
+                placeholder="Enter unit/deferral ID"
+                (input)="onUnitIdInput($event)" />
+              <mat-autocomplete #unitIdAuto>
+                <mat-option *ngFor="let option of filteredUnitIds()" [value]="option.unitId">
+                  {{ option.displayValue }}
+                </mat-option>
+              </mat-autocomplete>
+              <mat-error>{{ unitIdError }}</mat-error>
+            </mat-form-field>
+          </div>
+
+          <!-- Last Name -->
+          <div class="form-field-wrapper">
+            <mat-form-field appearance="fill" class="form-field">
+              <mat-label>Last Name</mat-label>
+              <input
+                matInput
+                formControlName="lastName"
+                [matAutocomplete]="lastNameAuto"
+                placeholder="Enter last name"
+                (input)="onLastNameInput($event)" />
+              <mat-autocomplete #lastNameAuto>
+                <mat-option *ngFor="let option of filteredLastNames()" [value]="option">
+                  {{ option }}
+                </mat-option>
+              </mat-autocomplete>
+              <mat-error>{{ lastNameError }}</mat-error>
+            </mat-form-field>
+          </div>
+
+          <!-- From Date -->
+          <div class="form-field-wrapper">
+            <mat-form-field appearance="fill" class="form-field">
+              <mat-label>From Date</mat-label>
+              <input
+                #fromDateInput
+                matInput
+                [matDatepicker]="fromDatePicker"
+                formControlName="fromDate"
+                [errorStateMatcher]="fromDateErrorMatcher"
+                placeholder="Select date"
+                (input)="validateFromDateInput()"
+                (blur)="onFromDateBlur()" />
+              <mat-datepicker-toggle matIconSuffix [for]="fromDatePicker"></mat-datepicker-toggle>
+              <mat-datepicker #fromDatePicker></mat-datepicker>
+              <mat-error>{{ fromDateError }}</mat-error>
+            </mat-form-field>
+          </div>
+
+          <!-- To Date -->
+          <div class="form-field-wrapper">
+            <mat-form-field appearance="fill" class="form-field">
+              <mat-label>To Date</mat-label>
+              <input
+                #toDateInput
+                matInput
+                [matDatepicker]="toDatePicker"
+                formControlName="toDate"
+                [errorStateMatcher]="toDateErrorMatcher"
+                placeholder="Select date"
+                (input)="validateToDateInput()"
+                (blur)="onToDateBlur()" />
+              <mat-datepicker-toggle matIconSuffix [for]="toDatePicker"></mat-datepicker-toggle>
+              <mat-datepicker #toDatePicker></mat-datepicker>
+              <mat-error>{{ toDateError }}</mat-error>
+            </mat-form-field>
+          </div>
+
+          <!-- Retrieve Button -->
+          <button
+            mat-stroked-button
+            type="button"
+            (click)="onRetrieve()"
+            [disabled]="isRetrieveDisabled()"
+            class="retrieve-button"
+            aria-label="Retrieve graded donors data">
+            RETRIEVE
+          </button>
+
+          <!-- Clear All Button -->
+          <button
+            mat-button
+            type="button"
+            (click)="onClearAll()"
+            [disabled]="isClearAllDisabled()"
+            class="clear-all-button"
+            aria-label="Clear all form fields">
+            CLEAR ALL
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Loading Indicator -->
+    @if (isLoading()) {
+      <div class="loading-container" role="status">
+        <mat-spinner diameter="50" aria-hidden="true"></mat-spinner>
+        <p>Loading graded donors data...</p>
+      </div>
+    }
+
+    <!-- Empty State (before query) -->
+    @if (!hasQueried() && !isLoading()) {
+      <div class="empty-state">
+        <mat-icon class="empty-icon" aria-hidden="true">search</mat-icon>
+        <h3>No Search Criteria Selected</h3>
+        <p>Enter a Unit/Deferral ID, Last Name, or Date Range, then click Retrieve to investigate graded donor matches.</p>
+      </div>
+    }
+
+    <!-- Results Section (after query) -->
+    @if (hasQueried() && !isLoading()) {
+      <mat-tab-group
+        aria-label="Query results"
+        [selectedIndex]="selectedTabIndex()"
+        (selectedIndexChange)="onTabChange($event)"
+        class="results-tabs">
+        <!-- Graded Donations Tab -->
+        <mat-tab label="Graded Donations">
+          <div class="tab-content">
+            <!-- Search and Filter Bar -->
+            <div class="search-filter-section">
+              <div class="filter-controls">
+                <button
+                  #donationsFilterBtn
+                  mat-button
+                  type="button"
+                  cdkOverlayOrigin
+                  #donationsTrigger="cdkOverlayOrigin"
+                  (click)="toggleDonationsFilterPanel()"
+                  class="filter-button"
+                  [class.filter-button--active]="isDonationsFilterOpen() || donationsFilterChips().length > 0"
+                  aria-label="Open filters"
+                  [attr.aria-expanded]="isDonationsFilterOpen()">
+                  <mat-icon aria-hidden="true">filter_list</mat-icon>
+                  FILTER
+                </button>
+
+                <!-- Inline Filter Chips -->
+                @if (donationsFilterChips().length > 0) {
+                  <app-filter-chips
+                    [chips]="donationsFilterChips()"
+                    [maxVisible]="5"
+                    [strictChipLimit]="true"
+                    (removeChip)="onRemoveDonationsFilterChip($event)"
+                    (clearAll)="clearDonationsFilters()" />
+                }
+              </div>
+
+              <!-- Filter Panel Overlay -->
+              <ng-template
+                cdkConnectedOverlay
+                [cdkConnectedOverlayOrigin]="donationsTrigger"
+                [cdkConnectedOverlayOpen]="isDonationsFilterOpen()"
+                [cdkConnectedOverlayHasBackdrop]="true"
+                [cdkConnectedOverlayBackdropClass]="'cdk-overlay-transparent-backdrop'"
+                [cdkConnectedOverlayOffsetY]="4"
+                cdkConnectedOverlayPanelClass="filter-overlay-panel"
+                (backdropClick)="closeDonationsFilterPanel()"
+                (detach)="closeDonationsFilterPanel()">
+                <app-filters-dialog
+                  [currentFilters]="donationsFilters()"
+                  [availableSexOptions]="availableDonationsSexOptions"
+                  [availableStatusOptions]="availableDonationsStatusOptions"
+                  (apply)="applyDonationsFilters($event)"
+                  (close)="closeDonationsFilterPanel()">
+                </app-filters-dialog>
+              </ng-template>
+
+              <app-search-bar
+                [config]="donationsSearchConfig"
+                [searchText]="donationsSearchText()"
+                (search)="onDonationsSearch($event)">
+              </app-search-bar>
+            </div>
+
+            <!-- Donations Table -->
+            <app-data-table
+              [config]="donationsTableConfig"
+              [data]="filteredDonations()"
+              [loading]="isLoading()"
+              (pageChange)="onDonationsPageChange($event)"
+              (sortChange)="onDonationsSortChange($event)"
+              (rowAction)="onDonationsRowAction($event)">
+            </app-data-table>
+
+            <!-- Record Count Display (below table) -->
+            <div class="record-count-footer" role="status">
+              Found: {{ donationsTotalRecords() }}
+            </div>
+          </div>
+        </mat-tab>
+
+        <!-- Graded Donors Tab -->
+        <mat-tab label="Graded Donors">
+          <div class="tab-content">
+            <!-- Search and Filter Bar -->
+            <div class="search-filter-section">
+              <div class="filter-controls">
+                <button
+                  #donorsFilterBtn
+                  mat-button
+                  type="button"
+                  cdkOverlayOrigin
+                  #donorsTrigger="cdkOverlayOrigin"
+                  (click)="toggleDonorsFilterPanel()"
+                  class="filter-button"
+                  [class.filter-button--active]="isDonorsFilterOpen() || donorsFilterChips().length > 0"
+                  aria-label="Open filters"
+                  [attr.aria-expanded]="isDonorsFilterOpen()">
+                  <mat-icon aria-hidden="true">filter_list</mat-icon>
+                  FILTER
+                </button>
+
+                <!-- Inline Filter Chips -->
+                @if (donorsFilterChips().length > 0) {
+                  <app-filter-chips
+                    [chips]="donorsFilterChips()"
+                    [maxVisible]="5"
+                    [strictChipLimit]="true"
+                    (removeChip)="onRemoveDonorsFilterChip($event)"
+                    (clearAll)="clearDonorsFilters()" />
+                }
+              </div>
+
+              <!-- Filter Panel Overlay -->
+              <ng-template
+                cdkConnectedOverlay
+                [cdkConnectedOverlayOrigin]="donorsTrigger"
+                [cdkConnectedOverlayOpen]="isDonorsFilterOpen()"
+                [cdkConnectedOverlayHasBackdrop]="true"
+                [cdkConnectedOverlayBackdropClass]="'cdk-overlay-transparent-backdrop'"
+                [cdkConnectedOverlayOffsetY]="4"
+                cdkConnectedOverlayPanelClass="filter-overlay-panel"
+                (backdropClick)="closeDonorsFilterPanel()"
+                (detach)="closeDonorsFilterPanel()">
+                <app-filters-dialog
+                  [currentFilters]="donorsFilters()"
+                  [availableSexOptions]="availableDonorsSexOptions"
+                  [availableStatusOptions]="availableDonorsStatusOptions"
+                  (apply)="applyDonorsFilters($event)"
+                  (close)="closeDonorsFilterPanel()">
+                </app-filters-dialog>
+              </ng-template>
+
+              <app-search-bar
+                [config]="donorsSearchConfig"
+                [searchText]="donorsSearchText()"
+                (search)="onDonorsSearch($event)">
+              </app-search-bar>
+            </div>
+
+            <!-- Donors Table -->
+            <app-data-table
+              [config]="donorsTableConfig"
+              [data]="filteredDonors()"
+              [loading]="isLoading()"
+              (pageChange)="onDonorsPageChange($event)"
+              (sortChange)="onDonorsSortChange($event)"
+              (rowAction)="onDonorsRowAction($event)">
+            </app-data-table>
+          </div>
+        </mat-tab>
+      </mat-tab-group>
+    }
+  </div>
+</div>

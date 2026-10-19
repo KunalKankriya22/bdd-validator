@@ -1,0 +1,195 @@
+<router-outlet></router-outlet>
+
+<div [hidden]="isChildRouteActive">
+<app-page-header-with-breadcrumb
+  [config]="headerConfig"
+  [attr.aria-labelledby]="elementId('page-title')">
+</app-page-header-with-breadcrumb>
+
+<div class="layout-wrapper">
+  <!-- Main content -->
+  <main class="main-content">
+    <section class="order-charges-container" role="region" [attr.aria-labelledby]="elementId('page-title')">
+      <!-- Filter Section -->
+      <div class="filter-section" [formGroup]="filterForm">
+        <div class="filter-row">
+          <!-- Order Type (searchable) -->
+          <mat-form-field appearance="fill" class="filter-field">
+            <mat-label [id]="labelId('orderType')">Order Type</mat-label>
+            <mat-select formControlName="orderType" placeholder="Select order type">
+              <mat-option>
+                <ngx-mat-select-search [formControl]="orderTypeSearchCtrl"
+                  placeholderLabel="Search order types..."
+                  noEntriesFoundLabel="No matching order types">
+                </ngx-mat-select-search>
+              </mat-option>
+              @if (loadingOrderTypes()) {
+                <mat-option disabled>Loading...</mat-option>
+              }
+              @for (type of filteredOrderTypes(); track type.code) {
+                <mat-option [value]="type.code">{{ type.code }} - {{ type.description }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <!-- Order No (searchable) -->
+          <mat-form-field appearance="fill" class="filter-field">
+            <mat-label [id]="labelId('orderNo')">Order No</mat-label>
+            <mat-select formControlName="orderNo" placeholder="Select order number">
+              <mat-option>
+                <ngx-mat-select-search [formControl]="orderNoSearchCtrl"
+                  placeholderLabel="Search orders..."
+                  noEntriesFoundLabel="No matching orders">
+                </ngx-mat-select-search>
+              </mat-option>
+              @if (loadingOrders()) {
+                <mat-option disabled>Loading...</mat-option>
+              }
+              @if (!loadingOrders() && orders().length === 0 && f['orderType'].value) {
+                <mat-option disabled>No orders found</mat-option>
+              }
+              @for (order of filteredOrders(); track order.orderNo) {
+                <mat-option [value]="order.orderNo">{{ order.orderNo }} - {{ order.customerName }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <!-- By (Read-only) -->
+          <mat-form-field appearance="fill" class="filter-field">
+            <mat-label>By</mat-label>
+            <mat-select formControlName="orderBy" [disabled]="true">
+              @if (f['orderBy'].value) {
+                <mat-option [value]="f['orderBy'].value">{{ f['orderBy'].value }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <!-- Read-only fields -->
+          <dl class="field-label">
+            <dt class="label">Status</dt>
+            <dd class="value">{{ orderData()?.statusDesc || '--' }}</dd>
+          </dl>
+          <dl class="field-label">
+            <dt class="label">Customer ID</dt>
+            <dd class="value">{{ orderData()?.customerId || '--' }}</dd>
+          </dl>
+          <dl class="field-label">
+            <dt class="label">Customer Description</dt>
+            <dd class="value">{{ orderData()?.customerName || '--' }}</dd>
+          </dl>
+          <dl class="field-label">
+            <dt class="label">Estimate Arrival Date & Time</dt>
+            <dd class="value">{{ orderData()?.estArrivalTime ? formatDateTime(orderData()?.estArrivalTime) : '--' }}</dd>
+          </dl>
+
+          <!-- Clear All -->
+          <div class="filter-actions">
+            <button mat-button type="button" (click)="clearAll()"
+              class="clear-all-btn"
+              [disabled]="!f['orderType'].value && !f['orderNo'].value">
+              CLEAR ALL
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Loading State -->
+      @if (loading()) {
+        <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+          <mat-spinner diameter="40" aria-label="Loading order charges"></mat-spinner>
+          <span class="sr-only">Loading order charges, please wait...</span>
+        </div>
+      }
+
+      <!-- Error State -->
+      @if (error() && !loading()) {
+        <div class="error-container" role="alert" aria-live="assertive">
+          <mat-icon aria-hidden="true">error</mat-icon>
+          <p>{{ error() }}</p>
+        </div>
+      }
+
+      <!-- Empty State -->
+      @if (isEmpty() && !loading() && !error()) {
+        <div class="empty-state" role="status">
+          <mat-icon class="empty-icon" aria-hidden="true">search</mat-icon>
+          <p class="empty-title">No Results to Display</p>
+          <p class="empty-message">Scan or enter a Unit ID to begin,</p>
+        </div>
+      }
+
+      <!-- Products Data Table -->
+      @if (hasData() && !loading()) {
+        <div class="table-container">
+          <app-data-table
+            [config]="tableConfig"
+            [data]="products()"
+            [loading]="loading()">
+          </app-data-table>
+
+          <!-- Totals Footer -->
+          @if (totals()) {
+            <div class="totals-footer" role="region" aria-label="Order totals">
+              <div class="totals-row">
+                <div class="total-item">
+                  <span class="total-label">Antigen</span>
+                  <span class="total-value">{{ formatCurrency(totals()?.antigensTotal) }}</span>
+                </div>
+                <span class="operator" aria-hidden="true">+</span>
+                <div class="total-item">
+                  <span class="total-label">Attributes</span>
+                  <span class="total-value">{{ formatCurrency(totals()?.attributesTotal) }}</span>
+                </div>
+                <span class="operator" aria-hidden="true">+</span>
+                <div class="total-item">
+                  <span class="total-label">Products</span>
+                  <span class="total-value">{{ formatCurrency(totals()?.productsTotal) }}</span>
+                </div>
+                <span class="operator" aria-hidden="true">+</span>
+                <div class="total-item">
+                  <mat-form-field appearance="fill" class="total-input" subscriptSizing="dynamic">
+                    <mat-label>Other Debits</mat-label>
+                    <input matInput
+                           type="text"
+                           [value]="formatCurrency(totals()?.otherDebitTotal)"
+                           (focus)="onOtherDebitsFocus($event)"
+                           (blur)="onOtherDebitsBlur($event)">
+                  </mat-form-field>
+                </div>
+                <span class="operator" aria-hidden="true">+</span>
+                <div class="total-item">
+                  <span class="total-label">Other Credits</span>
+                  <span class="total-value">{{ formatCurrency(totals()?.otherCreditTotal) }}</span>
+                </div>
+                <span class="operator" aria-hidden="true">=</span>
+                <div class="total-item">
+                  <span class="total-label">Grand Total</span>
+                  <span class="total-value">{{ formatCurrency(totals()?.grandTotal) }}</span>
+                </div>
+              </div>
+            </div>
+          }
+        </div>
+      }
+    </section>
+  </main>
+</div>
+
+<!-- Overlay backdrop + side panel -->
+@if (sidePanelOpen()) {
+  <div class="overlay-backdrop" (click)="closeSidePanel()"></div>
+  <div class="overlay-side-panel"
+       role="dialog"
+       aria-modal="true"
+       aria-label="Additional Order Charges, Attributes, and Antigens"
+       cdkTrapFocus
+       (keydown.escape)="closeSidePanel()">
+    <app-additional-charges-panel
+      [otherCharges]="orderData()?.otherCharges || []"
+      [antigens]="orderData()?.antigens || []"
+      [attributes]="orderData()?.attributes || []"
+      (closePanel)="closeSidePanel()">
+    </app-additional-charges-panel>
+  </div>
+}
+</div>

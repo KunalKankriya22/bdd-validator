@@ -1,0 +1,1966 @@
+CREATE OR REPLACE PACKAGE CNPREXTR as
+/* *********************************************************************************
+  Name              : CNPREXTR.pkg
+  Created By        : Ashok
+  Date Of Creation  : 10/10/2018
+  Purpose           : Regional Test Center result extraction program.
+
+  Version History (Change program version in code below)
+  
+  Date         Version   by       Description
+  ---------------------------------------------------------------------------------
+  10/10/2018   01  Ashok    Initial development
+  10/20/2018   02  Ashok    chapter id added to rpt_parm table
+  10/24/2018   03  Ashok    new parameter user id to main_program.
+  11/06/2018   04  Ashok    use confirm_test_flag to generate electornic file.
+  11/08/2018   05  Ashok    re_extract is not lookign at proper flag -- MLT 1035 -- V05
+***********************************************************************   */
+  TYPE t_tab IS TABLE OF cnf_extract_units%ROWTYPE INDEX BY BINARY_INTEGER;
+
+  procedure MAIN_PROGRAM(p_parm_id     in varchar2,
+                         p_chapter_id  in varchar2,
+                         p_user_id     in varchar2,
+                         p_status      out varchar2) ;
+END CNPREXTR;
+/
+create or replace package body CNPREXTR as
+  procedure MAIN_PROGRAM(p_parm_id     in varchar2,
+                         p_chapter_id  in varchar2,
+                         p_user_id     in varchar2,
+                         p_status      out varchar2) as
+    ceu_tab cnprextr.t_tab;
+
+    cursor c1(p_insert_dats in varchar2, p_contract_id in varchar2) is
+      select ceu.*
+        from cnf_extract ce, cnf_extract_units ceu
+       where ce.extract_id = ceu.extract_id
+         and ceu.extract_id = p_parm_id
+         and ceu.contract_id = p_contract_id
+         and ((ce.re_extract_flag = 'X' and ceu.re_extract_flag = 'X')or ce.under_extract_flag = 'Y')
+         and exists (select 'X'
+                      from utrs ut
+                     where ut.unit_id = ceu.unit_id
+                       and ut.coll_date = ceu.coll_date
+                       and ut.chapter_id = ceu.chapter_id
+                       and ut.cancel_flag is null
+                       and (
+                           (ceu.test_series_id is not null and ut.test_series_id = ceu.test_series_id)
+                             or
+                           (ceu.test_series_id is null and ut.test_id = ceu.test_id)
+                           )
+                       and nvl(ut.extract_date, to_date(p_insert_dats, 'YYYYMMDDHH24MISS')) =  
+                       to_date(p_insert_dats, 'YYYYMMDDHH24MISS')
+                 )
+       order by 2, 1;
+
+   
+    cursor c2(p_ins_dats           in varchar2,
+              p_unit_id            in varchar2,
+              p_coll_date          in date,
+              p_unit_chapter       in varchar2
+              ) is
+      select ut.test_id,
+             ut.test_seq_no,
+             nvl(result_status_1, '    ') result_status,
+             rpad(ut.absorbance, 12, ' ') od_value,
+             rpad(b.cut_off_value, 6, ' ') cut_off_value,
+             nvl(to_char(ut.extract_date, 'YYYYMMDDHH24MISS'),
+                 '99999999999999') extract_date,
+             decode(to_char(ut.extract_date, 'YYYYMMDDHH24MISS'),
+                    null,
+                    1,
+                    p_ins_dats,
+                    1,
+                    0) extractable,
+             decode(ut.result_status_1, null, 1, 0) check_interim,
+             ut.test_series_id
+        from utrs ut, test_batch_det b
+       where ut.unit_id = p_unit_id
+         and ut.coll_date = p_coll_date
+         and ut.chapter_id = p_unit_chapter -- p_chapter_id -- V03
+         and ut.cancel_flag is null
+         and b.test_chapter_id(+) = p_unit_chapter -- p_chapter_id -- V03
+         and b.tb_id(+) = ut.tb_id
+         and b.test_id(+) = ut.test_id
+         and nvl(ut.extract_date, to_date(p_ins_dats, 'YYYYMMDDHH24MISS')) = to_date(p_ins_dats, 'YYYYMMDDHH24MISS')
+         and exists (select null
+                       from  TABLE(ceu_tab) ceu_temp
+                       where ceu_temp.unit_id = ut.unit_id
+                        and ceu_temp.coll_date = ut.coll_date
+                        and ceu_temp.chapter_id = ut.chapter_id
+                      and (
+                             (ceu_temp.test_series_id is not null and ceu_temp.test_series_id = nvl(ut.test_series_id,'@'))
+                                or
+                             (ceu_temp.test_series_id is null and ceu_temp.test_id = ut.test_id)
+                             )
+                     )  
+       order by ut.test_id,
+                nvl(extract_date, sysdate + 1),
+                decode(ut.result_status_1, null, 0, 1),
+                test_seq_no;
+    /* DO NOT CHANGE THIS ORDER BY CLAUSE !!!
+    *
+    * Order by pulls previously extracted tests, followed by tests without
+    * results then by unextracted results.  This is required for consistant
+    * identification of initial result for repeats and interim results for
+    * final interpretations.  Tests without results must come before a reactive
+    * on final interpretations to prevent the extract date being set for the
+    * inital reactive.
+    *
+    * Decode of extract date changed to to_char due to peculiarity
+    * in oracle behavior.
+    */
+    
+    TYPE units_rt IS RECORD(unit_id units.unit_id%type,
+                            chapter_id units.chapter_id%type,
+                            coll_date units.coll_date%type
+                            );
+    unit_rec units_rt;                            
+
+    TYPE tests_cat_rt IS RECORD(test_series_id cnf_extract_units.test_series_id%type,
+                                  test_id cnf_extract_units.test_id%type
+                                  );
+    unit_tests_cat tests_cat_rt;   
+    
+    TYPE testres_rt IS RECORD(test_line VARCHAR2(1000),
+                              test_cat  VARCHAR2(10)
+                              );
+    
+    res_rec testres_rt;
+    
+    TYPE tstres_lines_t IS TABLE OF testres_rt INDEX BY PLS_INTEGER;
+    tstres_lines tstres_lines_t;
+    
+    TYPE testcat_t IS TABLE OF BOOLEAN INDEX BY VARCHAR2(10);
+    abort_series testcat_t;
+    abort_tests   testcat_t;
+    
+    lv_gen_res_YN           VARCHAR2(1):= 'N'; -- N indicates remove result file (no need to generate blank res files)
+                                         -- Y indicates - atleast one  unit is printed.
+    
+    t_user                   system_users.user_id%type;
+    t_ext_user_id            cnf_extract.insert_user%type;
+    
+    
+    log_file                 utl_file.file_type;
+    log_loc                  varchar2(30);
+    t_log_file_name          varchar2(120);
+    t_int_file_name          varchar2(500);
+    int_file                 utl_file.file_type;
+    t_parm_id                varchar2(30);
+    t_contract_id            cnf_extract_units.contract_id%type;
+
+
+    t_company_name           contracts.company%type;
+    t_od_reporting_method    contracts.od_reporting_method%type;
+    t_results_method         contracts.results_method%type;
+    t_alt_e_level            contracts.alt_e_level%type;
+    t_alt_se_level           contracts.alt_se_level%type;
+    t_cbc_chapter_id         contracts.cbc_chapter_id%type;
+    t_bar_code_protocol      contracts.bar_code_protocol%type;
+    t_chapter_name           varchar2(40);
+    t_po_no                  contracts.po_no%type;
+
+
+    t_result_type            rgt_result_parms.result_type%type;
+    t_insert_dats            varchar2(14);
+    t_proc_test_id           varchar2(11);
+    t_inter_str              varchar2(75);
+    t_t_inter_str            varchar2(25);
+    t_init_inter_str         varchar2(75);
+    t_init_od_value          varchar2(12);
+    t_aborh                  varchar2(3);
+    t_reactive_result_status varchar2(4);
+    t_temp_center            varchar2(5);
+    t_center_id              varchar2(5);
+
+
+
+    t_donor_str              varchar2(100);
+    t_cbc_test_id            rgt_test_matrix.cbc_test_id%type;
+    t_result_status          varchar2(4);
+    t_nonreac_result_status  varchar2(4);
+    t_cbc_result_code        varchar2(4);
+    t_last_interim_result    varchar2(5);
+    t_init_result_status     varchar2(4);
+    t_init_cut_off_value     varchar2(6);
+    t_final_result_status    varchar2(4);
+    t_os_flag                varchar2(1);
+
+    t_skip_unit_flag         varchar2(1);
+    t_abort_extract_flag     varchar2(1) := 'N';
+    t_dummy                  varchar2(1);
+
+
+    t_found_first_extract    varchar2(1);
+    t_unit_printed           varchar2(1);
+    t_first_test             varchar2(1);
+    t_init_reac              varchar2(1);
+    t_return                 varchar2(1);
+
+    t_new_batch_id           units.batch_id%type;
+
+    t_unit_chapter           varchar(4); -- V03
+    t_rpt_parm_cnt           number := 0;
+    t_hdr_read_cnt           number := 0;
+    
+    t_total_hdr_read_cnt          number := 0;
+    
+    t_close_final_test       VARCHAR2(1) := 'N';
+    t_ft_cnt                 number := 0;
+    t_bt_cnt                 number := 0;
+
+    t_chp_id                 CHAPTERS.CHAPTER_ID%TYPE;
+
+
+    --t_temp_count             number := 0;
+    t_test_count             number := 0;
+    t_no_result_count        number := 0;
+    t_interim_count          number := 0;
+    t_extracted_count        number := 0;
+    t_reactive_count         number := 0;
+    t_non_reactive_count     number := 0;
+    t_nt_count               number := 0;
+    t_repeat_count           number := 0;
+    t_prior_extracts         number := 0;
+    t_det_read_cnt           number := 0;
+    t_offset                 number := 0;
+    t_character_count        number := 0;
+    t_acceptable_no_init     number := 0;
+    t_temp_seq_no            number;
+    t_init_seq_no            number;
+    t_test_seq_no            number;
+
+    t_init_check_interim     number;
+    t_null_test              number;
+    t_od_count               number;
+    t_check_stop_label_cnt   number;
+    t_init_extractable       number;
+    t_program_version        varchar2(3);
+    v_local_time             date;
+    nCnt                     NUMBER;
+    
+    t_re_ext_flag            VARCHAR2(1) := 'N';
+    t_re_ext_cnt             NUMBER := 0;    
+    t_file_append            VARCHAR2(10); 
+     
+    t_confirmatory_tests     VARCHAR2(1); -- MLT 1025 -- V04
+   
+    handle_error exception;
+    unit_error   exception;
+    abort_error  exception;  
+    -- V05 -- added to keep track of units (same unit in DAL, OBK is counted as twice instead of once)
+    TYPE used_aat IS TABLE OF BOOLEAN INDEX BY VARCHAR2(15);
+    g_units_used used_aat;
+    
+    -----
+    TYPE lines_t IS TABLE OF VARCHAR2(20000) INDEX BY BINARY_INTEGER; 
+    log_output       lines_t;
+    res_output       lines_t;
+    
+    PROCEDURE log_pl(str IN VARCHAR2) IS
+    BEGIN
+      log_output(NVL(log_output.LAST, 0) + 1) := str;
+    END;
+
+    PROCEDURE res_pl(str IN VARCHAR2) IS
+    BEGIN
+      res_output(NVL(res_output.LAST, 0) + 1) := str;
+    END;
+    
+    -- Get log directory location
+    procedure get_log_loc is
+    begin
+      begin
+        select code_desc into log_loc
+          from master_codes
+         where code_type = 'LOGDR'
+           and code = 'UTIL'
+           and v_local_time between eff_date and nvl(term_date, v_local_time + 1);       
+      exception
+        when no_data_found then
+          p_status := 'Log Dir not maintained';
+          raise handle_error;
+        when others then
+          p_status := 'Error in fetching Log Dir: ' || substr(sqlerrm,1,300);
+          raise handle_error;
+      end;
+
+   end get_log_loc;
+
+   procedure open_log_file is    
+   begin
+     
+     if utl_file.is_open(log_file) then
+      utl_file.fclose(log_file);
+    end if;
+
+    begin
+      log_file := utl_file.fopen(log_loc, t_log_file_name, 'w');
+      
+    exception
+      when utl_file.invalid_filehandle then
+        utl_file.put_line(log_file, 'Invalid Filehandle');
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+      when utl_file.invalid_path then
+        utl_file.put_line(log_file, 'Invalid Path');
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+      when utl_file.invalid_mode then
+        utl_file.put_line(log_file, 'Invalid Mode');
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+      when utl_file.invalid_operation then
+        utl_file.put_line(log_file, 'Invalid Operation');
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+    end;
+  end open_log_file;
+  
+  procedure close_log_file is
+  begin
+    if utl_file.is_open(log_file) then
+      utl_file.fclose(log_file);
+    end if;           
+  end close_log_file;
+
+  procedure open_result_file is
+  begin
+    if utl_file.is_open(int_file) then
+      utl_file.fclose(int_file);
+    end if;
+  
+    begin
+      if t_confirmatory_tests = 'Y' then -- MLT 1025 -- generate log file only if conf tests flag is set. -- V04
+         int_file := utl_file.fopen(log_loc, t_int_file_name, 'w');
+      end if;
+    exception
+      when utl_file.invalid_filehandle then
+        utl_file.put_line(log_file,
+                          'Invalid Filehandle - ' || t_int_file_name);
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+      when utl_file.invalid_path then
+        utl_file.put_line(log_file, 'Invalid Path - ' || t_int_file_name);
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+      when utl_file.invalid_mode then
+        utl_file.put_line(log_file, 'Invalid Mode - ' || t_int_file_name);
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+      when utl_file.invalid_operation then
+        utl_file.put_line(log_file,
+                          'Invalid Operation - ' || t_int_file_name);
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+    end;
+  end open_result_file;
+
+
+  procedure close_result_file is
+  begin
+    if utl_file.is_open(int_file) then
+      utl_file.fclose(int_file);
+    end if;           
+  end close_result_file;
+
+   
+   PROCEDURE dump_output(file_type_in IN VARCHAR2) IS
+   begin
+     if file_type_in = 'log' then
+       open_log_file;
+       for indx in log_output.FIRST .. log_output.LAST loop
+         UTL_FILE.PUT_LINE(log_file, log_output(indx));
+       end loop;
+       close_log_file;
+       
+       log_output.DELETE;
+     end if;
+     
+     if file_type_in  = 'res' then
+       open_result_file;
+       if t_confirmatory_tests = 'Y' then -- MLT 1025 -- write to output file only if flag is set. -- V04
+         for indx in res_output.FIRST .. res_output.LAST loop
+           UTL_FILE.PUT_LINE(int_file, res_output(indx));
+         end loop;
+       end if;  
+       close_result_file;   
+       
+       res_output.DELETE;    
+     end if;
+   end dump_output;
+   
+     
+    procedure CHECK_ERROR(p_module_name  in varchar2,
+                          p_statement_id in varchar2,
+                          p_error_key    in varchar2,
+                          p_error_desc   in varchar2) as
+    begin
+      if SQLCODE < 0 then
+        log_pl('Error in ' || p_module_name || ' at statement ' ||
+                          p_statement_id || ' - Terminating... ' || SQLCODE);
+      
+        log_pl('Oracle error: ' || SQLCODE || ' - ' || SUBSTR(SQLERRM,1,500));
+        log_pl( substr(p_error_desc, 1, 70));
+        log_pl( substr(p_error_key, 1, 70));
+      
+        t_abort_extract_flag := 'Y';
+        --wind_up; -- Commented by Kishore on 01/19/2012
+      
+        begin
+          insert into system_error_log
+            (module_name,
+             insert_dats,
+             user_id,
+             statement_id,
+             error_key,
+             error_desc)
+          values
+            (p_module_name,
+             sysdate,
+             t_user,
+             p_statement_id,
+             substr(p_error_key, 1, 70),
+             substr(p_error_desc, 1, 70));
+        exception
+          when others then
+            log_pl('Error while inserting in CHECK_ERROR procedure');
+            log_pl('Terminating.');
+        end;
+      end if;
+    end CHECK_ERROR;  
+
+  procedure get_company_name(p_contract_id IN VARCHAR2) is
+  begin
+    begin
+      select company into t_company_name
+        from contracts
+       where contract_id = p_contract_id;
+    exception
+      when no_data_found then
+        p_status := 'Insufficient contract information';
+        log_pl('Insufficient contract information');
+        log_pl('Terminating.');       
+        raise handle_error;
+      when others then
+        p_status := 'Error: ' || SQLCODE || ' - ' || SQLERRM;
+        log_pl('Error: ' || SQLCODE || ' - ' || SQLERRM);
+        log_pl('Terminating.');
+        raise handle_error;
+    end;
+  end get_company_name;
+
+
+  PROCEDURE get_extract_info is
+  begin
+    select to_char(insert_date, 'YYYYMMDDHH24MISS'), insert_user, chapter_id, NVL(re_extract_flag,'N'), nvl(re_extract_count,0) + 1
+     into t_insert_dats, t_ext_user_id, t_chp_id, t_re_ext_flag, t_re_ext_cnt
+      from cnf_extract
+     where extract_id = p_parm_id
+       and rownum = 1;
+  exception
+    when no_data_found then
+      log_pl('No parameters exist for entered extract id...');
+      log_pl('Terminating');
+      raise handle_error;
+    when others then
+      check_error('CNPREXTR',
+                  '77',
+                  'Select result parameters set for extract_id = ' ||
+                  p_parm_id,
+                  '');
+      raise handle_error;
+  end get_extract_info;
+  
+  procedure set_os_flag is
+  begin
+    select substr(code, 1, 1) into t_os_flag
+      from master_codes
+     where code_type = 'OPS'
+       and v_local_time between eff_date and nvl(term_date, sysdate + 1)
+       and rownum = 1;
+  exception
+    when no_data_found then
+      log_pl('Operating system flag is not defined in the Master Code...');
+      log_pl('Terminating');
+      raise handle_error;
+    when others then
+      check_error('CNPREXTR', '97', 'Master code failed for OPS', '');
+      raise handle_error;
+  end set_os_flag;
+ 
+  procedure perform_unit_level_checks(unit_rec IN units_rt, skip_flag_out OUT VARCHAR2) is
+          t_reason_desc varchar2(40);
+        begin
+          skip_flag_out := 'N';
+          -- Pull only one reason if multiple exist
+          begin
+            select substr(m.code_desc, 1, 40)
+              into t_reason_desc
+              from rgt_confirm_skip_samples s, master_codes m
+             where s.chapter_id = unit_rec.chapter_id
+               and s.unit_id = unit_rec.unit_id
+               and s.skip_flag = 'S'
+               and m.code_type = 'SSKIP'
+               and m.code = s.reason_code
+               and rownum = 1;
+          exception
+            when no_data_found then
+              t_reason_desc := null;
+            when others then
+              log_pl('Error while retrieving reason description');
+              check_error('CNPREXTR',
+                          '80',
+                          'Check skip flag unit_id = ' || unit_rec.unit_id,
+                          '');
+              raise abort_error; -- Changed by Kishore on 01/19/2012
+          end;
+
+          if t_reason_desc is not null then
+            -- Skip reason found
+            skip_flag_out := 'Y';
+            log_pl('Unit: ' ||unit_rec.unit_id ||
+                              ' skipped for reason: ');
+            log_pl(t_reason_desc);
+          end if;
+          
+          -- Check for HOLD interdiction
+          -- Pull only one reason if multiple exist
+          begin
+            select substr(m.inter_desc, 1, 40)
+              into t_reason_desc
+              from unit_interdictions s, valid_interdictions_lab m
+             where s.chapter_id = unit_rec.chapter_id -- p_chapter_id -- V03
+               and s.coll_date = unit_rec.coll_date
+               and s.unit_id = unit_rec.unit_id
+               and m.inter_type = 'H'
+               and m.inter_code = s.inter_code
+               and rownum = 1;
+          exception
+            when no_data_found then
+              t_reason_desc := null;
+            when others then
+              log_pl('Error while retrieving reason description for HOLD interdiction');
+              check_error('CNPREXTR',
+                          '80',
+                          'Check hold interdiction unit_id=' || unit_rec.unit_id,
+                          '');
+              raise abort_error; -- Changed by Kishore on 01/19/2012
+          end;
+          
+          if t_reason_desc is not null then
+            -- HOLD interdiction found
+            skip_flag_out := 'Y';
+            log_pl('Unit: ' || unit_rec.unit_id ||
+                              ' skipped for hold: ');
+            log_pl(t_reason_desc);
+          end if;
+        end perform_unit_level_checks;   
+  
+  procedure check_utb (p_unit_rec IN c1%ROWTYPE) is
+      nCnt NUMBER;
+  begin
+    select count(1) into nCnt
+      from unit_test_base
+     where unit_id = p_unit_rec.unit_id
+       and coll_date = p_unit_rec.coll_date
+       and chapter_id = p_unit_rec.chapter_id
+       and result_status_1 is not null
+       and cancel_flag is null
+       and test_id in (select test_id
+                         from utrs
+                        where unit_id = p_unit_rec.unit_id
+                          and coll_date = p_unit_rec.coll_date
+                          and chapter_id = p_unit_rec.chapter_id
+                          and ( (test_series_id is not null and test_series_id = p_unit_rec.test_series_id)
+                                OR
+                                (test_series_id is null and test_id = p_unit_rec.test_id)
+                               )
+                          and cancel_flag is null
+                       );
+  -- Abort if any unit test base records exist
+    if nCnt <> 0 then
+      t_abort_extract_flag := 'Y';
+      log_pl('Unit: ' || p_unit_rec.unit_id ||
+                        ' results in unit test base (UTB)');
+      check_error('CNPREXTR',
+                  '50',
+                  'Checking unit test base unit_id = ' ||
+                  p_unit_rec.unit_id,
+                  ''); -- Added by Kishore on 01/19/2012
+      raise abort_error; -- Added by Kishore on 01/19/2012
+    end if;          
+  exception
+    when others then
+      check_error('CNPREXTR',
+                  '50',
+                  'Checking unit test base unit_id = ' || p_unit_rec.unit_id,
+                  '');
+      raise abort_error; -- Changed by Kishore on 01/19/2012            
+  end check_utb;
+
+  procedure check_dup_test(p_unit_rec IN c1%ROWTYPE) is
+          begin
+            if p_unit_rec.test_series_id is not null then
+              -- check if any test from the test series is present outside the series.
+              select count(1) into nCnt
+                from utrs
+               where unit_id = p_unit_rec.unit_id
+                 and coll_date = p_unit_rec.coll_date
+                 and chapter_id = p_unit_rec.chapter_id
+                 and nvl(cancel_flag, 'N') = 'N'
+                 and nvl(test_series_id,'@#') <> p_unit_rec.test_series_id
+                 and test_id in (select test_id
+                                   from utrs
+                                  where unit_id =  p_unit_rec.unit_id
+                                    and coll_date = p_unit_rec.coll_date
+                                    and chapter_id = p_unit_rec.chapter_id
+                                    and test_series_id = p_unit_rec.test_series_id
+                                    and nvl(cancel_flag,'N') = 'N'
+                                 );
+            elsif p_unit_rec.test_id is not null then
+             -- check if any stand alone test is present in any other test series.
+             select count(1) into nCnt
+                from utrs
+               where unit_id = p_unit_rec.unit_id
+                 and coll_date = p_unit_rec.coll_date
+                 and chapter_id = p_unit_rec.chapter_id
+                 and nvl(cancel_flag, 'N') = 'N'
+                 and test_series_id is not null
+                 and test_id = p_unit_rec.test_id;
+            end if;
+        
+          -- Notify if unrequested tests were scheduled
+            if nCnt <> 0 then
+              t_abort_extract_flag := 'Y';
+              log_pl('Unit: ' || p_unit_rec.unit_id || ' ' ||
+                                nCnt ||
+                                ' duplicate test');
+              raise abort_error;                  
+            end if;
+          exception
+            when others then
+              check_error('CNPREXTR',
+                          '22',
+                          'Select UTRS duplicate test  unit id = ' || p_unit_rec.unit_id,
+                          '');
+              raise abort_error; -- Changed by Kishore on 01/19/2012
+          end check_dup_test;
+
+
+  procedure check_utrs(p_unit_rec c1%ROWTYPE) is
+    nCnt NUMBER;
+  begin
+    begin
+      -- check all tests are resulted or not.
+      select COUNT(1) into nCnt
+        from utrs
+       where unit_id = p_unit_rec.unit_id
+         and chapter_id = p_unit_rec.chapter_id
+         and coll_date = p_unit_rec.coll_date
+         and qc_test_date IS NOT NULL
+        and ( (test_series_id is not null and test_series_id = p_unit_rec.test_series_id)
+              OR
+              (test_series_id is null and test_id = p_unit_rec.test_id)
+             )
+         and result_status_1 is null
+         and cancel_flag is null;
+    exception
+      when others then
+        check_error('CNPREXTR',
+                    '28',
+                    'Results not reconciled unit ' ||
+                    p_unit_rec.unit_id,
+                    ''); -- V03
+        --' chap ' || p_chapter_id || ' unit ' || c1rec.unit_id, '');
+        raise abort_error; -- Changed by Kishore on 01/19/2012
+    end;
+
+    if nCnt <> 0 then
+      t_abort_extract_flag := 'Y';
+      log_pl('Unit: ' || p_unit_rec.unit_id || ' ' ||
+                        nCnt ||
+                        ' mandatory test(s) without results');
+      raise abort_error;                                
+    end if;
+  end check_utrs;                      
+            
+
+  
+    -- Insert record into report parameters for retrieval of log file
+    procedure insert_parm_id is
+    begin
+      begin
+        select count(*)
+          into t_rpt_parm_cnt
+          from rpt_parm
+         where appl_id = 'DON'
+           and report_name = 'CNPREXTR'
+           and user_name = p_user_id -- t_ext_user_id -- V03
+           and chapter_id = t_chp_id
+           and parm_id = t_parm_id;
+      exception
+        when others then
+          check_error('CNPREXTR', '210', 'rpt_parm = ' || t_parm_id, '');
+          dump_output('log');
+          dump_output('res');
+      end;
+    
+      if t_rpt_parm_cnt > 0 then
+        -- Check if record already exists in RPT_PARM table
+        begin
+          update rpt_parm
+             set submit_date   = sysdate,
+                 report_status = 'C',
+                 output_file   = t_log_file_name 
+           where appl_id = 'DON'
+             and report_name = 'CNPREXTR'
+             and user_name = p_user_id -- t_ext_user_id -- V03
+             and chapter_id = t_chp_id
+             and parm_id = t_parm_id;
+        exception
+          when others then
+            check_error('CNPREXTR', '210', 'rpt_parm = ' || t_parm_id, '');
+            dump_output('log');
+            dump_output('res');
+        end;
+      else
+        begin
+          insert into rpt_parm
+            (appl_id,
+             user_name,
+             report_name,
+             parm_id,
+             parm_date,
+             submit_date,
+             report_status,
+             output_file,
+             chapter_id) 
+          values
+            ('DON',
+             p_user_id, -- t_ext_user_id, -- V03
+             'CNPREXTR',
+             t_parm_id,
+             sysdate,
+             sysdate,
+             'C',
+             t_log_file_name,
+             t_chp_id
+             ); 
+        exception
+          when others then
+            check_error('CNPREXTR', '210', 'rpt_parm = ' || t_parm_id, '');
+            dump_output('log');
+            dump_output('res');
+        end;
+      end if;
+    end insert_parm_id;
+  
+    -- Update parameter status and set unit count
+    procedure update_cnf_extract is
+    begin
+      -- UPDATE parent table.
+      begin
+        update cnf_extract
+           set unit_count         = t_total_hdr_read_cnt,
+               under_extract_flag = 'N',
+               re_extract_flag    = decode(t_re_ext_flag, 'X', 'Y', re_extract_flag),
+               re_extract_count   = decode(t_re_ext_flag, 'X', t_re_ext_cnt, 0)                              
+         where extract_id = p_parm_id;
+      exception
+        when others then
+          check_error('CNPREXTR',
+                      '94',
+                      'Update cnf_extract parm ' || p_parm_id,
+                      '');
+          dump_output('log');
+          dump_output('res');
+      end;
+      
+      -- UPDATE child table (applies for rextract only)
+      begin
+        update cnf_extract_units
+           set re_extract_flag    = 'Y'
+         where extract_id = p_parm_id
+          and re_extract_flag = 'X';
+      exception
+        when others then
+          check_error('CNPREXTR',
+                      '94',
+                      'Update cnf_extract_units parm ' || p_parm_id,
+                      '');
+          dump_output('log');
+          dump_output('res');
+      end;      
+    end update_cnf_extract;
+  
+    -- Initialize test id
+    procedure pre_test(param_test_series_id in varchar2, param_test_id in varchar2) is
+    begin
+      t_test_count             := 0;
+      t_no_result_count        := 0;
+      t_interim_count          := 0;
+      t_extracted_count        := 0;
+      t_reactive_count         := 0;
+      t_non_reactive_count     := 0;
+      t_nt_count               := 0;
+      t_repeat_count           := 0;
+      t_prior_extracts         := 0;
+      t_found_first_extract    := 'N';
+      t_inter_str              := null;
+      t_t_inter_str            := null;
+      t_reactive_result_status := null;
+      t_proc_test_id           := param_test_id;
+      unit_tests_cat.test_series_id := param_test_series_id;
+      unit_tests_cat.test_id := param_test_id;
+    
+      -- Translate test name to customer's name for test
+      begin
+        select nvl(max(rt.cbc_test_id), param_test_id)
+          into t_cbc_test_id
+          from rgt_test_matrix rt
+         where rt.chapter_id = t_unit_chapter -- p_chapter_id -- V03
+           and rt.contract_id = t_contract_id
+           and rt.test_id = param_test_id
+           and v_local_time between eff_date and
+               nvl(term_date, sysdate + 365); -- Applied time zone change. Applied by Kishore on 01/19/2012
+      exception
+        when others then
+          check_error('CNPREXTR',
+                      '36',
+                      'Select rgt_test_matrix for test_id = ' ||
+                      param_test_id,
+                      '');
+          raise unit_error; -- Changed by Kishore on 01/19/2012
+      end;
+    end pre_test;
+  
+    -- Store information of 'initial' test result
+    procedure copy_init_test(param_test_seq_no   in number,
+                             param_extractable   in number,
+                             param_check_interim in number,
+                             param_od_value      in varchar2,
+                             param_cut_off_value in varchar2) is
+    begin
+      t_init_seq_no        := param_test_seq_no;
+      t_init_extractable   := param_extractable;
+      t_init_check_interim := param_check_interim;
+      t_init_result_status := t_result_status;
+      t_init_od_value      := param_od_value;
+      t_init_cut_off_value := param_cut_off_value;
+      t_init_inter_str     := t_t_inter_str;
+    end copy_init_test;
+  
+    -- Translate final initerpretation to result used by customer
+    procedure cbc_final_result is
+    begin
+      begin
+        select rpad(nvl(max(rr.cbc_result_status), t_final_result_status),
+                    4,
+                    ' ')
+          into t_cbc_result_code
+          from rgt_results_matrix rr
+         where rr.test_id = t_proc_test_id
+           and rr.chapter_id = t_unit_chapter -- p_chapter_id -- V03
+           and rr.contract_id = t_contract_id
+           and rr.result_status = t_final_result_status
+           and v_local_time between eff_date and
+               nvl(term_date, v_local_time + 365);
+      exception
+        when no_data_found then
+          -- Added by Kishore on 01/19/2012
+          check_error('CNPREXTR',
+                      '37',
+                      'Select rgt_reslt_matrix result_id = ' ||
+                      t_final_result_status,
+                      '');
+          raise unit_error; -- Changed by Kishore on 01/19/2012
+        when others then
+          check_error('CNPREXTR',
+                      '37',
+                      'Select rgt_reslt_matrix result_id = ' ||
+                      t_final_result_status,
+                      '');
+          raise unit_error; -- Changed by Kishore on 01/19/2012
+      end;
+    end cbc_final_result;
+  
+    -- Update extract date of result extracted
+    procedure set_extract_date(param_extract_interim in number,
+                               param_coll_date       in date,
+                               param_unit_id         in varchar2) is
+    begin
+      t_extracted_count := t_extracted_count + 1;
+    
+      -- Interim result reported, extract interim
+      dbms_output.put_line('Param Extract Interim: ' ||
+                           param_extract_interim);
+      dbms_output.put_line('Proc Test ID: ' || t_proc_test_id);
+      dbms_output.put_line('Insert Dats: ' || t_insert_dats);
+      dbms_output.put_line('Test Seq No: ' || t_test_seq_no);
+      if param_extract_interim > 0 then
+        begin
+          update rgt_interim_results int
+             set int.first_extract_date = decode(int.first_extract_date,
+                                                 null,
+                                                 to_date(t_insert_dats,
+                                                         'YYYYMMDDHH24MISS'),
+                                                 int.first_extract_date),
+                 int.last_extract_date  = to_date(t_insert_dats,
+                                                  'YYYYMMDDHH24MISS'),
+                 int.program_id         = 'CNPREXTR',
+                 int.extract_flag       = 'Y'
+           where unit_id = param_unit_id
+             and chapter_id = t_unit_chapter -- p_chapter_id -- V03
+             and coll_date = param_coll_date
+             and test_id = t_proc_test_id
+             and test_seq_no = t_test_seq_no;
+        exception
+          when others then
+            check_error('CNPREXTR',
+                        '92',
+                        'Updating interim unit = ' || param_unit_id,
+                        '');
+            raise unit_error; -- Changed by Kishore on 01/19/2012
+        end;
+      else
+        -- No interim, extract result
+        begin
+          update utrs
+             set extract_date = to_date(t_insert_dats, 'YYYYMMDDHH24MISS'),
+                 program_id   = 'CNPREXTR'
+           where unit_id = param_unit_id
+             and chapter_id = t_unit_chapter -- p_chapter_id -- V03
+             and coll_date = param_coll_date
+             and test_id = t_proc_test_id
+             and test_seq_no = t_test_seq_no
+             and extract_date is null;
+          
+            update cnf_extract_units
+              set extract_date = to_date(t_insert_dats, 'YYYYMMDDHH24MISS'),
+                  program_id= 'CNPREXTR'
+            where  extract_id = p_parm_id
+               and unit_id = param_unit_id
+               and chapter_id = t_unit_chapter -- p_chapter_id -- V03
+               and coll_date = param_coll_date
+               and( 
+                    (unit_tests_cat.test_series_id is not null and test_series_id = unit_tests_cat.test_series_id)
+                     or
+                    (unit_tests_cat.test_series_id is null and test_id = t_proc_test_id)
+                  ) 
+               and extract_date is null;   
+        exception
+          when others then
+            check_error('CNPREXTR',
+                        '78',
+                        'Update UTRS unit_id ' || param_unit_id,
+                        '');
+            raise unit_error; -- Changed by Kishore on 01/19/2012
+        end;
+      end if;
+    end set_extract_date;
+  
+    -- Print unit information in results file
+    procedure print_unit(param_os_unit_id       in varchar2,
+                         param_unit_id          in varchar2) is
+    begin
+      --t_hdr_read_cnt := t_hdr_read_cnt + 1; -- V05
+      t_unit_printed := 'Y';
+    
+      -- V05 increase the count only for each unit ID, ignore duplicate.
+      if g_units_used.EXISTS(param_unit_id) then
+        NULL;
+      else
+        g_units_used(param_unit_id) := TRUE;
+        t_hdr_read_cnt := t_hdr_read_cnt + 1;
+      end if;
+      -- V05
+    
+      begin
+        select substr(center_id, 1, 5), substr(center_id, 1, 5)
+          into t_center_id, t_temp_center
+          from contracts co
+         where -- co.chapter_id = p_chapter_id -- V03
+         co.contract_id = t_contract_id
+         and rownum = 1; -- V03
+      end;
+    
+      dbms_output.put_line('Result Type: ' || t_result_type);
+      if t_result_type = 'S' then
+        -- Safe Blood format
+        null; -- SF change
+      else
+        if t_result_type = 'D' then
+          -- DMIS format
+          t_donor_str := param_os_unit_id;
+          t_ft_cnt    := t_ft_cnt + 1;
+        else
+          res_pl('UI:' || rpad(param_os_unit_id, 15, ' ') || ' ' ||
+                            rpad(param_unit_id, 15, ' '));
+          t_ft_cnt := t_ft_cnt + 1;
+          t_bt_cnt := t_bt_cnt + 1;
+        end if;
+      end if;
+    end print_unit;
+  
+    -- Print test results to result file
+    procedure print_detail(p_seq                  in number,
+                           p_result               in varchar2,
+                           p_buff                 in varchar2,
+                           param_unit_id          in varchar2,
+                           param_os_unit_id       in varchar2) is
+      t_buff varchar2(75);
+      l_indx PLS_INTEGER;
+    begin
+      t_buff         := p_buff;
+      t_det_read_cnt := t_det_read_cnt + 1;
+      if t_result_type in ('D', 'S') then
+        -- DMIS format
+        if t_result_type = 'D' then
+          -- SF change
+          -- Retrieve position information for test
+          if (t_proc_test_id = 'CMV' and length(t_proc_test_id) = 3 and
+             t_result_type = 'S') then
+            t_offset          := 49;
+            t_character_count := 1;
+          else
+            dbms_output.put_line('Proc Test ID: ' || t_proc_test_id);
+            begin
+              select nvl(interface_column, 0), nvl(interface_length, 1)
+                into t_offset, t_character_count
+                from contract_tests c
+               where -- c.chapter_id  = p_chapter_id -- V03
+               c.contract_id = t_contract_id
+               --and c.profile_set_id = t_profile_set_id -- V03
+               and c.test_id = t_proc_test_id
+               and v_local_time between eff_date and
+               nvl(term_date, v_local_time + 1);
+            exception
+              when no_data_found then
+                t_offset          := 0;
+                t_character_count := 0;
+            end;
+          end if;
+        
+          if (t_proc_test_id = 'ABORH' and length(t_proc_test_id) = 5 and
+             t_result_type = 'S') then
+            t_aborh := p_result;
+          else
+            if (t_proc_test_id = 'CHOL' and length(t_proc_test_id) = 4) then
+              t_buff := lpad(t_init_od_value, t_character_count, ' ');
+            elsif (t_proc_test_id = 'ALT' and length(t_proc_test_id) = 3 and
+                  t_result_type = 'D') then
+              t_buff := lpad(p_result, 1, ' ') || ' ' ||
+                        rpad(t_init_od_value, t_character_count - 2, ' ');
+            else
+              t_buff := rpad(nvl(p_result, ' '), 10, ' ');
+            end if;
+          end if;
+        
+          if t_offset != 0 then
+            -- Print unit if not yet printed
+            if t_unit_printed = 'N' then
+              print_unit(param_os_unit_id,
+                         param_unit_id);
+            end if;
+          
+            if (t_proc_test_id = 'ABORH' and length(t_proc_test_id) = 5 and
+               t_result_type = 'S') then
+              null;
+            else
+              dbms_output.put_line('Length of donor str: ' ||
+                                   length(t_donor_str));
+              dbms_output.put_line('Offset: ' || t_offset);
+              dbms_output.put_line('Character Count: ' ||
+                                   t_character_count);
+              --t_donor_str := t_donor_str || rpad(substr(t_buff, 1, t_character_count), t_character_count, ' ');
+              t_donor_str := rpad(t_donor_str, 100, ' ');
+              t_donor_str := substr(t_donor_str, 1, (t_offset - 1)) ||
+                             substr(t_buff, 1, t_character_count) ||
+                             substr(t_donor_str,
+                                    (t_offset + t_character_count));
+            end if;
+            dbms_output.put_line('Donor String so far: ' || t_donor_str);
+          end if;
+        end if; -- SF change
+      else
+        -- Other formats
+        -- Print unit if not yet printed
+        if t_unit_printed = 'N' then
+            print_unit(param_os_unit_id, param_unit_id);
+            
+            --------
+            tstres_lines.DELETE;
+            abort_series.DELETE;
+            abort_tests.DELETE;
+            ------
+        end if;
+
+        -- new code 10/16/18
+        -- store each line and its category (test series or test) in a table.        
+        res_rec.test_line := 'TR:' || rpad(t_cbc_test_id, 10, ' ') || ' ' ||
+                          nvl(to_char(p_seq), ' ') || ' ' ||
+                          rpad(p_result, 4, ' ') || t_buff;
+        res_rec.test_cat  := NVL(unit_tests_cat.test_series_id, unit_tests_cat.test_id);
+        tstres_lines(NVL(tstres_lines.LAST,0)+1) := res_rec;
+        
+        -- if aborted store it in abort tables.
+        if t_abort_extract_flag = 'Y' then
+          if unit_tests_cat.test_series_id is not null then
+            abort_series(unit_tests_cat.test_series_id) := TRUE;
+          elsif unit_tests_cat.test_id is not null then
+            abort_tests(unit_tests_cat.test_id) := TRUE;
+          end if;
+        end if;
+        ----------
+        --
+        if t_close_final_test = 'Y' then
+            -- copy to res_pl 
+            l_indx := tstres_lines.FIRST;
+            WHILE (l_indx IS NOT NULL) loop
+              if abort_series.EXISTS(tstres_lines(l_indx).test_cat) then
+                null;
+              elsif abort_tests.EXISTS(tstres_lines(l_indx).test_cat) then
+                null;
+              else
+                lv_gen_res_YN := 'Y';
+                res_pl(tstres_lines(l_indx).test_line);
+                t_ft_cnt := t_ft_cnt + 1;
+                t_bt_cnt := t_bt_cnt + 1;            
+              end if;  
+              l_indx := tstres_lines.NEXT(l_indx);
+            end loop;     
+            ------------------------             
+        end if;
+        
+        /*
+        dbms_output.put_line('Result: ' || p_result);
+        res_pl('TR:' || rpad(t_cbc_test_id, 10, ' ') || ' ' ||
+                          nvl(to_char(p_seq), ' ') || ' ' ||
+                          rpad(p_result, 4, ' ') || t_buff);
+             
+        t_ft_cnt := t_ft_cnt + 1;
+        t_bt_cnt := t_bt_cnt + 1;
+        */     
+      end if; -- if t_result_type in ('D', 'S') then
+    end print_detail;
+  
+    -- Print final interpretations and 'initial' results
+    procedure print_final_result(param_unit_id          in varchar2,
+                                 param_os_unit_id       in varchar2,
+                                 param_coll_date        in date) is
+    begin
+      dbms_output.put_line('Proc Test ID in PFR: ' || t_proc_test_id);
+      t_return := 'N';
+      -- Commented below "IF" statement and added new one below it
+      -- Same logic as Pro*C but eliminated the use of "length" function
+      -- Changed by Kishore on 01/19/2012
+      /*if (nvl(t_proc_test_id, '*') != 'CHOL' and length(nvl(t_proc_test_id, '*')) != 4) and
+      (nvl(t_proc_test_id, '*') != 'ALT' and length(nvl(t_proc_test_id, '*')) != 3) then*/
+      if (nvl(t_proc_test_id, '*') != 'CHOL' and
+         nvl(t_proc_test_id, '*') != 'ALT') then
+        -- Abort if multiple tests performed without reactives
+        dbms_output.put_line('Reactive Count: ' || t_reactive_count);
+        dbms_output.put_line('Test Count: ' || t_test_count);
+        if (t_test_count > 1 and t_reactive_count = 0) then
+          t_abort_extract_flag := 'Y';
+          log_pl(' Unit: ' || param_unit_id || ' Test: ' ||
+                            t_proc_test_id ||
+                            ' Multiple nonreactive, no reactive');
+        end if;
+      
+        -- Abort if incorrect number of repeats performed
+        dbms_output.put_line('Repeat Count: ' || t_repeat_count);
+        if (t_repeat_count + 1) != t_test_count then
+          t_abort_extract_flag := 'Y';
+          log_pl(' Unit: ' || param_unit_id || ' Test: ' ||
+                            t_proc_test_id ||
+                            ' Incorrect number of repeats');
+        end if;
+      end if;
+    
+      -- Initial extraction, print 'initial' result
+      if t_result_type = 'I' then
+        -- Verify test was performed and not previously extracted
+        if (t_prior_extracts = 0) and (t_no_result_count < t_test_count) then
+          t_temp_seq_no := t_test_seq_no;
+          t_test_seq_no := t_init_seq_no;
+          set_extract_date(t_init_check_interim,
+                           param_coll_date,
+                           param_unit_id);
+          dbms_output.put_line('PD1'); -- Substituted the second parameter ('    ') with null. Check ".pc" file for original value
+          print_detail(t_init_seq_no,
+                       '',
+                       t_init_inter_str,
+                       param_unit_id,
+                       param_os_unit_id);
+          t_test_seq_no := t_temp_seq_no;
+        end if;
+        -- Repeat extraction, abort if extractable test is found and initial extract not performed for the test
+      elsif t_result_type = 'R' then
+        if t_prior_extracts = 0 then
+          if t_repeat_count > 0 then
+            t_abort_extract_flag := 'Y';
+            log_pl(' Unit: ' || param_unit_id || ' Test: ' ||
+                              t_proc_test_id ||
+                              ' Repeat with no initial extraction');
+          else
+            t_acceptable_no_init := t_acceptable_no_init + 1;
+          end if;
+        end if;
+      else
+        -- Final interpretation or DMIS extraction
+        if nvl(t_result_type, '*') != 'S' then
+          -- SF change
+          -- If interim result encountered, use last interim result processed as the final interpretation
+          dbms_output.put_line('Interim Count: ' || t_interim_count);
+          if t_interim_count > 0 then
+            if (t_result_type = 'F' or t_result_type = 'S') then
+              if t_result_type = 'F' then
+                -- SF change
+                if t_prior_extracts = 0 then
+                  dbms_output.put_line('PD2');
+                  print_detail(1,
+                               ltrim(rtrim(t_last_interim_result)),
+                               t_inter_str,
+                               param_unit_id,
+                               param_os_unit_id);
+                end if;
+              end if; -- SF change
+            else
+              -- Abort if interim result given for DMIS extraction
+              t_abort_extract_flag := 'Y';
+              log_pl(' Unit: ' || param_unit_id || ' Test: ' ||
+                                t_proc_test_id ||
+                                ' Interim result in donor extract');
+            end if;
+          else
+            -- Abort if any results are missing for final interpretation
+            dbms_output.put_line('No Result Count: ' || t_no_result_count);
+            if t_no_result_count > 0 then
+              -- Check if test is required
+              begin
+                select count('x')
+                  into t_check_stop_label_cnt
+                  from contract_tests_image c
+                 where --c.chapter_id = p_chapter_id -- V03
+                 c.contract_id = t_contract_id
+                 --and c.profile_seq_no = t_profile_seq_no
+                 --and c.profile_set_id = t_profile_set_id -- V03
+                 and c.test_id = t_proc_test_id
+                 and c.stop_label_flag = 'Y'
+                 and v_local_time between eff_date and
+                 nvl(term_date, v_local_time + 365)
+                 and rownum = 1;
+              exception
+                when others then
+                  check_error('CNPREXTR',
+                              '136',
+                              'Select contract_tests_image for test_id = ' ||
+                              t_proc_test_id,
+                              '');
+                  raise unit_error; -- Changed by Kishore on 01/19/2012
+              end;
+            
+              dbms_output.put_line('Check Stop Label Count: ' ||
+                                   t_check_stop_label_cnt);
+              if t_check_stop_label_cnt > 0 then
+                t_abort_extract_flag := 'Y';
+                log_pl(' Unit: ' || param_unit_id || ' Test: ' ||
+                                  t_proc_test_id || ' Incomplete testing');
+              end if;
+            
+              t_return := 'Y';
+            end if;
+          
+            if t_return = 'N' then
+              -- Print maximum OD as final interpretation for ALT and Cholesterol
+              if ((t_proc_test_id = 'CHOL' and length(t_proc_test_id) = 4) or
+                 (t_proc_test_id = 'ALT' and length(t_proc_test_id) = 3)) then
+                t_final_result_status := t_init_result_status;
+                cbc_final_result;
+                t_final_result_status := t_cbc_result_code;
+              
+                if t_prior_extracts = 0 then
+                  dbms_output.put_line('PD3: ' || t_final_result_status);
+                  print_detail(1,
+                               ltrim(rtrim(t_final_result_status)),
+                               t_init_inter_str,
+                               param_unit_id,
+                               param_os_unit_id);
+                end if;
+              
+                t_return := 'Y';
+              elsif t_reactive_count > 0 then
+                -- At least one reactive result found
+                -- If more than one reactive (repeat reactive) is found or if no reactives
+                -- (repeats not required) are found, report test as reactive. Otherwise report as non-reactive
+                if (t_reactive_count >= (t_non_reactive_count - t_nt_count)) then
+                  t_final_result_status := t_reactive_result_status;
+                else
+                  t_final_result_status := t_nonreac_result_status;
+                end if;
+              else
+                -- Initially non-reactive
+                t_final_result_status := t_nonreac_result_status;
+              end if;
+            end if; -- if t_return = 'N' then
+          
+            if t_return = 'N' then
+              -- Print final interpretation
+              cbc_final_result;
+              t_final_result_status := t_cbc_result_code;
+              dbms_output.put_line('Test CBC Result Code: ' ||
+                                   t_cbc_result_code);
+              if t_prior_extracts = 0 then
+                dbms_output.put_line('PD4: ' || t_final_result_status);
+                dbms_output.put_line('Inter String: ' || t_inter_str);
+                print_detail(1,
+                             ltrim(rtrim(t_final_result_status)),
+                             t_inter_str,
+                             param_unit_id,
+                             param_os_unit_id);
+              end if;
+            end if;
+          end if; -- if t_interim_count > 0 then
+        end if; -- if nvl(t_result_type, '*') != 'S' then -- SF change
+      end if; -- if t_result_type = 'I' then
+    end print_final_result;
+  
+  begin
+    -- Start of main program
+    p_status := 'OK';
+    t_program_version := '01';
+    log_output.DELETE;
+    res_output.DELETE;
+    
+    t_user := lt_user_session.get_userid;    
+    v_local_time := lifetrack_timezone_convert.get_local_time(p_chapter_id, SYSDATE);
+
+   
+    get_extract_info; -- populates t_insert_dats, t_ext_user_id
+
+    -- Build log file name and pull user name
+    get_log_loc;
+    
+    t_parm_id := to_char(systimestamp, 'SSFF2');
+    
+    t_log_file_name := 'CNPREXTR_' || t_parm_id || '_' || p_user_id || '.r'; -- V03 (using p_user_id instead of t_ext_user_id)
+    
+    open_log_file;    
+        
+    -- get log header
+    log_pl( 'CNPREXTR Version ' || t_program_version);
+    log_pl( '**************************************************************************');
+    log_pl( 'Confirmatory Testing Center results extraction log');
+    log_pl( '**************************************************************************');
+    log_pl( 'Program Start Time: ' || to_char(v_local_time, 'MM-DD-YYYY HH24:MI:SS'));
+    log_pl( 'Log File Name: ' || t_log_file_name);
+    
+    if NVL(t_re_ext_flag,'N') = 'X' then
+      t_file_append := 'R' || LPAD(TO_CHAR(t_re_ext_cnt),2,'0');
+    else
+      t_file_append := 'E00';
+    end if;
+        
+    for rec in (  select  distinct ceu.contract_id
+                  from cnf_extract_units ceu
+                 where ceu.extract_id = p_parm_id
+                   -- and  select_flag = 'X' )  -- V05
+                   and ( (t_re_ext_flag = 'X' and re_extract_flag = 'X')
+                          or
+                         (t_re_ext_flag <> 'X' and select_flag = 'X' ) 
+                       )
+                )
+    loop
+        t_contract_id := rec.contract_id;
+        g_units_used.DELETE; --V05 (reset before start of program)
+        
+        ceu_tab.DELETE;
+        dbms_output.put_line('after delete temp table');
+        t_total_hdr_read_cnt := t_total_hdr_read_cnt + t_hdr_read_cnt;   
+            
+        -- reset for every customer.
+        t_hdr_read_cnt := 0; 
+        t_det_read_cnt := 0; 
+        -----------
+
+        -- Build results lab file.
+        t_int_file_name := p_parm_id || '_' || rec.contract_id || '_' || t_file_append ||  '.lab';
+      
+        get_company_name(rec.contract_id);    
+
+        log_pl( 'Results File Name: ' || t_int_file_name);
+        log_pl( rec.contract_id || ': ' || t_company_name);
+      
+        -- Retreive data on customer for specified results batch
+        -- Populate data for the entered contract
+        /* Defaults: report od values?  Yes
+        *           results method?  All results
+        */
+        begin
+          select nvl(od_reporting_method, 'Y'),
+                 nvl(results_method, 'A'),
+                 nvl(co.alt_e_level, 0),
+                 nvl(co.alt_se_level, 0),
+                 cbc_chapter_id,
+                 bar_code_protocol,
+                 substr(m.code_desc, 1, 40),
+                 substr(po_no, 1, 6)
+            into t_od_reporting_method,
+                 t_results_method,
+                 t_alt_e_level,
+                 t_alt_se_level,
+                 t_cbc_chapter_id,
+                 t_bar_code_protocol,
+                 t_chapter_name,
+                 t_po_no
+            from contracts co, master_codes m
+           where m.code = nvl(cbc_chapter_id, p_chapter_id)
+             and m.code_type = 'CBCID'
+                --and co.chapter_id  = p_chapter_id -- V05
+             and co.contract_id = rec.contract_id;
+        exception
+          when no_data_found then
+            log_pl('Insufficient contract information...');
+            log_pl('Terminating.');
+            raise handle_error;
+          when others then
+            check_error('CNPREXTR',
+                        '90',
+                        'Select contract parameters set for a parm_id = ' ||
+                        p_parm_id,
+                        '');
+            raise handle_error;
+        end;
+      
+        -- Get the Elevated and super Elevated values for ALT tests if not entered
+        -- at the contract level
+        if (t_alt_e_level = 0 or t_alt_se_level = 0) then
+          begin
+            select decode(t_alt_e_level, 0, nvl(alt_e_level, 0), t_alt_e_level),
+                   decode(t_alt_se_level,
+                          0,
+                          nvl(alt_se_level, 0),
+                          t_alt_se_level)
+              into t_alt_e_level, t_alt_se_level
+              from chapters
+             where chapter_id = p_chapter_id
+               and v_local_time between eff_date and
+                   nvl(term_date, sysdate + 365); -- Applied time zone change. Applied by Kishore on 01/19/2012
+          exception
+            when others then
+              check_error('CNPREXTR',
+                          '93',
+                          'Select alt levels from chapters for chapter_id = ' ||
+                          p_chapter_id,
+                          '');
+              raise handle_error;
+          end;
+        end if;
+      
+        -- Retreive data on customer for specified results batch
+        -- Populate data for the extraction specified
+        /* Defaults: list of units supplied?          No
+        *       extract units from other batches ? Yes
+        */
+        t_result_type := 'F';
+        
+
+        -- Retrieve parameters for specified results batch
+        -- Get the OS flag. U for Unix, L for Linux
+        set_os_flag; --populate t_os_flag;
+        
+
+       -- MLT 1025 (use this flag to generate electronic file or not) -- V04
+       begin
+         select nvl(co.confirm_test_flag, 'N')
+           into t_confirmatory_tests
+           from contracts co
+          where co.contract_id = rec.contract_id;
+       exception
+         when no_data_found then
+           t_confirmatory_tests := 'N';
+       end;
+        
+
+        -- Open result file for writing
+        open_result_file;
+        
+        -- Create result header
+       res_pl( 'FH:' || rpad(rec.contract_id, 9, ' ') || ' ' ||
+                          rpad(t_cbc_chapter_id, 4, ' ') || ' ' ||
+                          to_char(v_local_time, 'MM/DD/YY:HH24:MI:SS') || ' ' ||
+                          t_result_type || ' ' || t_od_reporting_method || ' ' ||
+                          rpad(t_chapter_name, 40, ' '));
+       res_pl( 'BH:' || rpad(p_parm_id, 14, ' '));
+       
+       
+        unit_rec := NULL;
+        
+        for c1rec in c1(t_insert_dats, rec.contract_id) loop
+          begin
+            dbms_output.put_line('Batch ID: ' || c1rec.batch_id);
+            dbms_output.put_line('Unit ID: ' || c1rec.unit_id);
+            dbms_output.put_line('Chapter ID: ' || c1rec.chapter_id); -- V03
+            dbms_output.put_line('ctr ID: ' || c1rec.contract_id); -- V03 
+            t_unit_chapter := c1rec.chapter_id; -- V03
+            
+            if c1rec.batch_id is not null then
+              if t_new_batch_id = c1rec.batch_id then
+                null;
+              else
+                t_new_batch_id := c1rec.batch_id; -- Added by Kishore on 01/19/2012
+                log_pl( 'Batch: ' || c1rec.batch_id);
+              end if;
+            else
+              NULL;
+            end if;
+            
+            if NVL(unit_rec.unit_id,'@#') <> c1rec.unit_id then -- this code executes only for first unit in the group of same units;
+              --ceu_tab.DELETE;
+              unit_rec.unit_id := c1rec.unit_id;
+              unit_rec.coll_date := c1rec.coll_date;
+              unit_rec.chapter_id := c1rec.chapter_id;
+              -- check if unit is skipped or on hold.
+              perform_unit_level_checks(unit_rec, t_skip_unit_flag);
+              dbms_output.put_line('Skip Unit Flag: ' || t_skip_unit_flag);
+              ----------
+            end if;
+      
+            if NVL(t_skip_unit_flag,'N') = 'N' then
+            
+              -- Processing is required
+              check_utb(c1rec); -- Check for results in UTB (extra test);
+            
+              --check_dup_test(c1rec); -- Check duplicate tests
+              
+              check_utrs(c1rec); -- check if all mandatory tests are resulted.     
+              
+              lv_gen_res_YN := 'Y'; -- using this flag to remove result file if it is set to N. we don't want empty result files. 
+              
+              dbms_output.put_line('before populating temp table');
+              dbms_output.put_line('unit id ' || c1rec.unit_id);
+              dbms_output.put_line('test series id ' || c1rec.test_series_id);
+              dbms_output.put_line('test id ' || c1rec.test_id);
+              -- populate temporary table. It is used in cursor c2 to display only the one's that are extractable.
+              ceu_tab(NVL(ceu_tab.LAST,0)+1) := c1rec;
+                   
+            FOR indx in ceu_tab.FIRST .. ceu_tab.LAST
+              LOOP
+                dbms_output.put_line(indx || '-- ' || ceu_tab(indx).unit_id);
+              END LOOP;
+           
+            end if;
+         exception
+          when abort_error then
+            t_abort_extract_flag := 'Y';  
+          end;
+        end loop;
+ 
+        for ext_units_rec in (select distinct unit_id, os_unit_id, coll_date, chapter_id, batch_id
+                               from TABLE(ceu_tab) ceu_temp
+                               order by chapter_id, unit_id
+                              ) loop
+          begin    
+            dbms_output.put_line('in temp table');
+            dbms_output.put_line('unit id ' || EXT_UNITS_REC.unit_id);                         
+            dbms_output.put_line('coll dt ' || to_char(EXT_UNITS_REC.coll_date,'mmddyyyy'));
+            dbms_output.put_line('os_unit_id ' || EXT_UNITS_REC.os_unit_id);
+            dbms_output.put_line('chapter id ' || EXT_UNITS_REC.chapter_id);
+            dbms_output.put_line('**INSERT DATE ' || T_INSERT_DATS);
+            t_unit_chapter := EXT_UNITS_REC.chapter_id; -- V03
+            --------
+            tstres_lines.DELETE;
+            abort_series.DELETE;
+            abort_tests.DELETE;
+            ------
+            lv_gen_res_yn := 'N';
+            t_close_final_test := 'N'; -- used in print_detail; set before calling last print_final_result;
+            --
+            
+                -- Process test results for unit
+                t_first_test   := 'Y';
+                t_unit_printed := 'N';
+      
+                -- Select all UTRS records for current unit except cancels.
+                -- 'Check Interim' * set if no result is found
+                -- 'Extractable' if not extracted or if extracted for current result batch's date and time
+                -- Do not extract confirmatories unless indicated by the CCBC customer
+                for c2rec in c2(t_insert_dats,
+                                ext_units_rec.unit_id,
+                                ext_units_rec.coll_date,
+                                ext_units_rec.chapter_id
+                                ) loop
+                  t_result_status := c2rec.result_status; -- Added by Kishore
+                  t_test_seq_no   := c2rec.test_seq_no; -- Added by Kishore
+                  
+                  dbms_output.put_line('****Test ID: ' || c2rec.test_id);
+                  if nvl(t_first_test, 'N') = 'Y' then
+                    pre_test(c2rec.test_series_id, c2rec.test_id);
+                    t_first_test := 'N';
+                  end if;
+                
+                  -- Check for change of test, close out previous test if changes
+                  if t_proc_test_id = c2rec.test_id then
+                    null;
+                  else
+                    print_final_result(ext_units_rec.unit_id,
+                                       ext_units_rec.os_unit_id,
+                                       ext_units_rec.coll_date);
+                    pre_test(c2rec.test_series_id, c2rec.test_id);
+                  end if;
+                
+                  t_null_test  := 0;
+                  t_init_reac  := 'N';
+                  t_test_count := t_test_count + 1;
+                
+                  -- If test has no result, check for interim result. Otherwise check if the result is reactive
+                  dbms_output.put_line('Check Interim: ' || c2rec.check_interim);
+                  if c2rec.check_interim = 1 then
+                    -- Check for interim result for missing test
+                    t_no_result_count := t_no_result_count + 1;
+                    t_null_test       := 1;
+                  else
+                    -- Check if the current result is reactive
+                    -- Reset ALT result (N/E/SE) according to customer's levels unless it is NT
+                    if c2rec.test_id = 'ALT' and
+                       nvl(ltrim(rtrim(t_result_status)), '*') != 'NT' then
+                      if ltrim(rtrim(c2rec.od_value)) = '9999' then
+                        t_result_status := 'UND'; -- Removed space after "UND". Removed by Kishore on 01/19/2012
+                      end if;
+                    
+                      if ltrim(rtrim(c2rec.od_value)) < t_alt_e_level then
+                        t_result_status := 'N'; -- Removed 3 spaces after "N". Removed by Kishore on 01/19/2012
+                      end if;
+                    
+                      if (ltrim(rtrim(c2rec.od_value)) >= t_alt_e_level and
+                         ltrim(rtrim(c2rec.od_value)) < t_alt_se_level) then
+                        t_result_status := 'E'; -- Removed 3 spaces after "E". Removed by Kishore on 01/19/2012
+                      end if;
+                    end if;
+                  
+                    dbms_output.put_line('Result Status: ' || t_result_status);
+                    begin
+                      select 'Y'
+                        into t_dummy
+                        from master_codes
+                       where code_type = 'REAC'
+                         and code = t_result_status
+                         and v_local_time between eff_date and
+                             nvl(term_date, v_local_time + 365);
+                    exception
+                      when no_data_found then
+                        -- If no data, result is non-reactive
+                        t_dummy                 := 'N';
+                        t_nonreac_result_status := t_result_status;
+                        t_non_reactive_count    := t_non_reactive_count + 1;
+                        if nvl(t_result_status, '*') = 'NT' then
+                          -- Removed 2 spaces after "NT". Changed "if" statement from "!= 'NT'" to "= 'NT'". Changed by Kishore on 01/19/2012
+                          t_nt_count := t_nt_count + 1;
+                        end if;
+                      when others then
+                        t_dummy := 'N';
+                        check_error('CNPREXTR',
+                                    '26',
+                                    'Reac result for unit ' || ext_units_rec.unit_id ||
+                                    ' test ' || c2rec.test_id || ' code ' ||
+                                    t_result_status,
+                                    '');
+                        raise unit_error; -- Changed by Kishore on 01/19/2012
+                    end;
+                    dbms_output.put_line('Non reactive Result Status: ' ||
+                                         t_nonreac_result_status);
+                  
+                    if t_dummy = 'Y' then
+                      -- If this is not the first test, but it is the first reactive test, replace the 'initial'
+                      -- result with the current result and place a message in the log. DO NOT ABORT extraction
+                      if t_non_reactive_count > 0 and t_reactive_count = 0 then
+                        if t_non_reactive_count > 0 then
+                          log_pl('Unit: ' || ext_units_rec.unit_id || 
+                                            ' Test: ' || c2rec.test_id ||
+                                            ' Reactive after nonreactive (no abort)');
+                        end if;
+                      
+                        t_init_reac := 'Y';
+                      end if;
+                    
+                      -- Find the number of repeat tests required
+                      if nvl(ltrim(rtrim(t_reactive_result_status)), '*') != 'NT' then
+                        -- Ommitted one clause. Kishore
+                        -- Get number of repeat tests required for the test
+                        begin
+                          select nvl(max(number_of_repeats), 0)
+                            into t_repeat_count
+                            from valid_test_results
+                           where test_id = c2rec.test_id
+                             and result_status = t_result_status
+                             and plate_seq = 'I'
+                             and v_local_time between eff_date and
+                                 nvl(term_date, v_local_time + 365);
+                        exception
+                          when others then
+                            check_error('CNPREXTR',
+                                        '27',
+                                        'Repeats from v test reslt for test ' ||
+                                        c2rec.test_id || ' reslt ' ||
+                                        t_result_status,
+                                        '');
+                            raise unit_error; -- Changed by Kishore on 01/19/2012
+                        end;
+                      
+                        t_reactive_result_status := t_result_status;
+                      end if;
+                    
+                      t_reactive_count := t_reactive_count + 1;
+                    end if; -- if t_dummy = 'Y' then
+                  end if; -- if c2rec.check_interim = 1 then
+                
+                  -- Process if result exists or interim result given
+                  if t_null_test = 0 then
+                    -- Get translation for test result
+                    -- Translate test result to result used by customer
+                    begin
+                      select rpad(nvl(max(rr.cbc_result_status), t_result_status),
+                                  4,
+                                  ' ')
+                        into t_cbc_result_code
+                        from rgt_results_matrix rr
+                       where rr.test_id = c2rec.test_id
+                         and rr.chapter_id = ext_units_rec.chapter_id -- p_chapter_id -- V03
+                         and rr.contract_id = t_contract_id
+                         and rr.result_status = t_result_status
+                         and v_local_time between eff_date and
+                             nvl(term_date, v_local_time + 365);
+                    exception
+                      when no_data_found then
+                        -- Added by Kishore on 01/19/2012
+                        check_error('CNPREXTR',
+                                    '37',
+                                    'Select rgt_reslt_matrix result_id = ' ||
+                                    t_result_status,
+                                    '');
+                        raise unit_error;
+                      when others then
+                        check_error('CNPREXTR',
+                                    '37',
+                                    'Select rgt_reslt_matrix result_id = ' ||
+                                    t_result_status,
+                                    '');
+                        raise unit_error; -- Changed by Kishore on 01/19/2012
+                    end;
+                  
+                    -- Log last interim result encountered for use as final interpretation if required
+                    if c2rec.check_interim = 1 then
+                      t_last_interim_result := t_result_status;
+                    end if;
+                  
+                    -- Check if the test is OD related like CHOL
+                    t_od_count := 0;
+                    begin
+                      select nvl(count(*), 0)
+                        into t_od_count
+                        from master_codes
+                       where code_type = 'ODTST'
+                         and code_desc = c2rec.test_id
+                         and v_local_time between eff_date and
+                             nvl(term_date, v_local_time + 1)
+                         and rownum = 1;
+                    end;
+                  
+                    -- Build result string
+                    if (t_od_reporting_method = 'Y' or t_od_count > 0 or
+                       (c2rec.test_id = 'CHOL' and length(c2rec.test_id) = 4) or
+                       (c2rec.test_id = 'ALT' and length(c2rec.test_id) = 3)) then
+                      t_t_inter_str := ' ' || rpad(t_cbc_result_code, 4, ' ') || ' ' ||
+                                       rpad(c2rec.od_value, 12, ' ') ||
+                                       rpad(c2rec.cut_off_value, 6, ' ');
+                    else
+                      t_t_inter_str := ' ' || rpad(t_cbc_result_code, 4, ' ') ||
+                                       '                   ';
+                    end if;
+                  
+                    -- Identify first result as initial result (Will be replaced by the first Reactive result)
+                    -- Check for maximum OD value on ALT and Cholesterol tests
+                    if ((c2rec.test_id = 'CHOL' and length(c2rec.test_id) = 4) or
+                       (c2rec.test_id = 'ALT' and length(c2rec.test_id) = 3) or
+                       t_od_count > 0) then
+                      if t_found_first_extract = 'N' then
+                        t_found_first_extract := 'Y';
+                        copy_init_test(c2rec.test_seq_no,
+                                       c2rec.extractable,
+                                       c2rec.check_interim,
+                                       c2rec.od_value,
+                                       c2rec.cut_off_value);
+                      else
+                        if to_number(ltrim(rtrim(c2rec.od_value))) >=
+                           to_number(ltrim(rtrim(t_init_od_value))) then
+                          copy_init_test(c2rec.test_seq_no,
+                                         c2rec.extractable,
+                                         c2rec.check_interim,
+                                         c2rec.od_value,
+                                         c2rec.cut_off_value);
+                        end if;
+                      end if;
+                    else
+                      if (t_found_first_extract = 'N' or t_init_reac = 'Y') then
+                        t_found_first_extract := 'Y';
+                        copy_init_test(c2rec.test_seq_no,
+                                       c2rec.extractable,
+                                       c2rec.check_interim,
+                                       c2rec.od_value,
+                                       c2rec.cut_off_value);
+                      end if;
+                    end if;
+                  
+                    -- Process extractable results other than initial extraction
+                    if c2rec.extractable > 0 then
+                      -- Repeats extraction, print result if initial found
+                      if t_result_type = 'R' then
+                        if t_prior_extracts != 0 then
+                          dbms_output.put_line('PD5'); -- Substituted the second parameter with null. Check ".pc" file for original value
+                          print_detail(c2rec.test_seq_no,
+                                       '',
+                                       t_t_inter_str,
+                                       ext_units_rec.unit_id,
+                                       ext_units_rec.os_unit_id);
+                          set_extract_date(c2rec.check_interim,
+                                           ext_units_rec.coll_date,
+                                           ext_units_rec.unit_id);
+                        end if;
+                      elsif (t_result_type != 'I' and t_result_type != 'S') then
+                        -- SF change
+                        if (((t_interim_count + t_no_result_count) = 0) or
+                           c2rec.check_interim > 0) then
+                          if t_extracted_count < 3 then
+                            t_inter_str := t_inter_str || t_t_inter_str;
+                          end if;
+                        
+                          set_extract_date(c2rec.check_interim,
+                                           ext_units_rec.coll_date,
+                                           ext_units_rec.unit_id);
+                        end if;
+                      end if;
+                    elsif to_date(t_insert_dats, 'YYYYMMDDHH24MISS') >
+                          to_date(c2rec.extract_date, 'YYYYMMDDHH24MISS') then
+                      t_prior_extracts := t_prior_extracts + 1;
+                    end if; -- if c2rec.extractable > 0 then
+                  end if; -- if t_null_test = 0 then
+                end loop;
+                dbms_output.put_line('End inner loop');
+              
+                -- Close out final test ID
+                dbms_output.put_line('Before PFR');
+                t_close_final_test := 'Y';
+                print_final_result(ext_units_rec.unit_id,
+                                   ext_units_rec.os_unit_id,
+                                   ext_units_rec.coll_date);
+                dbms_output.put_line('After PFR');
+              
+                -- Print unit data for DMIS format
+                dbms_output.put_line('Unit Printed: ' || t_unit_printed);
+                if ((t_result_type = 'D') and t_unit_printed = 'Y') then
+                  -- SF change
+                  dbms_output.put_line('Donor Str: ' || t_donor_str);
+                  res_pl(rpad(t_donor_str, 80, ' '));
+                end if;
+            exception
+              -- Added by Kishore on 01/19/2012
+              when unit_error then
+                t_abort_extract_flag := 'Y';
+            end;
+          end loop;
+        -- If no exceptions were found, close out report
+        dbms_output.put_line('Abort Extract Flag: ' || t_abort_extract_flag);
+        if t_abort_extract_flag = 'N' and lv_gen_res_YN = 'Y' then
+          -- Print log footer
+          if t_acceptable_no_init > 0 then
+            log_pl(t_acceptable_no_init ||
+                              ' tests missing initial extraction');
+          end if;
+        
+          log_pl( '');
+          log_pl( 'No of unit records created = ' || t_hdr_read_cnt);
+          log_pl( 'No of results included = ' || t_det_read_cnt);
+          log_pl( 'Program End Time: ' ||
+                            to_char(v_local_time, 'MM-DD-YYYY HH24:MI:SS'));
+          log_pl( '**************************************************************************');
+          log_pl( '                         EXTRACTION SUCCESSFUL');
+          log_pl( '**************************************************************************');
+        
+          -- Print result file footer
+          if t_result_type = 'D' then
+            res_pl('------- END OF FILE - NUMBER OF LINES: ' ||
+                              t_ft_cnt || '------');
+            t_ft_cnt := t_ft_cnt + 1;
+          elsif t_result_type = 'S' then
+            log_pl( 'Invalid file format - SafeBlood'); -- SF change
+            log_pl( 'Terminating.'); -- SF change
+            raise handle_error; -- SF change
+          else
+            t_ft_cnt := t_ft_cnt + 1;
+            t_bt_cnt := t_bt_cnt + 1;
+            res_pl('BT: ' || rpad(to_char(t_bt_cnt), 6, ' '));
+            t_ft_cnt := t_ft_cnt + 1;
+            res_pl('FT: ' || rpad(to_char(t_ft_cnt), 6, ' '));
+          end if;
+        else
+          raise handle_error; -- Added by Kishore on 01/19/2012
+        end if;
+
+        dump_output('res');
+    end loop;  
+        -- Insert record into report parameters for retrieval of log file
+    insert_parm_id;
+  
+    -- Update status for results parameter
+    update_cnf_extract;
+  
+    dump_output('log');  
+  
+
+  
+    /*
+    if (t_hdr_read_cnt > 0 and t_abort_extract_flag = 'N') then
+      -- Transmit if data found for extraction
+    
+    end if; */
+  
+    -- Commit all changes
+    dbms_output.put_line('Commit transactions');
+    commit;
+  exception
+    when handle_error then
+      --rollback;
+      commit;
+      dbms_output.put_line(p_status);
+      log_pl('Program End Time: ' || to_char(v_local_time, 'MM-DD-YYYY HH24:MI:SS'));
+      log_pl('**************************************************************************');
+      log_pl('                         EXTRACTION ABORTED!!!');
+      log_pl('                         EXTRACTION ABORTED!!!');
+      log_pl('                         EXTRACTION ABORTED!!!');
+      log_pl('                         EXTRACTION ABORTED!!!');
+      log_pl('                         EXTRACTION ABORTED!!!');
+      log_pl('**************************************************************************');
+    
+      -- Insert record into report parameters for retrieval of log file
+      insert_parm_id;
+    
+      -- Update status for results parameter
+      update_cnf_extract;
+    
+      commit; -- Added by Kishore on 01/19/2012
+    
+      dump_output('log');
+      dump_output('res');
+      
+      dbms_output.put_line(lv_gen_res_YN);
+      -- Remove results file
+      if lv_gen_res_YN = 'N' then
+         utl_file.fremove(log_loc, t_int_file_name);
+      end if;
+  end MAIN_PROGRAM;
+
+end CNPREXTR;
+/

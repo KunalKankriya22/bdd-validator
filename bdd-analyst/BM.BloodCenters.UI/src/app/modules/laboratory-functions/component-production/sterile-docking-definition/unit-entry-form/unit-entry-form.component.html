@@ -1,0 +1,86 @@
+<div class="unit-entry-form">
+  <form [formGroup]="form" (keydown.enter)="onEnterKey($event)">
+    <div class="form-row" [class.form-row--fb-bf]="requiresVerifyProduct()">
+      <!-- Unit ID - Shared component with barcode scan, ISBT/Codabar validation, double-entry -->
+      <div class="unit-id-wrapper">
+        <app-unit-id-field
+          [validateFfValue]="'N'"
+          [required]="true"
+          [label]="'Unit ID'"
+          [placeholder]="'Scan or type Unit ID'"
+          (postValidate)="onUnitPostValidate($event)"
+          (validated)="onUnitValidated($event)"
+          (cleared)="onUnitCleared()"
+        />
+        <mat-icon class="barcode-overlay-icon" fontSet="material-symbols-outlined" aria-hidden="true">barcode</mat-icon>
+      </div>
+
+      <!-- Original Product Code - Dropdown with autocomplete (FMB LOV), hidden for NE -->
+      <div class="field-with-barcode" *ngIf="!isNeedleDocking()">
+        <mat-form-field appearance="fill">
+          <mat-label>Original Product Code</mat-label>
+          <input matInput formControlName="originalProductCode" placeholder="Scan or select product code" autocomplete="off"
+            [matAutocomplete]="productAuto"
+            #productCodeTrigger="matAutocompleteTrigger"
+            (focus)="onProductCodeFocus()"
+            (blur)="onProductCodeBlur()" (keydown.enter)="onProductCodeBlur(); $event.preventDefault()" />
+          <button type="button" mat-icon-button matSuffix [attr.aria-label]="'Open product code list'" (click)="productCodeTrigger.openPanel()">
+            <mat-icon aria-hidden="true">arrow_drop_down</mat-icon>
+          </button>
+          <mat-autocomplete #productAuto="matAutocomplete" (optionSelected)="onProductCodeSelected($event.option.value)">
+            @for (product of filteredProducts; track product.code) {
+              <mat-option [value]="product.code">
+                {{ product.code }} - {{ product.description }}
+              </mat-option>
+            }
+          </mat-autocomplete>
+          <mat-hint *ngIf="productCodeValidated" class="confirmation-hint">Valid product code</mat-hint>
+          <mat-error *ngIf="form.get('originalProductCode')?.hasError('required')">Original Product Code is required</mat-error>
+          <mat-error *ngIf="form.get('originalProductCode')?.hasError('invalidProduct')">Invalid product code - not found for this unit</mat-error>
+        </mat-form-field>
+        <mat-icon class="barcode-overlay-icon" fontSet="material-symbols-outlined" aria-hidden="true">barcode</mat-icon>
+      </div>
+
+      <!-- Derived Product (read-only, auto-calculated for FB/BF docking types) -->
+      <div *ngIf="requiresVerifyProduct()">
+        <mat-form-field appearance="fill" class="derived-product-field" [class.mat-form-field-invalid]="derivedProductError">
+          <mat-label>Derived Product</mat-label>
+          <input matInput [value]="derivedProductCode || ''" readonly placeholder="Auto-calculated" />
+          <mat-hint *ngIf="derivedProductCode && !derivedProductError" class="confirmation-hint">Calculated derived product</mat-hint>
+          <mat-hint *ngIf="!derivedProductCode && productCodeValidated && !derivedProductError">Select a product code to calculate</mat-hint>
+        </mat-form-field>
+        <div *ngIf="derivedProductError" class="derived-product-error">{{ derivedProductError }}</div>
+      </div>
+
+      <!-- Weld OK -->
+      <mat-form-field appearance="fill">
+        <mat-label>Weld OK</mat-label>
+        <mat-select formControlName="weldOk" (closed)="onWeldOkClosed()" [disabled]="isSaving || !!derivedProductError">
+          <mat-option value="Y">Yes</mat-option>
+          <mat-option value="N">No</mat-option>
+        </mat-select>
+        <mat-hint *ngIf="form.get('weldOk')?.value === 'N'" class="weld-warning">WELD interdiction will be applied</mat-hint>
+        <mat-error>{{ getFieldError('weldOk') }}</mat-error>
+      </mat-form-field>
+
+      <!-- Verify Product (only for FB/BF docking types with product conversion) -->
+      <div class="field-with-barcode" *ngIf="requiresVerifyProduct()">
+        <mat-form-field appearance="fill">
+          <mat-label>Verify Product</mat-label>
+          <input matInput formControlName="verifyProduct" placeholder="Scan or type product code to verify" autocomplete="off"
+            [disabled]="!!derivedProductError"
+            (blur)="onVerifyProductBlur()" (keydown.enter)="onVerifyProductBlur(); $event.preventDefault()" />
+          <mat-hint *ngIf="verifyProductValidated" class="confirmation-hint">Verification successful</mat-hint>
+          <mat-error *ngIf="form.get('verifyProduct')?.hasError('required')">Verify Product is required</mat-error>
+          <mat-error *ngIf="form.get('verifyProduct')?.hasError('mismatch')">Verification product code does not match derived product (Error 9728)</mat-error>
+        </mat-form-field>
+        <mat-icon class="barcode-overlay-icon" fontSet="material-symbols-outlined" aria-hidden="true">barcode</mat-icon>
+      </div>
+    </div>
+
+    <!-- Unit count indicator -->
+    <div class="unit-count-hint" *ngIf="maxUnits > 0" role="status" aria-live="polite" aria-atomic="true">
+      {{ currentUnitCount }} of {{ maxUnits }} units entered
+    </div>
+  </form>
+</div>

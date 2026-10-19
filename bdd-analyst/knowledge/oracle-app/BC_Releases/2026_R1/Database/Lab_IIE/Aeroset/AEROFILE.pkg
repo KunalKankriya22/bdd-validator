@@ -1,0 +1,85 @@
+create or replace package AEROFILE is
+PROCEDURE add_log_entry(p_log_text varchar2, p_file UTL_FILE.FILE_TYPE);
+procedure main_proc(file_name in varchar2);
+procedure process;
+procedure readrecord;
+procedure rollback_and_exit ;
+   logfile UTL_FILE.FILE_TYPE;
+   instfile UTL_FILE.FILE_TYPE;
+   LogDir varchar2(50);
+   LogInstDir varchar2(50);
+   logfilename varchar2(50);
+   result_file_name varchar2(50);
+   read_record varchar2(500);
+   complete boolean:=false;
+   maxnum  number;
+end AEROFILE;
+/
+create or replace package body AEROFILE is
+PROCEDURE add_log_entry(p_log_text varchar2, p_file UTL_FILE.FILE_TYPE) is
+BEGIN
+         UTL_FILE.putf(p_file,'%s\n',p_log_text);
+         UTL_FILE.fflush(p_file);
+END add_log_entry;
+procedure main_proc(file_name in varchar2) is
+   begin
+      dbms_output.enable(50000000);
+      result_file_name:=file_name;
+      begin
+          select code_desc into LogInstDir from master_codes
+          where code_type='LOGDR' and code='ILOG' and
+	  sysdate between eff_date and nvl(term_date,sysdate);
+          select code_desc into LogDir from master_codes
+          where code_type='LOGDR' and code='ILOG' and
+	  sysdate between eff_date and nvl(term_date,sysdate);
+	  select 'AERO'||to_char(sysdate,'YYMMDDHH24MISS')||
+          decode(substr(user,1,4),'OPS$',substr(user,5),user)||'.aer'
+	  into logfilename from dual;
+	  exception when no_data_found then
+	    dbms_output.put_line('Error in getting log directory .. Aborting');
+	    raise;
+      end;
+      begin
+          logfile:=UTL_FILE.fopen(LogDir,logfilename, 'a');
+          instfile :=UTL_FILE.fopen(LogInstDir,file_name, 'r');
+      exception
+           when utl_file.invalid_path then 
+           dbms_output.put_line('Invalid path or filename');raise;
+      end;
+	  loop
+	  process;
+	  exit when complete;
+	  end loop;
+	  UTL_FILE.fclose(logfile);
+end;
+procedure process is
+begin
+   readrecord;
+   if not complete then
+   begin
+   add_log_entry(read_record,logfile);
+   end;
+   end if;
+end process;
+procedure readrecord is
+begin
+utl_file.get_line(instfile,read_record);
+exception
+  when no_data_found then
+  complete:=TRUE;
+  when UTL_FILE.READ_ERROR then
+  dbms_output.put_line(result_file_name||':Error reading file');
+  rollback_and_exit;
+end readrecord;
+procedure rollback_and_exit is
+begin
+dbms_output.put_line('Aborting');
+raise_application_error('-20000','ABORTING');
+UTL_FILE.fclose(logfile);
+end rollback_and_exit;
+end AEROFILE;
+/
+grant execute on AEROFILE to public
+/
+create public synonym AEROFILE for AEROFILE
+/

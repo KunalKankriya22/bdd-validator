@@ -1,0 +1,158 @@
+<div class="unit-level-qc-container">
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+  <div class="page-layout" [class.side-panel-active]="sidePanelOpen()">
+    <div class="main-content" [class.side-panel-active]="sidePanelOpen()">
+      <!-- Card 1: Unit ID (shared component — handles barcode format, double-entry, postValidate) -->
+      <section class="search-filters-section unit-id-card">
+        <div class="unit-field-wrapper">
+          <app-unit-id-field
+            (postValidate)="onUnitPostValidate($event)"
+            (validated)="onUnitValidated($event)"
+            (cleared)="onUnitCleared()"
+            class="unit-id-input">
+          </app-unit-id-field>
+          <img src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-indicator" width="24" height="24" />
+        </div>
+      </section>
+
+      <!-- Card 2: Info Labels + Component Review + QC For Labeling + VIEW TEST -->
+      <section class="search-filters-section fields-card">
+        <div class="fields-row">
+          <div class="info-card" role="group" [attr.aria-label]="'Donor Interface: ' + donorInterface()">
+            <div class="info-label" [id]="elementId('donor-interface-label')">Donor Interface</div>
+            <div class="info-value" [attr.aria-labelledby]="elementId('donor-interface-label')">{{ donorInterface() }}</div>
+          </div>
+
+          <div class="info-card" role="group" [attr.aria-label]="'Testing OK: ' + testingOk()">
+            <div class="info-label" [id]="elementId('testing-ok-label')">Testing OK?</div>
+            <div class="info-value" [attr.aria-labelledby]="elementId('testing-ok-label')">{{ testingOk() }}</div>
+          </div>
+
+          <div class="info-card" role="group" [attr.aria-label]="'Nursing Audit: ' + nursingAudit()">
+            <div class="info-label" [id]="elementId('nursing-audit-label')">Nursing Audit</div>
+            <div class="info-value" [attr.aria-labelledby]="elementId('nursing-audit-label')">{{ nursingAudit() }}</div>
+          </div>
+
+          <mat-form-field appearance="fill" class="filter-field filter-field--component-review">
+            <mat-label>Component Review</mat-label>
+            <mat-select [formControl]="componentReviewControl" aria-label="Component Review">
+              @for (option of componentReviewOptions(); track option.value) {
+                <mat-option [value]="option.value">{{ option.label }}</mat-option>
+              }
+              @if (componentReviewOptions().length === 0) {
+                <mat-option disabled>No data available</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="filter-field filter-field--qc-labeling">
+            <mat-label>QC For Labeling</mat-label>
+            <mat-select [formControl]="qcForLabelingControl" aria-label="QC For Labeling">
+              @for (option of qcForLabelingOptions(); track option.value) {
+                <mat-option [value]="option.value">{{ option.label }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <div class="action-col">
+            <button type="button" class="btn-retrieve" [disabled]="!hasSearched()" (click)="onViewTest()">VIEW TEST</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Card 3: Results Section -->
+      <section class="results-section">
+        <!-- Loading State -->
+        @if (loading()) {
+          <div class="loading-container" role="status" aria-live="polite">
+            <mat-spinner diameter="40" aria-label="Loading unit data"></mat-spinner>
+            <span class="loading-text">Loading, please wait...</span>
+          </div>
+        }
+
+        <!-- Error State -->
+        @if (error() && !loading()) {
+          <div class="error-container" role="alert" aria-live="assertive">
+            <mat-icon aria-hidden="true">error</mat-icon>
+            <p>{{ error() }}</p>
+            <button mat-button color="primary" (click)="onRetry()">Retry</button>
+          </div>
+        }
+
+        <!-- Empty State - Before Search -->
+        @if (!hasSearched() && !loading()) {
+          <div class="empty-container" role="status">
+            <div class="empty-state-icon">
+              <mat-icon aria-hidden="true">search</mat-icon>
+            </div>
+            <h3 class="empty-state-title">No Results to Display</h3>
+            <p class="empty-state-message">Use the fields above to get started.</p>
+          </div>
+        }
+
+        <!-- Data Table -->
+        @if (hasSearched() && !loading() && !error() && tableData().length > 0) {
+          <app-data-table
+            [config]="tableConfig"
+            [data]="tableData()"
+            [loading]="loading()"
+            (pageChange)="onPageChange($event)">
+          </app-data-table>
+        }
+
+        <!-- No Results Found -->
+        @if (hasSearched() && !loading() && !error() && tableData().length === 0) {
+          <div class="empty-container" role="status" aria-live="polite">
+            <div class="empty-state-icon">
+              <mat-icon aria-hidden="true">edit</mat-icon>
+            </div>
+            <p class="empty-state-message">No unit data found for the given Unit ID</p>
+          </div>
+        }
+      </section>
+
+      <!-- SAVE Button -->
+      @if (hasSearched() && tableData().length > 0 && !loading()) {
+        <div class="save-button-container">
+          <button mat-raised-button color="primary" class="btn-save"
+            [disabled]="saving() || !qcForLabelingControl.value"
+            (click)="onSave()">
+            @if (saving()) {
+              <mat-spinner diameter="20" aria-label="Saving"></mat-spinner>
+            } @else {
+              SAVE
+            }
+          </button>
+        </div>
+      }
+    </div>
+
+    <!-- Gray Backdrop -->
+    @if (sidePanelOpen()) {
+      <div class="panel-backdrop"
+        (click)="onPanelClose()"
+        (keydown.escape)="onPanelClose()"
+        role="presentation">
+      </div>
+    }
+
+    <!-- Side Panel -->
+    <div class="side-panel" #sidePanel
+      [class.open]="sidePanelOpen()"
+      role="dialog"
+      aria-modal="true"
+      [attr.aria-label]="'Test results for unit ' + displayUnitId()"
+      (keydown.escape)="onPanelClose()">
+      @if (sidePanelOpen()) {
+        <app-view-test-panel
+          [unitId]="displayUnitId()"
+          [scheduledTests]="scheduledTests()"
+          [unscheduledTests]="unscheduledTests()"
+          (closePanel)="onPanelClose()">
+        </app-view-test-panel>
+      }
+    </div>
+  </div>
+</div>

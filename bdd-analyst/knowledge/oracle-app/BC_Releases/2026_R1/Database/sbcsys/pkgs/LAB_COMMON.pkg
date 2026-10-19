@@ -1,0 +1,929 @@
+CREATE OR REPLACE PACKAGE lab_common AS
+
+/*****************************************************************************
+-----------------------------------------------------------------------------
+Ver |   Date Mod.   |   Changes
+-----------------------------------------------------------------------------
+01  |   04/17/2009  |   Initial Version. This package would contaIN the common 
+                        functions that are used IN the LT Lab applications
+02  |   08/10/2011  |   Added new PROCEDURE POP_USER_ERROR_LOG to populate
+                        data INTO USER_ERROR_LOG table
+03  |   08/25/2011  |   Added new PROCEDURE update_dst to synchronize
+                        lab time_zone on chapters table with donOR side
+04  |   09/20/2011  |   Added sequence to exIStINg column file_name, so as to 
+                        enable retention of lINe ORder of the file IN repORt 
+                        gerlogrep.rdf
+05  |   10/04/2012  |   Added new procedure CHECK_COLL_DATE. IM 9156
+06  |   06/29/2015  |   Added a function to determine the status of the debug 
+                        message flag
+07  |   09/10/2015  |   Creating a batch ID
+08  |   04/29/2016  |   Routine to populate the PATHOGEN_STERILE_DOCKING
+                        SCR: 372878
+09  |   05/10/2016  |   Routine to populate the component_interdictions
+                        SCR: 372878
+10  |   05/10/2016  |   Changes to Pathogen Sterile Docking
+                        SCR: 372878
+11  |   05/23/2016  |   Routine to delete from pathogen sterile docking.
+                        SCR: 372878
+12  |   05/23/2016  |   product code added to delete statements.
+                        SCR: 372878
+13  |   07/01/2016  |   Renamed below tables for merging database work
+                        CHAPTERS@DONOR	as	CHAPTERS
+                        CHAPTERS	as	CHAPTERS_LAB in update_dst  procedure
+                        (LT2017 DB Merge Work)
+13  |   08/02/2016  |   Renamed below tables for merging database work
+                        CHAPTERS_DON	as	CHAPTERS
+                        (LT2017 DB Merge Work)
+13  |   05/29/2018  |   Created new function CHECK_CONTRACT_CHAPTER to 
+                        validate Contract id aganist Chapter id.
+                        MLT-253
+------------------------------------------------------------------------------
+version reset
+------------------------------------------------------------------------------
+02  |   07/02/2018  |   pop_extract_log_table (new function added for 
+                        RSM Report). Used in RMUSER to view log report.
+                        MLT-439
+03  |   07/24/2018  |   CHECK_CONTRACT_CHAPTER (INTERNAL contract scenario 
+                        added)
+                        MLT-522
+04  |   07/31/2018  |   gen_batch_id routine modified to add LPAD to batch_seq
+                        MLT-583
+05  |   11/09/2018  |   -----------------
+06  |   09/07/2019  |   POP_LOG_TABLE, POP_EXTRACT_LOG_TABLE routines modfied to
+                        add line_no to log tables
+                        MLT-2479
+07  |   01/09/2020  |   MLT-2875		
+08  |   08/23/2022  |   DELETE_STERILE_DOCKING table updated. Added parameter 
+                        pl_SUIT_PROD_CODE
+                        MLT-5410, MLT-5424
+09  |   04/13/2023  |   MLT-5880   get_batch_colldate,  get_skip_code                  
+**************************************************************************** */
+
+    PROCEDURE pop_log_table (
+        pl_rep_name IN VARCHAR2,
+        pl_parm_id  IN VARCHAR2,
+        pl_dir      IN VARCHAR2,
+        pl_file     IN VARCHAR2,
+        pl_stat     OUT VARCHAR2
+    );
+
+-- 07/02/2018 (Used in RMUSER)
+    PROCEDURE pop_extract_log_table (
+        pl_sess_id IN VARCHAR2,
+        pl_parm_id IN VARCHAR2,
+        pl_dir     IN VARCHAR2,
+        pl_file    IN VARCHAR2,
+        pl_stat    OUT VARCHAR2
+    );
+
+	-- Added by Kishore on 08/10/2011. SCR 18564
+    PROCEDURE pop_user_error_log (
+        pl_insert_dats      IN DATE,
+        pl_user_id          IN VARCHAR2,
+        pl_program_name     IN VARCHAR2,
+        pl_error_code       IN VARCHAR2,
+        pl_unit_id          IN VARCHAR2,
+        pl_coll_date        IN DATE,
+        pl_chapter_id       IN VARCHAR2,
+        pl_component_prefix IN VARCHAR2,
+        pl_product_code     IN VARCHAR2,
+        pl_status           OUT VARCHAR2
+    );
+
+	-- added by hussein on 08-25-2011.
+    PROCEDURE update_dst;
+
+        -- Added by Kishore on 10/04/2012. IM 9156
+    PROCEDURE check_coll_date (
+        pl_unit_id       IN VARCHAR2,
+        pl_coll_date     IN DATE,
+        pl_compared_date IN DATE,
+        pl_error_flag    OUT VARCHAR2
+    );
+
+        -- Added by Kishore on 06/29/2015
+    FUNCTION is_debug_msg_displayed (
+        p_obj_name IN VARCHAR2,
+        p_obj_type IN VARCHAR2
+    ) RETURN BOOLEAN;
+
+    PROCEDURE gen_batch_id (
+        pl_batch_prefix IN VARCHAR2,
+        pl_chapter_id   IN VARCHAR2,
+        pl_batch_id     OUT VARCHAR2,
+        pl_status       OUT VARCHAR2
+    );
+
+-- Added By Edwin for 2015 R2 (Pathogen Reduction process)
+
+    PROCEDURE insert_sterile_docking (
+        pl_unit_id        IN VARCHAR2,
+        pl_chapter_id     IN VARCHAR2,
+        pl_weld_machine   IN VARCHAR2,
+        pl_wafer_lot_no   IN VARCHAR2,
+        pl_weld_ok        IN VARCHAR2,
+        pl_proc_code      IN VARCHAR2,
+        pl_set_lot_no     IN VARCHAR2,
+        pl_vol_type_set   IN VARCHAR2,
+        pl_insert_user    IN VARCHAR2,
+        pl_program_id     IN VARCHAR2,
+        pl_suit_prod_code IN VARCHAR2,
+        pl_status         OUT VARCHAR2
+    );
+
+    PROCEDURE place_component_inter (
+        pl_unit_id    IN VARCHAR2,
+        pl_coll_date  IN DATE,
+        pl_chp_id     IN VARCHAR2,
+        pl_prod_code  IN VARCHAR2,
+        pl_inter_code IN VARCHAR2,
+        pl_inter_user IN VARCHAR2,
+        pl_audit_key  IN NUMBER,
+        pl_pgm_id     IN VARCHAR2,
+        pl_status     OUT VARCHAR2
+    );
+
+    PROCEDURE delete_sterile_docking (
+        pl_unit_id        IN VARCHAR2,
+        pl_proc_code      IN VARCHAR2,
+        pl_suit_prod_code IN VARCHAR2,
+        pl_status         OUT VARCHAR2
+    );
+
+    FUNCTION check_contract_chapter (
+        p_contract_id IN VARCHAR2,
+        p_chapter_id  IN VARCHAR2
+    ) RETURN VARCHAR2;
+
+    PROCEDURE confirmatory_qc_lock (
+        p_session_id   IN VARCHAR2,
+        p_lock_level   IN VARCHAR2,
+        p_lock_value   IN VARCHAR2,
+        p_lock_user    IN VARCHAR2,
+        p_lock_flag_lu IN VARCHAR2,
+        p_status       OUT VARCHAR2
+    );
+
+    FUNCTION number_of_same_containers (
+        pl_catalog_number IN VARCHAR2
+    ) RETURN NUMBER;
+
+    FUNCTION get_skip_code (
+        unit_id_in    IN VARCHAR2,
+        chapter_id_in IN VARCHAR2,
+        coll_date_in  IN DATE
+    ) RETURN VARCHAR2;
+
+    FUNCTION get_batch_colldate (
+        batch_id_in   IN VARCHAR2,
+        chapter_id_in IN VARCHAR2
+    ) RETURN DATE;   
+
+END lab_common;
+
+/
+
+
+CREATE OR REPLACE PACKAGE BODY lab_common AS
+
+	-- Added by KIShORe on 08/10/2011. SCR 18564
+    PROCEDURE pop_user_error_log (
+        pl_insert_dats      IN DATE,
+        pl_user_id          IN VARCHAR2,
+        pl_program_name     IN VARCHAR2,
+        pl_error_code       IN VARCHAR2,
+        pl_unit_id          IN VARCHAR2,
+        pl_coll_date        IN DATE,
+        pl_chapter_id       IN VARCHAR2,
+        pl_component_prefix IN VARCHAR2,
+        pl_product_code     IN VARCHAR2,
+        pl_status           OUT VARCHAR2
+    ) IS
+    BEGIN
+        pl_status := 'OK';
+        IF pl_insert_dats IS NULL OR pl_user_id IS NULL OR pl_program_name IS NULL OR pl_error_code IS NULL THEN
+            IF pl_insert_dats IS NULL THEN
+                pl_status := 'Error: Insert Date cannot be a NULL value';
+            ELSIF pl_user_id IS NULL THEN
+                pl_status := 'Error: User ID cannot be a NULL value';
+            ELSIF pl_program_name IS NULL THEN
+                pl_status := 'Error: Program Name cannot be a NULL value';
+            ELSIF pl_error_code IS NULL THEN
+                pl_status := 'Error: Error Code cannot be a NULL value';
+            END IF;
+
+        ELSE
+            BEGIN
+                INSERT INTO user_error_log (
+                    insert_dats,
+                    user_id,
+                    program_name,
+                    error_code,
+                    unit_id,
+                    coll_date,
+                    chapter_id,
+                    component_prefix,
+                    product_code
+                ) VALUES (
+                    pl_insert_dats,
+                    pl_user_id,
+                    pl_program_name,
+                    pl_error_code,
+                    pl_unit_id,
+                    pl_coll_date,
+                    pl_chapter_id,
+                    pl_component_prefix,
+                    pl_product_code
+                );
+
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    pl_status := 'Error inserting into USER_ERROR_LOG: '
+                                 || sqlcode
+                                 || ' - '
+                                 || sqlerrm;
+                    ROLLBACK;
+            END;
+        END IF;
+
+    END pop_user_error_log;
+	-- END of change 
+
+    PROCEDURE pop_log_table (
+        pl_rep_name IN VARCHAR2,
+        pl_parm_id  IN VARCHAR2,
+        pl_dir      IN VARCHAR2,
+        pl_file     IN VARCHAR2,
+        pl_stat     OUT VARCHAR2
+    ) IS
+        in_file    utl_file.file_type;
+        szbuffer   VARCHAR2(200);
+        ord_seq    NUMBER := 10000;
+        ln_line_no NUMBER;
+    BEGIN
+        pl_stat := 'OK';
+        dbms_output.put_line('Dir=' || pl_dir);
+        dbms_output.put_line('Dir=' || pl_file);
+        in_file := utl_file.fopen(pl_dir, pl_file, 'r');
+        ln_line_no := 0;
+        LOOP
+            BEGIN
+                ln_line_no := ln_line_no + 1;
+                utl_file.get_line(in_file, szbuffer);
+                INSERT INTO print_report_log (
+                    report_name,
+                    parm_id,
+                    file_name,
+                    report_log,
+                    line_no
+                ) VALUES (
+                    pl_rep_name,
+                    pl_parm_id,
+                    to_char(ord_seq),
+                    szbuffer,
+                    ln_line_no
+                );
+
+                ord_seq := ord_seq + 1;
+            EXCEPTION
+                WHEN no_data_found THEN
+                    COMMIT;
+                    utl_file.fclose(in_file);
+                    EXIT;
+                WHEN OTHERS THEN
+                    utl_file.fclose(in_file);
+                    NULL;
+                    dbms_output.put_line('Error1=' || sqlerrm);
+                    pl_stat := 'Error1=' || sqlerrm;
+                    EXIT;
+            END;
+        END LOOP;
+
+    EXCEPTION
+        WHEN utl_file.invalid_filehandle THEN
+            utl_file.fclose(in_file);
+            dbms_output.put_line('Error2=' || sqlerrm);
+            pl_stat := 'Error2-' || sqlerrm;
+        WHEN utl_file.read_error THEN
+            utl_file.fclose(in_file);
+            pl_stat := 'Error3-' || sqlerrm;
+            dbms_output.put_line('Error3=' || sqlerrm);
+        WHEN OTHERS THEN
+            utl_file.fclose(in_file);
+            pl_stat := 'Error4-' || sqlerrm;
+            dbms_output.put_line('Error4=' || sqlerrm);
+    END pop_log_table;
+	------------------------------------------------
+-- 
+    PROCEDURE pop_extract_log_table (
+        pl_sess_id IN VARCHAR2,
+        pl_parm_id IN VARCHAR2,
+        pl_dir     IN VARCHAR2,
+        pl_file    IN VARCHAR2,
+        pl_stat    OUT VARCHAR2
+    ) IS
+        in_file    utl_file.file_type;
+        szbuffer   VARCHAR2(200);
+        ln_line_no NUMBER;
+    BEGIN
+        pl_stat := 'OK';
+        dbms_output.put_line('Dir=' || pl_dir);
+        dbms_output.put_line('Dir=' || pl_file);
+        in_file := utl_file.fopen(pl_dir, pl_file, 'r');
+        ln_line_no := 0;
+        LOOP
+            BEGIN
+                utl_file.get_line(in_file, szbuffer);
+                ln_line_no := ln_line_no + 1;
+                INSERT INTO rgt_extract_log (
+                    session_id,
+                    parm_id,
+                    log_text,
+                    line_no
+                ) VALUES (
+                    pl_sess_id,
+                    pl_parm_id,
+                    szbuffer,
+                    ln_line_no
+                );
+
+            EXCEPTION
+                WHEN no_data_found THEN
+                    COMMIT;
+                    utl_file.fclose(in_file);
+                    EXIT;
+                WHEN OTHERS THEN
+                    utl_file.fclose(in_file);
+                    NULL;
+                    dbms_output.put_line('Error1=' || sqlerrm);
+                    pl_stat := 'Error1=' || sqlerrm;
+                    EXIT;
+            END;
+        END LOOP;
+
+    EXCEPTION
+        WHEN utl_file.invalid_filehandle THEN
+            utl_file.fclose(in_file);
+            dbms_output.put_line('Error2=' || sqlerrm);
+            pl_stat := 'Error2-' || sqlerrm;
+        WHEN utl_file.read_error THEN
+            utl_file.fclose(in_file);
+            pl_stat := 'Error3-' || sqlerrm;
+            dbms_output.put_line('Error3=' || sqlerrm);
+        WHEN OTHERS THEN
+            utl_file.fclose(in_file);
+            pl_stat := 'Error4-' || sqlerrm;
+            dbms_output.put_line('Error4=' || sqlerrm);
+    END pop_extract_log_table;
+
+--------------------------------------------------
+    PROCEDURE update_dst IS
+
+        CURSOR don_cur IS
+        SELECT DISTINCT
+            ( chapter_id ),
+            time_zone
+        FROM
+            chapters
+        WHERE
+            sysdate BETWEEN chapters.eff_date AND nvl(chapters.term_date, sysdate + 365);
+
+    BEGIN
+        FOR cur IN don_cur LOOP
+            UPDATE chapters
+            SET
+                time_zone = cur.time_zone
+            WHERE
+                    chapter_id = cur.chapter_id
+                AND time_zone != cur.time_zone;
+
+            COMMIT;
+        END LOOP;
+    END update_dst;
+
+        -- Added by Kishore on 10/04/2012. IM 9156
+    PROCEDURE check_coll_date (
+        pl_unit_id       IN VARCHAR2,
+        pl_coll_date     IN DATE,
+        pl_compared_date IN DATE,
+        pl_error_flag    OUT VARCHAR2
+    ) IS
+        t_multi_chapter  lt_application_config.multi_chapter%TYPE;
+        t_unit_count     NUMBER := 0;
+        t_internal_count NUMBER := 0;
+    BEGIN
+        BEGIN
+            SELECT
+                multi_chapter
+            INTO t_multi_chapter
+            FROM
+                lt_application_config;
+
+        EXCEPTION
+            WHEN no_data_found THEN
+                t_multi_chapter := 'N';
+            WHEN OTHERS THEN
+                t_multi_chapter := 'N';
+        END;
+
+        IF nvl(t_multi_chapter, 'N') = 'Y' THEN
+            BEGIN
+                SELECT
+                    COUNT(*)
+                INTO t_unit_count
+                FROM
+                    units
+                WHERE
+                    unit_id = pl_unit_id;
+
+            EXCEPTION
+                WHEN OTHERS THEN
+                    t_unit_count := 0;
+            END;
+
+            IF t_unit_count > 1 THEN
+                BEGIN
+                    SELECT
+                        COUNT(*)
+                    INTO t_internal_count
+                    FROM
+                        units
+                    WHERE
+                            unit_id = pl_unit_id
+                        AND contract_id = 'INTERNAL';
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        t_internal_count := 0;
+                END;
+
+                IF t_internal_count > 0 THEN
+                    IF pl_coll_date > pl_compared_date + 2 THEN
+                        pl_error_flag := 'Y';
+                    END IF;
+                ELSIF pl_coll_date > pl_compared_date THEN
+                    pl_error_flag := 'Y';
+                END IF;
+
+            ELSIF pl_coll_date > pl_compared_date THEN
+                pl_error_flag := 'Y';
+            END IF;
+
+        ELSIF pl_coll_date > pl_compared_date THEN
+            pl_error_flag := 'Y';
+        END IF;
+
+    END check_coll_date;
+        -- End of change
+
+        -- Added by Kishore on 06/29/2015
+    FUNCTION is_debug_msg_displayed (
+        p_obj_name IN VARCHAR2,
+        p_obj_type IN VARCHAR2
+    ) RETURN BOOLEAN IS
+        t_debug_mode debug_controls.debug_mode%TYPE;
+    BEGIN
+        BEGIN
+            SELECT
+                nvl(debug_mode, 'N')
+            INTO t_debug_mode
+            FROM
+                debug_controls
+            WHERE
+                    upper(object_name) = upper(p_obj_name)
+                AND upper(object_type) = upper(p_obj_type);
+
+        EXCEPTION
+            WHEN no_data_found THEN
+                t_debug_mode := 'N';
+            WHEN OTHERS THEN
+                t_debug_mode := 'N';
+        END;
+
+        IF nvl(t_debug_mode, 'N') = 'Y' THEN
+            RETURN true;
+        ELSE
+            RETURN false;
+        END IF;
+
+    END is_debug_msg_displayed;
+        -- End of change
+
+-- this procedure is used in teh TCICOLDT.fmb
+
+    PROCEDURE gen_batch_id (
+        pl_batch_prefix IN VARCHAR2,
+        pl_chapter_id   IN VARCHAR2,
+        pl_batch_id     OUT VARCHAR2,
+        pl_status       OUT VARCHAR2
+    ) IS
+        local_sys_date DATE;
+        nexist         NUMBER := 0;
+    BEGIN
+        local_sys_date := lifetrack_timezone_convert.get_local_time(pl_chapter_id, sysdate);
+        LOOP
+            BEGIN
+                SELECT
+                    pl_batch_prefix
+                    || '-RG'
+                    || lpad(to_char(nvl(batch_seq, 1000) + 1),
+                            4,
+                            '0') -- MLT 583 (V04)
+                INTO pl_batch_id
+                FROM
+                    chapters
+                WHERE
+                    chapter_id = pl_chapter_id;
+
+            EXCEPTION
+                WHEN no_data_found THEN
+                    pl_status := '0090';
+                    EXIT;
+                WHEN OTHERS THEN
+                    pl_status := sqlerrm;
+                    EXIT;
+            END;
+
+    -- check if the same batch ID exists in the system
+
+            SELECT
+                nvl(COUNT(*),
+                    0)
+            INTO nexist
+            FROM
+                units
+            WHERE
+                batch_id = pl_batch_id;
+
+            BEGIN
+                UPDATE chapters
+                SET
+                    batch_seq = nvl(batch_seq, 1000) + 1
+                WHERE
+                    chapter_id = pl_chapter_id;
+
+            EXCEPTION
+                WHEN OTHERS THEN
+                    pl_status := sqlerrm;
+                    EXIT;
+            END;
+
+            COMMIT;
+            IF nexist = 0 THEN
+                EXIT;
+            END IF;
+        END LOOP;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            pl_status := sqlerrm;
+    END;
+
+    PROCEDURE insert_sterile_docking (
+        pl_unit_id        IN VARCHAR2,
+        pl_chapter_id     IN VARCHAR2,
+        pl_weld_machine   IN VARCHAR2,
+        pl_wafer_lot_no   IN VARCHAR2,
+        pl_weld_ok        IN VARCHAR2,
+        pl_proc_code      IN VARCHAR2,
+        pl_set_lot_no     IN VARCHAR2,
+        pl_vol_type_set   IN VARCHAR2,
+        pl_insert_user    IN VARCHAR2,
+        pl_program_id     IN VARCHAR2,
+        pl_suit_prod_code IN VARCHAR2,
+        pl_status         OUT VARCHAR2
+    ) IS
+        ncount NUMBER := 0;
+    BEGIN
+        pl_status := 'OK';
+
+-- If the same entry is there , delete and recreate it
+
+        SELECT
+            nvl(COUNT(*),
+                0)
+        INTO ncount
+        FROM
+            pathogen_sterile_docking
+        WHERE
+                unit_id = pl_unit_id
+            AND proc_code = pl_proc_code;
+
+        IF ncount > 0 THEN
+            DELETE FROM pathogen_sterile_docking
+            WHERE
+                    unit_id = pl_unit_id
+                AND proc_code = pl_proc_code
+                AND suit_prod_code = pl_suit_prod_code;
+
+        END IF;
+
+        BEGIN
+            INSERT INTO pathogen_sterile_docking (
+                unit_id,
+                chapter_id,
+                weld_machine,
+                wafer_lot_no,
+                weld_ok,
+                proc_code,
+                set_lot_no,
+                vol_type_set,
+                insert_date,
+                insert_user,
+                program_id,
+                suit_prod_code
+            ) VALUES (
+                pl_unit_id,
+                pl_chapter_id,
+                pl_weld_machine,
+                pl_wafer_lot_no,
+                pl_weld_ok,
+                pl_proc_code,
+                pl_set_lot_no,
+                pl_vol_type_set,
+                sysdate,
+                pl_insert_user,
+                pl_program_id,
+                pl_suit_prod_code
+            );
+
+            COMMIT;
+        EXCEPTION
+            WHEN OTHERS THEN
+                pl_status := 'Error inserting into PATHOGEN_STERILE_DOCKING: '
+                             || ' - '
+                             || sqlerrm;
+                ROLLBACK;
+        END;
+
+    END insert_sterile_docking;
+
+    PROCEDURE place_component_inter (
+        pl_unit_id    IN VARCHAR2,
+        pl_coll_date  IN DATE,
+        pl_chp_id     IN VARCHAR2,
+        pl_prod_code  IN VARCHAR2,
+        pl_inter_code IN VARCHAR2,
+        pl_inter_user IN VARCHAR2,
+        pl_audit_key  IN NUMBER,
+        pl_pgm_id     IN VARCHAR2,
+        pl_status     OUT VARCHAR2
+    ) IS
+        ncount NUMBER := 0;
+    BEGIN
+        pl_status := 'OK';
+
+      -- If the same entry is there , delete and recreate it
+        SELECT
+            COUNT(1)
+        INTO ncount
+        FROM
+            component_interdictions
+        WHERE
+                unit_id = pl_unit_id
+            AND coll_date = pl_coll_date
+            AND product_code = pl_prod_code
+            AND inter_code = pl_inter_code
+            AND chapter_id = pl_chp_id;
+
+        IF ncount > 0 THEN
+            DELETE FROM component_interdictions
+            WHERE
+                    unit_id = pl_unit_id
+                AND coll_date = pl_coll_date
+                AND product_code = pl_prod_code
+                AND inter_code = pl_inter_code
+                AND chapter_id = pl_chp_id;
+
+        END IF;
+
+        INSERT INTO component_interdictions (
+            unit_id,
+            coll_date,
+            chapter_id,
+            product_code,
+            inter_code,
+            insert_dats,
+            inter_user_id,
+            audit_key,
+            program_id
+        ) VALUES (
+            pl_unit_id,
+            pl_coll_date,
+            pl_chp_id,
+            pl_prod_code,
+            pl_inter_code,
+            sysdate,
+            pl_inter_user,
+            pl_audit_key,
+            pl_pgm_id
+        );
+
+        COMMIT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pl_status := 'Error inserting into component_interdictions: '
+                         || ' - '
+                         || substr(sqlerrm, 1, 200);
+            ROLLBACK;
+    END place_component_inter;
+
+    PROCEDURE delete_sterile_docking (
+        pl_unit_id        IN VARCHAR2,
+        pl_proc_code      IN VARCHAR2,
+        pl_suit_prod_code IN VARCHAR2,
+        pl_status         OUT VARCHAR2
+    ) IS
+    BEGIN
+        pl_status := 'OK';
+        DELETE FROM pathogen_sterile_docking
+        WHERE
+                unit_id = pl_unit_id
+            AND proc_code = pl_proc_code;
+     --AND suit_prod_code = pl_SUIT_PROD_CODE;
+
+        COMMIT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pl_status := 'Error inserting into PATHOGEN_STERILE_DOCKING: '
+                         || ' - '
+                         || substr(sqlerrm, 1, 200);
+            ROLLBACK;
+    END delete_sterile_docking;
+
+    FUNCTION check_contract_chapter (
+        p_contract_id IN VARCHAR2,
+        p_chapter_id  IN VARCHAR2
+    ) RETURN VARCHAR2 IS
+        v_rec_found VARCHAR2(1) := 'N';
+    BEGIN
+        IF p_contract_id = 'INTERNAL' THEN
+  /* MLT# 522*/
+            SELECT
+                'Y'
+            INTO v_rec_found
+            FROM
+                contracts
+            WHERE
+                    contract_id = p_contract_id
+                AND chapter_id = p_chapter_id
+                AND lifetrack_timezone_convert.get_local_time(p_chapter_id, sysdate) BETWEEN eff_date AND nvl(term_date,
+                                                                                                              lifetrack_timezone_convert.get_local_time
+                                                                                                              (p_chapter_id, sysdate)
+                                                                                                              + 1);
+
+        ELSE
+            SELECT
+                'Y'
+            INTO v_rec_found
+            FROM
+                rgt_contract_chapters
+            WHERE
+                    contract_id = p_contract_id
+                AND chapter_id = p_chapter_id
+                AND lifetrack_timezone_convert.get_local_time(p_chapter_id, sysdate) BETWEEN eff_date AND nvl(term_date,
+                                                                                                              lifetrack_timezone_convert.get_local_time
+                                                                                                              (p_chapter_id, sysdate)
+                                                                                                              + 1);
+
+        END IF;
+
+        RETURN v_rec_found;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN v_rec_found;
+    END;
+
+    FUNCTION number_of_same_containers (
+        pl_catalog_number IN VARCHAR2
+    ) RETURN NUMBER IS
+        ncount NUMBER := 1;
+    BEGIN
+        SELECT
+            nvl(COUNT(*),
+                0)
+        INTO ncount
+        FROM
+            valid_catalog_details
+        WHERE
+            catalog_number = pl_catalog_number;
+
+        RETURN ( ncount );
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN ( ncount );
+    END;
+
+
+
+-- called from CFIRESQC form
+    PROCEDURE confirmatory_qc_lock (
+        p_session_id   IN VARCHAR2,
+        p_lock_level   IN VARCHAR2,
+        p_lock_value   IN VARCHAR2,
+        p_lock_user    IN VARCHAR2,
+        p_lock_flag_lu IN VARCHAR2,
+        p_status       OUT VARCHAR2
+    ) IS
+        ncnt NUMBER;
+    BEGIN
+        p_status := 'OK';
+        SELECT
+            COUNT(1)
+        INTO ncnt
+        FROM
+            cnf_qc_lock
+        WHERE
+            session_id = p_session_id;
+
+        IF p_lock_flag_lu = 'L' THEN -- LOCK;   
+            IF ncnt <> 0 THEN
+                DELETE FROM cnf_qc_lock
+                WHERE
+                    session_id = p_session_id;
+
+            END IF;
+            INSERT INTO cnf_qc_lock (
+                session_id,
+                lock_level,
+                lock_value,
+                insert_date,
+                insert_user
+            ) VALUES (
+                p_session_id,
+                p_lock_level,
+                p_lock_value,
+                sysdate,
+                p_lock_user
+            );
+
+        ELSIF p_lock_flag_lu = 'U' THEN -- UNLOCK;
+            DELETE FROM cnf_qc_lock
+            WHERE
+                session_id = p_session_id;
+
+        ELSE
+     -- error;
+            p_status := 'Invalid lock flag';
+        END IF;
+
+        COMMIT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_status := substr(sqlerrm, 1, 300);
+    END confirmatory_qc_lock;
+
+    FUNCTION get_skip_code (
+        unit_id_in    IN VARCHAR2,
+        chapter_id_in IN VARCHAR2,
+        coll_date_in  IN DATE
+    ) RETURN VARCHAR2 IS
+        lv_reason_code rgt_skip_samples.reason_code%TYPE;
+    BEGIN
+        SELECT
+            reason_code
+        INTO lv_reason_code
+        FROM
+            rgt_skip_samples
+        WHERE
+                unit_id = unit_id_in
+            AND chapter_id = chapter_id_in
+            AND coll_date = coll_date_in
+            AND skip_flag = 'S';
+
+        RETURN lv_reason_code;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN NULL;
+    END get_skip_code;
+
+    FUNCTION get_batch_colldate (
+        batch_id_in   IN VARCHAR2,
+        chapter_id_in IN VARCHAR2
+    ) RETURN DATE IS
+        ld_coll_date DATE;
+    BEGIN
+        SELECT
+            u.coll_date
+        INTO
+            ld_coll_date
+        FROM
+            units u, batch_inputs bi
+        WHERE
+            bi.batch_id = u.batch_id
+            AND bi.batch_id = batch_id_in
+            AND bi.chapter_id = chapter_id_in
+            AND ROWNUM =1;
+
+
+        RETURN ld_coll_date;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN NULL;
+    END get_batch_colldate;
+
+
+END lab_common;
+
+/

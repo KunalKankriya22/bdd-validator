@@ -1,0 +1,39 @@
+--------------------------------------------------------
+--  DDL for Trigger VSERV_ORDER_CLASSES_BU
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "VSERV_ORDER_CLASSES_BU" before update on VSERV_ORDER_CLASSES
+for each row
+begin
+  insert into VSERV_ORDER_CLASSES_AUDIT
+  (	ORDER_CLASS,
+	CHAPTER_ID,
+	ORDER_PRIORITY,
+	CLASS_DESC,
+	PROCESS_HOURS,
+	EFF_DATE,
+	TERM_DATE,
+	LAST_MODIFIED_DATE,
+	DISPLAY_FLAG,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  (	:new.ORDER_CLASS,
+	:new.CHAPTER_ID,
+	:new.ORDER_PRIORITY,
+	:new.CLASS_DESC,
+	:new.PROCESS_HOURS,
+	:new.EFF_DATE,
+	:new.TERM_DATE,
+	:new.LAST_MODIFIED_DATE,
+	:new.DISPLAY_FLAG,
+	:new.AUDIT_KEY,
+	'UPDATE',LT_USER_SESSION.GET_USERID,
+    sysdate
+  ) ;
+  end ;
+/
+ALTER TRIGGER "VSERV_ORDER_CLASSES_BU" ENABLE;

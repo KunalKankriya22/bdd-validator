@@ -1,0 +1,503 @@
+<div class="layout-wrapper">
+  <main class="perform-visual-audit">
+    <h1 class="cdk-visually-hidden">Perform Visual Audit</h1>
+
+    <app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+    <div role="alert" aria-live="assertive" aria-atomic="true" class="cdk-visually-hidden">
+      <span *ngIf="inputRowError">{{ inputRowError }}</span>
+    </div>
+    <div role="status" aria-live="polite" aria-atomic="true" class="cdk-visually-hidden">
+      <span *ngIf="resetSearchError">{{ resetSearchError }}</span>
+    </div>
+
+    <p class="cdk-visually-hidden">Fields marked with an asterisk are required.</p>
+
+    <!-- Sub-controls -->
+    <div class="perform-visual-audit__sub-controls">
+      <div class="perform-visual-audit__sub-controls-left">
+
+        <mat-form-field appearance="fill" class="control-field" subscriptSizing="dynamic">
+          <mat-label>Option</mat-label>
+          <mat-select [(ngModel)]="selectedOption" (ngModelChange)="onOptionChange()" required>
+            <mat-option *ngFor="let option of optionList" [value]="option">{{ option }}</mat-option>
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field *ngIf="isDonation" appearance="fill" class="control-field" subscriptSizing="dynamic">
+          <mat-label>Audit Decision</mat-label>
+          <mat-select [(ngModel)]="selectedAuditDecision" required>
+            <mat-option *ngFor="let decision of auditDecisionList" [value]="decision">{{ decision }}</mat-option>
+          </mat-select>
+        </mat-form-field>
+
+      </div>
+
+      <button type="button" mat-stroked-button class="reset-button" (click)="onOpenResetPanel()" #resetAuditTrigger [attr.aria-expanded]="isResetPanelOpen">
+        RESET AUDIT
+      </button>
+    </div>
+
+    <!-- Card -->
+    <div class="perform-visual-audit__card">
+
+      <!-- Left: Table area -->
+      <div class="perform-visual-audit__table-area">
+
+        <!-- Controls row -->
+        <div class="perform-visual-audit__controls">
+          <app-search-bar [config]="searchConfig" (search)="onTableSearch($event)"></app-search-bar>
+        </div>
+
+        <!-- Collection date picker announcement live region (always in DOM; announces when picker appears) -->
+        <div role="alert" aria-live="assertive" aria-atomic="true" class="cdk-visually-hidden">
+          <span *ngIf="showCollectionDatePicker">Multiple collection dates found. Please select a collection date to continue.</span>
+        </div>
+
+        <!-- Collection date picker -->
+        <div class="collection-date-picker" *ngIf="showCollectionDatePicker"
+             role="group" [attr.aria-labelledby]="'collectionDatePickerLabel'">
+          <span id="collectionDatePickerLabel" class="collection-date-picker__label">Multiple collection dates found. Select one to continue:</span>
+          <mat-form-field appearance="fill" subscriptSizing="dynamic" class="collection-date-picker__field">
+            <mat-label>Collection Date</mat-label>
+            <mat-select [(ngModel)]="selectedCollectionDate">
+              <mat-option *ngFor="let d of pendingCollectionDates" [value]="d">{{ d }}</mat-option>
+            </mat-select>
+          </mat-form-field>
+          <button type="button" mat-raised-button color="primary" (click)="onCollectionDateSelected()" [disabled]="!selectedCollectionDate">SELECT</button>
+          <button type="button" mat-button (click)="onCollectionDateCancelled()">CANCEL</button>
+        </div>
+
+        <!-- Table wrapper -->
+        <div class="perform-visual-audit__table-wrapper">
+          <div class="table-responsive" [class.table-loading]="isLoading" [attr.aria-busy]="isLoading ? 'true' : null">
+            <table mat-table [dataSource]="dataSource" class="audit-table" role="grid" [attr.aria-label]="isDonation ? 'Donations visual audit table' : 'Deferrals visual audit table'">
+
+              <!-- Unit ID -->
+              <ng-container matColumnDef="unitId">
+                <th mat-header-cell *matHeaderCellDef scope="col">Unit ID</th>
+                <td mat-cell *matCellDef="let unit">
+                  <ng-container *ngIf="unit.__isInputRow; else unitIdCell">
+                    <div class="input-cell-wrapper">
+                      <app-unit-id-field
+                        #mainUnitIdField
+                        [validateFfValue]="'DONOR'"
+                        [requirePostValidation]="true"
+                        [label]="''"
+                        [hintDefault]="'Scan or type'"
+                        (postValidate)="onMainUnitPostValidate($event)"
+                        (validated)="onMainUnitValidated($event)"
+                        class="unit-id-cell-field"
+                      />
+                    </div>
+                  </ng-container>
+                  <ng-template #unitIdCell>{{ formatUnitIdForDisplay(unit.unitId) }}</ng-template>
+                </td>
+              </ng-container>
+
+              <!-- Audit -->
+              <ng-container matColumnDef="audit">
+                <th mat-header-cell *matHeaderCellDef scope="col">Audit</th>
+                <td mat-cell *matCellDef="let unit">
+                  <mat-form-field appearance="fill" class="cell-select audit-select" subscriptSizing="dynamic">
+                    <mat-label class="cdk-visually-hidden">Audit status</mat-label>
+                    <mat-select
+                      [ngModel]="unit.__isInputRow ? selectedAuditDecision : unit.audit"
+                      (ngModelChange)="unit.__isInputRow ? (selectedAuditDecision = $event) : onAuditChange(unit, $event)"
+                      [attr.aria-label]="unit.__isInputRow ? 'Audit status for new entry' : 'Audit status for unit ' + (unit.unitId || '')">
+                      <mat-option value="OK">OK</mat-option>
+                      <mat-option value="HOLD">HOLD</mat-option>
+                    </mat-select>
+                  </mat-form-field>
+                </td>
+              </ng-container>
+
+              <!-- Hold Reason -->
+              <ng-container matColumnDef="holdReason">
+                <th mat-header-cell *matHeaderCellDef scope="col">Hold Reason</th>
+                <td mat-cell *matCellDef="let unit">
+                  <ng-container *ngIf="!unit.__isInputRow">
+                    <input
+                      *ngIf="unit.audit === 'HOLD'"
+                      class="hold-reason-input"
+                      [(ngModel)]="unit.holdReason"
+                      (ngModelChange)="hasUnsavedChanges = true"
+                      maxlength="240"
+                      placeholder="Enter hold reason"
+                      [attr.aria-label]="'Hold reason for unit ' + (unit.unitId || '')"
+                      [attr.aria-required]="true"
+                      [attr.aria-invalid]="!unit.holdReason?.trim() ? true : null"
+                      [attr.aria-describedby]="!unit.holdReason?.trim() ? 'hold-err-' + unit.unitId : null"
+                      [class.hold-reason-input--error]="!unit.holdReason?.trim()">
+                    <span *ngIf="unit.audit === 'HOLD' && !unit.holdReason?.trim()"
+                          class="cdk-visually-hidden"
+                          role="alert"
+                          [id]="'hold-err-' + unit.unitId">
+                      Hold reason is required for unit {{ unit.unitId }}.
+                    </span>
+                    <span *ngIf="unit.audit !== 'HOLD'" class="hold-reason-na">—</span>
+                  </ng-container>
+                </td>
+              </ng-container>
+
+              <!-- Deferral ID -->
+              <ng-container matColumnDef="deferralId">
+                <th mat-header-cell *matHeaderCellDef scope="col">Deferral ID</th>
+                <td mat-cell *matCellDef="let unit">
+                  <ng-container *ngIf="unit.__isInputRow; else deferralIdCell">
+                    <div class="input-cell-wrapper">
+                      <mat-form-field appearance="fill" class="cell-select" subscriptSizing="dynamic">
+                        <mat-label class="cdk-visually-hidden">Deferral ID</mat-label>
+                        <input matInput
+                          [(ngModel)]="newDeferralId"
+                          (keyup.enter)="onDeferralSearch()"
+                          [disabled]="isSearchingRow"
+                          placeholder="Scan or type"
+                          [attr.aria-invalid]="inputRowError ? true : null"
+                          [attr.aria-describedby]="inputRowError ? 'deferral-input-error'
+                            : isSearchingRow ? 'deferral-input-hint-validating'
+                            : showDeferralDoubleEntryPrompt ? 'deferral-input-hint-reenter'
+                            : 'deferral-input-hint-default'">
+                        <mat-error *ngIf="inputRowError" id="deferral-input-error">{{ inputRowError }}</mat-error>
+                        <mat-hint *ngIf="!inputRowError && isSearchingRow" id="deferral-input-hint-validating">Validating...</mat-hint>
+                        <mat-hint *ngIf="!inputRowError && !isSearchingRow && showDeferralDoubleEntryPrompt" id="deferral-input-hint-reenter">Re-enter deferral ID to confirm</mat-hint>
+                        <mat-hint *ngIf="!inputRowError && !isSearchingRow && !showDeferralDoubleEntryPrompt" id="deferral-input-hint-default">Scan or type</mat-hint>
+                      </mat-form-field>
+                    </div>
+                  </ng-container>
+                  <ng-template #deferralIdCell>{{ unit.deferralId }}</ng-template>
+                </td>
+              </ng-container>
+
+              <!-- Deferral Type (editable dropdown) -->
+              <ng-container matColumnDef="deferralType">
+                <th mat-header-cell *matHeaderCellDef scope="col">Deferral Type</th>
+                <td mat-cell *matCellDef="let unit">
+                  <mat-form-field appearance="fill" class="cell-select audit-select" subscriptSizing="dynamic">
+                    <mat-label class="cdk-visually-hidden">Deferral type</mat-label>
+                    <mat-select
+                      [ngModel]="unit.__isInputRow ? selectedDeferralDecision : unit.deferralDecision"
+                      (ngModelChange)="unit.__isInputRow ? (selectedDeferralDecision = $event) : onDeferralDecisionChange(unit, $event)"
+                      [attr.aria-label]="unit.__isInputRow ? 'Deferral type for new entry' : 'Deferral type for deferral ' + (unit.deferralId || '')">
+                      <mat-option *ngFor="let d of deferralDecisionList" [value]="d.value">{{ d.label }}</mat-option>
+                    </mat-select>
+                  </mat-form-field>
+                </td>
+              </ng-container>
+
+              <!-- Deferred Through (display-only) -->
+              <ng-container matColumnDef="deferredThrough">
+                <th mat-header-cell *matHeaderCellDef scope="col">Deferred Through</th>
+                <td mat-cell *matCellDef="let unit">{{ unit.__isInputRow ? '' : (unit.deferredThroughDate || unit.deferredThrough || '') }}</td>
+              </ng-container>
+
+              <!-- Deferral Code (read-only) -->
+              <ng-container matColumnDef="deferralCode">
+                <th mat-header-cell *matHeaderCellDef scope="col">Deferral Code</th>
+                <td mat-cell *matCellDef="let unit">{{ unit.__isInputRow ? '' : (unit.deferralCode || unit.deferralReason || '-') }}</td>
+              </ng-container>
+
+              <!-- Comment (TDEF/PDEF only, editable) -->
+              <ng-container matColumnDef="comment">
+                <th mat-header-cell *matHeaderCellDef scope="col">Comment</th>
+                <td mat-cell *matCellDef="let unit">
+                  <ng-container *ngIf="!unit.__isInputRow">
+                    <input *ngIf="unit.deferralDecision === 'TDEF' || unit.deferralDecision === 'PDEF'"
+                      class="hold-reason-input"
+                      [(ngModel)]="unit.holdReason"
+                      (ngModelChange)="unit.isModified = true; hasUnsavedChanges = true"
+                      maxlength="240"
+                      placeholder="Enter comment"
+                      [attr.aria-label]="'Comment for deferral ' + (unit.deferralId || '')"
+                      [attr.aria-required]="true"
+                      [attr.aria-invalid]="!unit.holdReason?.trim() ? true : null"
+                      [attr.aria-describedby]="!unit.holdReason?.trim() ? 'comment-err-' + unit.deferralId : null"
+                      [class.hold-reason-input--error]="!unit.holdReason?.trim()">
+                    <span *ngIf="(unit.deferralDecision === 'TDEF' || unit.deferralDecision === 'PDEF') && !unit.holdReason?.trim()"
+                          class="cdk-visually-hidden"
+                          role="alert"
+                          [id]="'comment-err-' + unit.deferralId">
+                      Comment is required for deferral {{ unit.deferralId }}.
+                    </span>
+                    <span *ngIf="unit.deferralDecision !== 'TDEF' && unit.deferralDecision !== 'PDEF'">{{ unit.holdReason || '-' }}</span>
+                  </ng-container>
+                </td>
+              </ng-container>
+
+              <!-- Collection Date -->
+              <ng-container matColumnDef="collectionDate">
+                <th mat-header-cell *matHeaderCellDef scope="col">Collection Date</th>
+                <td mat-cell *matCellDef="let unit">{{ unit.__isInputRow ? '' : formatDate(unit.collectionDate) }}</td>
+              </ng-container>
+
+              <!-- Donation Type -->
+              <ng-container matColumnDef="donationType">
+                <th mat-header-cell *matHeaderCellDef scope="col">Donation Type</th>
+                <td mat-cell *matCellDef="let unit">{{ unit.__isInputRow ? '' : unit.donationType }}</td>
+              </ng-container>
+
+              <!-- Procedure Code -->
+              <ng-container matColumnDef="procedureCode">
+                <th mat-header-cell *matHeaderCellDef scope="col">Procedure Code</th>
+                <td mat-cell *matCellDef="let unit">{{ unit.__isInputRow ? '' : unit.procedureCode }}</td>
+              </ng-container>
+
+              <!-- Actions -->
+              <ng-container matColumnDef="actions">
+                <th mat-header-cell *matHeaderCellDef scope="col"><span class="cdk-visually-hidden">Actions</span></th>
+                <td mat-cell *matCellDef="let unit" class="actions-cell">
+                  <button mat-icon-button class="delete-btn"
+                    [attr.aria-label]="unit.__isInputRow ? 'Clear input row' : 'Delete unit ' + (unit.unitId || unit.deferralId || '')"
+                    [disabled]="unit.__isInputRow && (isDonation ? (mainUnitIdField?.validationState ?? 'idle') === 'idle' : !newDeferralId && !inputRowError)"
+                    (click)="unit.__isInputRow ? onClearInputRow() : onDeleteUnit(unit)">
+                    <mat-icon aria-hidden="true">delete</mat-icon>
+                  </button>
+                </td>
+              </ng-container>
+
+              <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+              <tr mat-row *matRowDef="let row; columns: displayedColumns;"
+                  [class.input-row]="row.__isInputRow"
+                  [class.selected-row]="!row.__isInputRow && row === selectedUnit"
+                  [tabindex]="row.__isInputRow ? -1 : 0"
+                  [attr.aria-selected]="row.__isInputRow ? null : (row === selectedUnit)"
+                  [attr.aria-label]="row.__isInputRow ? null : (isDonation ? 'Unit ' + formatUnitIdForDisplay(row.unitId) : 'Deferral ' + row.deferralId)"
+                  (click)="onRowClick(row)"
+                  (keydown.enter)="onRowClick(row)"
+                  (keydown.space)="onRowSpaceKey($event, row)"></tr>
+
+            </table>
+
+            <div class="empty-state" *ngIf="isLoading" role="status" aria-live="polite" aria-atomic="true">
+              <p class="empty-message">Searching...</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="perform-visual-audit__footer">
+          <div class="footer-actions">
+            <button type="button" mat-stroked-button class="cancel-btn" (click)="onCancel()" [disabled]="isSaving">
+              <mat-icon aria-hidden="true">close</mat-icon> CANCEL
+            </button>
+            <button type="button" mat-raised-button color="primary" class="save-btn"
+              (click)="onSave()"
+              [disabled]="!canSave"
+              [attr.aria-describedby]="!canSave && hasUnsavedChanges ? 'save-blocked-reason' : null">
+              <mat-icon aria-hidden="true">check</mat-icon> SAVE
+            </button>
+            <span id="save-blocked-reason" class="cdk-visually-hidden" *ngIf="!canSave && hasUnsavedChanges">
+              Save is disabled because one or more required fields are missing. Complete all required fields to save.
+            </span>
+          </div>
+        </div>
+
+        <!-- Counts — Donation -->
+        <div class="perform-visual-audit__counts" *ngIf="isDonation">
+          <div class="count-item">
+            <span class="count-label">Total Donations</span>
+            <span class="count-value">{{ auditCounts.totalDonations }}</span>
+          </div>
+          <div class="count-item">
+            <span class="count-label">Total Holds</span>
+            <span class="count-value">{{ auditCounts.totalHolds }}</span>
+          </div>
+          <div class="count-item">
+            <span class="count-label">Total OKs</span>
+            <span class="count-value">{{ auditCounts.totalOks }}</span>
+          </div>
+        </div>
+
+        <!-- Counts — Deferral -->
+        <div class="perform-visual-audit__counts" *ngIf="!isDonation">
+          <div class="count-item">
+            <span class="count-label">No Def</span>
+            <span class="count-value">{{ deferralCounts.noDef }}</span>
+          </div>
+          <div class="count-item">
+            <span class="count-label">Temp Def</span>
+            <span class="count-value">{{ deferralCounts.tempDef }}</span>
+          </div>
+          <div class="count-item">
+            <span class="count-label">Indef Def</span>
+            <span class="count-value">{{ deferralCounts.indDef }}</span>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Right: Donor Details panel -->
+      <div class="donor-details-panel">
+        <div class="donor-details-panel__header">
+          <h2 class="donor-details-panel__title">Donor Details</h2>
+        </div>
+        <div class="donor-details-panel__content" *ngIf="donorDetails; else emptyState" aria-live="polite" aria-atomic="true">
+          <dl>
+            <div class="detail-item">
+              <dt class="detail-label">Donor ID</dt>
+              <dd class="detail-value">{{ donorDetails.donorId }}</dd>
+            </div>
+            <div class="detail-item">
+              <dt class="detail-label">Name</dt>
+              <dd class="detail-value">{{ donorDetails.name }}</dd>
+            </div>
+            <div class="detail-item">
+              <dt class="detail-label">Date of Birth</dt>
+              <dd class="detail-value">{{ formatDate(donorDetails.dateOfBirth) }}</dd>
+            </div>
+            <div class="detail-item">
+              <dt class="detail-label">Sex</dt>
+              <dd class="detail-value">{{ donorDetails.sex }}</dd>
+            </div>
+          </dl>
+        </div>
+        <ng-template #emptyState>
+          <div class="donor-details-panel__empty"></div>
+        </ng-template>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- Reset Audit side panel -->
+  <div class="reset-audit-side-panel"
+       *ngIf="isResetPanelOpen"
+       role="dialog"
+       aria-modal="true"
+       [attr.aria-labelledby]="'resetPanelTitle'"
+       cdkTrapFocus
+       cdkTrapFocusAutoCapture
+       (keydown.escape)="onCloseResetPanel()">
+
+    <div class="panel-header">
+      <div class="header-content">
+        <h2 id="resetPanelTitle" class="panel-title">Reset Audit</h2>
+      </div>
+      <button mat-icon-button class="close-btn" (click)="onCloseResetPanel()" [attr.aria-label]="'Close Reset Audit panel'">
+        <mat-icon aria-hidden="true">close</mat-icon>
+      </button>
+    </div>
+
+    <div class="panel-body">
+      <p class="cdk-visually-hidden">Fields marked with an asterisk are required.</p>
+      <div class="form-grid">
+
+        <!-- Row 1: Option | ID -->
+        <mat-form-field appearance="fill">
+          <mat-label>Option</mat-label>
+          <mat-select [(ngModel)]="resetForm.option" (ngModelChange)="onResetOptionChange()" required>
+            <mat-option *ngFor="let o of optionList" [value]="o">{{ o }}</mat-option>
+          </mat-select>
+        </mat-form-field>
+
+        <div class="id-field-wrapper">
+          <!-- Donation: use shared unit-id-field (handles format validation, double-entry, display formatting) -->
+          <ng-container *ngIf="resetForm.option === 'Donation'">
+            <app-unit-id-field
+              #resetUnitIdField
+              [validateFfValue]="'DONOR'"
+              [label]="'ID'"
+              [hintDefault]="'Scan or type'"
+              [hintValid]="'ID validated'"
+              (validated)="onResetUnitValidated($event)"
+              (cleared)="onResetUnitCleared()"
+              style="width:100%"
+            />
+          </ng-container>
+          <!-- Deferral: raw input with local 8-digit validation and double-entry -->
+          <ng-container *ngIf="resetForm.option === 'Deferral'">
+            <mat-form-field appearance="fill" floatLabel="always" subscriptSizing="dynamic" style="width:100%">
+              <mat-label>ID</mat-label>
+              <input matInput [(ngModel)]="resetForm.id"
+                (keyup.enter)="onResetDeferralIdSearch()"
+                (blur)="onResetDeferralIdSearch()"
+                [disabled]="isResetSearching"
+                placeholder="Enter Deferral ID"
+                [attr.aria-invalid]="resetSearchError ? true : null"
+                [attr.aria-describedby]="resetSearchError ? 'reset-deferral-error'
+                  : isResetSearching ? 'reset-deferral-hint-validating'
+                  : showResetDeferralDoubleEntryPrompt ? 'reset-deferral-hint-reenter'
+                  : resetSearchDone ? 'reset-deferral-hint-valid'
+                  : 'reset-deferral-hint-default'">
+              <mat-error *ngIf="resetSearchError" id="reset-deferral-error">{{ resetSearchError }}</mat-error>
+              <mat-hint *ngIf="!resetSearchError && isResetSearching" id="reset-deferral-hint-validating">Validating...</mat-hint>
+              <mat-hint *ngIf="!resetSearchError && !isResetSearching && showResetDeferralDoubleEntryPrompt" id="reset-deferral-hint-reenter">Re-enter ID to confirm</mat-hint>
+              <mat-hint *ngIf="!resetSearchError && !isResetSearching && !showResetDeferralDoubleEntryPrompt && resetSearchDone" id="reset-deferral-hint-valid" class="success-hint">ID validated</mat-hint>
+              <mat-hint *ngIf="!resetSearchError && !isResetSearching && !showResetDeferralDoubleEntryPrompt && !resetSearchDone" id="reset-deferral-hint-default">Scan or type</mat-hint>
+            </mat-form-field>
+          </ng-container>
+        </div>
+
+        <ng-container *ngIf="resetSearchDone">
+
+          <!-- Row 2: Donor ID | Name | Date of Birth | Gender -->
+          <div class="full-width donor-info-row">
+            <dl class="field-display-card">
+              <dt class="field-label">Donor ID</dt>
+              <dd class="field-value">{{ resetForm.donorId || '—' }}</dd>
+            </dl>
+            <dl class="field-display-card">
+              <dt class="field-label">Name</dt>
+              <dd class="field-value">{{ resetForm.name || '—' }}</dd>
+            </dl>
+            <dl class="field-display-card">
+              <dt class="field-label">Date of Birth</dt>
+              <dd class="field-value">{{ resetForm.dateOfBirth || '—' }}</dd>
+            </dl>
+            <dl class="field-display-card">
+              <dt class="field-label">Gender</dt>
+              <dd class="field-value">{{ resetForm.gender || '—' }}</dd>
+            </dl>
+          </div>
+
+          <!-- Row 3: Current Audit Status | Reason -->
+          <dl class="field-display-card">
+            <dt class="field-label">Current Audit Status</dt>
+            <dd class="field-value">{{ resetForm.currentAuditStatus || '—' }}</dd>
+          </dl>
+          <dl class="field-display-card">
+            <dt class="field-label">Reason</dt>
+            <dd class="field-value">{{ resetForm.currentReason || '—' }}</dd>
+          </dl>
+
+          <!-- Row 4: New Audit Status | Reason -->
+          <mat-form-field appearance="fill">
+            <mat-label>New Audit Status</mat-label>
+            <mat-select [(ngModel)]="resetForm.newAuditStatus" (ngModelChange)="onResetNewStatusChange()" required>
+              <mat-option *ngFor="let s of resetStatusList" [value]="s">{{ s }}</mat-option>
+            </mat-select>
+          </mat-form-field>
+          <mat-form-field appearance="fill">
+            <mat-label>Hold Reason</mat-label>
+            <input matInput
+              #holdReasonInput="ngModel"
+              name="holdReason"
+              [(ngModel)]="resetForm.holdReason"
+              maxlength="240"
+              [required]="resetForm.option === 'Donation' && resetForm.newAuditStatus === 'HOLD'"
+              [disabled]="!(resetForm.option === 'Donation' && resetForm.newAuditStatus === 'HOLD')">
+            <mat-error *ngIf="holdReasonInput.invalid && holdReasonInput.touched">
+              Hold reason is required
+            </mat-error>
+          </mat-form-field>
+
+        </ng-container>
+
+      </div>
+    </div>
+
+    <div class="panel-footer">
+      <div class="footer-actions">
+        <button type="button" mat-button class="cancel-btn" (click)="onCloseResetPanel()" [disabled]="isResetting">CANCEL</button>
+        <button type="button" mat-stroked-button class="add-create-another-btn" (click)="onResetAndSave()" [disabled]="isResetting || !resetSearchDone || !resetForm.newAuditStatus">
+          {{ isResetting ? 'SAVING...' : 'RESET ANOTHER & SAVE' }}
+        </button>
+        <button type="button" mat-raised-button class="primary-btn" (click)="onSaveReset()" [disabled]="isResetting || !resetSearchDone || !resetForm.newAuditStatus">
+          {{ isResetting ? 'SAVING...' : 'SAVE' }}
+        </button>
+      </div>
+    </div>
+
+  </div>
+
+</div>

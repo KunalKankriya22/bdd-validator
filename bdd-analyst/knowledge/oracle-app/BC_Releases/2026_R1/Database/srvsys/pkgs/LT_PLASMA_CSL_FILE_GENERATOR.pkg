@@ -1,0 +1,659 @@
+CREATE OR REPLACE PACKAGE  LT_PLASMA_CSL_FILE_GENERATOR AS
+
+/*****************************************************************************
+Developed By : Basker Edwin
+Create Date  : 06.10.2002
+Purpose      : This procedure will generate CSL format file as per the 
+               specification
+Version      : 01  (Initial version)- Edwin 03/31/14
+             : 02  IM: 9942 - Edwin 4/7/14
+             : 03  IM: 9943 - Edwin (4/8/14)
+             : 04  IM: 9944, 9945 - Edwin (4/9/14)
+             : 05  IM: 9946, 9947   -Edwin (4/10/14)
+             : 06  IM: 9951   - Edwin (4/14/14)
+             : 07  IM: 9955  - Edwin 4/17/14
+             : 08  IM: 9965  - Edwin 4/23/14
+**************************************************************************** */
+
+   PROCEDURE GEN_CSL_FILE (pl_ship_no in varchar2,p_dl in varchar2,
+                            pl_Status out varchar2);
+
+END LT_PLASMA_CSL_FILE_GENERATOR;
+/
+
+CREATE OR REPLACE PACKAGE BODY LT_PLASMA_CSL_FILE_GENERATOR AS
+
+PROCEDURE GEN_CSL_FILE(pl_ship_no in varchar2,p_dl in varchar2,
+                      pl_Status out varchar2) Is
+
+ in_file   UTL_FILE.File_Type;
+ hErrLog   UTL_FILE.File_Type;
+
+ Cursor Ship_cur is Select * from shipped_products where shipment_no=pl_Ship_No;
+
+ sz_specific_gravity    NUMBER:=0;
+ sz_01_unit           varchar2(16);
+ sz_02_facility          varchar2(10);
+ sz_03_ship_label        varchar2(25);
+ sz_03_ship_label_str    varchar2(25);
+ sz_04_Ship_date         VARCHAR2(15);     
+ sz_05_Ship_origin      VARCHAR2(25);
+ sz_06_Ship_Dest         VARCHAR2(25);
+ sz_07_ShipContr        VARCHAR2(15);
+ sz_08_prod_code        VARCHAR2(8);
+ sz_09_coll_date        VARCHAR2(10);
+ sz_10_Pallet_type      VARCHAR2(25);
+ sz_11_Pallet_label     VARCHAR2(25);
+ sz_12_carton_type      VARCHAR2(25); 
+ sz_13_carton_label     VARCHAR2(25);
+ sz_13_carton_label_str VARCHAR2(25);
+ sz_14_unit_label       VARCHAR2(25);
+ sz_15_sample_label     VARCHAR2(28);
+ sz_15_sample_label_str VARCHAR2(25);
+ sz_15_prefix           VARCHAR2(2);
+ sz_16_donor_number     VARCHAR2(10);
+ sz_17_donor_id_type    VARCHAR2(15);
+ sz_18_appl_indicator   VARCHAR2(15);
+ sz_19_unit_vol         NUMBER:=0;
+ sz_20_unit_vol_UOM     VARCHAR2(15);
+ sz_21_unit_abo           varchar2(5);
+ sz_22_unit_rh            varchar2(5);
+ sz_23_ship_ref           varchar2(25);
+ sz_23_ship_ref_str       varchar2(25);
+ sz_24_HAV                VARCHAR2(10);
+ sz_26_HCV               varchar2(10);
+ sz_25_HBV               varchar2(10);
+ sz_27_HIV               varchar2(15);
+ sz_28_B19                varchar2(15);
+ sz_29_HBsAg              varchar2(15);
+ sz_30_HIVAg              varchar2(15);
+ sz_31_ALT                varchar2(15);
+ sz_32_HCV                varchar2(15);
+ sz_33_HIV_12             varchar2(15);
+ sz_26_HCV_str            varchar2(10);
+ sz_25_HBV_str            varchar2(10);
+ sz_27_HIV_str            varchar2(15);
+ sz_24_HAV_str            varchar2(15);
+ sz_29_HBsAg_str            varchar2(15);
+ sz_30_HIVAg_str              varchar2(15);
+ sz_31_ALT_str                varchar2(15);
+ sz_32_HCV_str                varchar2(15);
+ sz_33_HIV_12_str           varchar2(15);
+
+ sz_RESUL               varchar2(10);
+ szFileDir             VARCHAR2(40);
+ szLogFile            VARCHAR2(200);
+ szCSLFile            VARCHAR2(75);
+ szCSLDir            varchar2(70);
+ szDataString         VARCHAR2(800);
+  szWeight             NUMBER(6,3);
+  codabar_unit_scheme  varchar2(1);
+  v_unit_id            varchar2(15);
+  szStatus             VARCHAR2(200);
+  szProdType           VARCHAR2(10);
+  szProdCode           VARCHAR2(10);
+  sz_Box_ID            VARCHAR2(15);
+  v_chapter_id         VARCHAR2(5);
+  p_chp_sys_date       DATE;
+  p_chp_ship_date      DATE;
+  eExcept              EXCEPTION;
+  LogExcept            EXCEPTION;
+  user1                VARCHAR2(15):=LT_USER_SESSION.get_userid;
+
+  Function check_Log_file return varchar2 is 
+     szCSLErrDir    varchar2(100);
+  Begin
+      Select code_desc into szCSLErrDir from vserv_master where
+      code_type='CSLFL' and code='CSLER' and rownum =1 and
+      p_chp_sys_date between eff_date and nvl(term_date,sysdate+1);
+    
+     --szLogFile:='CSL_log_'||pl_ship_no||'.log'; 
+     szLogFile:='CSLERRLOG.log';
+     hErrLog  := UTL_FILE.FOPEN(szCSLErrDir,szLogFile,'a');
+     ---UTL_FILE.FCLOSE(hErrLog);
+     return('OK');
+
+  Exception
+      When No_data_found then
+          Return('4312');
+      When UTL_FILE.INVALID_PATH then
+	  Return('4311');
+      When OTHERS then 
+	  Return('4313');
+  End check_log_file;
+
+
+   Function get_position_data(pl_code in varchar2)
+                      return varchar2 is
+
+       pl_code_desc    varchar2(50);
+    Begin
+        select code_desc into pl_code_desc from vserv_master where
+        code_type='CSLFL' and code=pl_code and p_chp_sys_date between 
+        eff_date and nvl(term_date,sysdate+2);
+        return(pl_code_desc);
+
+    Exception when no_data_found then 
+       pl_code_desc:=null;
+       return (pl_code_desc);
+   End get_position_data;
+
+
+   
+  Function GET_RESULT_STATUS (pl_unit_id in varchar2,
+                           pl_test_id in varchar2) return boolean is
+
+    szResStatus  VARCHAR2(10);
+    nResCount    NUMBER:=0;
+    nNegCount    Number:=0;
+  Begin
+
+     select nvl(count(*),0) into nResCount from UTRS
+     where unit_id=pl_unit_id and test_id=pl_test_id and
+     nvl(cancel_flag,'N')='N' and
+     result_status_1 is not null;
+
+     If nResCount = 1 then 
+      select nvl(result_status_1,' ') into szResStatus from UTRS
+      where unit_id=pl_unit_id and test_id=pl_test_id and 
+      nvl(cancel_flag,'N')='N' and  
+      Upper(substr(result_status_1,1,1)) in ('N','-') ;
+
+      return(TRUE);
+     Elsif nResCount > 1 then 
+       select count(*) into nNegCount from utrs
+       where unit_id=pl_unit_id and test_id=pl_test_id and 
+       nvl(cancel_flag,'N')='N' and
+       Upper(substr(result_status_1,1,1)) in ('N','-');
+ 
+          If nNegCount > 1 then 
+             return (TRUE);
+          Else
+             return (FALSE);
+          End If;
+     Else
+        return(FALSE);
+     End If;
+  Exception 
+       when no_data_found then  
+           return (FALSE);
+  End get_result_status;
+
+BEGIN   -- Main Begin
+
+  -- get the chapter ID
+  Begin
+   select chapter_id into v_chapter_id from system_users where
+   user_id=lt_user_session.get_userid and
+   sysdate between eff_date and nvl(term_date, sysdate+2);
+  Exception when others then
+     v_chapter_id:='WAD';
+  End;
+
+ 
+  p_chp_sys_date:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                                sysdate);
+  dbms_output.put_line('Date='||to_char(p_chp_sys_date,'mm-dd-yyyy')||
+                       'Chp='||v_chapter_id);
+ 
+   ---Check the Error Log file
+  
+    Begin
+ 
+       szStatus:=check_log_file;
+       dbms_output.put_line('Log file status='||szStatus);
+
+       if szStatus='OK' then
+	   --hErrLog  := UTL_FILE.FOPEN(szXMLERDir,'XMLERRLOG.log','a');
+           null;
+       else
+	   Raise LogExcept;
+       end if;
+
+     Exception 
+       When others then 
+	 Raise LogExcept;
+     End;
+
+    -- Get the CSL file directory and create the file if successful
+     Begin
+          Select code_desc into szCSLDir from vserv_master where
+	  code_type='CSLFL' and code='CSLDR' and rownum =1 
+          and p_chp_sys_date between eff_date and nvl(term_date,sysdate+1); 
+     Exception
+	When others then
+           szStatus:='CSL file directory set up missing';
+	   Raise eExcept;
+     End;
+
+     begin
+	select nvl(codabar_unit_scheme,'*') into  codabar_unit_scheme
+	 from institutions
+	 where sysdate between eff_date and nvl(term_date,sysdate);
+     exception
+	when no_data_found then
+	   szStatus := 'No institution data available .... Aborting';
+	   Raise eExcept;
+     end;
+   
+      -- open up the data file
+ 
+      szCSLFile:=pl_ship_no||'.asn';
+      in_file  := UTL_FILE.FOPEN(szCSLDir,szCSLFile, 'w');
+      dbms_output.put_line('Input file-'||szCSLFile||' is opened'); 
+
+  -- Get values from the master code table
+  
+   sz_01_unit:=get_position_data('01');
+   If sz_01_unit is null then                       
+       szStatus:='01 code  (UNIT) is not defined ';
+       Raise eExcept;
+  End If;
+
+
+   sz_02_facility:=get_position_data('02');
+   If  sz_02_facility is null then 
+      szStatus:='02 code (Facility) is not defined ';
+      Raise eExcept;
+   End If;
+
+   sz_05_ship_origin:=get_position_data('05');
+
+    sz_06_ship_dest:=get_position_data('06');
+    If  sz_06_ship_dest is null then
+       szStatus:='06 code (Ship Dest) is not defined ';
+       Raise eExcept;
+    End If;
+
+
+   sz_07_ShipContr:=get_position_data('07');
+   sz_11_Pallet_label:=get_position_data('11');
+   sz_12_carton_type:=get_position_data('12');
+
+   sz_13_carton_label:=get_position_data('13');
+   If sz_13_carton_label is null then
+     szStatus:='13 code (carton label) is not defined ';
+     Raise eExcept;
+   End If;
+
+   sz_15_prefix:=get_position_data('15');
+
+   sz_17_donor_id_type:=get_position_data('17');
+   If  sz_17_donor_id_type is null then 
+      szStatus:='17 code (Donor Id type) is not defined ';
+      Raise eExcept;
+   End If;
+
+   sz_18_appl_indicator:=get_position_data('18');
+   sz_20_unit_vol_UOM:=get_position_data('20'); 
+   sz_23_ship_ref:=get_position_data('23');
+   sz_24_HAV:=get_position_data('24');
+
+  sz_25_HBV:=get_position_data('25');
+  If  sz_25_HBV is null then 
+      szStatus:='25 code (NHBV) is not defined ';
+      Raise eExcept;
+  End If;
+
+  sz_26_HCV:=get_position_data('26');
+  If  sz_26_HCV is null then
+      szStatus:='26 code (NHCV) is not defined ';
+      Raise eExcept;
+  End If;
+
+
+  sz_27_HIV:=get_position_data('27');
+  If  sz_27_HIV is null then
+     szStatus:='27 code (NHIV) is not defined ';
+     Raise eExcept;
+  End If;
+
+  sz_29_HBSAG:=get_position_data('29');
+  If  sz_29_HBSAG is null then
+    szStatus:='29 code (HBSAG) is not defined ';
+    Raise eExcept;
+  End If;
+
+  sz_30_HIVAg:=get_position_data('30');
+  sz_31_ALT:=get_position_data('31'); 
+
+  sz_32_HCV:=get_position_data('32');
+  If sz_32_HCV is null then
+      szStatus:='32 code (HCV) is not defined ';
+      Raise eExcept;
+  End If;
+
+  sz_33_HIV_12:=get_position_data('33');
+  If  sz_33_HIV_12 is null then
+     szStatus:='33 code (HIV-1/2) is not defined ';
+      Raise eExcept;
+  End If;
+
+  sz_RESUL:=get_position_data('RESUL');
+  If sz_RESUL is null then
+      szStatus:='33 code (RESUL) is not defined ';
+      Raise eExcept;
+  End If;
+
+
+   dbms_output.put_line('Master code configuration verification is over..');
+ 
+      ---Take the units one by one(Loop for each units)
+
+      For ship_rec in ship_cur Loop 
+ 
+         sz_03_ship_label_str:=null;
+         sz_23_ship_ref_str:=null;
+         sz_13_carton_label_str:=null;
+         sz_15_sample_label_str:=null;
+ 
+         If length(ship_rec.unit_id) = 7 then
+             If codabar_unit_scheme='A' then
+	        begin
+	          select machine_code||substr(ship_rec.unit_id,3)
+	          into v_unit_id from bar_code_prefixes
+       	          where eye_read_trns=substr(ship_rec.unit_id,1,2)
+	          and sysdate between eff_date and nvl(term_date,sysdate);
+                exception
+	          when others then
+	              szStatus:= 'Problem with bar_code translation for '||
+		      ship_rec.unit_id||' '||sqlerrm;
+	        end;
+             Else
+	       v_unit_id:=ship_rec.unit_id;
+             End if;
+        Else
+	  v_unit_id := ship_rec.unit_id;
+        End if;
+
+
+	    -- Get the volume
+
+
+             --1. get the specific gravity
+
+            begin            
+               select specific_gravity into sz_specific_gravity from 
+               valid_products where
+               product_code=substr(ship_rec.product_code,1,5) and
+               sysdate between eff_date and nvl(term_date,sysdate+2);
+       
+              If sz_specific_gravity is null then 
+                szStatus:='Specific gravity is null-'||ship_rec.product_code;
+                raise eExcept;
+             End If;
+           
+          exception when others then 
+            szStatus:='Issue with specific gravity-'||sqlerrm;
+            raise eExcept;  
+          end;
+         
+       dbms_output.put_line('Specific gravity='||to_char(sz_specific_gravity));
+
+      --2. calculate the volume
+
+           Begin 
+	      select nvl(component_weight/sz_specific_gravity,0) into 
+              sz_19_unit_vol from 
+	      components where unit_id=ship_rec.unit_id and 
+              product_code=ship_rec.product_code and
+	      component_prefix=ship_rec.aliquot and
+	      reject_reason_code is null and coll_date=ship_rec.coll_date;
+
+           Exception
+	     When no_data_found then
+	         szStatus:='Component weight is not found ';
+                 Raise eExcept;
+	     when too_many_rows then
+	         szStatus:='Duplicate records in the components table';
+	         raise eExcept;
+             when others then
+	         szStatus:='Volume:'||substr(sqlerrm,1,50)||' -Volume';
+	         raise eExcept; 
+	   End;
+          
+        -- Get the Donor ID
+        begin
+          select donor_id into sz_16_donor_number from DONATIONS where
+          unit_id=ship_rec.unit_id;
+        exception when others then 
+            sz_16_donor_number:=null;
+        end;
+
+        -- Get the BOX ID
+        begin
+           select box_id into sz_Box_Id from pick_slip_products where
+           unit_id=ship_rec.unit_id and product_code=ship_rec.product_code and
+           product_status in ('SH','DL') and rownum=1;
+        exception when others then 
+           sz_Box_id:='XXXXXXXXXX';
+        end;
+
+
+      -- store values to the bucket variables
+
+      sz_03_ship_label_str:=sz_02_facility||substr(pl_ship_no,3);
+      
+      p_chp_ship_date:=
+           lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                          ship_rec.shipped_date);
+      sz_04_ship_date:=to_char(p_chp_ship_date,'yyyymmdd');
+
+     dbms_output.put_line('SD='||to_char(ship_rec.shipped_date,'mm-dd-yyyy')||
+                          'LD='||p_chp_ship_date);
+
+      If sz_23_ship_ref is not null then 
+         sz_23_ship_ref_str:=sz_23_ship_ref||substr(pl_ship_no,3);
+      End If;
+      
+      sz_08_prod_code:=substr(ship_rec.product_code,1,5);
+      sz_09_coll_date:=to_char(ship_rec.coll_date,'yyyymmdd'); 
+      sz_13_carton_label_str:=sz_13_carton_label||sz_box_id;
+      sz_14_unit_label:=ship_rec.unit_id ;
+      
+      If sz_15_prefix is not null then
+         sz_15_sample_label_str:=ship_rec.unit_id||sz_15_prefix;
+      End If;
+
+      --- Verify teh test results for negative
+
+      sz_31_ALT_str:=null;
+      sz_30_HIVAg_str:=null;
+      sz_24_HAV_str:=null;
+      sz_33_HIV_12_str:=null;
+      sz_32_HCV_str:=null;
+      sz_29_HBSAG_str:=null;
+      sz_27_HIV_str:=null;
+      sz_26_HCV_str:=null;
+      sz_25_HBV_str:=null;
+
+
+      If GET_RESULT_STATUS(ship_rec.unit_id,sz_25_HBV) then 
+         sz_25_HBV_str:=sz_RESUL;
+      Else
+        szStatus:='Error in the result '||sz_25_HBV||
+                  ' for unit id-'||ship_rec.unit_id;
+        raise eExcept;
+     End If;
+
+
+     If GET_RESULT_STATUS(ship_rec.unit_id,sz_26_HCV) then 
+       sz_26_HCV_str:=sz_RESUL;
+    Else
+       szStatus:='Error in the result '||sz_26_HCV||
+                 ' for unit id-'||ship_rec.unit_id;
+       raise eExcept;
+    End If;
+
+     If GET_RESULT_STATUS(ship_rec.unit_id,sz_27_HIV) then 
+        sz_27_HIV_str:=sz_RESUL;
+     Else  
+       szStatus:='Error in the result '||sz_27_HIV||
+                 ' for unit id-'||ship_rec.unit_id; 
+       raise eExcept;
+     End If;
+
+      If GET_RESULT_STATUS(ship_rec.unit_id,sz_29_HBSAG) then   
+         sz_29_HBSAG_str:=sz_RESUL;
+      Else
+         szStatus:='Error in the result '||sz_29_HBSAG||
+                   ' for unit id-'||ship_rec.unit_id;
+         raise eExcept;
+      End If;
+      
+     If GET_RESULT_STATUS(ship_rec.unit_id,sz_32_HCV) then    
+        sz_32_HCV_str:=sz_RESUL;
+     Else
+         szStatus:='Error in the result '||sz_32_HCV||
+                   ' for unit id-'||ship_rec.unit_id;
+         raise eExcept;
+    End If;
+
+    If GET_RESULT_STATUS(ship_rec.unit_id,sz_33_HIV_12) then    
+       sz_33_HIV_12_str:=sz_RESUL;
+    Else
+       szStatus:='Error in the result '||sz_33_HIV_12||
+                 ' for unit id-'||ship_rec.unit_id;
+       raise eExcept;
+    End If;
+
+
+   --- for optioanl result fields, if the test ID is defined in the
+   -- master code then check for the results
+
+    If sz_24_HAV is not null then 
+       If GET_RESULT_STATUS(ship_rec.unit_id,sz_24_HAV) then
+          sz_24_HAV_str:=sz_RESUL;
+       Else
+            szStatus:='Error in the result '||sz_24_HAV||
+                ' for unit id-'||ship_rec.unit_id;
+            raise eExcept;
+        End If;
+    End If;
+
+    If sz_30_HIVAg is not null then
+       If GET_RESULT_STATUS(ship_rec.unit_id,sz_30_HIVAg) then
+          sz_30_HIVAg_str:=sz_RESUL;
+       Else
+             szStatus:='Error in the result '||sz_30_HIVAg||
+             ' for unit id-'||ship_rec.unit_id;
+             raise eExcept;
+        End If;
+    End If;
+
+    If sz_31_ALT is not null then
+       If GET_RESULT_STATUS(ship_rec.unit_id,sz_31_ALT) then
+           sz_31_ALT_str:=sz_RESUL;
+        Else
+             szStatus:='Error in the result '||sz_31_ALT||
+             ' for unit id-'||ship_rec.unit_id;
+             raise eExcept;
+        End If;
+    End If;
+
+
+
+      -- Construct the strin
+
+               szDataString:=sz_01_unit     ||p_dl ||
+               sz_02_facility   ||p_dl ||
+               sz_03_ship_label_str ||p_dl ||
+               sz_04_Ship_date     || p_dl ||
+               sz_05_Ship_origin  || p_dl ||
+               sz_06_Ship_Dest    || p_dl ||
+               sz_07_ShipContr    || p_dl ||
+               sz_08_prod_code    || p_dl ||
+               sz_09_coll_date    || p_dl ||
+               sz_10_Pallet_type  || p_dl ||
+               sz_11_Pallet_label || p_dl ||
+               sz_12_carton_type  || p_dl ||
+               sz_13_carton_label_str || p_dl ||
+               sz_14_unit_label   || p_dl ||
+               sz_15_sample_label_str || p_dl ||
+               sz_16_donor_number || p_dl ||
+               sz_17_donor_id_type || p_dl ||
+               sz_18_appl_indicator || p_dl ||
+               LTrim(RTrim(to_char(sz_19_unit_vol,'99999.99'))) || p_dl ||
+               sz_20_unit_vol_UOM || p_dl ||
+               sz_21_unit_abo || p_dl ||
+               sz_22_unit_rh  || p_dl ||
+               sz_23_ship_ref_str || p_dl ||
+               sz_24_HAV_str || p_dl ||
+               sz_25_HBV_str || p_dl ||
+               sz_26_HCV_str || p_dl ||
+               sz_27_HIV_str || p_dl ||
+               sz_28_B19 || p_dl ||
+               sz_29_HBsAg_str|| p_dl ||
+               sz_30_HIVAg_str || p_dl ||
+               sz_31_ALT_str ||p_dl ||
+               sz_32_HCV_str  || p_dl ||
+               sz_33_HIV_12_str ;
+
+ 
+              UTL_FILE.PUT_LINE(in_file, szDataString);
+
+      End loop;  -- Unit loop ends here
+
+  
+
+       UTL_FILE.FCLOSE(in_file); 
+  
+       UTL_FILE.PUT_LINE(hErrLog,to_char(p_chp_sys_date,'mm-dd-yy hh24:mi')||
+	     '  Status: '||'Successful'||' ['||pl_ship_no||']'||
+              '  Chap='||v_chapter_id||' User='||
+                 lt_user_session.get_userid); 
+	     pl_Status:='OK'; 
+       UTL_FILE.FCLOSE(hErrLog);
+
+EXCEPTION 
+
+  WHEN UTL_FILE.INVALID_PATH then
+       UTL_FILE.PUT_LINE(hErrLog,to_char(p_chp_sys_date,'mm-dd-yy hh24:mi')||
+	    '  Status: '||'Invalid File Directory' ||' ['||user1||']');
+       UTL_FILE.FCLOSE(hErrLog);
+       pl_Status:='NOTOK';
+
+  WHEN UTL_FILE.INVALID_OPERATION then
+       UTL_FILE.FCLOSE (in_file); 
+  
+       UTL_FILE.PUT_LINE(hErrLog,to_char(p_chp_sys_date,'mm-dd-yy hh24:mi')||
+        	 '  Status: '||'Invalid Operation'||' ['||user1||']');
+       UTL_FILE.FCLOSE(hErrLog);
+       pl_Status:='NOTOK';
+
+  WHEN UTL_FILE.INVALID_FILEHANDLE then
+       UTL_FILE.FCLOSE (in_file); 
+       UTL_FILE.PUT_LINE(hErrLog,to_char(p_chp_sys_date,'mm-dd-yy hh24:mi')||
+		 '  Status: '||'Invalid File Handle' ||' ['||user1||']');
+       UTL_FILE.FCLOSE(hErrLog);
+       pl_Status:='NOTOK';
+
+ WHEN UTL_FILE.READ_ERROR THEN
+       UTL_FILE.FCLOSE(in_file);
+       UTL_FILE.PUT_LINE(hErrLog,to_char(p_chp_sys_date,'mm-dd-yy hh24:mi')||
+		 '  Status: '||'Read Error'||' ['||user1||']');
+       UTL_FILE.FCLOSE(hErrLog);
+       pl_Status:='NOTOK';
+
+ WHEN eExcept THEN
+       UTL_FILE.FCLOSE(in_file);
+       UTL_FILE.PUT_LINE(hErrLog,to_char(p_chp_sys_date,'mm-dd-yy hh24:mi')||
+		 '  Status: '||szStatus||' ['||user1||']');
+       UTL_FILE.FCLOSE(hErrLog);
+       pl_Status:='NOTOK';
+ WHEN LogExcept THEN
+      pl_Status:=nvl(szStatus,'4313');
+
+WHEN OTHERS then
+       UTL_FILE.FCLOSE(in_file);
+       UTL_FILE.PUT_LINE(hErrLog,to_char(p_chp_sys_date,'mm-dd-yy hh24:mi')||
+		 '  Status: '||substr(sqlerrm,1,50)||' ['||user1||']');
+       UTL_FILE.FCLOSE(hErrLog);
+       pl_Status:='NOTOK';
+
+ End GEN_CSL_FILE;
+
+END LT_PLASMA_CSL_FILE_GENERATOR;
+/
+
+

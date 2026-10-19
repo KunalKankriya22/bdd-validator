@@ -1,0 +1,239 @@
+<app-side-panel-base
+  [title]="'Donation History — Test Results'"
+  [width]="'50vw'"
+  [showFooter]="true"
+  [footerButtons]="sidePanelButtons"
+  (closePanel)="onClose()"
+  (buttonClick)="onSidePanelButtonClick($event)">
+
+  <!-- Donor Information -->
+  <ng-container panelHeaderFields>
+    <div class="donor-info-section" role="region" aria-label="Donor information">
+      <div class="donor-info-grid">
+        <div class="donor-info-item">
+          <span class="info-label">Name</span>
+          <span class="info-value">{{ donorName || '-' }}</span>
+        </div>
+        <div class="donor-info-item">
+          <span class="info-label">DOB</span>
+          <span class="info-value">{{ dob || '-' }}</span>
+        </div>
+        <div class="donor-info-item">
+          <span class="info-label">Sex</span>
+          <span class="info-value">{{ sex || '-' }}</span>
+        </div>
+        <div class="donor-info-item">
+          <span class="info-label">ABO</span>
+          <span class="info-value">{{ abo || '-' }}</span>
+        </div>
+      </div>
+    </div>
+  </ng-container>
+
+  <!-- Main Content: Master-Detail Layout -->
+  <ng-container panelContent>
+    <div class="main-content">
+      <!-- Left Panel: Donations List -->
+      <div class="donations-panel" role="region" aria-label="Donations list">
+        <!-- Loading State -->
+        @if (loadingDonations()) {
+          <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+            <mat-spinner diameter="40" aria-label="Loading donations"></mat-spinner>
+            <span class="sr-only">Loading donations, please wait...</span>
+          </div>
+        }
+
+        <!-- Error State -->
+        @if (error() && !loadingDonations()) {
+          <div class="error-container" role="alert" aria-live="assertive">
+            <mat-icon aria-hidden="true">error</mat-icon>
+            <p>{{ error() }}</p>
+            <button mat-button color="primary" (click)="loadDonations()">
+              Retry
+            </button>
+          </div>
+        }
+
+        <!-- Donations Table -->
+        @if (!loadingDonations() && !error() && hasDonations()) {
+          <div class="table-container scrollable-donations">
+            <table
+              mat-table
+              [dataSource]="donations()"
+              class="donations-table"
+              role="table"
+              aria-label="Donation records">
+
+              <!-- Display Unit ID Column (15-char with ISBT check digit) -->
+              <ng-container matColumnDef="displayUnitId">
+                <th mat-header-cell *matHeaderCellDef scope="col">Unit ID</th>
+                <td
+                  mat-cell
+                  *matCellDef="let donation"
+                  (click)="selectDonation(donation)"
+                  (keydown.enter)="selectDonation(donation)"
+                  (keydown.space)="selectDonation(donation); $event.preventDefault()"
+                  tabindex="0"
+                  role="button"
+                  [attr.aria-pressed]="isSelected(donation)">
+                  {{ donation.displayUnitId || donation.unitId || '-' }}
+                </td>
+              </ng-container>
+
+              <!-- Collection Date Column -->
+              <ng-container matColumnDef="collDate">
+                <th mat-header-cell *matHeaderCellDef scope="col">Collection Date</th>
+                <td
+                  mat-cell
+                  *matCellDef="let donation"
+                  (click)="selectDonation(donation)"
+                  (keydown.enter)="selectDonation(donation)"
+                  (keydown.space)="selectDonation(donation); $event.preventDefault()"
+                  tabindex="0"
+                  role="button"
+                  [attr.aria-pressed]="isSelected(donation)">
+                  {{ formatDateDisplay(donation.collDate) || '-' }}
+                </td>
+              </ng-container>
+
+              <tr mat-header-row *matHeaderRowDef="donationsColumns; sticky: true"></tr>
+              <tr
+                mat-row
+                *matRowDef="let row; columns: donationsColumns;"
+                [class.selected-row]="isSelected(row)"
+                class="clickable-row"></tr>
+            </table>
+          </div>
+        }
+
+        <!-- Empty State -->
+        @if (!loadingDonations() && !error() && !hasDonations()) {
+          <div class="empty-state">
+            <mat-icon aria-hidden="true">info</mat-icon>
+            <p>No donations found for this donor.</p>
+          </div>
+        }
+      </div>
+
+      <!-- Right Panel: Test Results -->
+      <div class="test-results-panel" role="region" aria-label="Test results">
+        <!-- Selected Donation Info and Controls -->
+        @if (hasSelectedDonation()) {
+          <div class="test-results-controls">
+            <div class="selected-donation-info">
+              <div class="info-row">
+                <span class="info-label">Unit ID:</span>
+                <span class="info-value">{{ selectedDonation()?.displayUnitId || selectedDonation()?.unitId }}</span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">Collection Date</span>
+                <span class="info-value">{{ formatDateDisplay(selectedDonation()?.collDate || '') }}</span>
+              </div>
+            </div>
+            <div class="controls-group">
+              <mat-checkbox
+                [checked]="showConfirm()"
+                (change)="showConfirm.set($event.checked); onShowConfirmChange()"
+                [disabled]="!hasValidTests()"
+                color="primary"
+                aria-label="Show confirmatory tests">
+                Show Confirm
+              </mat-checkbox>
+              <button
+                mat-stroked-button
+                color="primary"
+                (click)="onRefresh()"
+                [disabled]="loadingTests()"
+                aria-label="Refresh test results">
+                @if (loadingTests()) {
+                  <mat-spinner diameter="20"></mat-spinner>
+                } @else {
+                  REFRESH
+                }
+              </button>
+            </div>
+          </div>
+
+          <!-- Hidden Tests Warning Banner -->
+          @if (hasHiddenTests()) {
+            <div class="hidden-tests-warning" role="alert" aria-live="polite">
+              <mat-icon aria-hidden="true">info</mat-icon>
+              <span>Some results may not be displayed due to access restrictions</span>
+            </div>
+          }
+        }
+
+        <!-- Loading Test Results -->
+        @if (loadingTests()) {
+          <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+            <mat-spinner diameter="40" aria-label="Loading test results"></mat-spinner>
+            <span class="sr-only">Loading test results, please wait...</span>
+          </div>
+        }
+
+        <!-- Test Results Table -->
+        @if (!loadingTests() && hasSelectedDonation() && displayedTests().length > 0) {
+          <div class="table-container scrollable-tests">
+            <table
+              mat-table
+              [dataSource]="displayedTests()"
+              class="test-results-table"
+              role="table"
+              aria-label="Test results">
+
+              <!-- Test ID Column -->
+              <ng-container matColumnDef="testId">
+                <th mat-header-cell *matHeaderCellDef scope="col">Test ID</th>
+                <td mat-cell *matCellDef="let test">{{ test.testId }}</td>
+              </ng-container>
+
+              <!-- Result Column -->
+              <ng-container matColumnDef="resultCode">
+                <th mat-header-cell *matHeaderCellDef scope="col">Result</th>
+                <td mat-cell *matCellDef="let test">{{ test.resultCode || '-' }}</td>
+              </ng-container>
+
+              <!-- Absorb Column -->
+              <ng-container matColumnDef="absorbance">
+                <th mat-header-cell *matHeaderCellDef scope="col">Absorb</th>
+                <td mat-cell *matCellDef="let test">{{ test.absorbance || '-' }}</td>
+              </ng-container>
+
+              <!-- Reactive Column -->
+              <ng-container matColumnDef="reactive">
+                <th mat-header-cell *matHeaderCellDef scope="col">Reactive</th>
+                <td mat-cell *matCellDef="let test">{{ test.reactive || '-' }}</td>
+              </ng-container>
+
+              <!-- Type Column -->
+              <ng-container matColumnDef="testType">
+                <th mat-header-cell *matHeaderCellDef scope="col">Type</th>
+                <td mat-cell *matCellDef="let test">{{ test.testType || '-' }}</td>
+              </ng-container>
+
+              <tr mat-header-row *matHeaderRowDef="testResultsColumns; sticky: true"></tr>
+              <tr mat-row *matRowDef="let row; columns: testResultsColumns;"></tr>
+            </table>
+          </div>
+        }
+
+        <!-- No Selection State -->
+        @if (!hasSelectedDonation() && !loadingDonations()) {
+          <div class="empty-state">
+            <mat-icon aria-hidden="true">touch_app</mat-icon>
+            <p>Select a donation to view test results</p>
+          </div>
+        }
+
+        <!-- No Test Results State -->
+        @if (!loadingTests() && hasSelectedDonation() && displayedTests().length === 0) {
+          <div class="empty-state">
+            <mat-icon aria-hidden="true">info</mat-icon>
+            <p>No test results available for this donation.</p>
+            <p class="empty-state-hint">If you expect to see results, verify that you have access to the TVIEW parameter or contact your system administrator.</p>
+          </div>
+        }
+      </div>
+    </div>
+  </ng-container>
+</app-side-panel-base>

@@ -1,0 +1,930 @@
+create or replace PACKAGE AG_LBL AS 
+
+/*-----------------------------------------------------------------------------------
+|| Author       : WellSky BC.
+|| Description  : Core pkg that deals with labeling of antigens 
+||              : 
+|| Requirements : 
+|| Call Syntax  :AG_CORE.START_JOB
+|| Version
+|| 01   03/15/2024  MLT-6671 - New pkg creation.
+|| 02   08/01/2024  MLT-7096 - get_eye_readable_string routine added.
+|| 03   08/06/2024  MLT-7063 - Added distinct to utrs query for get pos 17 tests.
+||------2024.1.0 Release version 03----------------------------------------------------------------------------
+*/-----------------------------------------------------------------------------------
+    -- used in init. Indicates that the global variables are populated.
+    -- global variables are used for caching.
+    gb_initialized          BOOLEAN := FALSE;
+    
+    -- used in LABELI screen as well to send the test results as array.
+    TYPE test_results_aat IS TABLE OF VARCHAR2(5) INDEX BY VARCHAR2(10);    
+    
+    TYPE strings_ntt IS TABLE OF VARCHAR2(10);
+
+    TYPE rcvs_aat IS TABLE OF NUMBER INDEX BY VARCHAR2(10);
+    TYPE rc_aat IS TABLE OF rcvs_aat INDEX BY VARCHAR2(10);
+    
+    TYPE result_strings_aat IS TABLE OF VARCHAR2(20) INDEX BY PLS_INTEGER;
+    
+    TYPE ds_det_rec IS RECORD(
+      test_ids      VALID_ANTIGEN_DS_DET.test_ids%TYPE,
+      pos_no        VALID_ANTIGEN_DS_DET.pos_no%TYPE,
+      pos_length    VALID_ANTIGEN_DS_DET.pos_length%TYPE,
+      rc_id         VALID_ANTIGEN_DS_DET.rc_id%TYPE,
+      group_flag    VALID_ANTIGEN_DS_DET.group_flag%TYPE
+      );
+    TYPE ds_det_aat IS TABLE OF ds_det_rec INDEX BY PLS_INTEGER;       
+
+    /*
+        Input parameters:
+            test_results_in     -> Test results list: arr('K') = '+'; arr('k') = '-';
+            content_string_out  -> DS012 DS: <DataIdentifier><DataContent><checkdigit>
+            status_out          -> 'OK' or any error.
+            
+        Usage: Called from LABELI screen.    
+    */
+    
+    PROCEDURE get_data_content_string(
+        test_results_aa_in  IN ag_lbl.test_results_aat,
+        content_string_out  OUT VARCHAR2,
+        status_out          OUT VARCHAR2
+        );
+    
+    /*
+        Input parameters:
+            test_results_in     -> <test_id, result_code> format :  C,+,e-,E+
+            content_string_out  -> DS012 DS: <DataIdentifier><DataContent>
+            status_out          -> 'OK' or any error.
+            
+        Usage: Called from a test script only .  
+    */
+    PROCEDURE get_data_content_string(
+        test_results_in     IN VARCHAR2,
+        content_string_out  OUT VARCHAR2,
+        status_out          OUT VARCHAR2
+        );
+        
+        
+    FUNCTION csv_to_list(csv_string_in IN VARCHAR2)
+        RETURN ag_lbl.strings_ntt;        
+
+    PROCEDURE get_eye_readable_string(
+        unit_id_in                  IN VARCHAR2,
+        selected_tests_csv_in       IN VARCHAR2,
+        barcode_string_in           IN VARCHAR2,
+        eye_readable_out            OUT VARCHAR2,
+        special_eye_readable_out    OUT VARCHAR2,
+        status_out                  OUT VARCHAR2
+    );    
+
+    FUNCTION version_no RETURN VARCHAR2;
+    
+END AG_LBL;
+
+/
+
+create or replace PACKAGE BODY AG_LBL AS
+    /*
+        create or replace public synonym AG_LBL for AGMGR.AG_LBL;
+        grant execute on AGMGR.AG_LBL to public;    
+    */
+    
+    gv_version_no VARCHAR2(03) := '03';
+
+    
+    -- stores result combination values by RC_ID
+    g_rcs                   rc_aat;
+    
+    -- DataStructure global variables.
+    g_ds_id                 VARCHAR2(10);
+    g_data_identifier       VARCHAR2(10);
+    g_ds_length             NUMBER;
+    
+    -- global variables to store DS_DET records.
+    g_ds_tests              ds_det_aat; -- tests not null
+    g_ds_null_tests         ds_det_aat; -- null tests
+
+
+    FUNCTION version_no RETURN VARCHAR2 IS
+    BEGIN
+        RETURN gv_version_no;
+    END version_no;
+
+        
+    -- load g_rcs variable.
+    PROCEDURE load_rcvs_tables(status_out OUT VARCHAR2) IS
+        lb_records_found    BOOLEAN := FALSE;
+        data_error          EXCEPTION;
+    BEGIN
+        status_out := 'OK';
+        
+        FOR rec IN ( SELECT DISTINCT rc_id
+                      FROM VALID_ANTIGEN_DS_DET
+                      WHERE ds_id = g_ds_id)
+        LOOP
+            lb_records_found := TRUE;
+            
+            DECLARE
+                l_rcvs_aa rcvs_aat;
+            BEGIN
+                -- For each RC_ID (load the values in the collection)
+                FOR rc_rec IN (SELECT result_combination, result_value
+                                 FROM valid_antigens_rcvs_det
+                                 WHERE rc_id = rec.rc_id
+                                 ORDER BY result_value)
+                LOOP
+                    l_rcvs_aa(rc_rec.result_combination) := rc_rec.result_value;  
+                END LOOP;
+                
+                IF l_rcvs_aa.COUNT = 0 THEN
+                    status_out := 'No data found in RSVS_DET table for ' || rec.rc_id;
+                    RAISE data_error;
+                END IF;
+                
+                g_rcs(rec.rc_id) := l_rcvs_aa;                
+            END;
+        END LOOP; 
+        
+        IF NOT lb_records_found THEN
+            status_out := 'RC data not found in DS_DET table';
+            RAISE data_error;
+        END IF;
+        
+    EXCEPTION
+        WHEN data_error THEN
+            NULL;
+    END load_rcvs_tables;
+
+    -- load g_ds_tests, g_ds_null_tests tables.
+    PROCEDURE load_ds_tables(status_out OUT VARCHAR2) IS
+        n_total_chars NUMBER;
+        config_error EXCEPTION;
+    BEGIN
+        status_out := 'OK';
+        
+        SELECT SUM(pos_length) INTO n_total_chars
+          FROM VALID_ANTIGEN_DS_DET
+         WHERE ds_id = g_ds_id;
+         
+        IF g_ds_length <> (LENGTH(g_data_identifier) + n_total_chars) THEN
+            status_out := 'Data Structure length mismatch. Check DS tables.';
+            RAISE config_error; 
+        END IF;
+        
+        SELECT test_ids, pos_no, pos_length, rc_id, group_flag
+          BULK COLLECT 
+          INTO g_ds_tests
+          FROM VALID_ANTIGEN_DS_DET 
+         WHERE ds_id = g_ds_id
+           AND test_ids is not null
+         ORDER BY pos_no;
+
+        SELECT test_ids, pos_no, pos_length, rc_id, group_flag
+          BULK COLLECT 
+          INTO g_ds_null_tests
+          FROM VALID_ANTIGEN_DS_DET 
+         WHERE ds_id = g_ds_id
+           AND test_ids is null
+         ORDER BY pos_no;    
+    EXCEPTION
+        WHEN config_error THEN
+            NULL;        
+    END load_ds_tables;
+    
+    -- load g_ds_id, g_data_identifier, g_ds_length variables.
+    PROCEDURE load_ds_info(status_out OUT VARCHAR2) IS
+    BEGIN
+        status_out := 'OK';
+        
+        SELECT ds_id, data_identifier, ds_length
+          INTO g_ds_id, g_data_identifier, g_ds_length
+          FROM VALID_ANTIGEN_DS_HDR
+        WHERE SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE+10);  
+        
+        IF  g_ds_id IS NULL 
+                OR 
+            g_data_identifier IS NULL 
+                OR 
+            g_ds_length IS NULL 
+        THEN
+            status_out := 'DS_ID or Data_Identifier or DS_Length missing from DS_HDR table';
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            status_out := 'Error retrieving from DS_HDR table';
+    END load_ds_info;
+
+    -- Initialize all the global variables. Used for caching validation tables.
+    PROCEDURE init(status_out OUT VARCHAR2) IS
+    BEGIN
+        status_out  := 'OK';
+        
+        load_ds_info(status_out);        
+        IF status_out <> 'OK' THEN
+            RETURN;
+        END IF;
+        
+        load_rcvs_tables(status_out);
+        IF status_out <> 'OK' THEN
+            RETURN;
+        END IF;
+        
+        load_ds_tables(status_out);
+        IF status_out <> 'OK' THEN
+            RETURN;
+        END IF;
+        
+        gb_initialized := TRUE;
+        
+    END init;
+
+    -- csv string to nested collection.
+    FUNCTION csv_to_list(csv_string_in IN VARCHAR2)
+        RETURN ag_lbl.strings_ntt 
+    IS
+        strings_nt   strings_ntt := strings_ntt(); 
+    BEGIN
+        SELECT
+            TRIM(regexp_substr(csv_string_in, '[^,]+', 1, level))
+        BULK COLLECT INTO strings_nt
+        FROM
+            dual
+        CONNECT BY
+            regexp_substr(csv_string_in, '[^,]+', 1, level) IS NOT NULL;
+        
+        RETURN strings_nt;
+    END csv_to_list;
+   
+    --  only used for debugging. To see contents of a collection.    
+    PROCEDURE print_test_results(test_results_aa_in IN ag_lbl.test_results_aat) IS
+        lv_row VARCHAR2(10);
+    BEGIN
+        IF test_results_aa_in.COUNT = 0 THEN
+            RETURN;
+        END IF;
+        -- print the string indexed collection.
+        lv_row := test_results_aa_in.FIRST;
+        
+        WHILE (lv_row IS NOT NULL)
+        LOOP
+            DBMS_OUTPUT.PUT_LINE(lv_row || ':' || test_results_aa_in(lv_row));
+            lv_row := test_results_aa_in.NEXT(lv_row);
+        END LOOP;        
+        
+    END print_test_results;
+
+    -- Called from LABELI screen.  
+    PROCEDURE get_data_content_string(
+        test_results_aa_in  IN ag_lbl.test_results_aat,
+        content_string_out  OUT VARCHAR2,
+        status_out          OUT VARCHAR2
+        ) IS
+    
+        result_values_aa    result_strings_aat;
+        lv_content_string   VARCHAR2(200); 
+        lv_check_digit      VARCHAR2(1);
+        
+        test_results_list  ag_lbl.test_results_aat;
+    BEGIN
+        status_out := 'OK';
+
+        IF NOT AG_UTIL.IS_LICENSED THEN
+            status_out := 'Not licensed to use.';
+            RETURN;
+        END IF;
+
+        -- if not cached - get the records from validation tables and cache.
+        IF NOT gb_initialized THEN
+            init(status_out);
+            IF status_out <> 'OK' THEN
+                RETURN;
+            END IF;
+        END IF;
+        
+        -- Returns all 9's if input string is blank.
+        IF test_results_aa_in.COUNT = 0 THEN
+            content_string_out := g_data_identifier || RPAD('9', g_ds_length - length(g_data_identifier), '9');
+            RETURN;
+        END IF;
+        
+        test_results_list := test_results_aa_in;
+        
+        
+        -- Loops through the DS_DET table (with tests present) by position no.
+        -- Gets the result value of each position no.
+        FOR ds_indx IN NVL(g_ds_tests.FIRST,1) .. NVL(g_ds_tests.LAST,0)
+        LOOP
+            BEGIN
+                DECLARE
+                    tests_nt            ag_lbl.strings_ntt;
+                    lv_result           VARCHAR2(200);
+                    lv_result_string    VARCHAR2(2000);
+                    ds_det_rec          ag_lbl.ds_det_rec;
+                BEGIN
+                    ds_det_rec  := g_ds_tests(ds_indx);
+                    tests_nt    := csv_to_list(ds_det_rec.test_ids);
+                    
+                    -- construct the result string by position 
+                    -- based on the incoming test results.
+                    -- Eg: if input is K-k+C-c+ and pos 2 has K, k
+                    -- then lv_result_string will be '-,+'
+                    lv_result_string := NULL;  
+                    FOR indx IN tests_nt.FIRST .. tests_nt.LAST
+                    LOOP
+                        IF test_results_list.EXISTS(tests_nt(indx)) THEN
+                            lv_result := test_results_list(tests_nt(indx));
+                        ELSE
+                            lv_result := 'nt'; -- TODO -- when to add nt vs ni
+                        END IF;
+                            
+                        lv_result_string := lv_result_string || ',' || lv_result;
+                    END LOOP;
+                    lv_result_string := LTRIM(lv_result_string, ',');
+                    ---
+                    
+                    -- if all the tests in a pos has nt result, replace it to ni.
+                    -- ni(9) is being used for missing tests.
+                    IF REGEXP_COUNT(lv_result_string, 'nt') = tests_nt.COUNT THEN
+                        lv_result_string := REPLACE(lv_result_string, 'nt', 'ni');
+                    END IF;
+                    
+                    -- Special case where group_flag is set as per ISBT doc.
+                    -- All the tests that are a part of group should be present with results.
+                    -- otherwise treat them as individual.
+                    IF ds_det_rec.group_flag = 'Y' THEN
+                        -- check if the result string has nt or ni.
+                        IF INSTR(lv_result_string, 'nt') > 0 THEN
+                            lv_result_string := 'ni';
+                        ELSIF INSTR(lv_result_string, 'ni') > 0 THEN
+                            lv_result_string := 'ni';
+                        ELSE
+                            -- Remove the tests from the input array.
+                            -- this will make sure that the tests 
+                            -- are not individually counted again for
+                            -- later positions.
+                            FOR indx IN tests_nt.FIRST .. tests_nt.LAST
+                            LOOP
+                                test_results_list.DELETE(tests_nt(indx)); 
+                            END LOOP;
+                        END IF;
+                    ELSE
+                        -- Remove the tests from the input array, once the
+                        -- input result string by position is constructed.
+                        FOR indx IN tests_nt.FIRST .. tests_nt.LAST
+                        LOOP
+                            test_results_list.DELETE(tests_nt(indx));
+                        END LOOP;
+                    END IF;
+                    ---
+                    
+                    -- Gets the result value based on the result combination from RCVS_DET table.
+                    -- result value is stored in result_values_aa by position number.
+                    IF g_rcs.EXISTS(ds_det_rec.rc_id) THEN
+                        IF g_rcs(ds_det_rec.rc_id).EXISTS(lv_result_string) THEN
+ 
+                            result_values_aa(ds_det_rec.pos_no) := g_rcs(ds_det_rec.rc_id)(lv_result_string);
+                        END IF;
+                    END IF;
+                    --
+                END;
+            END;
+        END LOOP;
+
+        
+        -- If incoming array still has any tests remaining, go to the next process.
+        -- Loops through the DS_DET table (with out tests) by position no.
+        IF test_results_list.COUNT > 0 THEN
+            DECLARE
+                res_aa      result_strings_aat;
+                lv_test_id  VARCHAR2(10);
+                lv_value    VARCHAR2(10);
+                ds_det_rec  ag_lbl.ds_det_rec;
+            BEGIN
+                -- build a result array FROM the input test array that is left. Eg: 'K11-,K12-,K13-'
+                -- res_aa('K11') = 'K11-'
+                -- res_aa('K12') = 'K12-'
+                -- res_aa('K13') = 'K13-'
+                BEGIN
+                    lv_test_id := test_results_list.FIRST;
+                    
+                    WHILE (lv_test_id IS NOT NULL)
+                    LOOP
+                        res_aa(NVL(res_aa.LAST, 0)+1) := 
+                            lv_test_id || test_results_list(lv_test_id);
+                        
+                        lv_test_id := test_results_list.NEXT(lv_test_id);
+                    END LOOP;
+                END;
+                
+                -- Loops through the DS_DET table (with out tests present) by position no.
+                -- Gets the result value of each position no.
+                --  -- Queries rcvs_det table by test_id || result_combination
+                --  -- Gets the minimum result_value from the result set. We only need the 
+                --  -- first match from that table, so MIN is used.
+                BEGIN
+                    FOR ds_det_indx IN NVL(g_ds_null_tests.FIRST,1) .. NVL(g_ds_null_tests.LAST,0)
+                    LOOP
+                        ds_det_rec := g_ds_null_tests(ds_det_indx);
+                        BEGIN
+                            -- Check rcvs_det table
+                            SELECT LPAD(NVL(MIN(result_value),99), ds_det_rec.pos_length, '0')
+                              INTO lv_value
+                              FROM valid_antigens_rcvs_det
+                             WHERE rc_id = ds_det_rec.rc_id
+                               AND test_ids||result_combination IN (SELECT column_value
+                                                  FROM TABLE(res_aa)
+                                                );
+                        
+                            result_values_aa(ds_det_rec.pos_no) := lv_value;
+                        END;
+                    END LOOP;                
+                END;                
+            END;
+        END IF;
+        --DBMS_OUTPUT.PUT_LINE('COUNT ' || result_values_aa.COUNT);
+        
+        -- Fill the result_values_aa array with 9 for the missing positions.
+        -- some positions may have one length or two lengths. 
+        -- Use pos_length to LPAD.
+        BEGIN
+            FOR indx IN NVL(g_ds_tests.FIRST,1) .. NVL(g_ds_tests.LAST,0)
+            LOOP
+                IF NOT result_values_aa.EXISTS(g_ds_tests(indx).pos_no) THEN
+                    result_values_aa(g_ds_tests(indx).pos_no) := LPAD('9',g_ds_tests(indx).pos_length,'9');
+                END IF;        
+            END LOOP;
+            
+            FOR indx IN NVL(g_ds_null_tests.FIRST,1) .. NVL(g_ds_null_tests.LAST,0)
+            LOOP
+                IF NOT result_values_aa.EXISTS(g_ds_null_tests(indx).pos_no) THEN
+                    result_values_aa(g_ds_null_tests(indx).pos_no) := LPAD('9',g_ds_null_tests(indx).pos_length,'9');
+                END IF;        
+            END LOOP;
+        END;
+        
+        -- Build the final content string from result_values_aa array.
+        BEGIN
+            FOR indx IN NVL(result_values_aa.FIRST,1) .. NVL(result_values_aa.LAST,0)
+            LOOP
+                --DBMS_OUTPUT.PUT_LINE(indx || ': ' || result_values_aa(indx));
+                lv_content_string := lv_content_string || result_values_aa(indx);
+            END LOOP;
+        END;
+        
+        -- get the checkdigit (ignore the identifier).
+        SBCLIB.validate_unit_chkdigit (
+            lv_content_string, 
+            lv_check_digit
+        );      
+        
+        -- Build the final string with Data Identifier, Data Content and Check digit.
+        content_string_out := g_data_identifier || lv_content_string || lv_check_digit;
+        
+        status_out := 'OK';
+
+    END get_data_content_string;
+
+    -- Called from a test script only.
+    PROCEDURE get_data_content_string(
+        test_results_in     IN VARCHAR2,
+        content_string_out  OUT VARCHAR2,
+        status_out          OUT VARCHAR2
+            ) 
+    IS
+        test_results_aa ag_lbl.test_results_aat;    
+        test_results_nt ag_lbl.strings_ntt := strings_ntt();
+    BEGIN
+        status_out := 'OK';
+
+        IF NOT AG_UTIL.IS_LICENSED THEN
+            status_out := 'Not licensed to use.';
+            RETURN;
+        END IF;
+
+        
+        IF NOT gb_initialized THEN
+            init(status_out);
+            IF status_out <> 'OK' THEN
+                RETURN;
+            END IF;
+        END IF;
+
+        IF test_results_in IS NULL THEN
+            content_string_out := g_data_identifier || RPAD('9', g_ds_length - length(g_data_identifier), '9');
+            RETURN;
+        END IF;
+        
+        test_results_nt := csv_to_list(test_results_in);
+        
+        FOR indx IN test_results_nt.FIRST .. test_results_nt.LAST
+        LOOP
+            -- DBMS_OUTPUT.PUT_LINE(indx || ':' || test_results_nt(indx));
+            IF MOD(indx, 2) <> 0 THEN
+                test_results_aa(test_results_nt(indx)) := test_results_nt(indx+1);
+            END IF;
+        END LOOP;  
+        
+        -- for debugging only
+        -- print_test_results(test_results_aa);
+        
+        get_data_content_string(
+                test_results_aa,
+                content_string_out,
+                status_out);
+        
+        content_string_out  := SUBSTR(content_string_out, 1, LENGTH(content_string_out)-1);
+        
+    END get_data_content_string;
+
+    PROCEDURE get_eye_readable_string(
+        unit_id_in                  IN VARCHAR2,
+        selected_tests_csv_in       IN VARCHAR2,
+        barcode_string_in           IN VARCHAR2,
+        eye_readable_out            OUT VARCHAR2,
+        special_eye_readable_out    OUT VARCHAR2,
+        status_out                  OUT VARCHAR2
+    ) IS
+        TYPE strings_nt IS TABLE OF VARCHAR2(1000);
+        pos17_tests_list strings_nt := strings_nt();  
+        
+        lv_rc_id VARCHAR2(10);
+        
+        
+        lv_eye_readable     VARCHAR2(2000);
+        lv_special_eye_readable VARCHAR2(2000);
+        
+        TYPE test_rec IS RECORD(
+            test_id         VARCHAR2(30),
+            test_desc       VARCHAR2(200),
+            eye_readable    VARCHAR2(200)
+        );
+        
+        CMV_rec     test_rec;
+        HBS_rec     test_rec;
+        IGA_rec     test_rec;
+        PARVO_rec   test_rec;
+        
+        
+        FUNCTION pos17_rc_id(pStatus OUT VARCHAR2) RETURN VARCHAR2 IS
+            lv_res_id VARCHAR2(20);
+        BEGIN
+            pStatus := 'OK';
+            
+            SELECT rc_id INTO lv_res_id
+              FROM valid_antigen_ds_det
+             WHERE ds_id = 'DS012'
+               AND pos_no = 17
+               AND pos_length = 2;  
+            
+            RETURN lv_res_id;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN NULL;
+                pStatus := 'RC_ID Error ' || SUBSTR(SQLERRM, 1, 1000);
+        END pos17_rc_id;
+
+        FUNCTION get_pos17_tests(pStatus OUT VARCHAR2) RETURN strings_nt IS
+            tests_list strings_nt := strings_nt();
+        BEGIN
+            pStatus := 'OK';
+            
+            WITH temp_tbl AS
+            (
+                SELECT DISTINCT ut.test_id, DECODE(mc.code_type, 'REAC', '+', '-') test_res
+                  FROM utrs ut, master_codes mc
+                  WHERE ut.unit_id = unit_id_in 
+                    AND ut.result_status_1 IS NOT NULL
+                    AND ut.cancel_flag IS NULL
+                    AND ut.result_status_1 = mc.code
+                    AND mc.code_type IN ('REAC', 'NREAC')
+                    AND SYSDATE BETWEEN mc.eff_date AND NVL(mc.term_date, SYSDATE+1)
+                    AND ut.test_id IN 
+                    (
+                        SELECT TRIM(REGEXP_SUBSTR(selected_tests_csv_in, '[^,]+', 1, LEVEL)) seq
+                          FROM DUAL
+                        CONNECT BY REGEXP_SUBSTR(selected_tests_csv_in, '[^,]+', 1, LEVEL) IS NOT NULL                                        
+                    )
+            ) SELECT temp_tbl.test_id || temp_tbl.test_res
+                BULK COLLECT
+                INTO tests_list
+                FROM temp_tbl
+                WHERE (temp_tbl.test_id, temp_tbl.test_res) IN
+                    (SELECT rcvs.test_ids, rcvs.result_combination
+                      FROM valid_antigens_rcvs_det rcvs
+                      WHERE rcvs.rc_id= lv_rc_id);
+            RETURN tests_list;
+        EXCEPTION
+            WHEN OTHERS THEN
+                pstatus := 'GET_POS17_TESTS ' || SUBSTR(SQLERRM, 1, 1000);
+                RETURN strings_nt();        
+        END get_pos17_tests;
+
+        FUNCTION get_RC003_test_info(pResultValue IN NUMBER) 
+            RETURN test_rec 
+        IS
+            lv_rec test_rec;
+        BEGIN
+            lv_rec.test_id := NULL;
+            lv_rec.test_desc := NULL;
+            
+            SELECT test_ids, test_desc
+              INTO lv_rec.test_id, lv_rec.test_desc
+              FROM valid_antigens_rcvs_det
+             WHERE rc_id= 'RC003'
+              AND result_value = pResultValue;  
+            
+            RETURN lv_rec;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN lv_rec;
+        END get_RC003_test_info;
+
+        FUNCTION eye_readable_for_16_positions(pStatus OUT VARCHAR2) RETURN VARCHAR2 IS
+            lv_return_string VARCHAR2(2000);
+
+            lv_test_ids             VARCHAR2(100);
+            lv_result_combination   VARCHAR2(100);           
+            
+            TYPE numbers_aat IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
+            barcode_numbers_list numbers_aat;
+
+            TYPE strings_aat IS TABLE OF VARCHAR2(50) INDEX BY PLS_INTEGER;
+            eye_readable_list strings_aat;
+
+            exit_error EXCEPTION;
+    
+            PROCEDURE add_eye_readable_list(test_and_result_in IN VARCHAR2) IS
+            BEGIN
+                eye_readable_list(NVL(eye_readable_list.LAST,0) +1) := test_and_result_in;
+            END add_eye_readable_list; 
+           
+
+        BEGIN
+            pStatus := 'OK';
+            
+            -- get array of numbers in the barcode by pos.
+            select REGEXP_SUBSTR(barcode_string_in,'[[:alnum:]]',1,level) 
+            BULK COLLECT INTO barcode_numbers_list
+               FROM dual
+              connect by level <=length(barcode_string_in);
+            
+            FOR indx IN NVL(barcode_numbers_list.FIRST,1) .. NVL(barcode_numbers_list.LAST,0)
+            LOOP
+                -- Only need the first 16 numbers of barcode string.
+                EXIT WHEN indx > 16;
+                
+                -- Ignore if the barcode number is 9 (9 indicates no information)
+                IF barcode_numbers_list(indx) = 9 THEN
+                    CONTINUE; 
+                END IF;                
+                
+                -- get test id and result combination for the barcode number.
+                -- Eg:
+                -- for a value of 0 at pos 1: C,c,E,e and +,-,+,-
+                -- for a value of 4 at pos 2: K,k and -,-
+                BEGIN
+                    SELECT ds.test_ids, rcvs.result_combination
+                     INTO lv_test_ids, lv_result_combination
+                     FROM valid_antigen_ds_det ds, valid_antigens_rcvs_det rcvs
+                     WHERE ds.rc_id = rcvs.rc_id
+                      AND rcvs.result_value = barcode_numbers_list(indx)
+                      AND ds.pos_no = indx
+                      AND ds.ds_id = 'DS012';                        
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        pStatus := 'GET_TEST_RC_FOR_VALUE ' || barcode_numbers_list(indx) || ' :ERROR: ' || SUBSTR(SQLERRM, 1, 1000);
+                        RAISE exit_error;
+                END;              
+                
+
+                -- Build eye readabile list. 
+                -- Eg: 
+                -- for a value of 0 at pos 1: C,c,E,e and +,-,+,-
+                -- returns C+,c-,E+,e-
+                -- for a value of 4 at pos 2: K,k and -,-
+                -- returns K-,k-
+                
+                FOR rec IN 
+                    ( SELECT TRIM(REGEXP_SUBSTR(lv_test_ids, '[^,]+', 1, LEVEL)) test_id
+                            , TRIM(REGEXP_SUBSTR(lv_result_combination, '[^,]+', 1, LEVEL)) test_result
+                        FROM DUAL
+                        CONNECT BY REGEXP_SUBSTR(lv_test_ids, '[^,]+', 1, LEVEL) IS NOT NULL
+                    )
+                LOOP
+                    -- ignore nt tests.
+                    IF rec.test_result != 'nt' THEN 
+                        add_eye_readable_list(rec.test_id || rec.test_result);
+                    END IF;                    
+                END LOOP;
+            END LOOP;
+            
+            -- Build eye readable string from eye readable list.
+            lv_return_string := '';
+            FOR indx IN NVL(eye_readable_list.FIRST,1) .. NVL(eye_readable_list.LAST,0)
+            LOOP
+                lv_return_string := lv_return_string || ',' || eye_readable_list(indx);
+                --DBMS_OUTPUT.PUT_LINE(final_list(indx));
+            END LOOP;
+            
+            lv_return_string := TRIM (BOTH ',' FROM lv_return_string);
+            
+            RETURN lv_return_string;
+            
+        EXCEPTION
+            WHEN exit_error THEN
+                RETURN NULL;
+            WHEN OTHERS THEN
+                pStatus := 'Eye Readable for 16 - Error ' || SUBSTR(SQLERRM, 1, 1000);
+                RETURN NULL;
+        END eye_readable_for_16_positions;
+
+        FUNCTION mastercode_desc(pCode IN VARCHAR2) RETURN VARCHAR2 IS
+            lv_desc VARCHAR2(300);
+        BEGIN
+            SELECT code_desc INTO lv_desc
+              FROM master_codes 
+              WHERE code_type = 'AGMGR'
+               AND code = pCode
+               AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1);        
+            RETURN lv_desc;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN NULL;        
+        END mastercode_desc;
+        
+        FUNCTION cmv_test_id RETURN VARCHAR2 IS
+            lv_test_id VARCHAR2(20);
+        BEGIN
+            SELECT SUBSTR(test_ids, INSTR(test_ids, ',')+1 )
+              INTO lv_test_id
+              FROM valid_antigen_ds_det
+             WHERE pos_no = 16
+              AND ds_id= 'DS012';
+            RETURN lv_test_id;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN NULL;
+        END cmv_test_id;
+    BEGIN
+        eye_readable_out         := NULL;
+        special_eye_readable_out := NULL;
+        status_out               := 'OK';
+        
+        IF NOT AG_UTIL.IS_LICENSED THEN
+            status_out := 'Not licensed to use.';
+            RETURN;
+        END IF;
+        
+        -- Input parameter validations
+        IF unit_id_in IS NULL THEN
+            status_out := 'Unit is required.';
+            RETURN;        
+        END IF;
+        
+        IF barcode_string_in IS NULL THEN
+            eye_readable_out := NULL;
+            status_out      := 'OK';
+            RETURN;
+        END IF;
+        
+        IF REGEXP_SUBSTR(barcode_string_in,'[[:alpha:]]') IS NOT NULL THEN
+            eye_readable_out := NULL;
+            status_out := 'Barcode string cannot contain alpha characters ' || barcode_string_in;
+            RETURN;
+        END IF;
+        
+
+        IF selected_tests_csv_in IS NULL THEN
+            eye_readable_out := NULL;
+            status_out       := 'OK';
+            RETURN;
+        END IF;
+        
+
+        -- first check if eyereadable is required or not.
+        -- Construction of eye readable is only for case where multiple antigens
+        -- are found in 17,18 position.
+        -- This is because of a limitation with digitrax where they only show 
+        -- the first available antigen.
+        
+        -- Get RC_ID for POS 17        
+        lv_rc_id := pos17_rc_id(status_out);
+        IF status_out <> 'OK' THEN
+            RETURN;        
+        END IF;
+        
+        -- Get all the tests for pos17.
+        pos17_tests_list := get_pos17_tests(status_out);
+        IF status_out <> 'OK' THEN
+            RETURN;
+        END IF;
+        
+        
+        -- Eye readable construction not needed - as not tests found.
+        IF pos17_tests_list.COUNT = 0 THEN
+            eye_readable_out := NULL;
+            status_out := 'OK';
+            RETURN;
+        END IF;
+        
+        -- Eye readable construction not needed - as only one test found. 
+        -- Digitrax can handle this.
+        IF pos17_tests_list.COUNT = 1 THEN
+            eye_readable_out := NULL;
+            status_out := 'OK';
+            RETURN;                
+        END IF;        
+        
+        
+        lv_eye_readable := eye_readable_for_16_positions(status_out);
+        IF status_out <> 'OK' THEN
+            eye_readable_out := NULL;
+            RETURN;
+        END IF;
+        
+        --DBMS_OUTPUT.PUT_LINE('Eye readable 1                ' || lv_eye_readable); 
+        
+        
+        -- Special scenario for CMV(16)
+        -- popuate CMV_rec.
+        BEGIN
+            CMV_rec.test_id := NVL(cmv_test_id, 'CMV');
+            
+            -- if CMV+ or CMV- is found in eye readable, remove it and store cmv desc in a variable.   
+            IF INSTR(lv_eye_readable, CMV_rec.test_id||'+') <> 0 THEN -- CMV+
+                lv_eye_readable := RTRIM(REPLACE(lv_eye_readable, CMV_rec.test_id||'+'),',');
+                CMV_rec.eye_readable := NVL(mastercode_desc('CMVP'), 'Anti-CMV Pos.');
+            ELSIF INSTR(lv_eye_readable, CMV_rec.test_id||'-') <> 0 THEN
+                lv_eye_readable := RTRIM(REPLACE(lv_eye_readable, CMV_rec.test_id||'-'),',');
+                CMV_rec.eye_readable := NVL(mastercode_desc('CMVN'), 'Anti-CMV Neg.');
+            END IF;
+        END; 
+        --DBMS_OUTPUT.PUT_LINE('Eye readable 1 without CMV    ' || lv_eye_readable);         
+        --------------------------------------
+
+        -- For 17,18 positions. Build Eyereadable. 
+        -- Special scenario for HbS (96), IgA (98), PARVO (97). Code Desc has to be used if found.
+
+        HBS_rec     := get_RC003_test_info(96);
+        IGA_rec     := get_RC003_test_info(97);
+        PARVO_rec   := get_RC003_test_info(98); 
+            
+        FOR indx IN NVL(pos17_tests_list.FIRST,1) .. NVL(pos17_tests_list.LAST,0)
+        LOOP
+            DECLARE
+                lv_test_id VARCHAR2(20);
+            BEGIN
+                -- Extract test id from list. (HbS-, IgA+, Kpb-)
+                lv_test_id := SUBSTR(pos17_tests_list(indx), 1, LENGTH(pos17_tests_list(indx)) - 1);
+                
+                -- Special case for HBS, PARVO, IGA
+                -- These special tests get added as desc to the end of the eye readable.
+                IF lv_test_id = NVL(HBS_rec.test_id,'HbS')  THEN                         
+                    HBS_rec.eye_readable := NVL(HBS_rec.test_desc, 'HbS Deficient');                        
+                ELSIF lv_test_id = NVL(IGA_rec.test_id,'IgA') THEN
+                    IGA_rec.eye_readable := NVL(IGA_rec.test_desc, 'IgA Deficient');
+                ELSIF lv_test_id = NVL(PARVO_rec.test_id,'PARVO') THEN
+                    PARVO_rec.eye_readable := NVL(PARVO_rec.test_desc, 'Parvovirus B19 antibody present');                            
+                ELSE
+                    lv_eye_readable := lv_eye_readable || ',' || pos17_tests_list(indx);
+                END IF;
+            END;
+        END LOOP;
+        -- Eye readable for 18 positions without CMV, HBS, IGA, PARVO.    
+        lv_eye_readable := TRIM (BOTH ',' FROM lv_eye_readable);
+        
+        ----------------------------    
+        -- construct eyereadable for CMV, HBS, IGA, PARVO
+        IF HBS_rec.eye_readable IS NOT NULL THEN
+            lv_special_eye_readable := lv_special_eye_readable || ',' || HBS_rec.eye_readable;
+        END IF;
+        IF CMV_rec.eye_readable IS NOT NULL THEN
+            lv_special_eye_readable := lv_special_eye_readable || ',' || CMV_rec.eye_readable;
+        END IF;                
+        IF IGA_rec.eye_readable IS NOT NULL THEN
+            lv_special_eye_readable := lv_special_eye_readable || ',' || IGA_rec.eye_readable;
+        END IF; 
+        IF PARVO_rec.eye_readable IS NOT NULL THEN
+            lv_special_eye_readable := lv_special_eye_readable || ',' || PARVO_rec.eye_readable;
+        END IF; 
+            
+        lv_special_eye_readable := TRIM (BOTH ',' FROM lv_special_eye_readable);
+           
+        --DBMS_OUTPUT.PUT_LINE('Special eye readable          ' || lv_special_eye_readable);
+        
+        /* This is done in AGLBL screen.
+        -- Add a pipe symbol to put the special eye readable in a seperate line.    
+        IF lv_special_eye_readable IS NOT NULL THEN
+            lv_eye_readable := lv_eye_readable || '|' || lv_special_eye_readable;
+        END IF;
+        */
+        
+        --DBMS_OUTPUT.PUT_LINE('Final Eye readable            ' || lv_eye_readable);
+        eye_readable_out            := lv_eye_readable;
+        special_eye_readable_out    := lv_special_eye_readable;
+        
+        status_out := 'OK';
+    END get_eye_readable_string;
+
+END AG_LBL;
+/

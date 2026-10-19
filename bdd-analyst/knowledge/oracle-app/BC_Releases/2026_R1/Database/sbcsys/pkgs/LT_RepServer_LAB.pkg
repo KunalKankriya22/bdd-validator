@@ -1,0 +1,411 @@
+/* Formatted on 2012/04/10 14:24 (Formatter Plus v4.8.5) */
+CREATE OR REPLACE PACKAGE LT_RepServer_Lab
+AUTHID CURRENT_USER
+IS
+     /*-----------------------------------------------------------------------------
+     PACKAGE     :  LT_REP_SERVER_CHECK_DONOR
+     PURPOSE     :  Get Report server that has least active jobs and get report server URL.
+     DEVELOPER   :  Ashok Vardhan
+     DEV. DATE   :  04/11/2012
+     NOTES       :  Initial version.
+     Ver         :  02
+
+     Modification History
+     -------------------------------------------------------------------------------
+     Modified by    on    Version  Remarks
+     -------------------------------------------------------------------------------
+     Ashok   08/20/2018   03       get_reports_url modified
+                                   update_repsrv_status and set_debug_mode routines added.
+     -----------------------------------------------------------------------------
+     */
+   -- This routine is used to return least active jobs server name.
+   PROCEDURE get_reports_server (
+      out_server_name   OUT   VARCHAR2,
+      out_error_msg     OUT   VARCHAR2
+   );
+
+   -- This routine is used to return the URL link for the reports server on which the input job id was submitted.	 
+   PROCEDURE get_reports_url (
+      in_server_name   IN       VARCHAR2,
+      out_server_url   OUT      VARCHAR2,
+      out_error_msg    OUT      VARCHAR2
+   );
+   
+   -- This routine is used to update rep server status to Y(server is up or reachable) OR N (server is down or not reachable)
+   PROCEDURE update_repsrv_status;   
+   
+   PROCEDURE set_debug_mode(flag_in IN BOOLEAN);   
+END LT_RepServer_Lab;
+/
+CREATE OR REPLACE PACKAGE BODY LT_RepServer_Lab
+IS
+	/*-----------------------------------------------------------------------------
+	PACKAGE     :  LT_REP_SERVER_CHECK_LAB
+	PURPOSE     :  Get Report server that has least active jobs and get report server URL.
+	DEVELOPER   :  Ashok Vardhan
+	DEV. DATE   :  04/11/2012
+	NOTES       :  Initial version.
+	Ver         :  01
+	
+	Modification History
+	-------------------------------------------------------------------------------
+	Modified by    on    Version  Remarks
+	-------------------------------------------------------------------------------
+	
+	-----------------------------------------------------------------------------
+	*/
+
+   gb_debug_on BOOLEAN := FALSE;
+   
+   PROCEDURE get_url_response(url_req_in    IN VARCHAR2,
+                             url_resp_out OUT VARCHAR2,
+                             errmsg_out   OUT VARCHAR2);
+
+   Procedure log_err(err_cd in varchar2, err_text in varchar2);
+
+  PROCEDURE set_debug_mode(flag_in IN BOOLEAN) IS 
+  BEGIN
+    gb_debug_on := flag_in;
+  END set_debug_mode;
+  
+   -- This routine is used to return least active jobs server name.
+   PROCEDURE get_reports_server (
+      out_server_name   OUT   VARCHAR2,
+      out_error_msg     OUT   VARCHAR2
+   )
+   IS
+      -- local global variables used in this routine
+      lg_svr_name    VARCHAR2 (100);
+      lg_err_msg     VARCHAR2 (100);
+      -- local variable to hold count of servers configured.
+      l_svr_cnt      NUMBER;
+      -- Exception to exit the routine and to assign out variables for this routine.
+      exit_process   EXCEPTION;
+
+      -- Cursor to fetch default reports server name from VALID_MASTER_CODES table.
+      CURSOR default_svr_cur
+      IS
+         SELECT code_info
+           FROM rpt_master_codes
+          WHERE code_type = 'OASVR'
+            AND code LIKE 'R%'
+            AND second_definition IS NOT NULL
+            AND NVL(location_id,'X') = 'Y';
+			
+	   FUNCTION least_ActiveJobs_Server RETURN VARCHAR2 IS
+			cntr NUMBER := NULL;
+			l_cnt NUMBER;
+			l_svr_name VARCHAR2(100);
+			CURSOR rpt_svr_cur IS
+			  SELECT code_info
+			    FROM rpt_master_codes
+			   WHERE code_type = 'OASVR'
+			     AND code LIKE 'R%'
+            AND second_definition IS NOT NULL
+            AND NVL(location_id,'X') = 'Y';
+		BEGIN		
+			FOR rpt_svr_rec IN rpt_svr_cur LOOP
+			 SELECT count(1) INTO l_cnt
+			   FROM rw_server_job_queue
+			  WHERE lower(server) = lower(rpt_svr_rec.code_info)
+			    AND status_code IN
+			                   (1,                           -- ENQUEUED
+			                    2,                          -- OPENING
+			                    3)                        -- RUNNING
+			    AND job_type != 'Scheduled';		
+					  
+			  IF cntr IS NULL THEN
+			    cntr  	   := l_cnt;
+				l_svr_name := rpt_svr_rec.code_info;
+			  ELSE
+			    IF l_cnt < cntr THEN
+				  cntr := l_cnt;
+				  l_svr_name := rpt_svr_rec.code_info;
+				END IF;
+			  END IF;			  
+			  --DBMS_OUTPUT.PUT_LINE('Server: ' || rpt_svr_rec.code_info || ' and count: ' || l_cnt);
+			  --DBMS_OUTPUT.PUT_LINE('Description ' || l_svr_name);
+			END LOOP;  
+			
+			RETURN l_svr_name;
+		END least_ActiveJobs_Server;				
+   BEGIN
+      -- Initialise local global variables to null.
+      lg_svr_name := NULL;
+      lg_err_msg := NULL;
+
+      -- Check if only one server is configured.
+      SELECT COUNT(1) INTO l_svr_cnt
+        FROM rpt_master_codes
+       WHERE code_type = 'OASVR'
+         AND UPPER (code) LIKE 'R%'
+        AND second_definition IS NOT NULL
+        AND NVL(location_id,'X') = 'Y'   ;
+
+      -- If No servers are configured, assign message to error variable and exit.
+      IF l_svr_cnt = 0 THEN
+         --DBMS_OUTPUT.put_line ('No servers');
+         lg_err_msg := 'Report server is not defined in the RPT MASTER CODES table for OASVR';
+         RAISE exit_process;
+      END IF;
+
+      -- Only if Single Server is configured.  Get the default server.
+      IF l_svr_cnt = 1 THEN
+         --DBMS_OUTPUT.put_line ('Single Server');
+         -- Fetch only one record
+         OPEN default_svr_cur;
+         FETCH default_svr_cur INTO lg_svr_name;
+         CLOSE default_svr_cur;
+
+         -- If server name is null, there might be an error configuring the master code.  Assign error message and exit.
+         IF lg_svr_name IS NULL THEN
+            lg_err_msg := 'Rpt Master code OASVR is not configured properly, check port number';
+         END IF;
+
+         RAISE exit_process;
+      END IF;
+
+      -- Only if Multiple Servers are configured.
+      IF l_svr_cnt > 1 THEN
+      -- DBMS_OUTPUT.put_line ('Multiple servers');
+
+         -- Get the least active jobs server from RW_SERVER_JOB_QUEUE. Least_ActiveJobs_Server will return the least active job. 
+		 -- There should be some value returned into lg_svr_name.  If not, master code might not be configured properly.
+		 lg_svr_name := least_ActiveJobs_Server;
+
+         -- If server name is null, there might be an error configuring the master code.  Assign error message and exit.
+         IF lg_svr_name IS NULL THEN
+            lg_err_msg := 'Rpt Master code OASVR is not configured properly';
+         END IF;
+
+         RAISE exit_process;
+      END IF;
+   EXCEPTION
+      WHEN exit_process THEN
+         out_error_msg := lg_err_msg;
+         out_server_name := lg_svr_name;
+      WHEN OTHERS THEN
+         out_error_msg := SQLCODE || '-' || SUBSTR (SQLERRM, 1, 75);
+         out_server_name := NULL;
+   END get_reports_server;
+
+   --------------------------------------------------------------------------------------------------
+   -- This routine is used to return the URL link for the reports server on which the input job id was submitted.
+   PROCEDURE get_reports_url (
+      in_server_name   IN       VARCHAR2,
+      out_server_url   OUT      VARCHAR2,
+      out_error_msg    OUT      VARCHAR2
+   )
+   IS
+      lg_svr_url    VARCHAR2 (500) := NULL;
+      lg_err_msg    VARCHAR2 (100) := NULL;
+      lg_port_no    VARCHAR2 (15)  := NULL;
+      error_exit    EXCEPTION;
+	  
+      -- Get the Port number of the URL ('OASVR' - Code Type, Server Name - Description, Port Number - Numeral sequence).
+      CURSOR rpt_svr_cur (p_svr_name VARCHAR2)
+      IS
+         SELECT second_definition -- port number
+           FROM rpt_master_codes
+          WHERE code_type = 'OASVR'
+            AND LOWER (code_info) = LOWER (p_svr_name);
+
+      -- Get the URL for the report server.  ( 'OASVR' - Code Type, Port Number - Code , URL - Description )
+      CURSOR rpt_url_cur (p_port_no VARCHAR2)
+      IS
+         SELECT code_info
+           FROM rpt_master_codes
+          WHERE code_type = 'OASVR'
+            AND code = p_port_no;
+   BEGIN
+      -- Get the Port number of the URL ('OASVR' - Code Type, Server Name - Description, Port Number - Numeral sequence).
+      OPEN rpt_svr_cur (in_server_name);
+      FETCH rpt_svr_cur INTO lg_port_no;
+      CLOSE rpt_svr_cur;
+
+      IF lg_port_no IS NULL THEN
+         lg_err_msg := 'Report Server is not defined in Master Codes OR Numeral value is empty';
+         RAISE error_exit;
+      END IF;
+
+      -- Get the URL for the report server.  ( 'OASVR' - Code Type, Port Number - Code , URL - Description )
+      OPEN rpt_url_cur (TO_CHAR (lg_port_no));
+      FETCH rpt_url_cur INTO lg_svr_url;
+      CLOSE rpt_url_cur;
+
+      IF lg_svr_url IS NULL THEN
+         lg_err_msg := 'Report Server URL is not defined in Master Code';
+         RAISE error_exit;
+      END IF;
+	  
+      out_server_url  := lg_svr_url;
+   EXCEPTION
+      WHEN error_exit THEN
+         out_error_msg := lg_err_msg;
+      WHEN OTHERS THEN
+         out_error_msg := SQLCODE || '-' || SUBSTR (SQLERRM, 1, 75);
+   END get_reports_url;
+   -------------------------------------------------------------------------------------
+   
+   
+  PROCEDURE get_url_response(url_req_in    IN VARCHAR2,
+                             url_resp_out OUT VARCHAR2,
+                             errmsg_out   OUT VARCHAR2) AS
+    req   UTL_HTTP.req;
+    resp  UTL_HTTP.resp;
+    lv_msg VARCHAR2(10000);
+  BEGIN 
+    /* request that exceptions are raised for error Status Codes */
+    UTL_HTTP.set_response_error_check(ENABLE => TRUE);
+    /* allow testing for exceptions like Utl_Http.Http_Server_Error */
+    UTL_HTTP.set_detailed_excp_support(ENABLE => TRUE);
+
+    req  := UTL_HTTP.begin_request(url => url_req_in, method => 'GET');
+    resp := UTL_HTTP.get_response(r => req);
+
+    -- For serverinfo command, Response maximum size is 2000.  So, below loop logic will be executed only once.
+    BEGIN
+      LOOP
+        UTL_HTTP.read_text(r => resp, DATA => lv_msg);
+        url_resp_out := url_resp_out || lv_msg;
+      END LOOP;
+    EXCEPTION
+      WHEN UTL_HTTP.end_of_body THEN
+        NULL;
+    END;
+  
+    UTL_HTTP.end_response(r => resp);
+  
+  EXCEPTION
+    WHEN UTL_HTTP.request_failed THEN      
+      errmsg_out := 'Request_Failed: ' || SUBSTR(UTL_HTTP.get_detailed_sqlerrm, 1, 500);
+      UTL_HTTP.end_response(r => resp);
+    WHEN UTL_HTTP.http_server_error THEN /* raised by URL http://xxx.oracle.com/ */     
+      errmsg_out := 'Server_Error: ' ||  SUBSTR(UTL_HTTP.get_detailed_sqlerrm, 1, 500);
+      UTL_HTTP.end_response(r => resp);
+    WHEN UTL_HTTP.http_client_error THEN /* raised by URL http://otn.oracle.com/xxx */
+      errmsg_out := 'Client_Error: ' || SUBSTR(UTL_HTTP.get_detailed_sqlerrm, 1, 500);
+      UTL_HTTP.end_response(r => resp);
+    WHEN OTHERS THEN      /* code for all the other defined exceptions you can recover from */
+      errmsg_out := 'SQL Error Msg: ' || SUBSTR(sqlerrm, 1, 500);
+      UTL_HTTP.end_response(r => resp);
+  END get_url_response;
+
+
+  PROCEDURE update_repsrv_status IS
+  /*  
+    -- procedure to update the location_id for report server confgigured in rpt_master_codes table;
+    -- Location_id is used to indicate if the server is reachable or not(Y- Yes, N- No);
+    -- location_id flag is used in get_Reports_server routine to only look for reachable servers 
+    -- while getting report server name for report jobs submission.
+  */  
+    CURSOR repsrv_cur IS -- Get report server names configured in master codes.
+      SELECT code, code_info
+        FROM rpt_master_codes
+       WHERE code_type = 'OASVR'
+         AND code LIKE 'R%';    
+    lv_repsrv_name VARCHAR2(100);
+    lv_repsrv_url  VARCHAR2(100);
+    lv_httpsrv_req VARCHAR2(1000);
+    lv_err_msg     VARCHAR2(1000);
+    
+    ln_resp_err_pos  NUMBER;
+    
+    lv_httpsrv_resp    VARCHAR2(4000);
+    server_down    EXCEPTION;
+    -- Procedure to udpate location_id in rpt_master_code
+    PROCEDURE update_server_status(p_code IN VARCHAR2, p_flag IN VARCHAR2) IS
+    BEGIN
+      if gb_debug_on then
+        dbms_output.put_line('Code: ' || p_code || ' -- Status: ' || p_flag);        
+      end if;
+      UPDATE rpt_master_codes
+         SET location_id = p_flag
+       WHERE code_type = 'OASVR'
+         AND code =  p_code;  
+    END update_server_status;             
+  BEGIN
+    FOR repsrv_rec IN repsrv_cur LOOP
+      BEGIN
+        lv_repsrv_name := repsrv_rec.code_info;
+        
+        if gb_debug_on then
+          dbms_output.put_line('Checking Report server: ' || repsrv_rec.code_info || ' Code: ' || repsrv_rec.code );
+        end if;
+        -- Gets the URL from rpt_master_codes based on portnumber. 
+        -- Eg: http://10.155.194.19:9002
+        LT_RepServer_Lab.get_reports_url( in_server_name => lv_repsrv_name,
+                                          out_server_url => lv_repsrv_url,
+                                          out_error_msg  => lv_err_msg
+                                        );      
+        if gb_debug_on then
+          dbms_output.put_line('RepSvr URL -- ' || lv_repsrv_url);
+        end if;
+        
+        IF lv_err_msg IS NOT NULL THEN
+           log_err('1', lv_repsrv_name || '--get_reports_url-- ' || lv_err_msg);
+           RAISE server_down;
+        END IF;     
+                                               
+        lv_httpsrv_req := lv_repsrv_url || '/reports/rwservlet/getserverinfo?server=' || lv_repsrv_name || '&&statusformat=xml';
+        
+        if gb_debug_on then
+          dbms_output.put_line('Req URL -- ' || lv_httpsrv_req);  
+        end if;
+
+        lt_repserver_lab.get_url_response(
+                         url_req_in    => lv_httpsrv_req,
+                         url_resp_out => lv_httpsrv_resp,
+                         errmsg_out   => lv_err_msg
+                         );   
+ 
+                                
+        if lv_err_msg is not null then -- http error
+           log_err('2', lv_repsrv_name || '--get_url_response-- ' ||lv_err_msg || '-- URL: ' || lv_httpsrv_req);          
+           RAISE server_down;
+        end if;
+        
+        SELECT INSTR(lv_httpsrv_resp, 'code="51002"') into ln_resp_err_pos from dual;
+
+        IF ln_resp_err_pos > 0 THEN
+           log_err('3', lv_repsrv_name || '-- REP 51002 - Bind to reports server failed.');          
+           RAISE server_down;
+        END IF;
+
+        update_server_status(p_code => repsrv_rec.code, p_flag => 'Y');
+
+      EXCEPTION
+        WHEN server_down THEN
+          update_server_status(p_code => repsrv_rec.code, p_flag => 'N');
+        WHEN others THEN
+          log_err('4', lv_repsrv_name || '--In OTHERS-- '|| sqlerrm);
+          update_server_status(p_code => repsrv_rec.code, p_flag => 'N');          
+      END;
+                              
+    END LOOP;
+    
+    COMMIT;
+  EXCEPTION
+    WHEN others THEN
+         log_err('5','update_repsrv_status -- ' || SQLERRM);           
+  END update_repsrv_status;
+
+
+  Procedure log_err(err_cd in varchar2, err_text in varchar2) is
+       PRAGMA AUTONOMOUS_TRANSACTION;
+   BEGIN
+     if gb_debug_on then
+       dbms_output.put_line(err_cd || '--' || err_text);       
+     end if;
+       insert into user_error_log
+       (insert_dats,     user_id,        program_name,
+        error_code,      error_msg)
+       values
+       (sysdate,         'SYSTEM',       'REPSRV',
+        substr(err_cd,1,4),   substr(err_text,1,500));
+       COMMIT;
+   END;   
+END LT_RepServer_Lab;
+/
+create or replace public synonym LT_REPSERVER_LAB for SBCSYS.LT_REPSERVER_LAB;
+grant execute on OPS$SBCSYS.LT_REPSERVER_LAB to public;

@@ -1,0 +1,387 @@
+<app-page-header-with-breadcrumb [config]="pageHeaderConfig"></app-page-header-with-breadcrumb>
+
+<div class="non-extracted-batches-container">
+  <!-- Search Form Section -->
+  <section class="search-section" [attr.aria-labelledby]="elementId('heading')" role="region">
+    <form [formGroup]="queryForm" (ngSubmit)="onRetrieve()" [id]="elementId('query-form')" novalidate>
+      <div class="form-row">
+        <!-- Contract ID -->
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label [id]="labelId('contractId')">Contract ID</mat-label>
+          <mat-select
+            [id]="elementId('contractId')"
+            formControlName="contractId"
+            [attr.aria-labelledby]="labelId('contractId')"
+            panelClass="filter-select-panel">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="contractIdSearchControl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="No matches found">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (contract of filteredContracts(); track contract.contractId) {
+              <mat-option [value]="contract.contractId">
+                {{ contract.contractId }} - {{ contract.company }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Contract ID Description (Read-only) -->
+        <div
+          class="field-label"
+          [id]="elementId('contract-description')"
+          role="group"
+          aria-label="Contract ID description for selected contract">
+          <span class="label">Contract ID Description</span>
+          <span class="value" aria-live="polite">{{ contractDescription() }}</span>
+        </div>
+
+        <!-- From Date -->
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label [id]="labelId('fromDate')">From Date <span style="color: #ff0000;">*</span></mat-label>
+          <input
+            matInput
+            [matDatepicker]="fromDatePicker"
+            [id]="elementId('fromDate')"
+            formControlName="fromDate"
+            [max]="maxDate()"
+            placeholder="DD-MMM-YYYY"
+            autocomplete="off"
+            [errorStateMatcher]="fromDateErrorMatcher"
+            (blur)="onDateBlur($event, 'fromDate')"
+            (keydown.enter)="onDateBlur($event, 'fromDate')"
+            (input)="onFromDateInput($event)"
+            [attr.aria-required]="true"
+            aria-label="From date">
+          <mat-datepicker-toggle matIconSuffix [for]="fromDatePicker"></mat-datepicker-toggle>
+          <mat-datepicker #fromDatePicker></mat-datepicker>
+          @if (queryForm.get('fromDate')?.hasError('matDatepickerParse') || queryForm.get('fromDate')?.hasError('invalidDate')) {
+            <mat-error>From Date is invalid</mat-error>
+          } @else if (queryForm.get('fromDate')?.hasError('futureDate')) {
+            <mat-error>From Date cannot be in the future</mat-error>
+          } @else if (queryForm.get('fromDate')?.hasError('fromAfterTo')) {
+            <mat-error>From Date cannot be after To Date</mat-error>
+          } @else if (queryForm.get('fromDate')?.hasError('required') && (queryForm.get('fromDate')?.touched || submitted())) {
+            <mat-error>From Date is required</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- To Date -->
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label [id]="labelId('toDate')">To Date <span style="color: #ff0000;">*</span></mat-label>
+          <input
+            matInput
+            [matDatepicker]="toDatePicker"
+            [id]="elementId('toDate')"
+            formControlName="toDate"
+            [max]="maxDate()"
+            placeholder="DD-MMM-YYYY"
+            autocomplete="off"
+            [errorStateMatcher]="toDateErrorMatcher"
+            (blur)="onDateBlur($event, 'toDate')"
+            (keydown.enter)="onDateBlur($event, 'toDate')"
+            (input)="onToDateInput($event)"
+            [attr.aria-required]="true"
+            aria-label="To date">
+          <mat-datepicker-toggle matIconSuffix [for]="toDatePicker"></mat-datepicker-toggle>
+          <mat-datepicker #toDatePicker></mat-datepicker>
+          @if (queryForm.get('toDate')?.hasError('matDatepickerParse') || queryForm.get('toDate')?.hasError('invalidDate')) {
+            <mat-error>To Date is invalid</mat-error>
+          } @else if (queryForm.get('toDate')?.hasError('futureDate')) {
+            <mat-error>To Date cannot be in the future</mat-error>
+          } @else if (queryForm.get('toDate')?.hasError('toDateRequired')) {
+            <mat-error>To Date is required when From Date is entered</mat-error>
+          } @else if (queryForm.get('toDate')?.hasError('required') && (queryForm.get('toDate')?.touched || submitted())) {
+            <mat-error>To Date is required</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Action Buttons -->
+        <div class="form-actions" role="group" [attr.aria-label]="'Form actions'">
+          <button
+            mat-raised-button
+            color="primary"
+            type="submit"
+            [id]="elementId('retrieve-btn')"
+            [disabled]="isRetrieveDisabled">
+            RETRIEVE
+          </button>
+          <button
+            mat-stroked-button
+            type="button"
+            [id]="elementId('clear-btn')"
+            (click)="clearAll()">
+            CLEAR ALL
+          </button>
+        </div>
+      </div>
+    </form>
+  </section>
+
+  <!-- Loading State -->
+  @if (loading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading batches"></mat-spinner>
+      <span>Loading batches...</span>
+    </div>
+  }
+
+  <!-- Results Section - Three Panel Layout -->
+  @if (hasResults() && !loading()) {
+    <section class="results-section" [attr.aria-labelledby]="elementId('results-heading')" role="region">
+      <div class="three-panel-layout">
+        <!-- Panel 1: Unextracted Batches -->
+        <mat-card class="results-panel batches-panel">
+          <mat-card-header>
+            <mat-card-title [id]="elementId('batches-heading')">
+              Unextracted Batches
+            </mat-card-title>
+            </mat-card-header>
+          <mat-card-content>
+            <div class="table-container">
+              <table
+                mat-table
+                [dataSource]="sortedBatches()"
+                matSort
+                (matSortChange)="onSortBatches($event)"
+                class="batches-table">
+                <caption class="sr-only">
+                  List of {{ batches().length }} unextracted batches. Select a batch to view its units.
+                </caption>
+
+                <!-- Batch ID Column -->
+                <ng-container matColumnDef="batchId">
+                  <th mat-header-cell *matHeaderCellDef mat-sort-header scope="col">
+                    Batch ID ({{ batches().length }})
+                  </th>
+                  <td mat-cell *matCellDef="let batch">
+                    <button
+                      class="batch-link"
+                      (click)="onBatchSelect(batch)"
+                      [class.selected]="isBatchSelected(batch)"
+                      [attr.aria-pressed]="isBatchSelected(batch)">
+                      {{ batch.batchId }}
+                    </button>
+                  </td>
+                </ng-container>
+
+                <!-- Count Column -->
+                <ng-container matColumnDef="numberOfUnits">
+                  <th mat-header-cell *matHeaderCellDef mat-sort-header scope="col">Count</th>
+                  <td mat-cell *matCellDef="let batch">{{ batch.numberOfUnits || 0 }}</td>
+                </ng-container>
+
+                <!-- Check-In QC Column -->
+                <ng-container matColumnDef="qcCheckinDate">
+                  <th mat-header-cell *matHeaderCellDef scope="col">Check-In QC</th>
+                  <td mat-cell *matCellDef="let batch">
+                    {{ batch.qcDate ? formatDateTimeUtc(batch.qcDate) : '-' }}
+                  </td>
+                </ng-container>
+
+                <tr mat-header-row *matHeaderRowDef="batchColumns; sticky: true"></tr>
+                <tr mat-row *matRowDef="let row; columns: batchColumns;"></tr>
+              </table>
+            </div>
+          </mat-card-content>
+        </mat-card>
+
+        <!-- Panel 2: Unextracted Units -->
+        <mat-card class="results-panel units-panel">
+          <mat-card-header>
+            <mat-card-title [id]="elementId('units-heading')">
+              {{ unitsHeader() }}
+            </mat-card-title>
+          </mat-card-header>
+          <mat-card-content>
+            @if (loadingUnits()) {
+              <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+                <mat-spinner diameter="30" aria-label="Loading units"></mat-spinner>
+                <span>Loading units...</span>
+                <span class="sr-only">Please wait while units are being loaded</span>
+              </div>
+            } @else if (units().length === 0 && selectedBatchId()) {
+              <div class="empty-state">
+                <mat-icon aria-hidden="true">search_off</mat-icon>
+                <p>No units found for this batch</p>
+              </div>
+            } @else if (units().length === 0) {
+              <div class="empty-state">
+                <mat-icon aria-hidden="true">info</mat-icon>
+                <p>Select a batch to view units</p>
+              </div>
+            } @else {
+              <div class="table-container">
+                <table
+                  mat-table
+                  [dataSource]="sortedUnits()"
+                  matSort
+                  (matSortChange)="onSortUnits($event)"
+                  class="units-table">
+                  <caption class="sr-only">
+                    List of {{ units().length }} units for batch {{ selectedBatchId() }}. Select a unit to view test results.
+                  </caption>
+
+                  <!-- Unit ID Column -->
+                  <ng-container matColumnDef="unitId">
+                    <th mat-header-cell *matHeaderCellDef mat-sort-header scope="col">
+                      Unit ID ({{ units().length }})
+                    </th>
+                    <td mat-cell *matCellDef="let unit">
+                      <button
+                        class="unit-link"
+                        (click)="onUnitSelect(unit)"
+                        [class.selected]="isUnitSelected(unit)"
+                        [attr.aria-pressed]="isUnitSelected(unit)">
+                        {{ unit.unitId }} {{ unit.checkDigit ? '-' + unit.checkDigit : '' }}
+                      </button>
+                    </td>
+                  </ng-container>
+
+                  <!-- Collection Date Column -->
+                  <ng-container matColumnDef="collDate">
+                    <th mat-header-cell *matHeaderCellDef mat-sort-header scope="col">Collection Date</th>
+                    <td mat-cell *matCellDef="let unit">{{ formatDate(unit.collDate) }}</td>
+                  </ng-container>
+
+                  <!-- QC Date Column -->
+                  <ng-container matColumnDef="qcDate">
+                    <th mat-header-cell *matHeaderCellDef scope="col">QC Date</th>
+                    <td mat-cell *matCellDef="let unit">
+                      {{ unit.qcCheckinDate ? formatDateTimeUtc(unit.qcCheckinDate) : 'No QC' }}
+                    </td>
+                  </ng-container>
+
+                  <tr mat-header-row *matHeaderRowDef="unitColumns; sticky: true"></tr>
+                  <tr mat-row *matRowDef="let row; columns: unitColumns;"></tr>
+                </table>
+              </div>
+            }
+          </mat-card-content>
+        </mat-card>
+
+        <!-- Panel 3: Unextracted Results -->
+        <mat-card class="results-panel results-panel-right">
+          <mat-card-header>
+            <mat-card-title [id]="elementId('results-heading')">
+              {{ resultsHeader() }}
+              @if (selectedUnitId()) {
+                <mat-icon class="warning-icon" aria-label="Unit contains unextracted test results" role="img">error</mat-icon>
+              }
+            </mat-card-title>
+          </mat-card-header>
+          <mat-card-content>
+            @if (loadingResults()) {
+              <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+                <mat-spinner diameter="30" aria-label="Loading test results"></mat-spinner>
+                <span>Loading test results...</span>
+                <span class="sr-only">Please wait while test results are being loaded</span>
+              </div>
+            } @else if (testResults().length === 0 && selectedUnitId()) {
+              <div class="empty-state">
+                <mat-icon aria-hidden="true">search_off</mat-icon>
+                <p>No test results found for this unit</p>
+              </div>
+            } @else if (testResults().length === 0) {
+              <div class="empty-state">
+                <mat-icon aria-hidden="true">info</mat-icon>
+                <p>Select a unit to view test results</p>
+              </div>
+            } @else {
+              <div class="table-container">
+                <table
+                  mat-table
+                  [dataSource]="sortedResults()"
+                  matSort
+                  (matSortChange)="onSortResults($event)"
+                  class="results-table">
+                  <caption class="sr-only">
+                    List of {{ testResults().length }} test results for unit {{ selectedUnitId() }}.
+                  </caption>
+
+                  <!-- Sequence Column -->
+                  <ng-container matColumnDef="testSeqNo">
+                    <th mat-header-cell *matHeaderCellDef mat-sort-header scope="col">Sequence</th>
+                    <td mat-cell *matCellDef="let result">{{ result.testSeqNo }}</td>
+                  </ng-container>
+
+                  <!-- Test ID Column -->
+                  <ng-container matColumnDef="testId">
+                    <th mat-header-cell *matHeaderCellDef mat-sort-header scope="col">Test ID</th>
+                    <td mat-cell *matCellDef="let result"
+                        [class.highlighted-result]="isHighlightedResult(result.resultStatus1)">
+                      {{ result.testId }}
+                    </td>
+                  </ng-container>
+
+                  <!-- Result Column -->
+                  <ng-container matColumnDef="resultStatus1">
+                    <th mat-header-cell *matHeaderCellDef scope="col">Result ({{ testResults().length }})</th>
+                    <td mat-cell *matCellDef="let result"
+                        [class.highlighted-result]="isHighlightedResult(result.resultStatus1)">
+                      {{ result.resultStatus1 || '-' }}
+                    </td>
+                  </ng-container>
+
+                  <!-- Interim Result Column -->
+                  <ng-container matColumnDef="interimResult">
+                    <th mat-header-cell *matHeaderCellDef scope="col">Interim Result</th>
+                    <td mat-cell *matCellDef="let result">
+                      {{ result.extractDate ? 'Yes' : 'No' }}
+                    </td>
+                  </ng-container>
+
+                  <tr mat-header-row *matHeaderRowDef="resultColumns; sticky: true"></tr>
+                  <tr mat-row *matRowDef="let row; columns: resultColumns;"></tr>
+                </table>
+              </div>
+            }
+          </mat-card-content>
+        </mat-card>
+
+        <!-- Footer Actions (Spans first 2 columns) -->
+        <section class="footer-section-grid">
+          <div class="footer-info">
+            @if (queryForm.get('contractId')?.value) {
+              <div class="contract-info">
+                <span class="label">Contract ID</span>
+                <span class="value">{{ queryForm.get('contractId')?.value }}</span>
+              </div>
+              <div class="contract-info">
+                <span class="label">Contract ID Description</span>
+                <span class="value">{{ contractDescription() }}</span>
+              </div>
+            }
+          </div>
+          <div class="footer-actions">
+            <button
+              mat-stroked-button
+              color="primary"
+              [id]="elementId('batches-in-progress-btn')"
+              (click)="navigateToBatchesInProgress()">
+              BATCHES IN PROGRESS
+            </button>
+            <button
+              mat-stroked-button
+              color="primary"
+              [id]="elementId('samples-query-btn')"
+              (click)="navigateToSamplesQuery()">
+              SAMPLES QUERY
+            </button>
+          </div>
+        </section>
+      </div>
+    </section>
+  }
+
+  <!-- Empty State (No Results) -->
+  @if (!hasResults() && !loading()) {
+    <div class="empty-results" role="status">
+      <mat-icon aria-hidden="true">search</mat-icon>
+      <p>No Results to Display</p>
+      <p class="sub-message">Please enter search criteria to view the results</p>
+    </div>
+  }
+</div>

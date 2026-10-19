@@ -1,0 +1,10 @@
+LOAD DATA
+INFILE '/home/donsys/conversion/data/table.413'
+--APPEND
+INTO TABLE mw_donor_email_address
+(
+ DONOR_ID       POSITION(1:10)          CHAR  NULLIF (DONOR_ID = BLANKS),
+ CHAPTER_ID     POSITION(11:14)         CHAR  NULLIF (CHAPTER_ID = BLANKS),
+ EMAIL_ADDRESS  POSITION(15:132)        CHAR  NULLIF (EMAIL_ADDRESS = BLANKS) 
+)
+

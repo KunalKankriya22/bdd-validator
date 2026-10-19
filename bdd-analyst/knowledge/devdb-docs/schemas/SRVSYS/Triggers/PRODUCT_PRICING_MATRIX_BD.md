@@ -1,0 +1,50 @@
+---
+tags:
+  - trigger
+  - SRVSYS
+---
+# PRODUCT_PRICING_MATRIX_BD
+
+**Schema**: [[schemas/SRVSYS/SRVSYS|SRVSYS]]
+**Table**: [[schemas/SRVSYS/Tables/PRODUCT_PRICING_MATRIX|PRODUCT_PRICING_MATRIX]]
+**Type**: BEFORE EACH ROW
+**Event**: DELETE
+**Status**: ENABLED
+
+## Trigger Body
+
+```plsql
+begin
+  insert into PRODUCT_PRICING_MATRIX_AUDIT
+  ( CHAPTER_ID,
+	PRODUCT_TYPE,
+	TIER,
+	FROM_DAY,
+	TO_DAY,
+	UNIT_PRICE,
+	EFF_DATE,
+	TERM_DATE,
+	LAST_MODIFIED_DATE,
+	CUSTOMER_ID,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  ( :old.CHAPTER_ID,
+	:old.PRODUCT_TYPE,
+	:old.TIER,
+	:old.FROM_DAY,
+	:old.TO_DAY,
+	:old.UNIT_PRICE,
+	:old.EFF_DATE,
+	:old.TERM_DATE,
+	:old.LAST_MODIFIED_DATE,
+	:old.CUSTOMER_ID,
+	:old.AUDIT_KEY,
+	'DELETE',LT_USER_SESSION.GET_USERID,
+    sysdate
+  ) ;
+  end ;
+```

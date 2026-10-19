@@ -1,0 +1,338 @@
+<!-- ARIA Live Region for Screen Reader Announcements -->
+<div id="aria-live-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+  {{ ariaLiveMessage }}
+</div>
+
+<!-- Main Content Area -->
+<main class="antigen-tests" aria-label="Antigen Tests content" role="main">
+
+  <!-- Page Header with Breadcrumb -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Table Card Container -->
+  <div class="antigen-tests__card" #tableCard>
+
+    <!-- Table Controls with Inline Filter Chips -->
+    <div class="antigen-tests__controls">
+      <!-- Left section: Filter button / Validation Error / chips -->
+      <div class="antigen-tests__controls-left">
+        <button
+          *ngIf="!isEditModeActive"
+          #filterBtn
+          type="button"
+          mat-button
+          class="filter-button"
+          [class.filter-button--active]="isFilterOpen"
+          [attr.aria-expanded]="isFilterOpen"
+          [attr.aria-label]="isFilterOpen ? 'Close filter options' : 'Open filter options'"
+          (click)="openFilter()">
+          <mat-icon aria-hidden="true">filter_list</mat-icon>
+          FILTER
+        </button>
+
+        <!-- Validation Error Message (left side in edit mode) -->
+        <div *ngIf="isEditModeActive && showValidationError" class="validation-error-inline">
+          <mat-icon aria-hidden="true">error</mat-icon>
+          <span>Please address the fields indicated below.</span>
+        </div>
+
+        <!-- Inline Filter Chips -->
+        <app-filter-chips
+          *ngIf="!isEditModeActive && hasActiveFilters()"
+          [chips]="filterChips"
+          [maxVisible]="3"
+          (removeChip)="onRemoveFilterChip($event)"
+          (clearAll)="clearAllFilters()">
+        </app-filter-chips>
+      </div>
+
+      <!-- Right section: Add/Edit button and Search bar -->
+      <div class="antigen-tests__controls-right">
+        <!-- Normal mode: Show ADD/EDIT button next to search -->
+        <button
+          *ngIf="!isEditModeActive"
+          type="button"
+          mat-stroked-button
+          class="add-edit-button"
+          aria-label="Add or edit antigen test"
+          (click)="enableEditMode()">
+          ADD/EDIT ANTIGEN TEST
+        </button>
+
+        <app-search-bar
+          *ngIf="!isEditModeActive"
+          [config]="searchConfig"
+          (search)="onSearch($event)">
+        </app-search-bar>
+
+        <!-- Edit mode: Show action buttons on the right -->
+        <div *ngIf="isEditModeActive" class="edit-mode-actions">
+          <button
+            type="button"
+            mat-stroked-button
+            class="btn-add-new"
+            aria-label="Add new antigen test"
+            (click)="addNewRow()">
+            <mat-icon aria-hidden="true">add</mat-icon>
+            ADD NEW ANTIGEN TEST
+          </button>
+
+          <button
+            type="button"
+            mat-stroked-button
+            class="btn-cancel"
+            [disabled]="isSaving"
+            aria-label="Cancel editing"
+            (click)="cancelEdit()">
+            <mat-icon aria-hidden="true">close</mat-icon>
+            CANCEL
+          </button>
+
+          <button
+            type="button"
+            mat-raised-button
+            class="btn-save"
+            [disabled]="isSaving || !hasAnyDirtyForms || hasAnyInvalidForms"
+            aria-label="Save all changes"
+            (click)="saveAll()">
+            <mat-icon aria-hidden="true">check</mat-icon>
+            SAVE
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Loading State -->
+    <div
+      *ngIf="isLoading || isSaving"
+      class="antigen-tests__loading"
+      role="status"
+      [attr.aria-label]="isSaving ? 'Saving changes' : 'Loading antigen tests data'">
+      <div class="loading-spinner"></div>
+      <p class="loading-message">{{ isSaving ? 'Saving changes, please wait...' : 'Loading antigen tests data...' }}</p>
+    </div>
+
+    <!-- Error State -->
+    <div
+      *ngIf="hasError && !isLoading && !isSaving"
+      class="antigen-tests__error"
+      role="status"
+      aria-label="No data available">
+      <mat-icon class="empty-icon" aria-hidden="true">inbox</mat-icon>
+      <p class="error-message">{{ errorMessage }}</p>
+    </div>
+
+    <!-- Data Table with Inline Editing -->
+    <div class="antigen-tests__table-wrapper" *ngIf="!hasError && !isLoading && !isSaving">
+      <table mat-table [dataSource]="dataSource" class="antigen-tests-table" aria-label="Antigen Tests">
+
+        <!-- Code Column -->
+        <ng-container matColumnDef="code">
+          <th mat-header-cell *matHeaderCellDef>
+            <button class="data-table__sort-button"
+                    (click)="onSortChange('code')"
+                    [attr.aria-label]="'Sort by Code'"
+                    [disabled]="isEditModeActive">
+              <span class="data-table__sort-text">Code<span class="required-asterisk" *ngIf="isEditModeActive">*</span></span>
+              <mat-icon class="data-table__sort-icon" [class.data-table__sort-icon--active]="sortColumn === 'code' && sortDirection !== 'default'" aria-hidden="true">
+                {{ getSortIcon('code') }}
+              </mat-icon>
+            </button>
+          </th>
+          <td mat-cell *matCellDef="let row">
+            <ng-container *ngIf="!row.isEditMode">
+              {{ row.code || '-' }}
+            </ng-container>
+            <ng-container *ngIf="row.isEditMode && row.form">
+              <mat-form-field appearance="fill" class="inline-field"
+                              [class.mat-form-field-invalid]="row.form.get('code')?.invalid && row.form.get('code')?.touched"
+                              [matTooltip]="getCodeTooltipMessage(row)"
+                              matTooltipPosition="below"
+                              [matTooltipDisabled]="!getCodeTooltipMessage(row)">
+                <input matInput [formControl]="row.form.get('code')" placeholder="Code" maxlength="4" title="" (input)="onCodeInput($event, row)" (blur)="onFieldBlur(row, 'code')">
+                <mat-hint align="end">{{ row.form.get('code')?.value?.length || 0 }}/4</mat-hint>
+                <mat-error *ngIf="getErrorMessage(row.form, 'code')">
+                  {{ getErrorMessage(row.form, 'code') }}
+                </mat-error>
+              </mat-form-field>
+            </ng-container>
+          </td>
+        </ng-container>
+
+        <!-- Description Column -->
+        <ng-container matColumnDef="description">
+          <th mat-header-cell *matHeaderCellDef>
+            <span class="data-table__header-text">Description<span class="required-asterisk" *ngIf="isEditModeActive">*</span></span>
+          </th>
+          <td mat-cell *matCellDef="let row">
+            <ng-container *ngIf="!row.isEditMode">
+              {{ row.description || '-' }}
+            </ng-container>
+            <ng-container *ngIf="row.isEditMode && row.form">
+              <mat-form-field appearance="fill" class="inline-field"
+                              [class.mat-form-field-invalid]="row.form.get('description')?.invalid && row.form.get('description')?.touched"
+                              [matTooltip]="getDescriptionTooltipMessage(row)"
+                              matTooltipPosition="below"
+                              [matTooltipDisabled]="!getDescriptionTooltipMessage(row)">
+                <input matInput [formControl]="row.form.get('description')" placeholder="Description" maxlength="50" title="" (input)="onDescriptionInput($event, row)" (blur)="onFieldBlur(row, 'description')">
+                <mat-hint align="end">{{ row.form.get('description')?.value?.length || 0 }}/50</mat-hint>
+                <mat-error *ngIf="getErrorMessage(row.form, 'description')">
+                  {{ getErrorMessage(row.form, 'description') }}
+                </mat-error>
+              </mat-form-field>
+            </ng-container>
+          </td>
+        </ng-container>
+
+        <!-- Price Column -->
+        <ng-container matColumnDef="price">
+          <th mat-header-cell *matHeaderCellDef>
+            <span class="data-table__header-text">Price</span>
+          </th>
+          <td mat-cell *matCellDef="let row">
+            <ng-container *ngIf="!row.isEditMode">
+              {{ formatPrice(row.price) }}
+            </ng-container>
+            <ng-container *ngIf="row.isEditMode && row.form">
+              <mat-form-field appearance="fill" class="inline-field price-field"
+                              [class.mat-form-field-invalid]="row.form.get('price')?.invalid && row.form.get('price')?.touched"
+                              [matTooltip]="getPriceTooltipMessage(row)"
+                              matTooltipPosition="below"
+                              [matTooltipDisabled]="!getPriceTooltipMessage(row)">
+                <span matTextPrefix class="price-prefix">$&nbsp;</span>
+                <input matInput type="text" [formControl]="row.form.get('price')" placeholder="0.00" inputmode="decimal" title="" (input)="onPriceInput($event, row)" (blur)="onFieldBlur(row, 'price')">
+                <mat-error *ngIf="getErrorMessage(row.form, 'price')">
+                  {{ getErrorMessage(row.form, 'price') }}
+                </mat-error>
+              </mat-form-field>
+            </ng-container>
+          </td>
+        </ng-container>
+
+        <!-- Effective Date Column -->
+        <ng-container matColumnDef="effectiveDate">
+          <th mat-header-cell *matHeaderCellDef>
+            <span class="data-table__header-text">Effective Date<span class="required-asterisk" *ngIf="isEditModeActive">*</span></span>
+          </th>
+          <td mat-cell *matCellDef="let row">
+            <ng-container *ngIf="!row.isEditMode">
+              {{ formatDate(row.effectiveDate) }}
+            </ng-container>
+            <ng-container *ngIf="row.isEditMode && row.form">
+              <mat-form-field appearance="fill" class="inline-field date-field"
+                              [class.mat-form-field-invalid]="row.form.get('effectiveDate')?.invalid && row.form.get('effectiveDate')?.touched"
+                              [class.date-field-error]="row.errors?.['effectiveDate']"
+                              [matTooltip]="getEffectiveDateTooltipMessage(row)"
+                              matTooltipPosition="below"
+                              [matTooltipDisabled]="!getEffectiveDateTooltipMessage(row)">
+                <input matInput
+                       [matDatepicker]="effectivePicker"
+                       [formControl]="row.form.get('effectiveDate')"
+                       placeholder="Effective Date"
+                       [min]="row.isNewRow ? minDate : null"
+                       title=""
+                       (input)="onDateInput($event, row, 'effectiveDate')"
+                       (dateChange)="onDateChange($event, row, 'effectiveDate')"
+                       (blur)="onDateInputBlur($event, row, 'effectiveDate')"
+                       (invalid)="$event.preventDefault()">
+                <mat-datepicker-toggle matIconSuffix [for]="effectivePicker"></mat-datepicker-toggle>
+                <mat-datepicker #effectivePicker></mat-datepicker>
+                <mat-error *ngIf="getErrorMessage(row.form, 'effectiveDate')">
+                  {{ getErrorMessage(row.form, 'effectiveDate') }}
+                </mat-error>
+              </mat-form-field>
+            </ng-container>
+          </td>
+        </ng-container>
+
+        <!-- Termination Date Column -->
+        <ng-container matColumnDef="terminationDate">
+          <th mat-header-cell *matHeaderCellDef>
+            <span class="data-table__header-text">Termination Date</span>
+          </th>
+          <td mat-cell *matCellDef="let row">
+            <ng-container *ngIf="!row.isEditMode">
+              {{ formatDate(row.terminationDate) }}
+            </ng-container>
+            <ng-container *ngIf="row.isEditMode && row.form">
+              <mat-form-field appearance="fill" class="inline-field date-field"
+                              [class.mat-form-field-invalid]="(row.form.get('terminationDate')?.invalid || row.form.hasError('terminationBeforeEffective')) && row.form.get('terminationDate')?.touched"
+                              [class.date-field-error]="row.errors?.['terminationDate']"
+                              [matTooltip]="getTerminationDateTooltipMessage(row)"
+                              matTooltipPosition="below"
+                              [matTooltipDisabled]="!getTerminationDateTooltipMessage(row)">
+                <input matInput
+                       [matDatepicker]="terminationPicker"
+                       [formControl]="row.form.get('terminationDate')"
+                       placeholder="Termination Date"
+                       [min]="getTerminationMinDate(row)"
+                       title=""
+                       (input)="onDateInput($event, row, 'terminationDate')"
+                       (dateChange)="onDateChange($event, row, 'terminationDate')"
+                       (blur)="onDateInputBlur($event, row, 'terminationDate')"
+                       (invalid)="$event.preventDefault()">
+                <mat-datepicker-toggle matIconSuffix [for]="terminationPicker"></mat-datepicker-toggle>
+                <mat-datepicker #terminationPicker></mat-datepicker>
+                <mat-error *ngIf="getErrorMessage(row.form, 'terminationDate')">
+                  {{ getErrorMessage(row.form, 'terminationDate') }}
+                </mat-error>
+              </mat-form-field>
+            </ng-container>
+          </td>
+        </ng-container>
+
+        <!-- Modification Date Column (Read Only) -->
+        <ng-container matColumnDef="modificationDate">
+          <th mat-header-cell *matHeaderCellDef>
+            <span class="data-table__header-text">Modification Date</span>
+          </th>
+          <td mat-cell *matCellDef="let row">
+            {{ formatDate(row.modificationDate) }}
+          </td>
+        </ng-container>
+
+        <!-- Delete Column - Only shown when there are new rows -->
+        <ng-container matColumnDef="delete">
+          <th mat-header-cell *matHeaderCellDef>
+            <ng-container *ngIf="hasNewRows()"></ng-container>
+          </th>
+          <td mat-cell *matCellDef="let row; let i = index" class="delete-cell">
+            <button
+              *ngIf="hasNewRows() && row.isNewRow"
+              type="button"
+              class="delete-icon-button"
+              aria-label="Delete row"
+              (click)="deleteRow(i)">
+              <mat-icon aria-hidden="true">delete</mat-icon>
+            </button>
+          </td>
+        </ng-container>
+
+        <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+        <tr mat-row *matRowDef="let row; columns: displayedColumns;" [class.edit-mode]="row.isEditMode"></tr>
+
+        <!-- Empty State -->
+        <tr class="mat-row" *matNoDataRow>
+          <td class="mat-cell" [attr.colspan]="displayedColumns.length">
+            <div class="data-table__empty">
+              <mat-icon class="data-table__empty-icon" aria-hidden="true">inbox</mat-icon>
+              <p class="data-table__empty-message">No data available</p>
+            </div>
+          </td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- Pagination -->
+    <mat-paginator
+      *ngIf="!isLoading && !isSaving && !hasError && dataSource.length > 0 && !isEditModeActive"
+      [length]="totalRecords"
+      [pageSize]="pageSize"
+      [pageSizeOptions]="pageSizeOptions"
+      [pageIndex]="pageIndex"
+      [showFirstLastButtons]="true"
+      (page)="onPageChange($event)"
+      aria-label="Table pagination">
+    </mat-paginator>
+  </div>
+</main>

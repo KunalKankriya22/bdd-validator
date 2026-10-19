@@ -1,0 +1,409 @@
+<div class="page-container">
+  <div class="layout-wrapper">
+    <div class="main-content">
+      <h1 class="cdk-visually-hidden">Verify Test Observations: Tech 2</h1>
+      <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+      <div class="scrollable-content">
+      <!-- Loading State -->
+      @if (loading() || loadingWorksheets()) {
+        <div class="table-card">
+          <div class="data-table__loading" role="status" aria-live="polite" aria-busy="true">
+            <mat-spinner diameter="36" aria-hidden="true"></mat-spinner>
+          </div>
+        </div>
+      }
+
+      <!-- Error State -->
+      @if (error()) {
+        <div class="error-container" role="alert" aria-live="assertive">
+          <mat-icon aria-hidden="true">error</mat-icon>
+          <p>{{ error() }}</p>
+          <button mat-button color="primary" (click)="loadWorksheets()">
+            Retry
+          </button>
+        </div>
+      }
+
+      @if (isReady()) {
+
+        <!-- Filter Card -->
+        <div class="search-card">
+          <form [formGroup]="filterForm" class="search-card__form">
+            <div class="search-card__fields">
+              <div class="search-card__fields-inner">
+
+                <!-- Test Batch/Worksheet# -->
+                <mat-form-field appearance="fill" subscriptSizing="dynamic" class="search-card__field" [hideRequiredMarker]="true">
+                  <mat-label>Test Batch/Worksheet# <span class="required">*</span></mat-label>
+                  <mat-select formControlName="worksheet"
+                              aria-label="Test Batch/Worksheet"
+                              [attr.aria-required]="true">
+                    <mat-select-trigger>
+                      {{ filterForm.get('worksheet')?.value || '' }}
+                    </mat-select-trigger>
+                    <mat-option>
+                      <ngx-mat-select-search
+                        [formControl]="worksheetSearchCtrl"
+                        placeholderLabel="Search..."
+                        noEntriesFoundLabel=""
+                        [autofocus]="false">
+                      </ngx-mat-select-search>
+                    </mat-option>
+                    @for (ws of filteredWorksheets; track ws.tbId) {
+                      <mat-option [value]="ws.tbId">{{ ws.tbId }}</mat-option>
+                    }
+                    @if (filteredWorksheets.length === 0) {
+                      <mat-option disabled class="panel-option--status">No Data Available</mat-option>
+                    }
+                  </mat-select>
+                  <mat-error>Test Batch/Worksheet# is required</mat-error>
+                </mat-form-field>
+
+                <!-- Test ID -->
+                <mat-form-field appearance="fill" subscriptSizing="dynamic" class="search-card__field" [hideRequiredMarker]="true">
+                  <mat-label>Test ID <span class="required">*</span></mat-label>
+                  <mat-select formControlName="testId"
+                              aria-label="Test ID"
+                              [attr.aria-required]="true">
+                    <mat-select-trigger>
+                      {{ filterForm.get('testId')?.value || '' }}
+                    </mat-select-trigger>
+                    @if (loadingTests()) {
+                      <mat-option disabled>
+                        <span class="panel-loading"><mat-spinner diameter="20"></mat-spinner><span>Loading...</span></span>
+                      </mat-option>
+                    } @else if (filteredTests.length === 0 && tests().length === 0) {
+                      <mat-option disabled class="panel-option--status">No Data Available</mat-option>
+                    } @else {
+                      <mat-option>
+                        <ngx-mat-select-search
+                          [formControl]="testIdSearchCtrl"
+                          placeholderLabel="Search..."
+                          noEntriesFoundLabel=""
+                          [autofocus]="false">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (test of filteredTests; track test.testId) {
+                        <mat-option [value]="test.testId">{{ test.testId }}</mat-option>
+                      }
+                      @if (filteredTests.length === 0) {
+                        <mat-option disabled class="panel-option--status">No matches found</mat-option>
+                      }
+                    }
+                  </mat-select>
+                  <mat-error>Test ID is required</mat-error>
+                </mat-form-field>
+
+                <!-- Description (readonly text) -->
+                <div class="search-card__description">
+                  <label class="search-card__description-label">Description</label>
+                  <div class="search-card__description-value">{{ filterForm.get('testDescription')?.value || '-' }}</div>
+                </div>
+
+                <!-- Test Type -->
+                <mat-form-field appearance="fill" subscriptSizing="dynamic" class="search-card__field" [hideRequiredMarker]="true">
+                  <mat-label>Test Type <span class="required">*</span></mat-label>
+                  <mat-select formControlName="testType"
+                              aria-label="Test Type"
+                              [attr.aria-required]="true">
+                    <mat-select-trigger>
+                      {{ filterForm.get('testType')?.value || '' }}
+                    </mat-select-trigger>
+                    @if (loadingTestTypes()) {
+                      <mat-option disabled>
+                        <span class="panel-loading"><mat-spinner diameter="20"></mat-spinner><span>Loading...</span></span>
+                      </mat-option>
+                    } @else if (testTypes().length === 0) {
+                      <mat-option disabled class="panel-option--status">No Data Available</mat-option>
+                    } @else {
+                      @for (tt of testTypes(); track tt.testType) {
+                        <mat-option [value]="tt.testType">{{ tt.testType }}{{ tt.testTypeDesc ? ' - ' + tt.testTypeDesc : '' }}</mat-option>
+                      }
+                    }
+                  </mat-select>
+                  <mat-error>Test Type is required</mat-error>
+                </mat-form-field>
+
+                @if (testTypeMetadata()) {
+                  <!-- Test Type Description (readonly text) -->
+                  <div class="search-card__description">
+                    <label class="search-card__description-label">Description</label>
+                    <div class="search-card__description-value">{{ testTypeMetadata()!.testTypeDesc || '-' }}</div>
+                  </div>
+
+                  <!-- Control Value (readonly text) -->
+                  <div class="search-card__description search-card__description--small">
+                    <label class="search-card__description-label">Control Value</label>
+                    <div class="search-card__description-value">{{ testTypeMetadata()!.defaultControlValue || '-' }}</div>
+                  </div>
+                }
+
+              </div>
+            </div>
+          </form>
+        </div>
+
+        <!-- Observation Data (three-panel layout) -->
+        @if (hasObservationData()) {
+          @if (loadingBands() || loadingUnits()) {
+            <div class="table-card">
+              <div class="data-table__loading" role="status" aria-live="polite" aria-busy="true">
+                <mat-spinner diameter="36" aria-hidden="true"></mat-spinner>
+              </div>
+            </div>
+          } @else {
+            <div class="three-panel-wrapper">
+
+              <!-- Card 1: Unit ID -->
+              <div class="panel-card panel-card--unit-id">
+                <div class="table-panel-spacer"></div>
+                <h3 [id]="elementId('unit-id-heading')" class="cdk-visually-hidden">Unit ID</h3>
+                <table class="mat-mdc-table fixed-header-table" role="grid" [attr.aria-labelledby]="elementId('unit-id-heading')">
+                  <thead>
+                    <tr class="mat-mdc-header-row">
+                      <th class="mat-mdc-header-cell">Unit ID</th>
+                    </tr>
+                  </thead>
+                </table>
+                <div class="table-body-scroll">
+                  <table class="mat-mdc-table" role="grid" [attr.aria-labelledby]="elementId('unit-id-heading')">
+                    <tbody>
+                      @for (row of displayRows(); track $index) {
+                        @if (row) {
+                          <tr class="mat-mdc-row unit-row"
+                            [class.unit-row--selected]="selectedUnit() === row"
+                            [attr.aria-selected]="selectedUnit() === row"
+                            tabindex="0"
+                            (click)="selectUnit(row)"
+                            (keydown.enter)="selectUnit(row)"
+                            (keydown.space)="selectUnit(row); $event.preventDefault()">
+                            <td class="mat-mdc-cell">
+                              <div class="readonly-cell" [title]="row.unitId + (row.chkDigit ? '-' + row.chkDigit : '')">{{ row.unitId }}{{ row.chkDigit ? '-' + row.chkDigit : '' }}</div>
+                            </td>
+                          </tr>
+                        } @else {
+                          <tr class="mat-mdc-row empty-row">
+                            <td class="mat-mdc-cell">&nbsp;</td>
+                          </tr>
+                        }
+                      }
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Card 2: Observation Values (dynamic band columns) -->
+              <div class="panel-card panel-card--observations">
+                <div class="observation-actions">
+                  <h2 [id]="elementId('observation-heading')" class="observation-title">Observation Values</h2>
+                  <div class="action-buttons">
+                      <button type="button" class="btn-add-band"
+                        (click)="onAddOtherBandResults()"
+                        [disabled]="unitRows().length === 0"
+                        [id]="elementId('add-band-btn')">
+                        <mat-icon>add</mat-icon>
+                        ADD OTHER BAND RESULTS
+                      </button>
+                    <button type="button" class="btn-cancel"
+                      (click)="onCancel()"
+                      [id]="elementId('cancel-btn')"
+                      [disabled]="saving()">
+                      <mat-icon>close</mat-icon>
+                      CANCEL
+                    </button>
+                    <button type="button" class="btn-save"
+                      (click)="onSave()"
+                      [id]="elementId('save-btn')"
+                      [disabled]="saving() || !canSave()">
+                      @if (saving()) {
+                        <mat-spinner diameter="20"></mat-spinner>
+                      } @else {
+                        <mat-icon>check</mat-icon>
+                      }
+                      SAVE
+                    </button>
+                  </div>
+                </div>
+                <table class="mat-mdc-table fixed-header-table" role="grid" [attr.aria-labelledby]="elementId('observation-heading')">
+                  <thead>
+                    <tr class="mat-mdc-header-row">
+                      @for (bandName of bandColumns(); track bandName) {
+                        <th class="mat-mdc-header-cell col-observation">{{ bandName }}</th>
+                      }
+                    </tr>
+                  </thead>
+                </table>
+                <div class="table-body-scroll">
+                  <table class="mat-mdc-table" role="grid" [attr.aria-labelledby]="elementId('observation-heading')">
+                    <tbody>
+                      @for (row of displayRows(); track $index) {
+                        @if (row) {
+                          <tr class="mat-mdc-row"
+                              [class.unit-row--selected]="selectedUnit() === row"
+                              [attr.aria-selected]="selectedUnit() === row"
+                              (click)="selectUnit(row)">
+                            @for (bandName of bandColumns(); track bandName) {
+                              <td class="mat-mdc-cell col-observation">
+                                <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field">
+                                  <mat-select
+                                    [value]="getBandValue(row, bandName)"
+                                    (selectionChange)="setBandValue(row, bandName, $event.value)"
+                                    [attr.aria-label]="'Band result for ' + bandName + ' on unit ' + row.unitId">
+                                    <mat-select-trigger>
+                                      {{ getBandValue(row, bandName) || '' }}
+                                    </mat-select-trigger>
+                                    <mat-option value="">--</mat-option>
+                                    @for (opt of bandResultOptions(); track opt.result) {
+                                      <mat-option [value]="opt.result">{{ opt.result }}{{ opt.resultDesc ? ' - ' + opt.resultDesc : '' }}</mat-option>
+                                    }
+                                  </mat-select>
+                                </mat-form-field>
+                              </td>
+                            }
+                          </tr>
+                        } @else {
+                          <tr class="mat-mdc-row empty-row">
+                            @for (bandName of bandColumns(); track bandName) {
+                              <td class="mat-mdc-cell col-observation">&nbsp;</td>
+                            }
+                          </tr>
+                        }
+                      }
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Card 3: Result Interpretation & Description -->
+              <div class="panel-card panel-card--result">
+                <div class="table-panel-spacer"></div>
+                <h3 [id]="elementId('result-heading')" class="cdk-visually-hidden">Result Interpretation</h3>
+                <table class="mat-mdc-table fixed-header-table" role="grid" [attr.aria-labelledby]="elementId('result-heading')">
+                  <thead>
+                    <tr class="mat-mdc-header-row">
+                      <th class="mat-mdc-header-cell col-result">Result Interpretation</th>
+                      <th class="mat-mdc-header-cell col-description">Description</th>
+                    </tr>
+                  </thead>
+                </table>
+                <div class="table-body-scroll" aria-live="polite" aria-atomic="false">
+                  <table class="mat-mdc-table" role="grid" [attr.aria-labelledby]="elementId('result-heading')">
+                    <tbody>
+                      @for (row of displayRows(); track $index) {
+                        @if (row) {
+                          <tr class="mat-mdc-row"
+                              [class.unit-row--selected]="selectedUnit() === row"
+                              [attr.aria-selected]="selectedUnit() === row">
+                            <td class="mat-mdc-cell col-result">
+                              <div class="readonly-cell" [title]="row.tempResult2 || row.resultInterpretation || '-'">{{ row.tempResult2 || row.resultInterpretation || '-' }}</div>
+                            </td>
+                            <td class="mat-mdc-cell col-description">
+                              <div class="readonly-cell" [title]="row.description || '-'">{{ row.description || '-' }}</div>
+                            </td>
+                          </tr>
+                        } @else {
+                          <tr class="mat-mdc-row empty-row">
+                            <td class="mat-mdc-cell col-result">&nbsp;</td>
+                            <td class="mat-mdc-cell col-description">&nbsp;</td>
+                          </tr>
+                        }
+                      }
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            </div>
+          }
+
+          <!-- Notes Section -->
+          <div class="notes-section">
+            @if (note(); as existingNote) {
+              @if (editingNoteId()) {
+                <!-- Edit mode -->
+                <div class="notes-card">
+                  <h3 class="notes-card__title">Edit Notes</h3>
+                  <textarea
+                    class="notes-card__textarea"
+                    placeholder="Edit your note..."
+                    aria-label="Edit note"
+                    [value]="notesForm.get('noteText')?.value || ''"
+                    (input)="notesForm.get('noteText')?.setValue($any($event.target).value)"
+                    rows="3"
+                    maxlength="1500">
+                  </textarea>
+                  <div class="notes-add-row">
+                    <button type="button" class="btn-cancel-note" (click)="onCancelEditNote()">CANCEL</button>
+                    <button type="button" class="btn-add-note"
+                      [disabled]="!notesForm.get('noteText')?.value?.trim()"
+                      (click)="onUpdateNote()">UPDATE</button>
+                  </div>
+                </div>
+              } @else {
+                <!-- Display existing note -->
+                <div class="note-item">
+                  <div class="note-item__header">
+                    <div class="note-item__user-info">
+                      <div class="note-item__avatar">
+                        <mat-icon>person</mat-icon>
+                      </div>
+                      <div class="note-item__meta">
+                        <span class="note-item__user-name">{{ existingNote.author }}</span>
+                        <span class="note-item__date">{{ existingNote.version }} | {{ existingNote.date | date:'dd-MMM-yyyy' }}</span>
+                      </div>
+                    </div>
+                    <div class="note-item__actions">
+                      @if (existingNote.canEdit) {
+                        <button type="button" class="btn-note-action" (click)="onEditNote()">EDIT</button>
+                      }
+                      @if (existingNote.canDelete) {
+                        <button type="button" class="btn-note-action btn-note-action--delete" (click)="onDeleteNote()">DELETE</button>
+                      }
+                    </div>
+                  </div>
+                  <div class="note-item__body">
+                    <p class="note-item__content">{{ existingNote.content }}</p>
+                  </div>
+                </div>
+              }
+            } @else {
+              <!-- No note exists — show add form -->
+              <div class="notes-card">
+                <h3 class="notes-card__title">Notes</h3>
+                <textarea
+                  class="notes-card__textarea"
+                  placeholder="Enter notes here..."
+                  aria-label="Add note"
+                  [value]="notesForm.get('noteText')?.value || ''"
+                  (input)="notesForm.get('noteText')?.setValue($any($event.target).value)"
+                  rows="3"
+                  maxlength="1500">
+                </textarea>
+                <div class="notes-add-row">
+                  <button type="button" class="btn-add-note"
+                    [disabled]="!notesForm.get('noteText')?.value?.trim()"
+                    (click)="onAddNote()">ADD</button>
+                </div>
+              </div>
+            }
+          </div>
+
+        } @else if (!loadingBands() && !loadingUnits()) {
+          <!-- Empty State -->
+          <div class="table-card">
+            <div class="empty-state-container">
+              <div class="empty-state-icon" aria-hidden="true">
+                <mat-icon>search</mat-icon>
+              </div>
+              <h3 class="empty-state-title">No pending units for verification.</h3>
+              <p class="empty-state-message">Please select a worksheet and test.</p>
+            </div>
+          </div>
+        }
+
+      }
+      </div>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,958 @@
+CREATE OR REPLACE package DON_NURSING_AUDIT is
+
+  -- Author  : ASHOKV
+  -- Created : 1/14/2019 1:55:39 PM
+  -- Purpose : This package shall allow automatic nursing audit process based on the criteria configured by facility.
+  -- Version
+  -- 01: 01/14/2019 - initial creation of pkg. called from DRIMAUDT (PAUDIT)
+  -- 02: 03/12/2019 -- start_process routine modified, do_commit routine modified. nursing_audit_query routine commented out
+  -- 03: 07/14/2019 -- to not to place teh HDT and HDI as part of MLT-1605
+  -- 04: 09/20/2019 -- commented out some unwnted codes
+  -- 05: 11/18/2019 -- MLT 2787
+  -- 06: 04/04/2020  -- MLT- 3135
+ --  07: 10/05/2020 -- MLT - 3593
+ --  08: 10/07/2020 -- MLT- 3593 (bug) 
+ --  09: 01/06/2021 -- MLT- 3970
+ --  10: 10/20/2021 -- MLT-4643 (search for V10) Modified historical hh changed query to only look at questions that have manual_audit_flag set.
+ --  11: 10/24/2021 -- MLT-4643 (use manual_audit_hist_flag instead of manual_audit_flag) --V11
+ --  12: 04/07/2025    (allow auditing only the completion status records )
+ --  13: 05/20/2025    MLT 7800
+ --  14. 10/28/2025    MLT 8590
+
+  -- Public type declarations
+  --type <TypeName> is <Datatype>;
+
+  -- Public constant declarations
+  --<ConstantName> constant <Datatype> := <Value>;
+
+
+
+  -- public procedure to fill the nursing_audit_manual table with data set 
+  -- based on the search criteria entered in control block.
+  -- data set is computed based on the nursing audit criteria.
+
+  /* 
+  -- Not required - merged query into start_process routine (V02)
+  procedure nursing_audit_query( p_session_id  in varchar2,
+                                 p_id_type     in varchar2,
+                                 p_from_date   in date,
+                                 p_to_date     in date,
+                                 p_status      out varchar2
+                                );
+  */
+  procedure start_process( p_session_id  in varchar2,
+                           p_id_type     in varchar2,
+                           p_from_date   in date,
+                           p_to_date     in date,
+                           p_user_id     in varchar2,
+                           p_chapter_id  in varchar2,
+                           p_program_id  in varchar2,
+                           p_status      out varchar2
+                          );
+
+  procedure do_commit(p_status OUT VARCHAR2);   
+
+   TYPE vha_rt IS RECORD(
+      ques_code  valid_hh_answers.question_code%TYPE,
+      ans_code   valid_hh_answers.answer_code%TYPE);
+
+  TYPE vhq_aat IS TABLE OF valid_hh_questions.question_code%TYPE INDEX BY PLS_INTEGER;  
+  TYPE vha_aat IS TABLE OF vha_rt INDEX BY PLS_INTEGER;
+  TYPE vpr_aat IS TABLE OF valid_physical_rules.physical_code%TYPE INDEX BY PLS_INTEGER;                                 
+
+end DON_NURSING_AUDIT;
+
+/
+
+
+CREATE OR REPLACE package body DON_NURSING_AUDIT is
+
+  -- Private type declarations
+  --type <TypeName> is <Datatype>;
+
+  -- Private constant declarations
+  --<ConstantName> constant <Datatype> := <Value>;
+  lc_donation constant varchar2(10) := 'DONATION';
+  lc_deferral constant varchar2(10) := 'DEFERRAL';
+  -- lc_date     constant DATE := TRUNC(SYSDATE);
+  -- lc_max_date constant DATE := lc_date + 2000;
+
+  gv_session_id NURSING_AUDIT_MANUAL.SESSION_ID%TYPE;
+  gv_id_type    NURSING_AUDIT_MANUAL.ID_TYPE%TYPE;
+  gv_user_id    NURSING_AUDIT_MANUAL.INSERT_USER%TYPE;
+  gv_chp_id     NURSING_AUDIT_MANUAL.CHAPTER_ID%TYPE;
+  gv_program_id NURSING_AUDIT_MANUAL.PROGRAM_ID%TYPE;
+  gv_pa_hold    VALID_REGINT_REASONS.INTER_CODE%TYPE;
+
+  -- Private variable declarations
+  --<VariableName> <Datatype>;
+ /* V02 -- merged into start_process routine.
+  procedure nursing_audit_insert is
+  begin
+    insert into nursing_audit_manual
+      (session_id,
+       chapter_id,
+       id_type,
+       id_value,
+       coll_date,
+       donor_id,
+       status,
+       reason,
+       exclude_flag)
+    values
+      (gv_session_id,
+       lt_user_session.get_chapter_id,
+       gv_id_type,
+       gv_id_value,
+       gd_coll_date,
+       gv_donor_id,
+       DECODE(gv_reasons, NULL, 'OK', 'HOLD'),
+       gv_reasons,
+       DECODE(gv_reasons, NULL, null, 'X');   -- MLT 7800
+    
+  end nursing_audit_insert;
+
+ -- V02 -- merged into start_process routine. Not Required.
+  procedure nursing_audit_query( p_session_id  in varchar2,
+                                 p_id_type     in varchar2,
+                                 p_from_date   in date,
+                                 p_to_date     in date,
+                                 p_status      out varchar2
+                                ) is
+    exit_error EXCEPTION;
+
+    ld_from_date  date;
+    ld_to_date    date;
+  begin
+    -- Initialse out parameter.
+    p_status := 'OK';
+
+    -- validate input parameters.
+    if p_session_id is null then
+      p_status := 'Session ID parameter is required';
+      raise exit_error;
+    end if;
+
+    if UPPER(p_id_type) not in (lc_donation, lc_deferral) then
+      p_status := 'Invalid ID Type';
+      raise exit_error;
+    end if;            
+
+    if p_from_date > p_to_date then
+      p_status := '''From Date'' can not be later to ''To Date''';
+      raise exit_error;
+    end if;                     
+    gv_session_id := p_session_id;
+    gv_id_type := UPPER(p_id_type);   
+    ld_from_date := TRUNC(p_from_date);
+    ld_to_date  := TRUNC(p_to_date);
+
+
+    -- Begin nursing audit criteria check.
+    if gv_id_type = lc_donation then
+      insert into nursing_audit_manual(session_id, chapter_id, id_type, id_value, coll_date, donor_id, drive_id,EXCLUDE_FLAG)
+      select gv_session_id, chapter_id, gv_id_type, unit_id, coll_date, donor_id, drive_id,'Y'
+       from donations
+       where coll_date between ld_from_date and ld_to_date
+        and unit_id is not null
+        and donor_id is not null
+        and n_audit_flag is null
+        and n_audit_user is null
+        and n_audit_date is null;     
+    else
+      insert into nursing_audit_manual(session_id, chapter_id, id_type, id_value, coll_date, donor_id, drive_id,EXCLUDE_FLAG)
+      select gv_session_id, chapter_id, gv_id_type, deferral_id, coll_date, donor_id, drive_id,'X'
+       from donations
+        where coll_date between ld_from_date and ld_to_date
+          and deferral_id is not null
+          and donor_id is not null
+          and n_audit_flag is null
+          and n_audit_user is null
+          and n_audit_date is null;         
+    end if;
+
+    COMMIT;
+  exception
+    when exit_error then -- p_status is already populated with error message.
+      null;
+    when others then -- catch any other ora errors.
+      ROLLBACK;
+      p_status := SUBSTR(SQLERRM, 1, 300);      
+  end nursing_audit_query;
+   */
+  /*
+  Purpose: Starts paperless audit process.  Gets all the units/deferrals pending nursing audit 
+           AND 
+           calculates OK/HOLD status based on manual audit flag setup.
+    Date: 03/11/2019
+   Usage: Called from RETRIEVE button of DRIMAUDT
+  */
+  procedure start_process( p_session_id  in varchar2,
+                           p_id_type     in varchar2,
+                           p_from_date   in date,
+                           p_to_date     in date,
+                           p_user_id     in varchar2,
+                           p_chapter_id  in varchar2,
+                           p_program_id  in varchar2,
+                           p_status      out varchar2
+                          ) is
+
+    exit_error exception;  
+    next_record exception;   
+    nCnt number; 
+    audit_req_flag varchar2(1);
+
+    nu_audit_rc SYS_REFCURSOR;
+
+    ld_from_date  date;
+    ld_to_date    date;
+    lv_prev_trn_id DONATIONS.TRANSACTION_ID%type;
+    lv_don_type   DONATIONS.DONATION_TYPE%type;
+    lv_proc_code  DONATIONS.PROCEDURE_CODE%type;
+    lv_equip_type DONATIONS.EQUIP_TYPE%type;
+    lv_gender     DONORS.GENDER%type;
+    --ln_age_years  number;
+    nAuditKey     NUMBER;
+    nCount        NUMBER:=0;
+
+    vhq_list don_nursing_audit.vhq_aat;
+    vhq_audit_hist_list don_nursing_audit.vhq_aat;
+    vha_list don_nursing_audit.vha_aat;    
+
+    TYPE string_aat IS TABLE OF VARCHAR2(200) INDEX BY PLS_INTEGER;  
+    list_unexpected_HHR       string_aat;           
+    list_staffchanged_HHR     string_aat;
+    list_unexpected_PFValue  string_aat;
+    list_changed_KeyValue     string_aat;
+    list_changed_History_HHR  string_aat;
+    chp_sysdate               DATE;
+    nInqry                    NUMBER:=0;
+    pl_exclude_flag           varchar2(1); 
+
+
+    nu_rec nursing_audit_manual%ROWTYPE;
+    -- caches validation table data
+    PROCEDURE cache_lists IS
+    BEGIN
+      select vhq.question_code BULK COLLECT into vhq_list
+       from valid_hh_questions vhq
+      where vhq.manual_audit_flag = 'Y'
+        and chp_sysdate between eff_date and nvl(term_date, chp_sysdate+1);
+
+      select vhq.question_code BULK COLLECT into vhq_audit_hist_list --V11
+       from valid_hh_questions vhq
+      where vhq.manual_audit_hist_flag = 'Y'
+        and chp_sysdate between eff_date and nvl(term_date, chp_sysdate+1);
+        
+      select vha.question_code, vha.answer_code BULK COLLECT into vha_list
+       from valid_hh_answers vha
+      where vha.manual_audit_flag = 'Y'
+        and chp_sysdate between eff_date and nvl(term_date, chp_sysdate+1);
+    END cache_lists;
+
+    -- Clear all the lists defined for holding REASON 
+    PROCEDURE clear_list_reasons IS
+    BEGIN
+      list_unexpected_HHR.DELETE;
+      list_staffchanged_HHR.DELETE;
+      list_unexpected_PFValue.DELETE;
+      list_changed_KeyValue.DELETE;
+      list_changed_History_HHR.DELETE;
+    END clear_list_reasons;       
+
+    -- Concatenate all reasons from list to a single string reason.
+    FUNCTION get_reason (p_reasons IN string_aat, p_msg IN VARCHAR2) RETURN VARCHAR2 IS
+      lv_reason VARCHAR2(300) := NULL;   --- MLT 8590
+    BEGIN
+      if p_reasons.COUNT > 0 then
+        lv_reason := p_msg;
+        FOR indx IN p_reasons.FIRST .. p_reasons.LAST LOOP
+          lv_reason := lv_reason || ' ' || p_reasons(indx) || ',';
+        END LOOP;
+        lv_reason := RTRIM(lv_reason,',');
+      end if;   
+
+      RETURN lv_reason;   
+    END get_reason;
+
+  begin
+    -- Initialse out parameter.
+    p_status := 'OK';
+
+    -- validate input parameters.
+    if p_session_id is null then
+      p_status := 'Session ID parameter is required';
+      RETURN;
+    end if;
+
+    if UPPER(p_id_type) not in (lc_donation, lc_deferral) then
+      p_status := 'Invalid ID Type';
+      RETURN;
+    end if;            
+
+    if p_from_date > p_to_date then
+      p_status := '''From Date'' can not be later to ''To Date''';
+      RETURN;
+    end if;     
+
+    -- Initialize session global variables.                
+    gv_session_id := p_session_id;
+    gv_id_type := UPPER(p_id_type); 
+    gv_user_id := p_user_id;
+    gv_program_id := p_program_id;  
+    ld_from_date := TRUNC(p_from_date);
+    ld_to_date  := TRUNC(p_to_date);
+    gv_chp_id := p_chapter_id;
+    chp_sysdate := lifetrack_timezone_convert.get_local_time(p_chapter_id, SYSDATE);
+    -- 
+    BEGIN
+      SELECT inter_code INTO gv_pa_hold 
+        FROM valid_regint_reasons
+       WHERE inter_reason = 'PAUDITHOLD';
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+         p_status := '23015';
+         RETURN;
+      WHEN OTHERS THEN
+         p_status := SUBSTR(SQLERRM, 1, 300);
+         RETURN;
+    END;
+
+
+    -- get initial data set based on the search block values.
+    if gv_id_type = lc_donation then
+      select count(1) into nCnt
+       from donations
+      where coll_date between ld_from_date and ld_to_date
+        and unit_id is not null
+        and chapter_id = gv_chp_id
+        and donor_id is not null
+        and n_audit_flag is null
+        and n_audit_user is null
+        and n_audit_date is null
+        and program_id not in ('DRIREGIS', 'DRIREDEF')
+        and exists (select 'x' from online_status where transaction_id=donations.transaction_id and status_flag='C');    
+      
+    else 
+      select count(1) into nCnt
+       from donations
+      where coll_date between ld_from_date and ld_to_date
+        and deferral_id is not null
+        and chapter_id = gv_chp_id 
+        and donor_id is not null       
+        and n_audit_flag is null
+        and n_audit_user is null
+        and n_audit_date is null
+        and program_id not in ('DRIREGIS', 'DRIREDEF');
+        --and exists (select 'x' from online_status where transaction_id=donations.transaction_id and status_flag='C');
+     end if; 
+
+     if nCnt = 0 then
+       p_status := '9188'; -- 'No records found' error code;
+       RETURN;
+     end if;
+
+     /* -- close to 800 units are processed each day - no limits for now.
+     if nCnt > 300 then
+       p_status := 'More than 300 records found.. exiting.';
+       raise exit_error;
+     end if;
+     */
+
+    --  get valid tables data.
+    cache_lists;
+
+
+    -- Begin nursing audit criteria check.
+    if gv_id_type = lc_donation then
+       open nu_audit_rc for   
+       select transaction_id, coll_date, unit_id, donor_id, donation_type, procedure_code, equip_type, drive_id
+         from donations
+        where coll_date between ld_from_date and ld_to_date
+          and unit_id is not null
+          and chapter_id = gv_chp_id          
+          and donor_id is not null
+          and n_audit_flag is null
+          and n_audit_user is null
+          and n_audit_date is null
+          and program_id not in ('DRIREGIS', 'DRIREDEF') and
+          exists (select 'x' from online_status where transaction_id=donations.transaction_id and status_flag='C');
+    else
+      open nu_audit_rc for  
+       select transaction_id, coll_date, deferral_id, donor_id, donation_type, procedure_code, equip_type, drive_id
+         from donations
+        where coll_date between ld_from_date and ld_to_date
+          and deferral_id is not null
+          and chapter_id = gv_chp_id          
+          and donor_id is not null
+          and n_audit_flag is null
+          and n_audit_user is null
+          and n_audit_date is null
+          and program_id not in ('DRIREGIS', 'DRIREDEF'); 
+          ---and exists (select 'x' from online_status where transaction_id=donations.transaction_id and status_flag='C');         
+    end if;
+
+
+    LOOP
+      -- clear reasons list.
+      clear_list_reasons;
+
+
+      BEGIN      
+        FETCH nu_audit_rc 
+         INTO nu_rec.transaction_id, nu_rec.coll_date, nu_rec.id_value, nu_rec.donor_id, lv_don_type, lv_proc_code, lv_equip_type, nu_rec.drive_id;
+        EXIT WHEN nu_audit_rc%NOTFOUND;        
+
+        -- 1) Unexpected HH Responses.
+        select hh.question_code ||'-' || hh.answer_code BULK COLLECT into list_unexpected_HHR
+          from health_history hh
+           where hh.transaction_id =  nu_rec.transaction_id
+            and (hh.question_code, hh.answer_code) IN (SELECT * FROM TABLE(vha_list));        
+
+
+        -- 2) Response changed by staff.        
+        -- if a response is changed by staff, existing answers will be deleted and a new response is inserted
+        -- with program id as ONIHLTHS.
+        select count(1) into nCnt
+          from donor_responses dr
+         where dr.transaction_id = nu_rec.transaction_id;
+
+        -- DonorReponse button was not used, staff did the responses using HH button.
+       IF nCnt = 0 THEN
+          -- Audit table record indicates that one of the questions was modified.
+          select DECODE(COUNT(1), 0, NULL, MAX(audit_key)) into nAuditKey
+           from health_history_audit hha
+          where UPPER(hha.column_name) = 'TRANSACTION_ID'
+            and hha.old_value = nu_rec.transaction_id;
+
+          if nAuditKey is not null then
+            select hha.old_value BULK COLLECT into list_staffchanged_HHR
+             from health_history_audit hha
+            where hha.audit_key = nAuditKey
+              and UPPER(hha.column_name) = 'QUESTION_CODE'
+              and hha.old_value IN (select COLUMN_VALUE from TABLE(vhq_list));
+          end if;
+       ELSE
+          -- for normal sceanrio where user does donor responses and screener does HH.
+          select hh.question_code BULK COLLECT into list_staffchanged_HHR
+            from donor_responses dr, health_history hh
+           where dr.transaction_id = hh.transaction_id
+            and dr.question_code = hh.question_code
+            and dr.transaction_id = nu_rec.transaction_id
+            and dr.donor_response <> hh.response
+            and hh.question_code in (select COLUMN_VALUE from TABLE(vhq_list));
+       END IF;
+
+        -- 3) Unexptected Physical Findings.      
+        select gender--, FLOOR(MONTHS_BETWEEN(sysdate, date_of_birth)/12) 
+          into lv_gender
+         from donors 
+        where donor_id = nu_rec.donor_id;
+
+        FOR Z IN (
+             /*select pf.physical_code, pf.physical_value, vpr.item_value, vpr.item_value_max, vpr.item_operator
+              from physical_findings pf, valid_physical_rules vpr
+             where pf.physical_code = vpr.physical_code
+               and vpr.donation_type = lv_don_type
+               and vpr.procedure_code = lv_proc_code
+               and NVL(vpr.manual_audit_flag,'X') = 'Y'
+               and vpr.data_type in ('C', 'N', 'D')  
+               and vpr.gender in ('A', lv_gender) 
+               and vpr.item_operator IN ('EQUAL', 'BETWEEN', 'MORE', 'LESS')  
+               and pf.transaction_id = nu_rec.transaction_id
+               and nu_rec.coll_date between vpr.eff_date and nvl(vpr.term_date, nu_rec.coll_date+1)
+             */
+               select pf.physical_code, pf.physical_value
+               from physical_findings pf where pf.transaction_id = nu_rec.transaction_id
+               --and nu_rec.coll_date between vpr.eff_date and nvl(vpr.term_date, nu_rec.coll_date+1)
+             )
+         LOOP
+
+           audit_req_flag:='N';
+
+           For rec in (
+
+              select vpr.item_value, vpr.item_value_max, vpr.item_operator, vpr.manual_audit_flag
+               from valid_physical_rules vpr
+             where vpr.physical_code=Z.physical_code
+               and vpr.donation_type = lv_don_type
+               and vpr.procedure_code = lv_proc_code
+               and vpr.data_type in ('C', 'N', 'D')  
+               and vpr.gender in ('A', lv_gender) 
+               and vpr.item_operator IN ('EQUAL', 'BETWEEN', 'INRANGE', 'MORE', 'LESS')  
+               and nu_rec.coll_date between vpr.eff_date and nvl(vpr.term_date, nu_rec.coll_date+1)
+
+                     )
+             Loop
+
+             /* select nvl(count(*),0) into nCount from valid_physical_rules where donation_type=lv_don_type
+             and procedure_code=lv_proc_code and physical_code=Z.physical_code and data_type in ('N','D') 
+             and nu_rec.coll_date between eff_date and nvl(term_date, nu_rec.coll_date+1);
+             */
+
+
+             ---audit_req_flag:='N';
+
+           IF ltrim(Z.physical_value, '1234567890.') IS NULL THEN -- NUMBER
+
+
+
+              IF rec.item_operator = 'BETWEEN' THEN
+
+                  IF Z.physical_value BETWEEN TO_NUMBER(rec.item_value) AND TO_NUMBER(rec.item_value_max) and  
+                       nvl(rec.manual_audit_flag,' ') ='Y' THEN
+                       --list_unexpected_PFValue(NVL(list_unexpected_PFValue.LAST,0)+1) := rec.physical_code;
+                        audit_req_flag:='Y';
+                   END IF;
+
+
+                /*
+                  If nCount =1 then   -- just one rule defined case
+
+                     IF (Z.physical_value NOT BETWEEN TO_NUMBER(rec.item_value) AND TO_NUMBER(rec.item_value_max)) 
+                         and nvl(rec.manual_audit_flag,' ') ='Y' THEN
+                       --list_unexpected_PFValue(NVL(list_unexpected_PFValue.LAST,0)+1) := rec.physical_code;
+                        audit_req_flag:='Y';
+                     END IF;
+                  Elsif nCount > 1 then   -- multiple rules case
+                     IF Z.physical_value BETWEEN TO_NUMBER(rec.item_value) AND TO_NUMBER(rec.item_value_max) and  
+                       nvl(rec.manual_audit_flag,' ') ='Y' THEN
+                       --list_unexpected_PFValue(NVL(list_unexpected_PFValue.LAST,0)+1) := rec.physical_code;
+                        audit_req_flag:='Y';
+                     END IF;
+                  End If;
+               */
+             ELSIF rec.item_operator = 'INRANGE' THEN
+
+                  IF Z.physical_value BETWEEN TO_NUMBER(rec.item_value) AND TO_NUMBER(rec.item_value_max) and  
+                       nvl(rec.manual_audit_flag,' ') ='Y' THEN
+                       --list_unexpected_PFValue(NVL(list_unexpected_PFValue.LAST,0)+1) := rec.physical_code;
+                        audit_req_flag:='Y';
+                   END IF;
+
+             ELSIF rec.item_operator = 'MORE' THEN
+                   IF Z.physical_value > TO_NUMBER(rec.item_value)  and nvl(rec.manual_audit_flag,' ') ='Y' THEN
+                    --list_unexpected_PFValue(NVL(list_unexpected_PFValue.LAST,0)+1) := rec.physical_code;
+                    audit_req_flag:='Y';
+                   END IF;
+              ELSIF rec.item_operator = 'LESS' THEN
+                  IF Z.physical_value < TO_NUMBER(rec.item_value)  and nvl(rec.manual_audit_flag,' ') ='Y' THEN
+                    --list_unexpected_PFValue(NVL(list_unexpected_PFValue.LAST,0)+1) := rec.physical_code;
+                    audit_req_flag:='Y';
+                  END IF;
+              END IF; 
+            ELSE -- Character
+               IF rec.item_operator = 'EQUAL' THEN
+                 IF Z.physical_value = rec.item_value  and nvl(rec.manual_audit_flag,' ') ='Y' THEN
+                   --list_unexpected_PFValue(NVL(list_unexpected_PFValue.LAST,0)+1) := rec.physical_code;
+                   audit_req_flag:='Y';
+                 END IF;
+               END IF;
+
+           END IF;    
+         END LOOP;
+
+         -- just finished looping through all the PF rules for that physical code 
+         -- now decide if the manual audit is needed or not or that code based
+         -- on the flag settings
+
+          If audit_req_flag = 'Y' then 
+            list_unexpected_PFValue(NVL(list_unexpected_PFValue.LAST,0)+1) := Z.physical_code;
+          End If;
+
+     END LOOP;   -- for the outer loop
+
+
+        --*/
+
+        -- 4) Key field values changed for donor columns.      
+        SELECT da.column_name BULK COLLECT into list_changed_KeyValue 
+          FROM donors d, donors_audit da, donations don
+         WHERE d.audit_key = da.audit_key
+           and d.donor_id = nu_rec.donor_id
+           --and trunc(da.audit_insert_dats) = trunc(SYSDATE) -- only if changed on the same day
+             and (d.donor_id=don.donor_id and (don.unit_id is not null or don.DEFERRAL_ID is not null) and 
+                  don.n_audit_flag is null) ---and don.coll_date > trunc(sysdate)-5 ) 
+             and UPPER(da.column_name) in
+               (select UPPER(description)
+                  from valid_master_codes
+                 where code_type = 'NUKEY'
+                   and chp_sysdate between eff_date and nvl(term_date, chp_sysdate+1)
+                );
+
+          -- 5) Historical answer changed.
+          -- need more info on this--
+          select count(1) into nCnt
+            from donations
+           where donor_id = nu_rec.donor_id;
+
+          -- for return donor only. skip this check for new donors.
+          if nCnt > 1 then
+            SELECT prev_trn_id INTO lv_prev_trn_id
+              FROM
+                 (
+                  select transaction_id, LAG(transaction_id,1) OVER (ORDER BY coll_date) AS prev_trn_id 
+                   from donations
+                  where donor_id  = nu_rec.donor_id
+                 )
+              WHERE transaction_id = nu_rec.transaction_id
+                and rownum = 1;
+
+
+              select distinct hh1.question_code BULK COLLECT into list_changed_History_HHR
+               from health_history hh1, health_history hh2
+              where hh1.question_code = hh2.question_code
+               and hh1.transaction_id = nu_rec.transaction_id
+               and hh2.transaction_id= lv_prev_trn_id
+               and hh1.answer_code <> hh2.answer_code
+               and hh1.question_code in ( select COLUMN_VALUE from TABLE(vhq_audit_hist_list) );  -- MLT-4643 --V10, V11       
+
+          end if;
+
+      END; 
+
+      nu_rec.reason  := NULL;
+
+      nu_rec.reason := get_reason(list_unexpected_HHR, '**Unexpected HHR: ')
+                  || get_reason(list_staffchanged_HHR, '**Staff Changed HHR: ')
+                  || get_reason(list_unexpected_PFValue, '**Unexpected PF: ')
+                  || get_reason(list_changed_KeyValue, '**Key Value Changed: ')
+                  || get_reason(list_changed_History_HHR, '**Historical HHR Changed: ');
+
+      -- IF nu_rec.reason IS NULL THEN
+        -- Registration Inquiry check.
+      -- MLT 2787 (manual audit check added), originated from changed to INQR
+      select count(*) into nInqry
+        from donor_interdictions di
+       where transaction_id = nu_rec.transaction_id
+         and originated_from = 'INQR'
+         and exists (select 1 
+                      from valid_hh_answers vha
+                     where vha.answer_code = di.reason_code
+                       and NVL(manual_audit_flag, 'N') = 'Y'
+                       and chp_sysdate between eff_date and nvl(term_date, chp_sysdate+1) );
+         /* -- 
+         and 0 = (select count(*)
+                    from health_history
+                   where transaction_id = nu_rec.transaction_id)
+         and 0 = (select count(*)
+                    from physical_findings
+                   where transaction_id = nu_rec.transaction_id);
+         */          
+     If nInqry > 0 then 
+       if nu_rec.reason is not null then
+         nu_rec.reason := nu_rec.reason || '**Registration Inquiry';
+       else
+         nu_rec.reason := 'Registration Inquiry';    --- This line was added by Edwin 
+       end if;  
+     End If;
+      -- END IF;
+
+      -- MLT 2787   (refactored code to fix the issue where status was OK for registration inquiry hold)
+      IF nu_rec.reason IS NULL THEN
+        nu_rec.status := 'OK';
+        pl_exclude_flag:= NULL;
+      ELSE
+        nu_rec.status := 'HOLD';
+        pl_exclude_flag:='X';
+      END IF;
+      --
+      nu_rec.session_id := gv_session_id;
+      nu_rec.chapter_id := gv_chp_id;
+      nu_rec.id_type := gv_id_type;
+      nu_rec.program_id := gv_program_id;
+      nu_rec.insert_user := gv_user_id;
+      nu_rec.insert_date := SYSDATE;
+      nu_rec.exclude_flag := pl_exclude_flag;
+
+      INSERT INTO nursing_audit_manual VALUES nu_rec;            
+    END LOOP;
+
+    CLOSE nu_audit_rc;
+
+    COMMIT;
+
+
+  exception
+    when exit_error then -- p_status is already populated with error message.
+      null;
+    when others then -- catch any other ora errors.
+      ROLLBACK;
+      p_status := SUBSTR(SQLERRM, 1, 300);      
+      if nu_audit_rc%ISOPEN then
+        CLOSE nu_audit_rc;
+      end if;
+  end start_process;                                
+
+  procedure process_donations(p_status OUT VARCHAR2) is
+    chp_sysdate DATE;
+    temp_status VARCHAR2(200);
+    out_status VARCHAR2(200);
+    ld_dummy_in_out DATE;
+  begin
+    p_status := 'OK';
+    chp_sysdate := lifetrack_timezone_convert.get_local_time(gv_chp_id, SYSDATE);
+
+    -- Updates audit flags for all the records
+    UPDATE donations
+       SET n_audit_date = chp_sysdate,
+           n_audit_flag = 'Y',
+           DONOR_SIGNATURE_FLAG='Y',    --- MLT-3135
+           n_audit_user = gv_user_id
+     WHERE (unit_id, coll_date, chapter_id) IN
+           (SELECT id_value, coll_date, chapter_id
+              FROM nursing_audit_manual
+             WHERE session_id = gv_session_id);
+
+    -- record by record processing of HOLD units.  Place AUHLD intercode.         
+    FOR rec IN (SELECT * FROM nursing_audit_manual WHERE session_id = gv_session_id AND status = 'HOLD') LOOP
+        don_inter.place_inter_unit(
+                              rec.id_value, 
+                              null,                
+                              rec.coll_date,
+                              rec.chapter_id,
+                              rec.transaction_id,
+                              gv_pa_hold,
+                              null,
+                              null,
+                              null,
+                              rec.insert_user,
+                              null,
+                              null,
+                              rec.program_id,
+                              trunc(chp_sysdate),
+                              null,
+                              temp_status,
+                              rec.reason);      
+
+        IF temp_status != 'OK' then
+          p_status := 'Error in AUHLD placement.  ID_VALUE || ' || rec.id_value;
+          RETURN;
+        END IF;                      
+
+    END LOOP; 
+
+    -- Remove RAPND inter code if exists.
+    FOR rec in 
+         ( SELECT donor_id, unit_id, transaction_id, eff_date, originated_from, reason_code
+            FROM donor_interdictions
+           WHERE (donor_id, unit_id, transaction_id) IN (SELECT donor_id, id_value, transaction_id FROM nursing_audit_manual WHERE session_id = gv_session_id)
+             AND inter_code = 'RAPND'
+             AND release_date IS NULL
+          ) LOOP
+
+         ld_dummy_in_out := NULL;
+         DON_INTER.INTER_UPGRADE_REMOVE(rec.donor_id,
+                                        'ALL',
+                                        rec.unit_id,
+                                        rec.transaction_id,
+                                        'RAPND',
+                                        rec.originated_from,
+                                        rec.reason_code,
+                                        gv_user_id,
+                                        null,
+                                        null,
+                                        gv_program_id,
+                                        rec.eff_date,
+                                        ld_dummy_in_out,
+                                        trunc(chp_sysdate),
+                                        null,
+                                        'SYSTEM RELEASED',
+                                        out_status);    
+
+        IF out_status != 'OK' THEN
+          p_status := 'Error in removing RAND ' || rec.unit_id || '-' || out_status;
+          RETURN;
+        END IF;                                        
+    END LOOP;
+
+    -- Release DRDEF inter for all records in donation interdictions        
+    UPDATE donation_interdictions
+       SET release_date = chp_sysdate,
+           term_date = chp_sysdate,
+           release_user = gv_user_id
+     WHERE (unit_id, transaction_id) IN
+           (SELECT id_value, transaction_id
+              FROM nursing_audit_manual
+             WHERE session_id = gv_session_id)
+        AND inter_code = 'DRDEF'
+        AND release_date IS NULL;
+
+    -- RELEASE DRDEF inter for all records in donor interdictions.    
+    UPDATE donor_interdictions
+       SET release_date = chp_sysdate,
+           term_date = chp_sysdate,
+           release_user = gv_user_id
+     WHERE (donor_id, transaction_id) IN
+           (SELECT donor_id, transaction_id
+              FROM nursing_audit_manual
+             WHERE session_id = gv_session_id)
+        AND inter_code = 'DRDEF'
+        AND release_date IS NULL;
+  end process_donations;
+
+  procedure process_deferral(p_status OUT VARCHAR2) is
+    chp_sysdate DATE;
+    temp_status VARCHAR2(200);
+    lv_multi_chapter VARCHAR2(1);
+    lv_multi_chp_id  VARCHAR2(5);
+    ld_term_date     DATE;
+    lv_inter_code    VARCHAR2(5);
+  begin
+    p_status := 'OK';
+
+    chp_sysdate := lifetrack_timezone_convert.get_local_time(gv_chp_id, SYSDATE);
+
+    --- Used in don_inter placement routine.
+    select NVL(multi_chapter, 'N') into lv_multi_chapter
+      from lt_application_config;
+
+    IF lv_multi_chapter = 'Y' THEN
+      lv_multi_chp_id := 'ALL';
+    ELSE
+      lv_multi_chp_id := gv_chp_id;
+    END IF;
+    --------------------------------
+
+    -- Updates audit flags for all the records
+    UPDATE donations
+       SET n_audit_date = chp_sysdate,
+           n_audit_flag = 'Y',
+           DONOR_SIGNATURE_FLAG='Y',   --MLT 3135
+           n_audit_user = gv_user_id
+     WHERE (deferral_id, coll_date, chapter_id) IN
+           (SELECT id_value, coll_date, chapter_id
+              FROM nursing_audit_manual
+             WHERE session_id = gv_session_id);
+
+    -- record by record processing of HOLD units.  
+    FOR rec IN (SELECT * FROM nursing_audit_manual WHERE session_id = gv_session_id AND status = 'HOLD') LOOP
+
+       ld_term_date := NULL;  
+
+      /*  MLT - 2787 -- no need to calculate term date.  It is always null as the PA HOLD is always indefinite deferral.
+
+       -- Returns NULL if no records found OR returns max of term dates. 
+       -- A null di.term date value indicates a permananet deferral, so constant lc_max_date is used to determine if it is permanant or not.      
+      SELECT DECODE(COUNT(1), 0, NULL, MAX(NVL(di.term_date, lc_max_date ))) INTO ld_term_date
+        FROM donor_interdictions di
+       WHERE di.transaction_id = rec.transaction_id
+         AND rec.coll_date BETWEEN di.eff_date and NVL(di.term_date, rec.coll_date+1)
+         AND di.release_date is null
+         AND di.inter_code IN (SELECT vi.inter_code
+                                 FROM valid_interdictions vi
+                                WHERE vi.deferral_flag = 'Y'
+                                  AND chp_sysdate BETWEEN eff_date AND NVL(term_date, chp_sysdate)
+                               );
+
+        --  commented by Edwin as it does not need to place teh HDT/HDI 
+
+        if ld_term_date is null then  -- NoDef case.
+          lv_inter_code := gv_pa_hold;
+          ld_term_date := null;
+        elsif ld_term_date = lc_max_date then -- permanant OR indefinite deferral.
+          lv_inter_code := 'HDI';
+          ld_term_date := NULL; --  no term date.
+        else
+          if ld_term_date < chp_sysdate then -- if term date is less than local date, don_inter routine does not allow to place HDT.  Place PAUDITHOLD interdiction instead.
+            lv_inter_code := gv_pa_hold;
+            ld_term_date := null;            
+          else  
+            lv_inter_code := 'HDT';
+            ld_term_date := ld_term_date; -- no changes to term date.
+          end if;
+        end if;
+        =======================================    
+        */
+
+         lv_inter_code := gv_pa_hold;
+
+
+        don_inter.inter_upgrade_place(
+                             rec.donor_id,
+                             lv_multi_chp_id,           
+                             null,
+                             rec.transaction_id,
+                             lv_inter_code,
+                             null,
+                             null,
+                             rec.insert_user,
+                             null,
+                             null,
+                             rec.program_id,
+                             trunc(chp_sysdate), 
+                             ld_term_date,  -- MLT 2787  (Always null -- pa hold is always an indefinite deferral)
+                             rec.reason,
+                             temp_status);  
+
+        IF temp_status != 'OK' then
+          p_status := ' Error in ' || lv_inter_code || ' placement for '|| rec.id_value || ' - ' ||temp_status;
+          RETURN;
+        END IF;  
+
+
+    END LOOP; 
+    -- Release DRDEF inter for all records in donation interdictions          
+    UPDATE donation_interdictions
+       SET release_date = trunc(chp_sysdate),
+           term_date = trunc(chp_sysdate),
+           release_user = gv_user_id
+     WHERE transaction_id IN
+           (SELECT transaction_id
+              FROM nursing_audit_manual
+             WHERE session_id = gv_session_id)
+        AND inter_code = 'DRDEF'
+        AND release_date IS NULL;
+
+    -- Release DRDEF inter for all records in donation interdictions     
+    UPDATE donor_interdictions
+       SET release_date = trunc(chp_sysdate),
+           term_date = trunc(chp_sysdate),
+           release_user = gv_user_id
+     WHERE (donor_id, transaction_id) IN
+           (SELECT donor_id, transaction_id
+              FROM nursing_audit_manual
+             WHERE session_id = gv_session_id)
+        AND inter_code = 'DRDEF'
+        AND release_date IS NULL;
+
+  end process_deferral;
+
+  /*
+  Purpose: uses pkg session variables initialized in start_process routine and commits the transactions.
+  Usage: called from COMMIT button of DRIMAUDT screen.
+  */
+  procedure do_commit(p_status OUT VARCHAR2) is
+  begin
+    p_status := 'OK';
+
+    if gv_session_id is null then
+      p_status := 'Session not found';
+      return;
+    end if;  
+
+    DELETE FROM nursing_audit_manual
+    WHERE session_id = gv_session_id
+      AND exclude_flag = 'X';
+
+    if gv_id_type = lc_donation then
+      process_donations(p_status);  
+    elsif gv_id_type = lc_deferral then
+      process_deferral(p_status);
+    end if; 
+
+    if p_status = 'OK' then
+       COMMIT;
+    end if;
+
+  exception
+    when others then
+      p_status := SUBSTR(SQLERRM, 1, 300);  
+  end do_commit;
+
+
+begin
+  -- Initialization
+  null;
+end DON_NURSING_AUDIT;
+/

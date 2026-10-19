@@ -1,0 +1,265 @@
+<div class="side-drawer">
+
+  <!-- ==================== ADD/EDIT FORM VIEW ==================== -->
+    <!-- Header -->
+    <header class="side-drawer__header">
+      <div class="side-drawer__header-title">
+        <h3>{{ mode === 'add' ? 'Add New Lot' : 'Edit Lot' }}</h3>
+        @if (mode === 'edit' && data?.lastModifiedDate) {
+          <span class="last-modified">Last Modified: {{ data?.lastModifiedDate }}</span>
+        }
+      </div>
+      <button mat-icon-button
+              type="button"
+              aria-label="Close drawer"
+              matTooltip="Close"
+              (click)="onClose()">
+        <mat-icon>close</mat-icon>
+      </button>
+    </header>
+
+    <!-- Content -->
+    <div class="side-drawer__content">
+      <form [formGroup]="form" [attr.aria-describedby]="errorMessage ? 'form-error-message' : null">
+        <!-- Error Message -->
+        @if (errorMessage) {
+          <div id="form-error-message" class="error-message" role="alert" aria-live="assertive">
+            <mat-icon aria-hidden="true">error</mat-icon>
+            <span>{{ errorMessage }}</span>
+          </div>
+        }
+
+        <!-- Row 1: Lot Number | Catalog -->
+        <div class="form-row">
+          <mat-form-field appearance="fill">
+            <mat-label>Lot Number</mat-label>
+            <input matInput formControlName="lotNumber" maxlength="30" required aria-required="true"
+                   (keydown)="preventSpaceInput($event)" />
+            <mat-hint>A maximum of 30 characters.</mat-hint>
+            @if (form.get('lotNumber')?.hasError('required')) {
+              <mat-error>Lot Number is required</mat-error>
+            }
+            @if (form.get('lotNumber')?.hasError('maxlength')) {
+              <mat-error>Lot number must not exceed 30 characters</mat-error>
+            }
+            @if (form.get('lotNumber')?.hasError('invalidLotNumber')) {
+              <mat-error>Lot number can only contain letters, numbers, hyphens, and underscores</mat-error>
+            }
+          </mat-form-field>
+
+          <mat-form-field appearance="fill">
+            <mat-label>Catalog</mat-label>
+            <mat-select formControlName="catalogNumber" required aria-required="true">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="catalogSearchCtrl"
+                  placeholderLabel="Search catalog..."
+                  noEntriesFoundLabel="No matching catalogs"
+                  aria-label="Search catalog options">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (catalog of filteredCatalogs; track catalog.catalogNumber) {
+                <mat-option [value]="catalog.catalogNumber">
+                  {{ catalog.catalogNumber }}
+                </mat-option>
+              }
+            </mat-select>
+            @if (form.get('catalogNumber')?.hasError('required')) {
+              <mat-error>Catalog is required</mat-error>
+            }
+          </mat-form-field>
+        </div>
+
+        <!-- Row 2: Vendor Name | Received Date -->
+        <div class="form-row">
+          <mat-form-field appearance="fill">
+            <mat-label>Vendor Name</mat-label>
+            <input matInput formControlName="vendorName" maxlength="50" (keydown)="preventSpaceInput($event)" />
+            @if (form.get('vendorName')?.hasError('maxlength')) {
+              <mat-error>Vendor name must not exceed 50 characters</mat-error>
+            }
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" [class.has-error]="getReceivedDateError()">
+            <mat-label>Received Date</mat-label>
+            <input #receivedDateInput matInput [matDatepicker]="dateReceivedPicker" formControlName="dateReceived"
+                   [max]="minDate"
+                   [errorStateMatcher]="receivedDateErrorMatcher"
+                   (blur)="onReceivedDateBlur()"
+                   aria-label="Received Date, format DD-MMM-YYYY" />
+            <mat-datepicker-toggle matIconSuffix [for]="dateReceivedPicker"
+                                   aria-label="Open received date calendar"></mat-datepicker-toggle>
+            <mat-datepicker #dateReceivedPicker [startAt]="minDate"></mat-datepicker>
+            @if (getReceivedDateError()) {
+              <mat-error>{{ getReceivedDateError() }}</mat-error>
+            }
+          </mat-form-field>
+        </div>
+
+        <!-- Row 3: Units | Cartons -->
+        <div class="form-row">
+          <mat-form-field appearance="fill">
+            <mat-label>Units</mat-label>
+            <input matInput type="number" formControlName="numberOfUnits" min="0" max="9999"
+                   (keypress)="onlyNumbers($event)" />
+            @if (form.get('numberOfUnits')?.hasError('min') || form.get('numberOfUnits')?.hasError('max')) {
+              <mat-error>Must be between 0 and 9999</mat-error>
+            }
+          </mat-form-field>
+
+          <mat-form-field appearance="fill">
+            <mat-label>Cartons</mat-label>
+            <input matInput type="number" formControlName="numberOfCartons" min="0" max="9999"
+                   (keypress)="onlyNumbers($event)" />
+            @if (form.get('numberOfCartons')?.hasError('min') || form.get('numberOfCartons')?.hasError('max')) {
+              <mat-error>Must be between 0 and 9999</mat-error>
+            }
+          </mat-form-field>
+        </div>
+
+        <!-- Component Manufacturing Control -->
+        <mat-form-field appearance="fill" class="cmc-field">
+          <mat-label>Component Manufacturing Control</mat-label>
+          <mat-select formControlName="spFlag" multiple aria-label="Component Manufacturing Control Values">
+            <mat-select-trigger>
+              @if (getSelectedCmcValues().length > 0) {
+                <div class="cmc-chips-container">
+                  @for (value of getSelectedCmcValues(); track value) {
+                    <span class="cmc-chip">
+                      {{ value }}
+                      <button type="button"
+                              class="cmc-chip__remove"
+                              (click)="removeCmcChip($event, value)"
+                              [attr.aria-label]="'Remove ' + value + ' from Component Manufacturing Control'">
+                        <mat-icon aria-hidden="true">cancel</mat-icon>
+                      </button>
+                    </span>
+                  }
+                </div>
+              }
+            </mat-select-trigger>
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="cmcSearchCtrl"
+                placeholderLabel="Search CMC values..."
+                noEntriesFoundLabel="No matching CMC values"
+                aria-label="Search Component Manufacturing Control options">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (cmc of filteredCmcCodes; track cmc.code) {
+              <mat-option [value]="cmc.code">
+                {{ cmc.code }} - {{ cmc.description }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Row 4: Type Set | Supply Code -->
+        <div class="form-row">
+          <mat-form-field appearance="fill">
+            <mat-label>Type Set</mat-label>
+            <mat-select formControlName="volumeTypeSet">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="typeSetSearchCtrl"
+                  placeholderLabel="Search type set..."
+                  noEntriesFoundLabel="No matching type sets"
+                  aria-label="Search volume type set options">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (vts of filteredVolumeTypeSets; track vts.code) {
+                <mat-option [value]="vts.code">
+                  {{ vts.code }} - {{ vts.description }}
+                </mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <mat-form-field appearance="fill">
+            <mat-label>Supply Code</mat-label>
+            <mat-select formControlName="supplyCode">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="supplyCodeSearchCtrl"
+                  placeholderLabel="Search supply code..."
+                  noEntriesFoundLabel="No matching supply codes"
+                  aria-label="Search supply code options">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (sc of filteredSupplyCodes; track sc.code) {
+                <mat-option [value]="sc.code">
+                  {{ sc.code }} - {{ sc.description }}
+                </mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+        </div>
+
+        <!-- Row 5: Effective Date | Termination Date -->
+        <div class="form-row">
+          <div class="form-field-wrapper">
+            @if (mode === 'add') {
+              <mat-form-field appearance="fill" [class.has-error]="getEffectiveDateError()">
+                <mat-label>Effective Date</mat-label>
+                <input #effectiveDateInput matInput [matDatepicker]="effDatePicker" formControlName="effDate"
+                       [min]="minDate"
+                       [errorStateMatcher]="effDateErrorMatcher"
+                       (blur)="onEffectiveDateBlur()"
+                       aria-label="Effective Date, format DD-MMM-YYYY, required" />
+                <mat-datepicker-toggle matIconSuffix [for]="effDatePicker"
+                                       aria-label="Open effective date calendar"></mat-datepicker-toggle>
+                <mat-datepicker #effDatePicker [startAt]="minDate"></mat-datepicker>
+                @if (getEffectiveDateError()) {
+                  <mat-error>{{ getEffectiveDateError() }}</mat-error>
+                }
+              </mat-form-field>
+            } @else {
+              <div class="field-display-card">
+                <div class="field-label">Effective Date</div>
+                <div class="field-value">{{ (data?.effDate | date: 'dd-MMM-yyyy') || '-' }}</div>
+              </div>
+            }
+          </div>
+
+          <div class="form-field-wrapper">
+            <mat-form-field appearance="fill" [class.has-error]="getTerminationDateError()">
+              <mat-label>Termination Date</mat-label>
+              <input #terminationDateInput matInput [matDatepicker]="termDatePicker" formControlName="termDate"
+                     [matDatepickerFilter]="terminationDateFilter"
+                     [errorStateMatcher]="termDateErrorMatcher"
+                     (blur)="onTerminationDateBlur()"
+                     aria-label="Termination Date, format DD-MMM-YYYY" />
+              <mat-datepicker-toggle matIconSuffix [for]="termDatePicker"
+                                     aria-label="Open termination date calendar"></mat-datepicker-toggle>
+              <mat-datepicker #termDatePicker [startAt]="terminationMinDate"></mat-datepicker>
+              @if (getTerminationDateError()) {
+                <mat-error>{{ getTerminationDateError() }}</mat-error>
+              }
+            </mat-form-field>
+          </div>
+        </div>
+      </form>
+    </div>
+
+    <!-- Footer -->
+    <footer class="side-drawer__footer">
+      <div class="footer-actions">
+        <button mat-button type="button" class="cancel-btn" (click)="onClose()" [disabled]="isSubmitting">
+          CANCEL
+        </button>
+
+        @if (mode === 'add') {
+          <button mat-stroked-button type="button" class="secondary-btn" (click)="onSaveAndCreateAnother()"
+                  [disabled]="isSubmitting || isFormInvalid">
+            ADD AND CREATE ANOTHER
+          </button>
+        }
+
+        <button mat-flat-button type="button" class="primary-btn" (click)="onSubmit()"
+                [disabled]="isSubmitting || isFormInvalid">
+          {{ mode === 'add' ? 'ADD' : 'SAVE' }}
+        </button>
+      </div>
+    </footer>
+
+</div>

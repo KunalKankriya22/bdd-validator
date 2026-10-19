@@ -1,0 +1,271 @@
+<div class="temporary-drive-query-page">
+  <div class="page-wrapper">
+    <!-- Visually hidden h1 for proper heading hierarchy -->
+    <h1 class="cdk-visually-hidden">{{ headerConfig.title }}</h1>
+
+    <!-- Page Header with Breadcrumb -->
+    <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+    <!-- SEARCH CARD -->
+    <div class="search-card">
+      <form [formGroup]="filterForm" (ngSubmit)="onRetrieve()" class="search-form">
+        <!-- From Date -->
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label>From Date</mat-label>
+          <input
+            matInput
+            #fromDateInput
+            [matDatepicker]="fromPicker"
+            formControlName="fromDate"
+            required
+            (blur)="onDateBlur('fromDate', fromDateInput)"
+            [attr.aria-invalid]="f['fromDate'].invalid && f['fromDate'].touched"
+            aria-label="From Date">
+          <mat-datepicker-toggle matSuffix [for]="fromPicker"></mat-datepicker-toggle>
+          <mat-datepicker #fromPicker></mat-datepicker>
+          @let fromDateError = getFromDateError();
+          @if (fromDateError) {
+            <mat-error>{{ fromDateError }}</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- To Date -->
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label>To Date</mat-label>
+          <input
+            matInput
+            #toDateInput
+            [matDatepicker]="toPicker"
+            formControlName="toDate"
+            required
+            (blur)="onDateBlur('toDate', toDateInput)"
+            [attr.aria-invalid]="f['toDate'].invalid && f['toDate'].touched"
+            aria-label="To Date">
+          <mat-datepicker-toggle matSuffix [for]="toPicker"></mat-datepicker-toggle>
+          <mat-datepicker #toPicker></mat-datepicker>
+          @let toDateError = getToDateError();
+          @if (toDateError) {
+            <mat-error>{{ toDateError }}</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Recruiter (autocomplete, typeable) -->
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label>Recruiter</mat-label>
+          <input matInput type="text"
+            formControlName="recruiterId"
+            [matAutocomplete]="recruiterAuto"
+            placeholder="Type to search"
+            (blur)="onRecruiterBlur()"
+            (keydown.enter)="onRecruiterEnter($event)"
+            aria-label="Recruiter selection">
+          <mat-icon matSuffix class="dropdown-arrow">arrow_drop_down</mat-icon>
+          <mat-autocomplete #recruiterAuto="matAutocomplete" [displayWith]="displayRecruiter"
+            (optionSelected)="onRecruiterSelected()">
+            @if (isLoadingRecruiters) {
+              <mat-option disabled>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <mat-spinner diameter="18"></mat-spinner>
+                  <span>Loading...</span>
+                </div>
+              </mat-option>
+            } @else {
+              @for (recruiter of filteredRecruiters$ | async; track recruiter.staffNo) {
+                <mat-option [value]="recruiter" class="option-two-line">
+                  <span class="option-primary">{{ recruiter.name }}</span>
+                  <span class="option-secondary">{{ recruiter.staffNo }}</span>
+                </mat-option>
+              }
+            }
+          </mat-autocomplete>
+          @if (f['recruiterId'].errors?.['invalidRecruiter'] && f['recruiterId'].touched) {
+            <mat-error>Select a valid recruiter</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Status (simple select, static values) -->
+        <mat-form-field appearance="fill" class="form-field form-field--small">
+          <mat-label>Status</mat-label>
+          <mat-select formControlName="status" aria-label="Status selection" panelClass="temporary-drive-query-status-panel">
+            @for (status of statusOptions; track status.code) {
+              <mat-option [value]="status.code">{{ status.description }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Sponsor ID (autocomplete, typeable, depends on dates) -->
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label>Sponsor ID</mat-label>
+          <input matInput type="text"
+            formControlName="sponsorId"
+            [matAutocomplete]="sponsorAuto"
+            [placeholder]="isSponsorEnabled ? 'Type to search' : 'Enter dates first'"
+            (blur)="onSponsorBlur()"
+            (keydown.enter)="onSponsorEnter($event)"
+            aria-label="Sponsor selection">
+          <mat-icon matSuffix class="dropdown-arrow">arrow_drop_down</mat-icon>
+          <mat-autocomplete #sponsorAuto="matAutocomplete" [displayWith]="displaySponsor"
+            (optionSelected)="onSponsorSelected()">
+            @if (isLoadingSponsors) {
+              <mat-option disabled>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <mat-spinner diameter="18"></mat-spinner>
+                  <span>Loading...</span>
+                </div>
+              </mat-option>
+            } @else {
+              @for (sponsor of filteredSponsors$ | async; track sponsor.sponsorId) {
+                <mat-option [value]="sponsor" class="option-two-line">
+                  <span class="option-primary">{{ sponsor.name }}</span>
+                  <span class="option-secondary">{{ sponsor.sponsorId }}</span>
+                </mat-option>
+              }
+            }
+          </mat-autocomplete>
+          @if (f['sponsorId'].errors?.['invalidSponsor'] && f['sponsorId'].touched) {
+            <mat-error>Select a valid sponsor</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Sponsor Name (read-only, auto-populated) -->
+        <mat-form-field appearance="fill" class="form-field sponsor-name-field">
+          <mat-label>Sponsor Name</mat-label>
+          <input matInput [value]="sponsorName || '--'" readonly aria-label="Sponsor Name" />
+        </mat-form-field>
+
+        <!-- RETRIEVE Button -->
+        <button
+          type="submit"
+          class="btn-retrieve"
+          [disabled]="isRetrieveDisabled"
+          aria-label="Retrieve temporary drive data">
+          RETRIEVE
+        </button>
+      </form>
+    </div>
+
+    <!-- CONTENT AREA (table + side panel) -->
+    <div class="content-area">
+      <!-- TABLE PANEL -->
+      <div class="table-panel" #tableCard>
+        @if (hasRetrievedData) {
+          <!-- TABLE CONTROLS -->
+          <div class="table-controls">
+            <div class="table-controls-left">
+              <!-- Filter button and chips hidden per design — functionality retained for future use -->
+            </div>
+
+            <div class="table-controls-right">
+              <app-search-bar
+                [config]="searchConfig"
+                (search)="onSearch($event)">
+              </app-search-bar>
+            </div>
+          </div>
+        }
+
+        <!-- EMPTY STATE -->
+        @if (showEmptyState && !isLoadingData) {
+          <div class="empty-state-container" role="status" aria-live="polite">
+            <div class="empty-state-icon" aria-hidden="true">
+              <mat-icon>search</mat-icon>
+            </div>
+            <p class="empty-state-title">No Criteria Selected</p>
+            <p class="empty-state-message">
+              Select From Date and To Date above, then click RETRIEVE<br />
+              to view temporary drive query results.
+            </p>
+          </div>
+        }
+
+        <!-- TABLE -->
+        @if (!showEmptyState) {
+          <div class="table-wrapper">
+            <app-data-table
+              [config]="tableConfig"
+              [data]="dataSource"
+              [loading]="isLoadingData"
+              (sortChange)="onSortChange($event)"
+              (rowClick)="onRowClick($event)">
+            </app-data-table>
+          </div>
+        }
+      </div>
+
+      <!-- OVERVIEW DETAILS SIDE PANEL -->
+      @if (selectedDrive) {
+        <div class="side-panel" role="complementary" aria-label="Overview Details">
+          <div class="side-panel__header">
+            <span class="side-panel__title">Overview Details</span>
+            <!-- Close button hidden — side panel is always visible with auto-selected first row -->
+          </div>
+
+          @if (isLoadingDetail) {
+            <div class="side-panel__loading">
+              <mat-spinner diameter="32"></mat-spinner>
+            </div>
+          } @else if (selectedDriveDetail) {
+            <div class="side-panel__body">
+              <div class="detail-row">
+                <span class="detail-label">Sponsor ID:</span>
+                <span class="detail-value">{{ selectedDriveDetail.sponsorId || '--' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Sponsor Name:</span>
+                <span class="detail-value">{{ selectedDriveDetail.sponsorName || '--' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Contact ID:</span>
+                <span class="detail-value">{{ selectedDriveDetail.contactId || '--' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Contact Name:</span>
+                <span class="detail-value">{{ selectedDriveDetail.contactName || '--' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Location ID:</span>
+                <span class="detail-value">{{ selectedDriveDetail.locationId || '--' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Contact Name:</span>
+                <span class="detail-value">{{ selectedDriveDetail.locationName || '--' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Reason ID:</span>
+                <span class="detail-value">{{ selectedDriveDetail.reasonId || '--' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Reason Name:</span>
+                <span class="detail-value">{{ selectedDriveDetail.reasonName || '--' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Category:</span>
+                <span class="detail-value">{{ selectedDriveDetail.category || '--' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Drive Type:</span>
+                <span class="detail-value">{{ selectedDriveDetail.driveType || '--' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Territory ID:</span>
+                <span class="detail-value">{{ selectedDriveDetail.territoryId || '--' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Territory Name:</span>
+                <span class="detail-value">{{ selectedDriveDetail.territoryName || '--' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Start Time:</span>
+                <span class="detail-value">{{ selectedDriveDetail.startTime || '--' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">End Time:</span>
+                <span class="detail-value">{{ selectedDriveDetail.endTime || '--' }}</span>
+              </div>
+            </div>
+          }
+        </div>
+      }
+    </div>
+  </div>
+</div>

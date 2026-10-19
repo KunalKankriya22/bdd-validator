@@ -1,0 +1,284 @@
+<div class="layout-wrapper">
+  <main class="close-hospital-transfer main-content"
+        aria-labelledby="page-title">
+
+    <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+    <!-- Filter / Retrieve Card -->
+    <div class="close-hospital-transfer__retrieve-card">
+      <div class="close-hospital-transfer__retrieve-fields">
+
+        <!-- Transfer Slip ID (opens side panel dialog) -->
+        <div class="close-hospital-transfer__field-group">
+          <mat-form-field appearance="fill" class="close-hospital-transfer__retrieve-field close-hospital-transfer__slip-field" subscriptSizing="dynamic">
+            <mat-label>Transfer Slip ID</mat-label>
+            <input matInput
+                   readonly
+                   [formControl]="transferSlipCtrl"
+                   [value]="selectedSlipDisplay()"
+                   (click)="openSelectTransferSlipDialog()"
+                   (keydown.enter)="openSelectTransferSlipDialog()"
+                   (keydown.arrowDown)="openSelectTransferSlipDialog()"
+                   (keydown.arrowUp)="openSelectTransferSlipDialog()"
+                   (keydown.space)="$event.preventDefault(); openSelectTransferSlipDialog()"
+                   [id]="elementId('transfer-slip-id')"
+                   [attr.aria-label]="'Transfer Slip ID - click to select'"
+                   aria-required="true" />
+            @if (transferSlipCtrl.hasError('required') && transferSlipCtrl.touched) {
+              <mat-error>Transfer Slip ID is required</mat-error>
+            }
+          </mat-form-field>
+        </div>
+
+        <!-- Creation Date (read-only label) -->
+        <div class="close-hospital-transfer__field-group close-hospital-transfer__info-group">
+          <div class="close-hospital-transfer__info-label" [id]="elementId('creation-date-label')">Creation Date</div>
+          <div class="close-hospital-transfer__info-value" [attr.aria-labelledby]="elementId('creation-date-label')">{{ creationDate() }}</div>
+        </div>
+
+      </div>
+
+      <div class="close-hospital-transfer__retrieve-actions">
+        <button type="button"
+                class="btn-retrieve"
+                [disabled]="isLoadingProducts || !transferSlipCtrl.value"
+                (click)="onRetrieve()"
+                aria-label="Retrieve transfer products">
+          RETRIEVE
+        </button>
+        <button type="button"
+                mat-button
+                class="btn-clear"
+                [disabled]="!hasAnyFieldValue()"
+                (click)="onClearAll()"
+                aria-label="Clear all filters">
+          CLEAR ALL
+        </button>
+      </div>
+    </div>
+
+    <!-- Loading / Empty State Card -->
+    @if (isLoadingProducts || !hasRetrieved || (hasRetrieved && products.length === 0)) {
+      <div class="close-hospital-transfer__card">
+        @if (isLoadingProducts) {
+          <div class="close-hospital-transfer__loading" role="status" aria-live="polite" aria-atomic="true">
+            <mat-spinner diameter="40" aria-label="Loading transfer products"></mat-spinner>
+            <span class="cdk-visually-hidden">Loading transfer products, please wait...</span>
+          </div>
+        } @else if (!hasRetrieved) {
+          <div class="empty-state-container">
+            <div class="empty-state-icon" aria-hidden="true">
+              <mat-icon aria-hidden="true">search</mat-icon>
+            </div>
+            <h3 class="empty-state-title">No Results to Display</h3>
+            <p class="empty-state-message">Choose a Transfer Slip ID to begin.</p>
+          </div>
+        } @else {
+          <div class="empty-state-container">
+            <div class="empty-state-icon" aria-hidden="true">
+              <mat-icon aria-hidden="true">search_off</mat-icon>
+            </div>
+            <h3 class="empty-state-title">No Products Found</h3>
+            <p class="empty-state-message">No transfer products found for this slip.</p>
+          </div>
+        }
+      </div>
+    }
+
+    <!-- Hospital Info Card -->
+    @if (hasRetrieved && !isLoadingProducts && products.length > 0) {
+      <div class="close-hospital-transfer__hospital-card" role="region" aria-label="Hospital transfer information">
+        <div class="close-hospital-transfer__hospital-info">
+          <div class="close-hospital-transfer__hospital-source">
+            <div class="close-hospital-transfer__hospital-label">Source Hospital</div>
+            <div class="close-hospital-transfer__hospital-name">{{ sourceHospitalName() }}</div>
+            <div class="close-hospital-transfer__hospital-address">{{ sourceHospitalAddress() }}</div>
+          </div>
+          <div class="close-hospital-transfer__hospital-arrow" aria-hidden="true">
+            <mat-icon aria-hidden="true">arrow_forward</mat-icon>
+          </div>
+          <div class="close-hospital-transfer__hospital-destination">
+            <div class="close-hospital-transfer__hospital-label">Destination Hospital</div>
+            <div class="close-hospital-transfer__hospital-name">{{ destinationHospitalName() }}</div>
+            <div class="close-hospital-transfer__hospital-address">{{ destinationHospitalAddress() }}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Products Table Card -->
+      <div class="close-hospital-transfer__card">
+        <div class="close-hospital-transfer__table-wrapper">
+          <table mat-table [dataSource]="products" [trackBy]="trackByUnitId"
+                 class="close-hospital-transfer__table" aria-label="Transfer products">
+
+            <!-- Action Taken Column -->
+            <ng-container matColumnDef="actionTaken">
+              <th mat-header-cell *matHeaderCellDef scope="col" class="col-action">Action Taken</th>
+              <td mat-cell *matCellDef="let product" class="col-action">
+                <mat-form-field appearance="fill" class="close-hospital-transfer__inline-field" subscriptSizing="dynamic">
+                  <mat-select [value]="product.actionTaken"
+                              (selectionChange)="onActionChange(product, $event.value)"
+                              aria-label="Select action for this product">
+                    @for (option of actionTakenOptions; track option.value) {
+                      <mat-option [value]="option.value">{{ option.label }}</mat-option>
+                    }
+                  </mat-select>
+                </mat-form-field>
+              </td>
+            </ng-container>
+
+            <!-- Unit ID Column (sortable) -->
+            <ng-container matColumnDef="unitId">
+              <th mat-header-cell *matHeaderCellDef scope="col" class="col-unitid"
+                  [attr.aria-sort]="sortDirection === 'ASC' ? 'ascending' : 'descending'">
+                <button type="button" class="sort-button" (click)="onSortToggle()"
+                        [attr.aria-label]="'Sort by Unit ID ' + (sortDirection === 'ASC' ? 'descending' : 'ascending')">
+                  <span class="sort-text">Unit ID (1)</span>
+                  <mat-icon class="sort-icon sort-icon--active" aria-hidden="true">{{ getSortIcon() }}</mat-icon>
+                </button>
+              </th>
+              <td mat-cell *matCellDef="let product" class="col-unitid">
+                @if (product.actionTaken === 'M') {
+                  <app-unit-id-field
+                    [label]="''"
+                    [required]="false"
+                    [skipDoubleEntry]="true"
+                    [showBarcodeIcon]="false"
+                    [hintDefault]="''"
+                    (validated)="onUnitValidated(product, $event)"
+                    (cleared)="onUnitCleared(product)"
+                    (emptyBlur)="onUnitCleared(product)">
+                  </app-unit-id-field>
+                } @else {
+                  <span class="cell-text">{{ product.displayUnitId || product.unitId }}</span>
+                }
+              </td>
+            </ng-container>
+
+            <!-- Product Code Column -->
+            <ng-container matColumnDef="productCode">
+              <th mat-header-cell *matHeaderCellDef scope="col" class="col-product">Product Code</th>
+              <td mat-cell *matCellDef="let product" class="col-product">
+                @if (product.actionTaken === 'M') {
+                  <mat-form-field appearance="fill" class="close-hospital-transfer__inline-field" subscriptSizing="dynamic">
+                    <mat-select [(ngModel)]="product.modifiedProductCode"
+                                (selectionChange)="onProductCodeChange(product, $event.value)"
+                                aria-label="Select product code">
+                      @if (product.isLoadingProductCodes) {
+                        <mat-option disabled>
+                          <span class="panel-loading"><mat-spinner diameter="16" aria-hidden="true"></mat-spinner><span>Loading product codes...</span></span>
+                        </mat-option>
+                      } @else if (product.productCodeOptions.length === 0) {
+                        <mat-option disabled>No options</mat-option>
+                      } @else {
+                        @for (opt of product.productCodeOptions; track opt.productCode) {
+                          <mat-option [value]="opt.productCode">{{ opt.productCode }}</mat-option>
+                        }
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                } @else {
+                  <span class="cell-text">{{ product.productCode }}</span>
+                }
+              </td>
+            </ng-container>
+
+            <!-- Product Description Column -->
+            <ng-container matColumnDef="productDescription">
+              <th mat-header-cell *matHeaderCellDef scope="col" class="col-desc">Product Description</th>
+              <td mat-cell *matCellDef="let product" class="col-desc">
+                @if (product.actionTaken === 'M') {
+                  <span class="cell-text">{{ product.modifiedProductDescription }}</span>
+                } @else {
+                  <span class="cell-text">{{ product.productDescription }}</span>
+                }
+              </td>
+            </ng-container>
+
+            <!-- ABORh Column -->
+            <ng-container matColumnDef="aboRh">
+              <th mat-header-cell *matHeaderCellDef scope="col" class="col-abo">ABORh</th>
+              <td mat-cell *matCellDef="let product" class="col-abo">
+                @if (product.actionTaken === 'M') {
+                  <mat-form-field appearance="fill" class="close-hospital-transfer__inline-field" subscriptSizing="dynamic">
+                    <mat-select [(ngModel)]="product.modifiedBloodType"
+                                (selectionChange)="onAboRhChange(product, $event.value)"
+                                aria-label="Select ABORh">
+                      @if (product.isLoadingAboRh) {
+                        <mat-option disabled>
+                          <span class="panel-loading"><mat-spinner diameter="16" aria-hidden="true"></mat-spinner><span>Loading ABORh options...</span></span>
+                        </mat-option>
+                      } @else if (product.aboRhOptions.length === 0) {
+                        <mat-option disabled>No options</mat-option>
+                      } @else {
+                        @for (opt of product.aboRhOptions; track opt.bloodType) {
+                          <mat-option [value]="opt.bloodType">{{ opt.aboDescription }}</mat-option>
+                        }
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                } @else {
+                  <span class="cell-text">{{ product.aboDescription || product.bloodType }}</span>
+                }
+              </td>
+            </ng-container>
+
+            <!-- Expiration Date Column -->
+            <ng-container matColumnDef="expirationDate">
+              <th mat-header-cell *matHeaderCellDef scope="col" class="col-expdate">Expiration Date</th>
+              <td mat-cell *matCellDef="let product" class="col-expdate">
+                @if (product.actionTaken === 'M') {
+                  <mat-form-field appearance="fill"
+                                  class="close-hospital-transfer__inline-field"
+                                  [class.mat-form-field-invalid]="product.expDateError"
+                                  subscriptSizing="dynamic">
+                    <input matInput
+                           [value]="product.modifiedExpDate || formatExpDate(product.expDate)"
+                           (input)="onExpDateInput(product, $event)"
+                           placeholder="DD-MMM-YYYY HH:MM"
+                           aria-label="Expiration Date"
+                           [attr.aria-invalid]="!!product.expDateError"
+                           [attr.aria-describedby]="product.expDateError ? elementId('exp-error-' + product.unitId) : null">
+                  </mat-form-field>
+                  @if (product.expDateError) {
+                    <span class="field-error" role="alert" aria-live="assertive" aria-atomic="true" [id]="elementId('exp-error-' + product.unitId)">{{ product.expDateError }}</span>
+                  }
+                } @else {
+                  <span class="cell-text">{{ formatExpDate(product.expDate) }}</span>
+                }
+              </td>
+            </ng-container>
+
+            <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+            <tr mat-row *matRowDef="let row; columns: displayedColumns"
+                [class.row-modify]="row.actionTaken === 'M'"
+                [class.row-deallocate]="row.actionTaken === 'D'"></tr>
+          </table>
+        </div>
+
+        <!-- Footer Actions -->
+        <div class="close-hospital-transfer__footer">
+          <button type="button"
+                  mat-button
+                  class="btn-cancel"
+                  (click)="onCancel()"
+                  aria-label="Cancel changes">
+            CANCEL
+          </button>
+          <button type="button"
+                  mat-raised-button
+                  class="btn-save"
+                  [disabled]="isSaving || !isReadyToSave()"
+                  (click)="onSave()"
+                  aria-label="Save transfer changes">
+            @if (isSaving) {
+              <mat-spinner diameter="20" class="btn-spinner" aria-hidden="true"></mat-spinner>
+            }
+            SAVE
+          </button>
+        </div>
+      </div>
+    }
+
+  </main>
+</div>

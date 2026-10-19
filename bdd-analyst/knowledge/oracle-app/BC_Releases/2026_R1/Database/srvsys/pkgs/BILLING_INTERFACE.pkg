@@ -1,0 +1,259 @@
+/*---------------------------------------------------------------------
+   Name :       billing_interface.pkg                                
+   Type :       PL/SQL                                               
+  Function :   Serve*Care to Libra AR Billing Interface             
+   Author :     Bala Hegde                                           
+   Date   :     08-25-94                                             
+   Date Revised : 01-05-98                                           
+                  09-01-2000 (Amit Bhagat)                          
+   New version 2018                                                  
+          Ver: 01              Migratrion to 2018          
+          Ver: 02      Edwin      MLT-4491
+---------------------------------------------------------------------*/
+set serveroutput on
+CREATE OR REPLACE PACKAGE billing_interface IS
+   procedure insert_invoice_details
+      (FiCompanyNo IN varchar2,
+       OrderNo     IN varchar2,
+       ArAccount   IN varchar2,
+       ItemId      IN varchar2,
+       ShipDate    IN date,
+       StdPrice    IN number,
+       InsertDate  IN date,
+       UsrText1    IN varchar2,
+       UsrText2    IN varchar2,
+       LineItemDesc IN varchar2,
+       FiPriceSchNo IN varchar2,
+       LineItemDesc2 IN varchar2,
+       OrderQty    IN number,
+       ShipQty     IN number,
+       TranType    IN varchar2,
+       RetAdvice   IN varchar2,
+       Flag        OUT varchar2);
+
+   procedure insert_attribute_details 
+      (Type         IN varchar2,
+       FiCompanyNo  IN varchar2,
+       OrderNo      IN varchar2,
+       ArAccount    IN varchar2,
+       ShipDate     IN date,
+       UnitID       IN varchar2,
+       ProductCode  IN varchar2,
+       Aliquot      IN varchar2,
+       BloodType    IN varchar2,
+       FiPriceSchNo IN varchar2,
+       InsertDate   IN date,
+       OrderQty    IN number,
+       ShipQty     IN number,
+       TranType    IN varchar2,
+       RetAdvice   IN varchar2,
+       Flag         OUT varchar2);
+
+   procedure insert_header 
+      (FiCompanyNo   IN  varchar2,
+       OrderNo       IN  varchar2,
+       ArAccount     IN  varchar2,
+       ShipmentNo    IN  varchar2,
+       ShipDate      IN  date,
+       OrderDate     IN  date,
+       InsertDate    IN  date,
+       Flag          OUT varchar2); 
+END billing_interface;
+/
+grant execute on billing_interface to public
+/
+create public synonym billing_interface for billing_interface
+/
+CREATE OR REPLACE PACKAGE BODY billing_interface IS 
+   PROCEDURE insert_invoice_details
+      (FiCompanyNo IN varchar2,
+       OrderNo     IN varchar2,
+       ArAccount   IN varchar2,
+       ItemId      IN varchar2,
+       ShipDate    IN date,
+       StdPrice    IN number,
+       InsertDate  IN date,
+       UsrText1    IN varchar2,
+       UsrText2    IN varchar2,
+       LineItemDesc IN varchar2,
+       FiPriceSchNo IN varchar2,
+       LineItemDesc2 IN varchar2,
+       OrderQty    IN number,
+       ShipQty     IN number,
+       TranType    IN varchar2,
+       RetAdvice   IN varchar2,
+       Flag        OUT varchar2) IS
+       -- input: 1) service code = from vserv_products,vserv_attributes, or
+       --                          antigen_pricing_martrix
+       --        2) std_price = product_price, expect to be pos or negative
+   begin
+
+     
+      insert into serve_ar_interface_det
+        (rec_type,        fi_company_no,   order_no, 
+         ar_account,      item_id,         ship_date,  
+         std_price,       insert_date,     user_text_1,  
+         user_text_2,     line_item_desc,  fi_price_sch_no,
+         line_item_desc_2,order_qty,       ship_qty,  
+         tran_type,       return_advice_id, chapter_id)
+      values
+        (2,               FiCompanyNo,     OrderNo,
+         ArAccount,       ItemId,          ShipDate,
+         StdPrice,        InsertDate,      UsrText1,
+         UsrText2,        LineItemDesc,    FiPriceSchNo,
+         LineItemDesc2,   OrderQty,        ShipQty, 
+         TranType,        RetAdvice,LT_USER_SESSION.get_chapter_id);
+      Flag := 'Y';
+   exception
+     when others then
+        Flag := 'E';
+   end insert_invoice_details;
+
+   PROCEDURE insert_attribute_details 
+     (Type         IN varchar2,
+      FiCompanyNo  IN varchar2,
+      OrderNo      IN varchar2,
+      ArAccount    IN varchar2,
+      ShipDate     IN date,
+      UnitID       IN varchar2,
+      ProductCode  IN varchar2,
+      Aliquot      IN varchar2,
+      BloodType    IN varchar2,
+      FiPriceSchNo IN varchar2,
+      InsertDate   IN date,
+      OrderQty     IN number,
+      ShipQty      IN number,
+      TranType     IN varchar2,
+      RetAdvice    IN varchar2,
+      Flag         OUT varchar2) is
+      cursor c1 is
+         select distinct v.service_code, v.credit_flag,
+                 p.price, p.attrib_group, v.attrib_desc
+         from vserv_attributes v, pick_slip_product_attr p
+         where v.attrib_group = p.attrib_group
+         and v.attrib_code = p.attrib_code
+         and v.unit_scheme_type = decode(length(ProductCode),5,'C','I')
+         and unit_id = UnitId
+         and product_code = ProductCode 
+         and aliquot = Aliquot
+         order by 1;
+      auto_cnt     number;
+      out_flag     varchar2(1);
+      usr_txt1     varchar2(24);   
+   begin
+      auto_cnt := 0;
+      select count(*) into auto_cnt
+      from pick_slip_product_attr 
+      where unit_id = UnitId 
+      and product_code = ProductCode 
+      and aliquot = Aliquot
+      and attrib_group = 'DON';
+      Flag := 'Y';
+      select substr(decode(length(ProductCode),5, ProductCode
+             ||'-'||Aliquot,ProductCode)||' '||BloodType,1,24)
+      into usr_txt1 from dual;
+      if type = 'S' then
+         for c1rec in c1 loop
+            if c1rec.credit_flag != 'N' then 
+               if auto_cnt > 0 then
+                  if c1rec.attrib_group = 'DON' then 
+                     insert_invoice_details
+                     ( FiCompanyNo,
+                       OrderNo,
+                       ArAccount,
+                       c1rec.service_code,
+                       ShipDate,
+                       c1rec.price,
+                       InsertDate,
+                       '',
+                       usr_txt1,
+                       substr(UnitId||' '||c1rec.attrib_desc,1,60),
+                       FiPriceSchNo,    
+                       '',
+                       OrderQty,
+                       ShipQty ,
+                       TranType,
+                       RetAdvice,
+                       out_flag);
+                  end if;
+               else
+                  insert_invoice_details
+                  ( FiCompanyNo,
+                    OrderNo,
+                    ArAccount,
+                    c1rec.service_code,
+                    ShipDate,
+                    c1rec.price,
+                    InsertDate,
+                    '',
+                    usr_txt1,
+                    substr(UnitId||' '||c1rec.attrib_desc,1,60),
+                    FiPriceSchNo,    
+                    '',
+                    OrderQty,
+                    ShipQty ,
+                    TranType,
+                    RetAdvice,
+                    out_flag);
+               end if;
+            end if;
+         end loop;
+      else 
+         if type = 'R' then
+            for c1rec in c1 loop
+               if c1rec.credit_flag != 'N' then 
+                  insert_invoice_details
+                  (FiCompanyNo,
+                   OrderNo,
+                   ArAccount,
+                   c1rec.service_code,
+                   ShipDate,
+                   c1rec.price,
+                   InsertDate,
+                   '',
+                   usr_txt1,
+                   substr(UnitId||' '||c1rec.attrib_desc,1,60),
+                   FiPriceSchNo,    
+                   '',
+                   OrderQty,
+                   ShipQty ,
+                   TranType,
+                   RetAdvice,
+                   out_flag);
+               end if;
+            end loop;
+         end if;
+      end if;
+      IF out_flag = 'E' THEN
+         Flag := 'E';
+      END IF;
+   exception 
+      WHEN OTHERS then
+         Flag := 'E';
+   end insert_attribute_details;
+
+   PROCEDURE insert_header 
+     (FiCompanyNo   IN  varchar2,
+      OrderNo       IN  varchar2,
+      ArAccount     IN  varchar2,
+      ShipmentNo    IN  varchar2,
+      ShipDate      IN  date,
+      OrderDate     IN  date,
+      InsertDate    IN  date,
+      Flag          OUT varchar2) is
+   begin
+      Flag := 'Y';
+      insert into serve_ar_interface_hdr
+      (rec_type,      fi_company_no,      order_no,
+       ar_account,    inv_desc,           order_date,
+       ship_date,     insert_date, chapter_id)
+      values
+      (1,             FiCompanyNo,        OrderNo,
+       ArAccount,     ShipmentNo,         OrderDate, 
+       ShipDate,      InsertDate,LT_USER_SESSION.get_chapter_id);
+    exception
+       when others then
+          Flag := 'E';
+    end insert_header;
+END billing_interface;
+/

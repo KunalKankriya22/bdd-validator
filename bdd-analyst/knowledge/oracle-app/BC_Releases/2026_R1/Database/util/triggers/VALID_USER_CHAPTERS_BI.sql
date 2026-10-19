@@ -1,0 +1,17 @@
+--------------------------------------------------------
+--  DDL for Trigger VALID_USER_CHAPTERS_BI
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "VALID_USER_CHAPTERS_BI" 
+ BEFORE INSERT
+ ON VALID_USER_CHAPTERS
+ FOR EACH ROW
+BEGIN
+
+    select decode(substr(lt_user_session.get_userid,1,3),'OPS',substr(lt_user_session.get_userid,5),lt_user_session.get_userid)
+    into :new.insert_user from dual ;
+
+    :new.insert_date := sysdate ;
+end ;
+/
+ALTER TRIGGER "VALID_USER_CHAPTERS_BI" ENABLE;

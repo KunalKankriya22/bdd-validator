@@ -1,0 +1,196 @@
+<section
+  class="freeze-start-time-container"
+  aria-label="Freeze Start Time">
+
+  <!-- Skip Link for Keyboard Navigation -->
+  <a href="#freeze-table" class="skip-link">Skip to freeze entries table</a>
+
+  <!-- Screen Reader Status Announcements -->
+  <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+    {{ statusMessage() }}
+  </div>
+
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb
+    [config]="headerConfig()"
+  ></app-page-header-with-breadcrumb>
+
+  <!-- Form Section -->
+  <div class="form-section" [attr.inert]="isSaving() ? true : null">
+    <!-- Action Buttons - commented for future use
+    <div class="action-buttons">
+      @if (!isHistoryMode()) {
+        <button
+          mat-raised-button
+          color="primary"
+          type="button"
+          [disabled]="isLoadingHistory()"
+          (click)="loadHistory()"
+          aria-label="Load freeze history records">
+          <mat-icon>history</mat-icon>
+          Load History
+        </button>
+      }
+      @else {
+        <button
+          mat-raised-button
+          type="button"
+          [disabled]="isLoadingHistory()"
+          (click)="clearAll()"
+          aria-label="Return to data entry mode">
+          <mat-icon>add</mat-icon>
+          Data Entry
+        </button>
+      }
+    </div>
+    -->
+
+    <form [formGroup]="freezeForm" class="freeze-form">
+      <fieldset>
+        <legend class="sr-only">Freeze Entry Information</legend>
+        <div class="form-row">
+        <!-- Unit ID Field -->
+        <div class="form-field-wrapper">
+          <app-unit-id-field
+            #unitIdFieldComponent
+            [label]="'Unit ID'"
+            [required]="true"
+            [hintDefault]="'Scan or type Unit ID'"
+            [hintValid]="'Valid - ready to freeze'"
+            [showBarcodeIcon]="true"
+            (postValidate)="onUnitPostValidate($event)"
+            (validated)="onUnitValidated($event)"
+            (cleared)="onUnitIdCleared()"
+          ></app-unit-id-field>
+        </div>
+
+        <!-- Collection Date (Read-only) -->
+        <div class="form-field-wrapper">
+          <div class="field-label" role="group" [attr.aria-labelledby]="labelId('collectionDate')">
+            <span class="label" [id]="labelId('collectionDate')">Collection Date</span>
+            <span class="value" aria-live="polite">
+              @if (collectionDate()) {
+                <time [attr.datetime]="collectionDate()">{{ formatDate(collectionDate()!) }}</time>
+              } @else {
+                -
+              }
+            </span>
+          </div>
+        </div>
+
+        <!-- Product Code Dropdown -->
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label [id]="labelId('productCode')">
+            Product Code
+          </mat-label>
+          <mat-select
+            [id]="elementId('productCode')"
+            formControlName="productCode"
+            [disabled]="isSaving()"
+            aria-required="true"
+            [attr.aria-invalid]="f['productCode'].invalid && f['productCode'].touched"
+            [attr.aria-describedby]="productCodeErrorId()">
+            <mat-select-trigger>
+              <span #productTrigger class="select-trigger-text"
+                    (mouseenter)="checkProductTruncation(productTrigger)"
+                    (focus)="checkProductTruncation(productTrigger)"
+                    [matTooltip]="selectedProductDisplay()"
+                    [matTooltipDisabled]="!isProductTruncated"
+                    matTooltipPosition="above"
+                    tabindex="0">
+                {{ selectedProductDisplay() }}
+              </span>
+            </mat-select-trigger>
+            @for (product of products(); track product.productCode) {
+              <mat-option [value]="product.productCode">
+                {{ product.productCode }}{{ product.productDesc ? ' - ' + product.productDesc : '' }}
+              </mat-option>
+            }
+          </mat-select>
+          <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+          @if (duplicateError()) {
+            <mat-error [id]="errorId('productCode-duplicate')">
+              This product has already been scanned for this unit
+            </mat-error>
+          } @else if (f['productCode'].invalid && f['productCode'].touched) {
+            <mat-error [id]="errorId('productCode')">
+              Product Code is required
+            </mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Product Description (Read-only) -->
+        <div class="form-field-wrapper">
+          <div class="field-label" role="group" [attr.aria-labelledby]="labelId('productDesc')">
+            <span class="label" [id]="labelId('productDesc')">Product Description</span>
+            <span class="value" aria-live="polite">{{ selectedProduct()?.productDesc || '-' }}</span>
+          </div>
+        </div>
+
+        <!-- GAP FIX: Aliquot Selection Dropdown (shown when multiple aliquots available) -->
+        @if (showAliquotDropdown()) {
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>
+              Aliquot
+            </mat-label>
+            <mat-select
+              [id]="elementId('aliquot')"
+              formControlName="aliquot"
+              [value]="selectedAliquot()"
+              [disabled]="isLoadingAliquots() || isSaving()"
+              (selectionChange)="onAliquotChange($event.value)"
+              required
+              [attr.aria-invalid]="f['aliquot']?.invalid && f['aliquot']?.touched"
+              [attr.aria-describedby]="f['aliquot']?.invalid && f['aliquot']?.touched ? errorId('aliquot') : null">
+              @for (aliquot of aliquots(); track aliquot.componentPrefix) {
+                <mat-option [value]="aliquot.componentPrefix">
+                  {{ aliquot.componentPrefix }}
+                </mat-option>
+              }
+            </mat-select>
+            <mat-hint>Select aliquot to record freeze</mat-hint>
+            @if (f['aliquot']?.invalid && f['aliquot']?.touched) {
+              <mat-error [id]="errorId('aliquot')">
+                Aliquot is required
+              </mat-error>
+            }
+          </mat-form-field>
+        }
+
+        <!-- Freeze Start (Read-only) -->
+        <div class="form-field-wrapper">
+          <div class="field-label" role="group" [attr.aria-labelledby]="labelId('freezeStart')">
+            <span class="label" [id]="labelId('freezeStart')">Freeze Start</span>
+            <span class="value" aria-live="polite">{{ selectedProduct() ? formatCurrentTime() : '-' }}</span>
+          </div>
+        </div>
+        </div>
+      </fieldset>
+    </form>
+  </div>
+
+  <!-- Table Section -->
+  <div class="table-section">
+    <!-- Table Status Announcement for Pagination -->
+    <div class="sr-only" role="status" aria-live="polite">
+      {{ tableAnnouncementMessage() }}
+    </div>
+
+    <!-- Loading State - only when saving record -->
+    @if (isSaving()) {
+      <div class="loading-overlay" role="status" aria-live="polite" aria-busy="true">
+        <mat-spinner diameter="48" aria-label="Saving freeze entry"></mat-spinner>
+        <p class="loading-text" aria-hidden="true">Saving freeze entry...</p>
+      </div>
+    }
+
+    <app-data-table
+      id="freeze-table"
+      [config]="tableConfig"
+      [data]="paginatedEntries()"
+      [loading]="isLoadingHistory()"
+      (pageChange)="onPageChange($event)"
+      (sortChange)="onSortChange($event)"
+      aria-label="Freeze start time entries" />
+  </div>
+</section>

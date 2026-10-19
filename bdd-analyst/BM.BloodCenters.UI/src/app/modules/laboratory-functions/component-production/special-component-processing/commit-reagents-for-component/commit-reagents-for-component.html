@@ -1,0 +1,351 @@
+<app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+<div aria-live="polite" aria-atomic="true" class="cdk-visually-hidden" id="status-announcer">
+  @if (isLoadingKit) { Loading reagent data, please wait. }
+  @if (isSaving) { Saving reagent kit, please wait. }
+</div>
+
+<div class="commit-reagents-container">
+
+  <!-- Criteria Panel -->
+  <div class="criteria-section">
+    <form [formGroup]="headerForm">
+      <div class="criteria-grid">
+
+        <!-- Row 1, Col 1: Process Code -->
+        <mat-form-field appearance="fill" class="criteria-field">
+          <mat-label>Process Code</mat-label>
+          <mat-select formControlName="processCode" (selectionChange)="onProcessCodeChange()"
+            (openedChange)="headerForm.get('processCode')?.markAsTouched(); $event || clearDropdownSearch(processCodeSearch)">
+            <mat-option>
+              <ngx-mat-select-search [formControl]="processCodeSearch"
+                placeholderLabel="Search..." noEntriesFoundLabel="No results found" />
+            </mat-option>
+            @for (p of filteredProcessCodes; track p.code) {
+              <mat-option [value]="p.code">{{ p.code }}</mat-option>
+            }
+          </mat-select>
+          <mat-error>Process Code is required</mat-error>
+        </mat-form-field>
+
+        <!-- Row 1, Col 2: Process Description -->
+        <div class="readonly-field" role="group" aria-label="Process Description">
+          <span class="field-label" aria-hidden="true">Description</span>
+          <span class="field-value">{{ getProcessDescription() }}</span>
+        </div>
+
+        <!-- Row 1, Col 3: (empty — aligns with ABORh below) -->
+        <div></div>
+
+        <!-- Row 1, Col 4: Stage -->
+        <mat-form-field appearance="fill" class="criteria-field">
+          <mat-label>Stage</mat-label>
+          <mat-select
+            formControlName="stageCode"
+            [disabled]="isStageDisabled || isLoadingStages"
+            (selectionChange)="onStageCodeChange()"
+            (openedChange)="headerForm.get('stageCode')?.markAsTouched(); $event || clearDropdownSearch(stageCodeSearch)">
+            <mat-option>
+              <ngx-mat-select-search [formControl]="stageCodeSearch"
+                placeholderLabel="Search..." noEntriesFoundLabel="No results found" />
+            </mat-option>
+            @if (isLoadingStages) {
+              <mat-option disabled>Loading...</mat-option>
+            }
+            @for (s of filteredStageCodes; track s.code) {
+              <mat-option [value]="s.code">{{ s.code }}</mat-option>
+            }
+          </mat-select>
+          <mat-error>Stage is required</mat-error>
+        </mat-form-field>
+
+        <!-- Row 1, Col 5: Stage Description -->
+        <div class="readonly-field" role="group" aria-label="Stage Description">
+          <span class="field-label" aria-hidden="true">Description</span>
+          <span class="field-value">{{ getStageDescription() }}</span>
+        </div>
+
+        <!-- Row 2, Col 1: Unit ID -->
+        <app-unit-id-field
+          [validateFfValue]="'DONOR'"
+          [required]="true"
+          class="criteria-field"
+          (postValidate)="onUnitPostValidate($event)"
+          (validated)="onUnitValidated($event)"
+          (cleared)="onUnitCleared()"
+        />
+
+        <!-- Row 2, Col 2: Product -->
+        <mat-form-field appearance="fill" class="criteria-field">
+          <mat-label>Product</mat-label>
+          <mat-select
+            formControlName="productCode"
+            [disabled]="isProductDisabled || isLoadingProducts"
+            (selectionChange)="onProductCodeChange()"
+            (openedChange)="$event || clearDropdownSearch(productCodeSearch)">
+            <mat-option>
+              <ngx-mat-select-search [formControl]="productCodeSearch"
+                placeholderLabel="Search..." noEntriesFoundLabel="No results found" />
+            </mat-option>
+            @if (isLoadingProducts) {
+              <mat-option disabled>Loading...</mat-option>
+            }
+            @for (p of filteredUnitProducts; track p.productCode) {
+              <mat-option [value]="p.productCode">{{ getProductLabel(p) }}</mat-option>
+            }
+          </mat-select>
+          <mat-error>Product is required</mat-error>
+        </mat-form-field>
+
+        <!-- Row 2, Col 3: ABORh -->
+        <div class="readonly-field" role="group" aria-label="ABO and Rh type">
+          <span class="field-label" aria-hidden="true">ABORh</span>
+          <span class="field-value">{{ aboRh }}</span>
+          @if (showComponentPrefix) {
+            <span class="field-label" style="margin-top: 4px;" aria-hidden="true">Alq</span>
+            <span class="field-value" aria-label="Aliquot: {{ componentPrefix }}">{{ componentPrefix }}</span>
+          }
+        </div>
+
+        <!-- Row 2, Col 4: Expiration Date -->
+        <div class="readonly-field" role="group" aria-label="Component Expiration Date">
+          <span class="field-label" aria-hidden="true">Expiration Date</span>
+          <span class="field-value">{{ expiryDate }}</span>
+          @if (isComponentExpired) {
+            <span class="warning-text" role="alert">This component has expired</span>
+          }
+        </div>
+
+        <!-- Row 2, Col 5: RETRIEVE -->
+        <div class="criteria-actions">
+          <button
+            mat-stroked-button
+            type="button"
+            (click)="onRetrieve()"
+            [disabled]="!isRetrieveEnabled || isLoadingKit"
+            class="retrieve-btn"
+            aria-label="Retrieve reagents">
+            @if (isLoadingKit) {
+              <mat-spinner diameter="16" class="btn-spinner-sm" aria-hidden="true"></mat-spinner>
+            }
+            RETRIEVE
+          </button>
+        </div>
+
+      </div>
+    </form>
+  </div>
+
+  <!-- Results Panel -->
+  <div class="results-section">
+
+    <!-- View Mode Toolbar -->
+    @if (hasData && !isEditMode) {
+      <div class="results-toolbar view-toolbar">
+        <button
+          mat-button
+          type="button"
+          #filterButton
+          (click)="openFilterPanel()"
+          class="filter-btn"
+          aria-label="Open filter panel">
+          <mat-icon aria-hidden="true">filter_list</mat-icon>
+          FILTER
+        </button>
+        @if (filterChips.length) {
+          <app-filter-chips
+            [chips]="filterChips"
+            [maxVisible]="3"
+            (removeChip)="removeFilterChip($event)"
+            (clearAll)="clearAllFilters()" />
+        }
+        <span class="toolbar-spacer"></span>
+        <button
+          mat-stroked-button
+          type="button"
+          (click)="onAddEditReagent()"
+          class="add-edit-btn"
+          aria-label="Edit reagents">
+          ADD/EDIT REAGENT
+        </button>
+        <div class="search-box">
+          <mat-icon class="search-icon" aria-hidden="true">search</mat-icon>
+          <input
+            class="search-input"
+            [value]="searchText"
+            (input)="onSearch($any($event.target).value)"
+            placeholder="Search by reagent or manufacturer"
+            aria-label="Search reagents" />
+        </div>
+      </div>
+    }
+
+    <!-- Edit Mode Toolbar — all buttons pushed RIGHT -->
+    @if (isEditMode) {
+      <div class="results-toolbar edit-toolbar">
+        <span class="toolbar-spacer"></span>
+        <button mat-button type="button" (click)="onAddNewReagent()" class="add-new-btn" aria-label="Add new reagent">
+          <mat-icon aria-hidden="true">add</mat-icon>
+          ADD NEW REAGENT
+        </button>
+        <div class="toolbar-orange-divider"></div>
+        <button mat-stroked-button type="button" (click)="onCancel()" class="cancel-btn" aria-label="Cancel">
+          <mat-icon aria-hidden="true">close</mat-icon>
+          CANCEL
+        </button>
+        <button
+          mat-flat-button
+          type="button"
+          (click)="onSave()"
+          [disabled]="isSaveDisabled"
+          class="save-btn"
+          aria-label="Save reagents">
+          @if (isSaving) {
+            <mat-spinner diameter="18" class="btn-spinner" aria-hidden="true"></mat-spinner>
+          } @else {
+            <mat-icon aria-hidden="true">check</mat-icon>
+          }
+          SAVE
+        </button>
+      </div>
+    }
+
+    <!-- View Table (app-data-table) -->
+    @if (!isEditMode) {
+      <app-data-table
+        [config]="tableConfig"
+        [data]="filteredReagents"
+        [loading]="isLoadingKit"
+        (sortChange)="onViewSort($event)"
+        aria-label="Reagents table" />
+    }
+
+    <!-- Edit Table — full-width, plain inputs, pipe-separated columns -->
+    @if (isEditMode) {
+      <div class="et-wrapper" [formGroup]="editForm" role="table" aria-label="Reagent details">
+        <!-- Header -->
+        <div class="et-header-row" role="row">
+          <div class="et-cell et-reagent" role="columnheader"
+            [attr.aria-sort]="sortColumn === 'reagentName' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'">
+            <button type="button" class="et-sort-btn" (click)="onSortColumn('reagentName')"
+              [attr.aria-label]="'Sort by Reagent ' + (sortDirection === 'asc' ? 'descending' : 'ascending')">
+              Reagent <span class="required-marker" aria-hidden="true">*</span>
+              <mat-icon class="sort-icon" aria-hidden="true" [class.sort-active]="sortColumn === 'reagentName'">
+                {{ getSortIcon('reagentName') }}
+              </mat-icon>
+            </button>
+          </div>
+          <div class="et-cell et-manufacturer" role="columnheader" aria-sort="none">Manufacturer <span class="required-marker" aria-hidden="true">*</span></div>
+          <div class="et-cell et-lot" role="columnheader" aria-sort="none">Lot Number <span class="required-marker" aria-hidden="true">*</span></div>
+          <div class="et-cell et-date" role="columnheader" aria-sort="none">Expiration Date <span class="required-marker" aria-hidden="true">*</span></div>
+          <div class="et-cell et-actions" role="columnheader"><span class="cdk-visually-hidden">Actions</span></div>
+        </div>
+
+        <!-- Editable rows -->
+        <div formArrayName="rows" role="rowgroup">
+          @for (idx of sortedRowIndices; track idx; let i = $index) {
+            <div class="et-data-row" role="row" [formGroupName]="idx">
+              <div class="et-cell et-reagent" role="cell">
+                <input
+                  class="et-input"
+                  formControlName="reagentName"
+                  [attr.aria-label]="'Reagent name, row ' + (i + 1)"
+                  [attr.aria-required]="true"
+                  [attr.aria-invalid]="isRowFieldInvalid(idx, 'reagentName') ? 'true' : null"
+                  [attr.aria-describedby]="isRowFieldInvalid(idx, 'reagentName') ? 'err-' + idx + '-reagent' : null"
+                  [class.et-input-error]="isRowFieldInvalid(idx, 'reagentName')" />
+                @if (isRowFieldInvalid(idx, 'reagentName')) {
+                  <span class="et-error" [id]="'err-' + idx + '-reagent'">
+                    @if (getRowGroup(idx).get('reagentName')?.hasError('required')) {
+                      Reagent Name is required
+                    } @else if (getRowGroup(idx).get('reagentName')?.hasError('maxlength')) {
+                      Max 50 characters
+                    }
+                  </span>
+                }
+              </div>
+              <div class="et-cell et-manufacturer" role="cell">
+                <input
+                  class="et-input"
+                  formControlName="manufacturer"
+                  [attr.aria-label]="'Manufacturer, row ' + (i + 1)"
+                  [attr.aria-required]="true"
+                  [attr.aria-invalid]="isRowFieldInvalid(idx, 'manufacturer') ? 'true' : null"
+                  [attr.aria-describedby]="isRowFieldInvalid(idx, 'manufacturer') ? 'err-' + idx + '-mfr' : null"
+                  [class.et-input-error]="isRowFieldInvalid(idx, 'manufacturer')" />
+                @if (isRowFieldInvalid(idx, 'manufacturer')) {
+                  <span class="et-error" [id]="'err-' + idx + '-mfr'">
+                    @if (getRowGroup(idx).get('manufacturer')?.hasError('required')) {
+                      Manufacturer is required
+                    } @else if (getRowGroup(idx).get('manufacturer')?.hasError('maxlength')) {
+                      Max 50 characters
+                    }
+                  </span>
+                }
+              </div>
+              <div class="et-cell et-lot" role="cell">
+                <input
+                  class="et-input"
+                  formControlName="lotNumber"
+                  [attr.aria-label]="'Lot number, row ' + (i + 1)"
+                  [attr.aria-required]="true"
+                  [attr.aria-invalid]="isRowFieldInvalid(idx, 'lotNumber') ? 'true' : null"
+                  [attr.aria-describedby]="isRowFieldInvalid(idx, 'lotNumber') ? 'err-' + idx + '-lot' : null"
+                  [class.et-input-error]="isRowFieldInvalid(idx, 'lotNumber')" />
+                @if (isRowFieldInvalid(idx, 'lotNumber')) {
+                  <span class="et-error" [id]="'err-' + idx + '-lot'">
+                    @if (getRowGroup(idx).get('lotNumber')?.hasError('required')) {
+                      Lot Number is required
+                    } @else if (getRowGroup(idx).get('lotNumber')?.hasError('maxlength')) {
+                      Max 50 characters
+                    }
+                  </span>
+                }
+              </div>
+              <div class="et-cell et-date" role="cell">
+                <div class="et-date-input-row">
+                  <input
+                    class="et-input"
+                    formControlName="expDate"
+                    [matDatepicker]="expDatePicker"
+                    [min]="minExpDate"
+                    [matDatepickerFilter]="expDateFilter"
+                    [attr.aria-label]="'Expiration date, row ' + (i + 1)"
+                    [attr.aria-required]="true"
+                    [attr.aria-invalid]="isRowFieldInvalid(idx, 'expDate') ? 'true' : null"
+                    [attr.aria-describedby]="isRowFieldInvalid(idx, 'expDate') ? 'err-' + idx + '-date' : null"
+                    [class.et-input-error]="isRowFieldInvalid(idx, 'expDate')"
+                    (input)="onExpDateInput($event, idx)" />
+                  <mat-datepicker-toggle [for]="expDatePicker" class="et-cal-btn" [attr.aria-label]="'Pick expiration date for row ' + (i + 1)" />
+                  <mat-datepicker #expDatePicker />
+                </div>
+                @if (isRowFieldInvalid(idx, 'expDate')) {
+                  <span class="et-error" [id]="'err-' + idx + '-date'">
+                    @if (getRowGroup(idx).get('expDate')?.hasError('matDatepickerParse') || getRowGroup(idx).get('expDate')?.hasError('invalidDate')) {
+                      Invalid date
+                    } @else if (getRowGroup(idx).get('expDate')?.hasError('required')) {
+                      Expiration Date is required
+                    } @else if (getRowGroup(idx).get('expDate')?.hasError('pastDate')) {
+                      Must be a future date
+                    }
+                  </span>
+                }
+              </div>
+              <div class="et-cell et-actions" role="cell">
+                <button
+                  mat-icon-button
+                  type="button"
+                  color="warn"
+                  (click)="onDeleteRow(idx)"
+                  [attr.aria-label]="'Delete row ' + (i + 1)">
+                  <mat-icon aria-hidden="true">delete</mat-icon>
+                </button>
+              </div>
+            </div>
+          }
+        </div>
+      </div>
+    }
+
+  </div>
+</div>

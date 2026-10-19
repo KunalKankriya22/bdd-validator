@@ -1,0 +1,177 @@
+<!-- Resume Prompt -->
+<div *ngIf="showResumePrompt" class="resume-prompt">
+  <div class="resume-prompt-content">
+    <h3>Resume Processing?</h3>
+    <p>We found an incomplete processing operation. Would you like to resume from where you left off?</p>
+    <div class="resume-prompt-actions">
+      <button (click)="resumeProcessing()" class="btn btn-primary">
+        Resume
+      </button>
+      <button (click)="declineResume()" class="btn btn-secondary">
+        Start Fresh
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Main Container -->
+<div class="bulk-processor-container">
+  <h2>Bulk Processing Demo</h2>
+
+  <!-- Configuration Panel -->
+  <div class="config-panel" *ngIf="!isProcessing">
+    <h3>Configuration</h3>
+    <div class="config-grid">
+      <div class="config-item">
+        <label>Batch Size:</label>
+        <input type="number" [(ngModel)]="config.batchSize" min="1" max="1000" />
+      </div>
+      <div class="config-item">
+        <label>Max Retries:</label>
+        <input type="number" [(ngModel)]="config.maxRetries" min="0" max="10" />
+      </div>
+      <div class="config-item">
+        <label>Retry Delay (ms):</label>
+        <input type="number" [(ngModel)]="config.retryDelayMs" min="0" max="10000" step="100" />
+      </div>
+      <div class="config-item">
+        <label>Concurrency:</label>
+        <input type="number" [(ngModel)]="config.concurrency" min="1" max="10" />
+        <span class="config-hint">(1 = serial, >1 = parallel)</span>
+      </div>
+      <div class="config-item">
+        <label>
+          <input type="checkbox" [(ngModel)]="config.stopOnFailure" />
+          Stop on Failure
+        </label>
+      </div>
+      <div class="config-item">
+        <label>
+          <input type="checkbox" [(ngModel)]="config.enableResume" />
+          Enable Resume
+        </label>
+      </div>
+      <div class="config-item">
+        <label>
+          <input type="checkbox" [(ngModel)]="config.yieldBetweenBatches" />
+          Yield Between Batches (Prevent UI Blocking)
+        </label>
+      </div>
+      <div class="config-item" *ngIf="config.yieldBetweenBatches">
+        <label>Yield Delay (ms):</label>
+        <input type="number" [(ngModel)]="config.yieldDelayMs" min="0" max="1000" step="10" />
+        <span class="config-hint">(0 = asyncScheduler)</span>
+      </div>
+    </div>
+
+    <div class="data-info">
+      <p>Total Records: <strong>{{ records.length }}</strong></p>
+      <p>Estimated Batches: <strong>{{ Math.ceil(records.length / config.batchSize) }}</strong></p>
+    </div>
+  </div>
+
+  <!-- Action Buttons -->
+  <div class="action-panel">
+    <button
+      *ngIf="!isProcessing"
+      (click)="startProcessing()"
+      class="btn btn-primary btn-large"
+      [disabled]="records.length === 0">
+      Start Processing
+    </button>
+
+    <button
+      *ngIf="isProcessing"
+      (click)="cancelProcessing()"
+      class="btn btn-danger btn-large">
+      Cancel Processing
+    </button>
+  </div>
+
+  <!-- Progress Panel -->
+  <div class="progress-panel" *ngIf="progress as p">
+    <h3>Processing Progress</h3>
+
+    <!-- Progress Bar -->
+    <div class="progress-bar-container">
+      <div
+        class="progress-bar"
+        [style.width.%]="getProgressPercentage()"
+        [class.progress-bar-success]="p.status === 'completed' && p.failedBatches === 0"
+        [class.progress-bar-warning]="p.status === 'completed' && p.failedBatches > 0"
+        [class.progress-bar-error]="p.status === 'failed'"
+        [class.progress-bar-cancelled]="p.status === 'cancelled'">
+      </div>
+      <span class="progress-text">{{ getProgressPercentage() | number:'1.1-1' }}%</span>
+    </div>
+
+    <!-- Status Grid -->
+    <div class="status-grid">
+      <div class="status-item">
+        <span class="status-label">Status:</span>
+        <span class="status-value" [style.color]="getStatusColor()">
+          {{ p.status | uppercase }}
+        </span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Job ID:</span>
+        <span class="status-value">{{ p.jobId }}</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Total Records:</span>
+        <span class="status-value">{{ p.totalRecords }}</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Total Batches:</span>
+        <span class="status-value">{{ p.totalBatches }}</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Processed Batches:</span>
+        <span class="status-value">{{ p.processedBatches }} / {{ p.totalBatches }}</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Failed Batches:</span>
+        <span class="status-value" [class.error-text]="p.failedBatches > 0">
+          {{ p.failedBatches }}
+        </span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Current Batch:</span>
+        <span class="status-value">{{ p.currentBatch }}</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Error Panel -->
+  <div class="error-panel" *ngIf="hasError">
+    <h3>Error</h3>
+    <p class="error-message">{{ errorMessage }}</p>
+    <button (click)="resetState()" class="btn btn-secondary">
+      Dismiss
+    </button>
+  </div>
+
+  <!-- Information Panel -->
+  <div class="info-panel">
+    <h3>How It Works</h3>
+    <ul>
+      <li><strong>Serial Processing:</strong> Batches are processed one at a time using <code>concatMap</code></li>
+      <li><strong>UI Responsiveness:</strong> Uses macrotask queue yielding (<code>asyncScheduler</code>) to prevent UI freezing</li>
+      <li><strong>Retry Logic:</strong> Failed batches are retried with exponential backoff</li>
+      <li><strong>Cancellation:</strong> Processing can be cancelled at any time, stopping all pending operations</li>
+      <li><strong>Resume:</strong> If enabled, processing can resume from the last successful batch after interruption</li>
+      <li><strong>Progress Tracking:</strong> Real-time updates on processing status, percentage, and batch counts</li>
+    </ul>
+
+    <h4>Microtask vs Macrotask</h4>
+    <p>
+      <strong>Microtasks</strong> (Promises, RxJS operators) execute before browser rendering, which can freeze the UI
+      when processing many batches. <strong>Macrotasks</strong> (setTimeout, asyncScheduler) allow the browser to
+      render between operations, keeping the UI responsive even with hundreds of batches.
+    </p>
+    <p>
+      This implementation uses <code>observeOn(asyncScheduler)</code> to move batch emissions to the macrotask queue,
+      ensuring the browser can paint between batches.
+    </p>
+  </div>
+</div>

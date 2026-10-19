@@ -1,0 +1,384 @@
+<div class="ext-file-mapping-container">
+  <!-- Filter Bar -->
+  <section class="search-card">
+    <div class="filter-row">
+      <mat-form-field appearance="fill" class="filter-field">
+        <mat-label>Test Batch Prefix <span class="required-marker">*</span></mat-label>
+        <mat-select [formControl]="prefixControl" aria-label="Test Batch Prefix">
+          @if (prefixOptions().length > 3) {
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="prefixSearchControl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="No prefixes found">
+              </ngx-mat-select-search>
+            </mat-option>
+          }
+          @for (opt of filteredPrefixes(); track opt.value) {
+            <mat-option [value]="opt.value">{{ opt.value }}</mat-option>
+          }
+          @if (filteredPrefixes().length === 0) {
+            <mat-option disabled>No data available</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <div class="action-col">
+        <button type="button" class="btn-retrieve" [disabled]="isRetrieveDisabled() || loading()" (click)="onRetrieve()">RETRIEVE</button>
+        <button type="button" class="btn-clear" [disabled]="!prefixControl.value" (click)="onClearAll()">CLEAR ALL</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Results Section -->
+  <section class="results-section">
+    @if (loading()) {
+      <div class="loading-container" role="status">
+        <mat-spinner diameter="40" aria-hidden="true"></mat-spinner>
+        <span class="loading-text">Loading results, please wait...</span>
+      </div>
+    }
+
+    <!-- Empty state -->
+    @if (!hasSearched() && !loading()) {
+      <div class="empty-container" role="status">
+        <div class="empty-state-icon"><mat-icon aria-hidden="true">search</mat-icon></div>
+        <h3 class="empty-state-title">No Results to Display</h3>
+        <p class="empty-state-message">Please enter Search criteria to view Results.</p>
+      </div>
+    }
+
+    <!-- Data loaded -->
+    @if (hasSearched() && !loading()) {
+      <!-- ═══ VIEW MODE ═══ -->
+      @if (!isEditMode()) {
+        <div class="toolbar-row">
+          <div class="toolbar-left">
+            <button type="button"
+              class="btn-filter"
+              aria-label="Open filter panel"
+              [attr.aria-expanded]="isFilterOpen()"
+              cdkOverlayOrigin
+              #filterTrigger="cdkOverlayOrigin"
+              [class.filter-active]="isFilterOpen()"
+              (click)="toggleFilterPanel()">
+              <mat-icon aria-hidden="true">filter_list</mat-icon> FILTER
+            </button>
+          </div>
+          <div class="toolbar-right">
+            <button type="button" class="btn-action-primary" (click)="onToggleEditMode()">
+              ADD/EDIT ANTIGEN TEST
+            </button>
+            <app-search-bar
+              [config]="searchConfig"
+              (search)="onSearch($event)">
+            </app-search-bar>
+          </div>
+        </div>
+
+        <!-- Filter Panel Overlay -->
+        <ng-template
+          cdkConnectedOverlay
+          [cdkConnectedOverlayOrigin]="filterTrigger"
+          [cdkConnectedOverlayOpen]="isFilterOpen()"
+          [cdkConnectedOverlayHasBackdrop]="true"
+          [cdkConnectedOverlayBackdropClass]="'cdk-overlay-transparent-backdrop'"
+          [cdkConnectedOverlayPositions]="filterOverlayPositions"
+          (backdropClick)="closeFilterPanel()"
+          (detach)="closeFilterPanel()">
+          <section class="filter-panel" role="dialog" aria-modal="true" aria-labelledby="filter-title">
+            <header class="filter-panel__header">
+              <h2 id="filter-title">Filters</h2>
+              <button mat-icon-button type="button" aria-label="Close filter panel" (click)="closeFilterPanel()">
+                <mat-icon>close</mat-icon>
+              </button>
+            </header>
+
+            <form [formGroup]="filterForm" class="filter-panel__content">
+              <!-- Row 1: Test Antigen + Approval Flag -->
+              <mat-form-field appearance="fill">
+                <mat-label>Test Antigen</mat-label>
+                <mat-select formControlName="testAntigen">
+                  @for (opt of filterAntigenOptions(); track opt) {
+                    <mat-option [value]="opt">{{ opt }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+
+              <mat-form-field appearance="fill">
+                <mat-label>Approval Flag</mat-label>
+                <mat-select formControlName="approvedFlag">
+                  <mat-option value="L">Licensed</mat-option>
+                  <mat-option value="U">Unapproved</mat-option>
+                  <mat-option value="A">Approved</mat-option>
+                </mat-select>
+              </mat-form-field>
+
+              <!-- Row 2: Effective Date -->
+              <div class="filter-row">
+                <div class="period-field" [class.error-state]="filterForm.get('effectiveDatePeriod')?.hasError('required')">
+                  <mat-form-field appearance="fill">
+                    <mat-label [ngStyle]="{ color: filterForm.get('effectiveDatePeriod')?.hasError('required') ? '#b02828' : 'inherit' }">Period</mat-label>
+                    <mat-select formControlName="effectiveDatePeriod">
+                      <mat-option value="AFTER">After</mat-option>
+                      <mat-option value="BEFORE">Before</mat-option>
+                    </mat-select>
+                  </mat-form-field>
+                  @if (filterForm.get('effectiveDatePeriod')?.hasError('required')) {
+                    <div class="period-error">Period is required</div>
+                  }
+                </div>
+                <div class="date-field">
+                  <mat-form-field appearance="fill">
+                    <mat-label>Effective Date</mat-label>
+                    <input matInput [matDatepicker]="effFilterPicker"
+                      formControlName="effectiveDate"
+                      #effFilterNativeInput
+                      placeholder="DD-MMM-YYYY"
+                      (input)="onFilterEffDateInput($event)" />
+                    <mat-datepicker-toggle matIconSuffix [for]="effFilterPicker"></mat-datepicker-toggle>
+                    <mat-datepicker #effFilterPicker></mat-datepicker>
+                  </mat-form-field>
+                  @if (getFilterEffDateError()) {
+                    <div class="period-error">{{ getFilterEffDateError() }}</div>
+                  }
+                </div>
+              </div>
+
+              <!-- Row 3: Termination Date -->
+              <div class="filter-row">
+                <div class="period-field" [class.error-state]="filterForm.get('terminationDatePeriod')?.hasError('required')">
+                  <mat-form-field appearance="fill">
+                    <mat-label [ngStyle]="{ color: filterForm.get('terminationDatePeriod')?.hasError('required') ? '#b02828' : 'inherit' }">Period</mat-label>
+                    <mat-select formControlName="terminationDatePeriod">
+                      <mat-option value="AFTER">After</mat-option>
+                      <mat-option value="BEFORE">Before</mat-option>
+                    </mat-select>
+                  </mat-form-field>
+                  @if (filterForm.get('terminationDatePeriod')?.hasError('required')) {
+                    <div class="period-error">Period is required</div>
+                  }
+                </div>
+                <div class="date-field">
+                  <mat-form-field appearance="fill">
+                    <mat-label>Termination Date</mat-label>
+                    <input matInput [matDatepicker]="termFilterPicker"
+                      formControlName="terminationDate"
+                      #termFilterNativeInput
+                      placeholder="DD-MMM-YYYY"
+                      (input)="onFilterTermDateInput($event)" />
+                    <mat-datepicker-toggle matIconSuffix [for]="termFilterPicker"></mat-datepicker-toggle>
+                    <mat-datepicker #termFilterPicker></mat-datepicker>
+                  </mat-form-field>
+                  @if (getFilterTermDateError()) {
+                    <div class="period-error">{{ getFilterTermDateError() }}</div>
+                  }
+                </div>
+              </div>
+            </form>
+
+            <footer class="filter-panel__footer">
+              <button mat-stroked-button type="button" (click)="onClearFilters()">CLEAR ALL</button>
+              <button mat-raised-button color="primary" type="button" (click)="onApplyFilters()" [disabled]="isApplyDisabled">APPLY</button>
+            </footer>
+          </section>
+        </ng-template>
+
+        <!-- Filter Chips -->
+        @if (hasActiveFilters()) {
+          <div class="chips-row">
+            <app-filter-chips
+              [chips]="filterChips()"
+              (removeChip)="onRemoveFilterChip($event)"
+              (clearAll)="onClearAllChips()">
+            </app-filter-chips>
+          </div>
+        }
+
+        <div class="table-container">
+          <table mat-table [dataSource]="viewDataSource" matSort #viewSort="matSort"
+                 matSortActive="testBatchPrefix" matSortDirection="asc"
+                 aria-label="External Antigen Test File Mapping">
+
+            <ng-container matColumnDef="testBatchPrefix">
+              <th mat-header-cell *matHeaderCellDef mat-sort-header>Test Batch ID Prefix</th>
+              <td mat-cell *matCellDef="let row">{{ row.testBatchPrefix }}</td>
+            </ng-container>
+
+            <ng-container matColumnDef="testAntigen">
+              <th mat-header-cell *matHeaderCellDef>Test Antigen</th>
+              <td mat-cell *matCellDef="let row">{{ row.testAntigen }}</td>
+            </ng-container>
+
+            <ng-container matColumnDef="approvedFlag">
+              <th mat-header-cell *matHeaderCellDef>Approval Flag</th>
+              <td mat-cell *matCellDef="let row">{{ flagLabels[row.approvedFlag] || row.approvedFlag }}</td>
+            </ng-container>
+
+            <ng-container matColumnDef="effDate">
+              <th mat-header-cell *matHeaderCellDef>Effective Date</th>
+              <td mat-cell *matCellDef="let row">{{ formatDate(row.effDate) }}</td>
+            </ng-container>
+
+            <ng-container matColumnDef="termDate">
+              <th mat-header-cell *matHeaderCellDef>Termination Date</th>
+              <td mat-cell *matCellDef="let row">{{ formatDate(row.termDate) }}</td>
+            </ng-container>
+
+            <ng-container matColumnDef="modifiedDate">
+              <th mat-header-cell *matHeaderCellDef>Modification Date</th>
+              <td mat-cell *matCellDef="let row">{{ formatDate(row.modifiedDate) }}</td>
+            </ng-container>
+
+            <tr mat-header-row *matHeaderRowDef="viewColumns; sticky: true"></tr>
+            <tr mat-row *matRowDef="let row; columns: viewColumns;"></tr>
+          </table>
+        </div>
+      }
+
+      <!-- ═══ EDIT MODE ═══ -->
+      @if (isEditMode()) {
+        <div class="toolbar-row">
+          <div class="toolbar-left"></div>
+          <div class="toolbar-right">
+            <button type="button" class="btn-action" (click)="onAddRow()">
+              <mat-icon aria-hidden="true">add</mat-icon> ADD ANTIGEN TEST
+            </button>
+            <span class="toolbar-separator"></span>
+            <button type="button" class="btn-cancel" (click)="onCancelEdit()">
+              <mat-icon aria-hidden="true">close</mat-icon> CANCEL
+            </button>
+            <button type="button" class="btn-save" [disabled]="loading()" (click)="onSave()">
+              <mat-icon aria-hidden="true">check</mat-icon> SAVE
+            </button>
+          </div>
+        </div>
+
+        <div class="table-container editable">
+          <table mat-table [dataSource]="editableData()" aria-label="External Antigen Test File Mapping (Edit)">
+            <ng-container matColumnDef="testBatchPrefix">
+              <th mat-header-cell *matHeaderCellDef>Test Batch ID Prefix</th>
+              <td mat-cell *matCellDef="let row">
+                <span>{{ row.testBatchPrefix }}</span>
+              </td>
+            </ng-container>
+
+            <ng-container matColumnDef="testAntigen">
+              <th mat-header-cell *matHeaderCellDef>Test Antigen</th>
+              <td mat-cell *matCellDef="let row; let i = index">
+                @if (row.isNew) {
+                  <mat-form-field appearance="fill" class="table-field">
+                    <mat-select [formControl]="getRowControl(i, 'testAntigen')">
+                      <mat-option>
+                        <ngx-mat-select-search
+                          [formControl]="antigenSearchControl"
+                          placeholderLabel="Search..."
+                          noEntriesFoundLabel="No results found">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (opt of filteredAntigens(); track opt.value) {
+                        <mat-option [value]="opt.value">{{ opt.value }}{{ opt.label ? ' - ' + opt.label : '' }}</mat-option>
+                      }
+                    </mat-select>
+                    @if (getRowControl(i, 'testAntigen').touched && getRowControl(i, 'testAntigen').hasError('required')) {
+                      <mat-error>Required</mat-error>
+                    }
+                  </mat-form-field>
+                } @else {
+                  <span>{{ row.testAntigen }}</span>
+                }
+              </td>
+            </ng-container>
+
+            <ng-container matColumnDef="approvedFlag">
+              <th mat-header-cell *matHeaderCellDef>Approval Flag</th>
+              <td mat-cell *matCellDef="let row; let i = index">
+                <mat-form-field appearance="fill" class="table-field">
+                  <mat-select [formControl]="getRowControl(i, 'approvedFlag')">
+                    @for (opt of getApprovalFlagOptions(); track opt.value) {
+                      <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                    }
+                  </mat-select>
+                </mat-form-field>
+              </td>
+            </ng-container>
+
+            <ng-container matColumnDef="effDate">
+              <th mat-header-cell *matHeaderCellDef>Effective Date <span class="required-marker">*</span></th>
+              <td mat-cell *matCellDef="let row; let i = index">
+                <mat-form-field appearance="fill" class="table-field date-field"
+                  [class.mat-form-field-invalid]="getEffDateError(i)"
+                  [matTooltip]="getEffDateError(i)"
+                  [matTooltipDisabled]="!getEffDateError(i)"
+                  matTooltipPosition="below"
+                  matTooltipClass="date-error-tooltip">
+                  <input matInput [matDatepicker]="effPicker"
+                    [formControl]="getRowControl(i, 'effDate')"
+                    [errorStateMatcher]="effDateErrorMatchers[i]"
+                    [min]="row.isNew ? getMinDate() : null"
+                    placeholder="DD-MMM-YYYY"
+                    autocomplete="off"
+                    (input)="onEffDateInput($event, i)"
+                    (dateChange)="onEffDatePickerChange(i)" />
+                  <mat-datepicker-toggle matIconSuffix [for]="effPicker"></mat-datepicker-toggle>
+                  <mat-datepicker #effPicker></mat-datepicker>
+                  @if (getEffDateError(i)) {
+                    <mat-error>{{ getEffDateError(i) }}</mat-error>
+                  }
+                </mat-form-field>
+              </td>
+            </ng-container>
+
+            <ng-container matColumnDef="termDate">
+              <th mat-header-cell *matHeaderCellDef>Termination Date</th>
+              <td mat-cell *matCellDef="let row; let i = index">
+                <mat-form-field appearance="fill" class="table-field date-field"
+                  [class.mat-form-field-invalid]="getTermDateError(i)"
+                  [matTooltip]="getTermDateError(i)"
+                  [matTooltipDisabled]="!getTermDateError(i)"
+                  matTooltipPosition="below"
+                  matTooltipClass="date-error-tooltip">
+                  <input matInput [matDatepicker]="termPicker"
+                    [formControl]="getRowControl(i, 'termDate')"
+                    [errorStateMatcher]="termDateErrorMatchers[i]"
+                    [matDatepickerFilter]="termDateFilters[i]"
+                    placeholder="DD-MMM-YYYY"
+                    autocomplete="off"
+                    (input)="onTermDateInput($event, i)"
+                    (dateChange)="onTermDatePickerChange(i)" />
+                  <mat-datepicker-toggle matIconSuffix [for]="termPicker"></mat-datepicker-toggle>
+                  <mat-datepicker #termPicker></mat-datepicker>
+                  @if (getTermDateError(i)) {
+                    <mat-error>{{ getTermDateError(i) }}</mat-error>
+                  }
+                </mat-form-field>
+              </td>
+            </ng-container>
+
+            <ng-container matColumnDef="modifiedDate">
+              <th mat-header-cell *matHeaderCellDef>Modification Date</th>
+              <td mat-cell *matCellDef="let row">
+                <span class="readonly-value">{{ formatDate(row.modifiedDate) }}</span>
+              </td>
+            </ng-container>
+
+            <ng-container matColumnDef="actions">
+              <th mat-header-cell *matHeaderCellDef></th>
+              <td mat-cell *matCellDef="let row; let i = index">
+                @if (row.isNew) {
+                  <button type="button" mat-icon-button aria-label="Remove row" (click)="onDeleteRow(i)" matTooltip="Remove row" class="btn-delete-row">
+                    <mat-icon aria-hidden="true">delete_outline</mat-icon>
+                  </button>
+                }
+              </td>
+            </ng-container>
+
+            <tr mat-header-row *matHeaderRowDef="editColumns; sticky: true"></tr>
+            <tr mat-row *matRowDef="let row; columns: editColumns;"
+                [class.new-row]="row.isNew"></tr>
+          </table>
+        </div>
+      }
+    }
+  </section>
+</div>

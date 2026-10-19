@@ -1,0 +1,691 @@
+/* ************************************************************
+  Name              : LIFETRAK_API.pkg
+  Created By        : Basker Edwin 
+  Date Of Creation  : 04/23/08
+  Purpose           : This is an interface between the third party application
+		      and LT.
+		      The external application populats data in a temporary
+		      table. The interface pull the data and populates the
+		      LifeTrak tables
+
+  Version History
+  
+  Date         Version        Description
+  --------------------------------------------------------------------
+  06/15/2008   01             Initial development -Edwin
+  10/15/2008   02             did not calculat the est arrival time-IM 2012
+  10/17/2008   03             Include cancel and Edit option
+			      check the product type from vserv_product_types
+  05/13/2009   04             create contacts
+  05/19/2009   05             include the first namne and last name in contacts
+			      and reset the p-note-id value.
+  06/18/2009   06             COD flag was not populating
+  06/27/2009   07             Divided product type attribut & placing multiple
+			      attributes
+  01/31/2012   08             Time Zone Logic -Hussein          
+**********************************************************************   */
+
+CREATE OR REPLACE PACKAGE LIFETRAK_API IS
+  function  local_time_zone return date;
+  procedure add_error_log(p_log_text in varchar2);
+  Procedure API_LIFETRAK_CONV (p_os_appl_id in varchar2,
+                               p_source_value in varchar2,
+			       p_target_value out varchar2);
+  procedure rollback_and_exit (pl_err_msg in varchar2);
+  Procedure ORDER_PROCESSOR(pl_os_appl_name in varchar2,
+			    pl_os_trans_id in varchar2,
+			    pl_action in varchar2);
+
+  p_ext_id               VARCHAR2(50);
+  p_int_id               VARCHAR2(50);
+  p_appl_name            VARCHAR2(20);
+  p_err_msg              VARCHAR2(500);
+  v_tb_id                VARCHAR2(64);
+  v_chapter_id           VARCHAR2(5);
+  x_lt_order_no          VARCHAR2(15);
+  g_action_id            VARCHAR2(5);
+  lt_order_status        varchar2(5);
+END LIFETRAK_API;
+/
+
+CREATE OR REPLACE package body LIFETRAK_API is
+
+function local_time_zone return date is
+v_local_time date;
+
+begin
+
+    if Lifetrack_timezone_convert.is_timezone_enabled then
+    	
+         Lifetrack_timezone_convert.get_local_time(v_chapter_id,sysdate,v_local_time);
+	else
+	v_local_time:=sysdate;
+	end if;	 
+    return v_local_time;
+end;
+
+
+PROCEDURE add_error_log(p_log_text in varchar2) is
+
+Begin
+    insert into lifetrak_api_log(external_id,internal_id,log_text,
+				 source_id,insert_date, program_id)
+			  values(p_ext_id,p_int_id,p_log_text,
+				 p_appl_name,local_time_zone,'LTAPI');
+Exception when others then
+   raise_application_error('-20000','API Log Error');
+END add_error_log;
+
+Procedure API_LIFETRAK_CONV (p_os_appl_id in varchar2,
+			     p_source_value in varchar2,
+			     p_target_value out varchar2) is
+
+ p_source_id    VARCHAR2(20);
+Begin
+
+
+  --get the target value
+
+  begin
+     select target_value into p_target_value
+     from API_LT_CONVERSION where source_appl_id=p_os_appl_id and
+     source_value=p_source_value
+     and local_time_zone between eff_date and nvl(term_date,local_time_zone+1);
+  exception when no_data_found then
+     p_err_msg:='No Translation found for '||p_source_value;
+     rollback_and_exit(p_err_msg);
+  end;
+
+End API_LIFETRAK_CONV;
+
+PROCEDURE ORDER_PROCESSOR(pl_os_appl_name in varchar2,
+			  pl_os_trans_id in varchar2,
+		          pl_action in varchar2) is
+
+ nCount1 NUMBER:=0;
+
+ Procedure GENERATE_ORDERS (ps_os_appl_name in varchar2,
+			    p_os_order_id in varchar2) is
+
+     CURSOR order_cur is select * from API_ORDERS
+		       where os_order_no=p_os_order_id;
+
+     CURSOR item_cur is select * from API_ORDER_ITEMS where
+		       os_order_no=p_os_order_id ;
+
+     CURSOR attr_cur(pl_item_no number) is select * from API_ORDER_ITEMS_ATTR
+			      where os_order_no=p_os_order_id and
+			      item_no=pl_item_no;
+
+     p_order_no     VARCHAR2(15);
+     p_note_id      NUMBER:=0;
+     p_item_note_id NUMBER:=0;
+     p_payee_id     VARCHAR2(10);
+     p_cons_id      VARCHAR2(10);
+     p_stdng_ord    VARCHAR2(1):=NULL;
+     p_cod_flag     VARCHAR2(1);
+     p_est_time     VARCHAR2(30);
+     p_abo_type     VARCHAR2(15);
+     x_abo_value    VARCHAR2(15);
+     p_pd_t_type    VARCHAR2(10);
+     x_prod_type    VARCHAR2(20);
+     p_attrib_group VARCHAR2(5);
+     p_contract_id  VARCHAR2(10);
+     x_customer_id  VARCHAR2(10);
+     x_attr_code    VARCHAR2(5);
+     x_ord_type     VARCHAR2(5);
+     x_ord_class    VARCHAR2(5);
+     x_ord_mode     VARCHAR2(5);
+     x_order_by     VARCHAR2(50);
+     p_unit_price   NUMBER:=0;
+     p_name         VARCHAR2(30);
+  Begin
+
+      ---Step 1:  populate the orders table
+
+      p_ext_id:=p_os_order_id;
+
+      dbms_output.put_line('OS order id='||p_os_order_id);
+
+     For ord_rec in order_cur Loop
+          --Get the chapter ID
+          If ord_rec.chapter_id is null or ord_rec.chapter_id=' ' then
+	     p_err_msg:='External Application does not have chapter ID';
+	     rollback_and_exit(p_err_msg);
+          Else
+            begin
+	      select chapter_id into v_chapter_id from vserv_chapters
+	      where chapter_id=ord_rec.chapter_id and local_time_zone
+	      between eff_date and nvl(term_date,local_time_zone+1);
+            exception
+	       when no_data_found then
+	         v_chapter_id:=null;
+	         API_LIFETRAK_CONV(pl_os_appl_name,ord_rec.chapter_id,
+	                           v_chapter_id);
+               when others then
+		  p_err_msg:='Unable to get the Chapter ID';
+		  rollback_and_exit(p_err_msg);
+	    end;
+
+	  End If;
+
+	  --get the order number
+	  If x_lt_order_no is null then   --for update no need to gen order no
+             LIFETRAK_DIST.GET_ORDER_NO(v_chapter_id,p_order_no,p_err_msg);
+	     if p_err_msg!='OK' then
+		rollback_and_exit(p_err_msg);
+             end if;
+
+          Else
+	    p_order_no:=x_lt_order_no;
+          End if;
+
+	 --- Translate the given Customer id into LT customer ID
+
+	 If ord_rec.customer_id is null or ord_rec.customer_id =' ' then
+	   p_err_msg:='External Application does not have Customer ID';
+	   rollback_and_exit(p_err_msg);
+         Else
+
+	    begin
+	      select customer_id into x_customer_id from CUSTOMERS
+	      where customer_id=ord_rec.customer_id and local_time_zone between
+	      eff_date and nvl(term_date,local_time_zone+1);
+            exception
+	      when no_data_found then
+	         x_customer_id:=null;
+	         API_LIFETRAK_CONV(pl_os_appl_name,ord_rec.customer_id,
+	                           x_customer_id);
+              when others then
+		p_err_msg:='Unable to get the Customer ID from LT';
+		rollback_and_exit(p_err_msg);
+	    end;
+
+             dbms_output.put_line('Out customer id='||ord_rec.customer_id||
+    	                          'LT Customer='||x_customer_id);
+         End If;
+
+        --Get the order type
+        If ord_rec.order_type is null or ord_rec.order_type=' ' then
+	  p_err_msg:='External Application does not have Order type';
+	  rollback_and_exit(p_err_msg);
+        Else
+	   if ord_rec.order_type not in ('RE','SP','AD','EX','ID','LD') then
+	      API_LIFETRAK_CONV(pl_os_appl_name,ord_rec.order_type,x_ord_type);
+           else
+	      x_ord_type:=ord_rec.order_type;
+           end if;
+	    dbms_output.put_line('Order Type='||x_ord_type);
+        End If;
+
+       --Get the order class
+
+	If ord_rec.order_class is null or ord_rec.order_class=' ' then
+          p_err_msg:='External Application does not have Order class';
+	  rollback_and_exit(p_err_msg);
+        Else
+	    begin
+	        select order_class into x_ord_class from vserv_order_classes
+	         where order_class=ord_rec.order_class and local_time_zone between
+	         eff_date and nvl(term_date,local_time_zone+1);
+             exception
+	       when no_data_found then
+	           API_LIFETRAK_CONV(pl_os_appl_name,ord_rec.order_class,
+			 	     x_ord_class);
+               when others then
+	           p_err_msg:='Not able to retrieve the Order class';
+	           rollback_and_exit(p_err_msg);
+            end;
+	     dbms_output.put_line('Order class='||x_ord_class);
+        End If;
+
+	--Get the order mode
+
+
+	If ord_rec.order_mode is null or ord_rec.order_mode=' ' then
+          p_err_msg:='External Application does not have Order mode';
+	  rollback_and_exit(p_err_msg);
+        Else
+	    begin
+	        select code into x_ord_mode from vserv_order_modes
+	         where code=ord_rec.order_mode and local_time_zone between
+	         eff_date and nvl(term_date,local_time_zone+1);
+             exception
+	       when no_data_found then
+	           API_LIFETRAK_CONV(pl_os_appl_name,ord_rec.order_mode,
+			 	     x_ord_mode);
+               when others then
+	           p_err_msg:='Not able to retrieve the Order mode';
+	           rollback_and_exit(p_err_msg);
+            end;
+	    dbms_output.put_line('Order Mode='||x_ord_mode);
+        End If;
+	---get Order by
+	If ord_rec.order_by is not null then
+	  begin
+	     p_name:=substr(ord_rec.order_by,1,instr(ord_rec.order_by,' ',1));
+	     dbms_output.put_line('Order by='||p_name);
+	     select first_name ||' '||last_name into x_order_by
+	     from vserv_contacts where
+	     upper(first_name)=upper(LTrim(RTrim(p_name))) and
+	     customer_id=x_customer_id and local_time_zone between eff_date and
+	     nvl(term_date,local_time_zone+1) and rownum =1;
+          exception when no_data_found then
+	     p_err_msg:='Invalid Customer contact ';
+	     rollback_and_exit(p_err_msg);
+          end;
+
+	End If;
+
+	--get the values from the LT tables
+	  begin
+	     select payee_id into p_payee_id
+	     from customers  where customer_id=x_customer_id and
+	     local_time_zone between eff_date and nvl(term_date,local_time_zone+1);
+          exception when no_data_found then
+	     p_err_msg:='No Payee defined in the table';
+	     rollback_and_exit(p_err_msg);
+	   end;
+           dbms_output.put_line('Payee ID='||p_payee_id);
+
+	  begin
+	     select consignee_id into p_cons_id
+	     from consignee where customer_id=x_customer_id and
+	     local_time_zone between eff_date and nvl(term_date,local_time_zone+1) and
+	     rownum=1;  --verify if more than one consignee for 1  customer
+          exception when no_data_found then
+	     p_err_msg:='No consignee defined in the table';
+	     rollback_and_exit(p_err_msg);
+	 end;
+
+	 dbms_output.put_line('Cons ID='||p_cons_id);
+
+	 --Get the contract id for the customer
+	 begin
+	    select contract_id into p_contract_id from vserv_contracts where
+	    customer_id=x_customer_id and local_time_zone between eff_date and
+	    nvl(term_date,local_time_zone+1);
+
+	 exception when no_data_found then
+            p_err_msg:='Contract is not defined in the LifeTrak system';
+	    rollback_and_exit(p_err_msg);
+	 end;
+
+	 dbms_output.put_line('LT contract ID='||p_contract_id);
+
+	 --generate the note id if the comments are not null
+
+	 If ord_rec.order_comments is not null then
+            p_err_msg:=null;
+	    LIFETRAK_DIST.GENERATE_NOTES(ord_rec.order_comments,p_note_id,
+	    p_err_msg);
+	    if p_err_msg!='OK' then
+	      rollback_and_exit(p_err_msg);
+            end if;
+         End IF;
+
+          -- insert into orders table
+	  Begin
+	     p_err_msg:=null;
+             LIFETRAK_DIST.POPULATE_ORDERS(p_order_no,
+					   v_chapter_id,
+					   x_ord_type,
+		               x_customer_id,
+					   p_cons_id,
+					   p_payee_id,
+		                           'OR',
+					   x_ord_class,
+					   local_time_zone,
+		                           'LTAPI',
+					   sysdate,
+					   p_contract_id,
+					   x_order_by,
+		                           p_cod_flag,
+					   p_est_time,
+					   null,
+					   p_note_id,
+					   p_stdng_ord,
+		                           x_ord_mode,
+					   'LTAPI',
+					   p_err_msg);
+            if p_err_msg!='OK' then
+	      rollback_and_exit(p_err_msg);
+	    end if;
+
+         Exception
+            when others then
+               p_err_msg:='Unable to insert into ORDERS -'||sqlerrm;
+	       rollback_and_exit(p_err_msg);
+        End;
+
+      dbms_output.put_line('Order record is populated in LT');
+     End Loop;
+
+     -- Step 2: Populate order_items table
+
+    FOR item_rec IN item_cur Loop
+    Begin
+
+        --translate the blood type
+	If item_rec.blood_type is null then
+	  p_err_msg:='Blood type is blank';
+	  rollback_and_exit(p_err_msg);
+        Else
+           begin
+	      select code into x_abo_value from vserv_master
+	      where code_type='ABO' and code=item_rec.blood_type
+	      and local_time_zone between eff_date and nvl(term_date,local_time_zone+1);
+           exception when no_data_found then
+	     x_abo_value:=null;
+	     API_LIFETRAK_CONV(ps_os_appl_name,item_rec.blood_type,
+			       x_abo_value);
+           when others then
+	      p_err_msg:='Cannot retreive the ABO';
+	      rollback_and_exit(p_err_msg);
+	   end;
+
+	    dbms_output.put_line('OS blood type='||item_rec.blood_type||
+			     'LT blood type='||x_abo_value);
+         End If;
+
+	--translate the product type
+	If item_rec.product_type is null then
+	   p_err_msg:='Product type is missing.';
+	   rollback_and_exit(p_err_msg);
+        Else
+
+	   begin
+	     select product_type into x_prod_type from
+	     vserv_product_types where product_type=item_rec.product_type
+	     and local_time_zone between eff_date and nvl(term_date,local_time_zone+1);
+           exception when no_data_found then
+               x_prod_type:=null;
+               API_LIFETRAK_CONV(ps_os_appl_name,item_rec.product_type,
+	       x_prod_type);
+            when others then
+	       p_err_msg:='Cannot get Product type.';
+	       rollback_and_exit(p_err_msg);
+            end;
+
+            dbms_output.put_line('OS prod type='||item_rec.product_type||
+                                 'LT prod type='||x_prod_type);
+        End If;
+
+	--verify the item no
+	If item_rec.item_no <=0 then
+	  p_err_msg:='Invalid Item No.';
+	  rollback_and_exit(p_err_msg);
+        End If;
+
+	If item_rec.item_comments is not null then
+	    p_err_msg:=null;
+            LIFETRAK_DIST.GENERATE_NOTES(item_rec.item_comments,p_item_note_id,
+					 p_err_msg);
+            if p_err_msg!='OK' then
+	       rollback_and_exit(p_err_msg);
+            end if;
+
+        End IF;
+
+	--get the standard pricing values
+         p_err_msg:=null;
+	 LIFETRAK_DIST.GET_PROD_PRICE(v_chapter_id,x_prod_type,1,x_customer_id,
+				      p_unit_price, p_err_msg);
+          if p_err_msg!='OK' then
+             rollback_and_exit(p_err_msg);
+	  end if;
+         dbms_output.put_line('Price='||to_char(p_unit_price,'099.99'));
+
+	 If nvl(item_rec.required_quantity,0) <=0 then
+	   p_err_msg:='Required quantity is captured as 0 or less';
+	   rollback_and_exit(p_err_msg);
+         End If;
+
+	p_err_msg:=null;
+
+       LIFETRAK_DIST.POPULATE_ORDER_ITEMS   (
+				   p_order_no,
+				   v_chapter_id,
+				   item_rec.item_no,
+				   x_prod_type,
+				   x_abo_value,
+				   nvl(item_rec.tier_code,1),
+				   'OR',
+				   item_rec.required_quantity,
+				   0,                      --Allocated qty
+				   0,                      --shipped_qty
+				   0,                      --system_cancel_qty
+				   item_rec.substitution_flag,
+				   p_unit_price,
+				   0,                         --canceled_qty
+				   p_item_note_id,
+				   0,                         --sub_qty
+				   'LTAPI',
+				   p_err_msg);
+
+        If p_err_msg!='OK' then
+	   rollback_and_exit(p_err_msg);
+        End If;
+
+         dbms_output.put_line('Order items populated:'||
+			       to_char(item_rec.item_no));
+
+     For attr_rec IN attr_cur(item_rec.item_no) Loop
+
+	If attr_rec.attrib_code is null then
+	   p_err_msg:='Attribute code is missing.';
+	   rollback_and_exit(p_err_msg);
+        Else
+
+	  Begin
+	     select attrib_code,attrib_group into x_attr_code,
+	     p_attrib_group from valid_attributes where
+	     attrib_code=attr_rec.attrib_code and local_time_zone between eff_date
+	     and nvl(term_date,local_time_zone+1) and rownum <2;
+         Exception
+	   When no_data_found then
+                 x_attr_code:=null;
+                 API_LIFETRAK_CONV(ps_os_appl_name,attr_rec.attrib_code,
+	                           x_attr_code);
+
+                 begin
+                    select attrib_group into p_attrib_group from
+		    valid_attributes where attrib_code=x_attr_code and
+		    rownum=1 and local_time_zone between eff_date and
+		    nvl(term_date,local_time_zone+1);
+                exception when others then
+	             p_err_msg:='Invalid LifeTrak Attribute code: '||sqlerrm;
+                     rollback_and_exit(p_err_msg);
+                end;
+           When others then
+	       p_err_msg:='Cannot get attribute code';
+	       rollback_and_exit(p_err_msg);
+         End;
+       End If;
+	    dbms_output.put_line('OS Attrib='||attr_rec.attrib_code||' '||
+		         	 'LT ='||x_attr_code);
+	Begin
+             p_err_msg:=null;
+	     LIFETRAK_DIST.POPULATE_ORDER_ITEM_ATTRS(p_order_no,
+					       v_chapter_id,
+					       item_rec.item_no,
+					       p_attrib_group,
+                                               x_attr_code,
+					       p_unit_price,
+                                               x_prod_type,
+                                               item_rec.required_quantity,
+					       'LTAPI',
+					       p_err_msg);
+            If p_err_msg!='OK' then
+	       rollback_and_exit(p_err_msg);
+            End If;
+
+        Exception when others then
+	  p_err_msg:='Unable to insert into order_item_attributes '
+	  ||sqlerrm;
+	  rollback_and_exit(p_err_msg);
+        End;
+
+     End Loop;
+     dbms_output.put_line('Attributes are added in the LT table');
+
+  End;    -- for items
+  End Loop;
+
+  p_int_id:=p_order_no;
+
+END Generate_orders;
+
+----------------------------------------------
+---Main routine starts here for Order processor
+------------------------------------------------
+BEGIN
+
+     dbms_output.enable(50000000);
+       /* the following code does the action
+	  I  - For order creation
+	  R  - PRoduct return
+       */
+
+     --v_chapter_id:='WAD';
+     p_appl_name:=pl_os_appl_name;
+     g_action_id:=pl_action; --for global usage
+
+     If pl_action='I' then
+	x_lt_order_no:=null;
+        GENERATE_ORDERS(pl_os_appl_name,pl_os_trans_id);
+	   update API_ORDERS set lt_order_no=p_int_id,
+	   lt_updated_on=local_time_zone, lt_status='SUCCESS' where
+	   os_order_no=pl_os_trans_id;
+
+	   update API_ORDER_ITEMS set lt_order_no=p_int_id,
+	   lt_updated_on=local_time_zone,lt_status='SUCCESS'
+	   where os_order_no=pl_os_trans_id;
+
+	   update API_ORDER_ITEMS_ATTR set lt_order_no=p_int_id,
+	   lt_updated_on=local_time_zone, lt_status='SUCCESS' where
+	   os_order_no=pl_os_trans_id;
+
+	   update API_ORDER_PROCESSOR set api_date=local_time_zone,
+	   api_status='SUCCESS' ,api_comments='Order generated',
+	   lt_order_no=p_int_id where os_appl_name=p_appl_name and
+	   api_action_code=g_action_id and os_order_no=pl_os_trans_id ;
+   	   If g_action_id='I' then
+	      add_error_log('Order generated successfully');
+           End If;
+
+	   commit;
+     End If;
+
+    If pl_action in ('U','C') then
+       --update can be done only if the order was not processed
+       --delete all the  current order information and repopulate
+       begin
+          select lt_order_no into x_lt_order_no from api_orders where
+          os_order_no=pl_os_trans_id;
+
+         --get the order status from LT orders table
+         select order_status into lt_order_status from orders where
+         order_no=x_lt_order_no;
+
+       exception when no_data_found then
+	  p_err_msg:='Could not found LT order number for update';
+	  rollback_and_exit(p_err_msg);
+       end;
+
+    End If;
+
+    --Update action
+
+    If pl_action='U' then
+
+       If lt_order_status='OR' then
+         delete from order_item_attributes where order_no=x_lt_order_no;
+         delete from order_items where order_no=x_lt_order_no;
+         delete from orders where order_no=x_lt_order_no;
+	 GENERATE_ORDERS(pl_os_appl_name,pl_os_trans_id);
+
+	 update API_ORDER_PROCESSOR set api_date=local_time_zone,
+         api_status='SUCCESS' where os_appl_name=p_appl_name and
+         api_action_code=g_action_id and os_order_no=pl_os_trans_id ;
+         p_ext_id:=pl_os_trans_id;
+         p_int_id:=x_lt_order_no;
+         add_error_log('Order Updated ');
+      Else
+        update API_ORDER_PROCESSOR set api_date=local_time_zone,
+        api_status='FAILED' where os_appl_name=p_appl_name and
+        api_action_code=g_action_id and os_order_no=pl_os_trans_id ;
+        p_ext_id:=pl_os_trans_id;
+	p_int_id:=x_lt_order_no;
+	add_error_log('Cannot update the order ');
+      End if;
+
+      COMMIT;
+   End If;
+
+   --Cancel action
+
+   If pl_action='C' then
+
+     If lt_order_status='OR' then
+        update orders set order_status='CA' where order_no=x_lt_order_no;
+        update order_items set item_status='CA' where order_no=x_lt_order_no;
+
+        update API_ORDER_PROCESSOR set api_date=local_time_zone,
+        api_status='SUCCESS',api_comments='Order_cancelled'
+        where os_appl_name=p_appl_name and api_action_code=g_action_id
+        and os_order_no=pl_os_trans_id ;
+        p_ext_id:=pl_os_trans_id;
+	p_int_id:=x_lt_order_no;
+	add_error_log('Order Cancelled');
+    Else
+      update API_ORDER_PROCESSOR set api_date=local_time_zone,
+      api_status='FAILED' where os_appl_name=p_appl_name and
+      api_action_code=g_action_id and os_order_no=pl_os_trans_id ;
+
+       p_ext_id:=pl_os_trans_id;
+       p_int_id:=x_lt_order_no;
+       add_error_log('Cancel failed-The order was already '||
+	             'processed or cancelled');
+    End if;
+      COMMIT;
+  End If;
+
+END ORDER_PROCESSOR;
+
+procedure rollback_and_exit(pl_err_msg in varchar2) is
+end_time  varchar2(30);
+Begin
+dbms_output.put_line(pl_err_msg);
+rollback;
+--delete from orders where order_no=p_int_id;
+--delete from order_items where order_no=p_int_id;
+--delete from order_item_attributes where order_no=p_int_id;
+
+  update API_ORDERS set lt_updated_on=local_time_zone,
+  lt_status='FAILED' where os_order_no=p_ext_id;
+
+  update API_ORDER_ITEMS set lt_updated_on=local_time_zone,
+  lt_status='FAILED' where os_order_no=p_ext_id;
+
+  update API_ORDER_ITEMS_ATTR set lt_updated_on=local_time_zone,
+  lt_status='FAILED' where os_order_no=p_ext_id;
+
+ update API_ORDER_PROCESSOR set api_date=local_time_zone,
+ api_status='FAILED' ,api_Comments=pl_err_msg
+ where os_appl_name=p_appl_name and os_order_no=p_ext_id
+ and api_action_code=g_action_id;
+
+add_error_log(pl_err_msg);
+commit;
+raise_application_error('-20000','Aborting');
+End rollback_and_exit;
+
+END LIFETRAK_API;
+/
+
+drop public synonym LIFETRAK_API;
+create public synonym LIFETRAK_API for LIFETRAK_API;
+grant execute on LIFETRAK_API to public;
+
+

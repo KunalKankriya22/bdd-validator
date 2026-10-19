@@ -1,0 +1,272 @@
+<h1 class="cdk-visually-hidden">{{ headerConfig.title }}</h1>
+
+<app-page-header-with-breadcrumb [config]="headerConfig" />
+
+<main class="void-product-label main-content">
+
+  <!-- Loading Overlay -->
+  @if (loading()) {
+    <div class="loading-overlay" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading"></mat-spinner>
+    </div>
+  }
+
+  <form [formGroup]="form" (ngSubmit)="onSave()" novalidate>
+
+    <!-- Section 1: Unit Information (FMB Steps 1–5) -->
+    <div class="form-section">
+      <div class="form-row form-row--five-col">
+        <!-- Unit ID (FMB Steps 1–2) -->
+        <div class="form-field">
+          <app-unit-id-field
+            [validateFfValue]="'VOID_PRODUCT_LABEL'"
+            [label]="'Unit ID'"
+            [showBarcodeIcon]="true"
+            (validated)="onUnitValidated($event)"
+            (cleared)="onUnitCleared()"
+            class="unit-id-field">
+          </app-unit-id-field>
+        </div>
+
+        <!-- Collection Date/Time (readonly, auto-populated from Step 2) -->
+        <mat-form-field appearance="fill" class="form-field readonly-field" subscriptSizing="dynamic">
+          <mat-label>Collection Date/Time</mat-label>
+          <input matInput
+                 [value]="collectionDateTime()"
+                 readonly
+                 tabindex="-1">
+        </mat-form-field>
+
+        <!-- Product Code (FMB Steps 3–4: LOV from unit components) -->
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label [id]="labelId('productCode')">
+            Product Code
+          </mat-label>
+          <mat-select
+            [id]="elementId('productCode')"
+            formControlName="productCode"
+            [attr.aria-labelledby]="labelId('productCode')"
+            [attr.aria-invalid]="f['productCode'].invalid && (f['productCode'].touched || submitted())"
+            [attr.aria-describedby]="f['productCode'].invalid && (f['productCode'].touched || submitted()) ? errorId('productCode') : null"
+            (selectionChange)="onProductCodeSelected($event.value)">
+            <mat-select-trigger>
+              {{ f['productCode'].value }}
+              <img src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon product-code-scan-icon" />
+            </mat-select-trigger>
+            @for (comp of unitComponents(); track comp.productCode) {
+              <mat-option [value]="comp.productCode">
+                {{ comp.productCode }} - {{ comp.productDescription }}
+              </mat-option>
+            }
+          </mat-select>
+          @if (f['productCode'].invalid && (f['productCode'].touched || submitted())) {
+            <mat-error [id]="errorId('productCode')">Product Code is required</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Current Label (readonly) -->
+        <mat-form-field appearance="fill" class="form-field readonly-field" subscriptSizing="dynamic">
+          <mat-label>Current Label</mat-label>
+          <input matInput
+                 [value]="currentLabel()"
+                 readonly
+                 tabindex="-1">
+        </mat-form-field>
+
+        <!-- Tested ABO (readonly) -->
+        <mat-form-field appearance="fill" class="form-field readonly-field" subscriptSizing="dynamic">
+          <mat-label>Tested ABO</mat-label>
+          <input matInput
+                 [value]="testedAbo()"
+                 readonly
+                 tabindex="-1">
+        </mat-form-field>
+      </div>
+
+      <!-- Component Prefix row (FMB Step 5) -->
+      @if (hasComponentDetails()) {
+        <div class="form-row form-row--component-prefix">
+          <!-- Component Prefix: ISBT = auto-populated readonly, Codabar = LOV dropdown -->
+          @if (isCodabar()) {
+            <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+              <mat-label [id]="labelId('componentPrefix')">
+                Component Prefix <span class="required-marker">*</span>
+              </mat-label>
+              <mat-select
+                [id]="elementId('componentPrefix')"
+                formControlName="componentPrefix"
+                [attr.aria-labelledby]="labelId('componentPrefix')">
+                @for (prefix of componentPrefixOptions(); track prefix) {
+                  <mat-option [value]="prefix">{{ prefix }}</mat-option>
+                }
+              </mat-select>
+              @if (f['componentPrefix'].invalid && (f['componentPrefix'].touched || submitted())) {
+                <mat-error [id]="errorId('componentPrefix')">Component Prefix is required</mat-error>
+              }
+            </mat-form-field>
+          } @else {
+            <mat-form-field appearance="fill" class="form-field readonly-field" subscriptSizing="dynamic">
+              <mat-label>Component Prefix</mat-label>
+              <input matInput
+                     formControlName="componentPrefix"
+                     readonly
+                     tabindex="-1">
+            </mat-form-field>
+          }
+
+          <!-- NFT Label (auto-derived, readonly) -->
+          <mat-form-field appearance="fill" class="form-field readonly-field" subscriptSizing="dynamic">
+            <mat-label>New ABO Label (NFT)</mat-label>
+            <input matInput
+                   [value]="nftLabel()"
+                   readonly
+                   tabindex="-1">
+          </mat-form-field>
+        </div>
+      }
+    </div>
+
+    <!-- Section 2: Label Verification (FMB Steps 6–10) -->
+    @if (hasComponentDetails()) {
+      <div class="form-section">
+        <h2 class="section-title">Label Verification</h2>
+
+        <!-- Row 1: Combined scan field (narrow) -->
+        <div class="form-row form-row--scan-combined">
+          <mat-form-field appearance="fill" class="form-field" [class.readonly-field]="confirmationValid()" subscriptSizing="dynamic">
+            <mat-label>Scan Unit ID/ Scan Quarantine Label</mat-label>
+            <input matInput
+                   [id]="elementId('scanUnitQuarantineLabel')"
+                   formControlName="scanUnitQuarantineLabel"
+                   [readonly]="confirmationValid()"
+                   (blur)="onScanUnitQuarantineLabel()">
+            <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+          </mat-form-field>
+        </div>
+
+        <!-- Row 2: Individual fields + Expiration Date + Hold Reason CD -->
+        <div class="form-row form-row--four-col">
+          <mat-form-field appearance="fill" class="form-field" [class.readonly-field]="confirmationValid()" subscriptSizing="dynamic">
+            <mat-label>Scan Unit ID</mat-label>
+            <input matInput
+                   [id]="elementId('scanUnitId')"
+                   formControlName="scanUnitId"
+                   [readonly]="confirmationValid()"
+                   (blur)="onIndividualUnitIdBlur()">
+            <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field" [class.readonly-field]="confirmationValid()" subscriptSizing="dynamic">
+            <mat-label>Scan Quarantine Label</mat-label>
+            <input matInput
+                   [id]="elementId('scanQuarantineLabel')"
+                   formControlName="scanQuarantineLabel"
+                   [readonly]="confirmationValid()"
+                   (blur)="onIndividualQuarantineLabelBlur()">
+            <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+          </mat-form-field>
+
+          @if (confirmationValid()) {
+            <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+              <mat-label>Expiration Date</mat-label>
+              <input matInput
+                     [id]="elementId('expiryDateScan')"
+                     formControlName="expiryDateScan"
+                     (blur)="onExpiryDateScanBlur()">
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+              <mat-hint>Calculated: {{ expirationDate() }}</mat-hint>
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+              <mat-label [id]="labelId('holdReasonCode')">
+                Hold Reason CD
+              </mat-label>
+              <mat-select
+                [id]="elementId('holdReasonCode')"
+                formControlName="holdReasonCode"
+                [attr.aria-labelledby]="labelId('holdReasonCode')"
+                [attr.aria-invalid]="f['holdReasonCode'].invalid && (f['holdReasonCode'].touched || submitted())"
+                [attr.aria-describedby]="f['holdReasonCode'].invalid && (f['holdReasonCode'].touched || submitted()) ? errorId('holdReasonCode') : null">
+                @for (code of overrideCodeOptions(); track code.code) {
+                  <mat-option [value]="code.code">
+                    {{ code.code }} - {{ code.description }}
+                  </mat-option>
+                }
+              </mat-select>
+              @if (f['holdReasonCode'].invalid && (f['holdReasonCode'].touched || submitted())) {
+                <mat-error [id]="errorId('holdReasonCode')">Hold Reason is required</mat-error>
+              }
+            </mat-form-field>
+          }
+        </div>
+      </div>
+    }
+
+    <!-- Comments Section with Labeled Components Info -->
+    @if (hasComponentDetails()) {
+      <div class="form-section comments-section">
+        <mat-form-field appearance="fill" class="form-field comments-field" subscriptSizing="dynamic">
+          <mat-label>Comments</mat-label>
+          <textarea matInput
+                    formControlName="note"
+                    [id]="elementId('note')"
+                    cdkTextareaAutosize
+                    cdkAutosizeMinRows="3"
+                    cdkAutosizeMaxRows="6"
+                    maxlength="240"></textarea>
+          <mat-hint align="end">Characters Remaining: {{ noteCharCount() }}/240</mat-hint>
+          @if (f['note'].invalid && (f['note'].touched || submitted())) {
+            <mat-error [id]="errorId('note')">
+              @if (f['note'].errors?.['required']) {
+                Comments are required
+              }
+              @if (f['note'].errors?.['maxlength']) {
+                Maximum 240 characters allowed
+              }
+            </mat-error>
+          }
+        </mat-form-field>
+
+        @if (labeledComponents().length > 0) {
+          <div class="labeled-components-info" role="region" aria-label="Labeled components information">
+            <p class="labeled-components-info__title">The following components have been labelled:</p>
+            @for (comp of labeledComponents(); track comp.productCode) {
+              <p class="labeled-components-info__item">
+                {{ comp.productCode }} - {{ comp.aboDescription }} - Expiring On {{ comp.expiryDate }} - {{ comp.location }}
+              </p>
+            }
+          </div>
+        }
+      </div>
+    }
+
+    <!-- Action Buttons -->
+    <div class="form-actions" role="group" aria-label="Form actions">
+      <button mat-raised-button
+              type="button"
+              (click)="onClear()"
+              class="action-button">
+        CLEAR ALL
+      </button>
+      <button mat-raised-button
+              type="button"
+              (click)="onReprint()"
+              [disabled]="!canReprint()"
+              class="action-button">
+        REPRINT
+      </button>
+      <button mat-raised-button
+              color="primary"
+              type="submit"
+              [disabled]="loading()"
+              class="action-button save-button">
+        @if (loading()) {
+          <mat-spinner diameter="20"></mat-spinner>
+        } @else {
+          SAVE
+        }
+      </button>
+    </div>
+
+  </form>
+</main>

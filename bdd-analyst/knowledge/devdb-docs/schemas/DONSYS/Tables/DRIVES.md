@@ -1,0 +1,124 @@
+---
+tags:
+  - table
+  - DONSYS
+---
+# DRIVES
+
+**Schema**: [[schemas/DONSYS/DONSYS|DONSYS]]
+**Tablespace**: BC_DATA
+**Estimated Rows**: 50001
+**Last Analyzed**: 2026-05-16 03:00:14
+**Partitioned**: NO
+
+## Columns
+
+| # | Column | Type | Nullable | Default | Comment |
+| --- | --- | --- | --- | --- | --- |
+| 1 | DRIVE_ID | VARCHAR2(10) | No |  |  |
+| 2 | CHAPTER_ID | VARCHAR2(4) | No |  |  |
+| 3 | DRIVE_DATE | DATE | No |  |  |
+| 4 | DRIVE_TYPE | VARCHAR2(5) | No |  |  |
+| 5 | SCHEDULE_START_TIME | DATE | No |  |  |
+| 6 | SCHEDULE_END_TIME | DATE | No |  |  |
+| 7 | RECRUITER_ID | VARCHAR2(6) | No |  |  |
+| 8 | LOCATION_ID | VARCHAR2(10) | No |  |  |
+| 9 | STATUS | VARCHAR2(5) | No |  |  |
+| 10 | CAMPAIGN_ID | VARCHAR2(10) | Yes |  |  |
+| 11 | EVENT_ID | VARCHAR2(10) | Yes |  |  |
+| 12 | CANCEL_DATE | DATE | Yes |  |  |
+| 13 | CANCEL_USER | VARCHAR2(6) | Yes |  |  |
+| 14 | CANCEL_REASON | VARCHAR2(100) | Yes |  |  |
+| 15 | SCHEDULE_ID | VARCHAR2(20) | Yes |  |  |
+| 16 | ESTIMATED_CPU | NUMBER(8,2) | Yes |  |  |
+| 17 | PROJECTED_DRAW | NUMBER(6) | Yes |  |  |
+| 18 | PROJECTED_SHOW | NUMBER(6) | Yes |  |  |
+| 19 | ACTUAL_START_TIME | DATE | Yes |  |  |
+| 20 | ACTUAL_END_TIME | DATE | Yes |  |  |
+| 21 | ACTUAL_LEAVE_TIME | DATE | Yes |  |  |
+| 22 | ACTUAL_RETURN_TIME | DATE | Yes |  |  |
+| 23 | ACTUAL_TRAVEL_TIME | NUMBER(3) | Yes |  |  |
+| 24 | ACTUAL_CPU | NUMBER(8,2) | Yes |  |  |
+| 25 | ACTUAL_STUP_BKDOWN_TIME | NUMBER(3) | Yes |  |  |
+| 26 | NOTE_ID | VARCHAR2(10) | Yes |  |  |
+| 27 | OPEN_DRIVE_IND | VARCHAR2(5) | Yes |  |  |
+| 28 | DRIVE_CATEGORY | VARCHAR2(5) | Yes |  |  |
+| 29 | TERRITORY_ID | VARCHAR2(10) | Yes |  |  |
+| 30 | SCHEDULE_STUP_BKDOWN_TIME | NUMBER(3) | Yes |  |  |
+| 31 | CANCEL_REASON_CODE | VARCHAR2(5) | Yes |  |  |
+| 32 | HOLD_REASON_CODE | VARCHAR2(5) | Yes |  |  |
+| 33 | ROLLOVER_STATUS | VARCHAR2(1) | Yes |  |  |
+| 34 | LAST_MODIFIED_DATE | DATE | Yes |  |  |
+| 35 | LAST_MODIFIED_USER | VARCHAR2(6) | Yes |  |  |
+| 36 | DRIVE_SHEET_DATE | DATE | Yes |  |  |
+| 37 | MIN_SKILL_RATING | NUMBER(2) | Yes |  |  |
+| 38 | SCHEDULE_REMARKS | VARCHAR2(50) | Yes |  |  |
+| 39 | OS_OK_FLAG | VARCHAR2(1) | Yes |  |  |
+| 40 | CONV_DRIVE_ID | VARCHAR2(10) | Yes |  |  |
+| 41 | PROGRAM_ID | VARCHAR2(30) | No |  |  |
+| 42 | INSERT_DATE | DATE | No |  |  |
+| 43 | INSERT_USER | VARCHAR2(6) | No |  |  |
+| 44 | AUDIT_KEY | NUMBER | No |  |  |
+| 45 | SIGNOFF_USER | VARCHAR2(6) | Yes |  |  |
+| 46 | SIGNOFF_DATE | DATE | Yes |  |  |
+| 47 | SCH_TRAVEL_TIME | NUMBER(3) | Yes |  |  |
+| 48 | STAFF_REVIEW_DATE | DATE | Yes |  |  |
+| 49 | STAFF_REVIEW_USER | VARCHAR2(6) | Yes |  |  |
+| 50 | ACTIVE_STATUS | VARCHAR2(1) | Yes |  |  |
+
+## Primary Key
+
+**DRIVES_PK**: `DRIVE_ID, CHAPTER_ID`
+
+## Foreign Keys
+
+| Constraint | Columns | References | On Delete |
+| --- | --- | --- | --- |
+| CAMPAIGN_DRIVE_FK | CAMPAIGN_ID, CHAPTER_ID | [[schemas/DONSYS/Tables/CAMPAIGNS\|DONSYS.CAMPAIGNS]] (CAMPAIGN_ID, CHAPTER_ID) | NO ACTION |
+| COMMUN_EVENT_DRIVE_FK | EVENT_ID, CHAPTER_ID | [[schemas/DONSYS/Tables/COMMUNITY_EVENTS\|DONSYS.COMMUNITY_EVENTS]] (EVENT_ID, CHAPTER_ID) | NO ACTION |
+| LOCATION_DRIVE_FK | LOCATION_ID, CHAPTER_ID | [[schemas/DONSYS/Tables/LOCATIONS\|DONSYS.LOCATIONS]] (LOCATION_ID, CHAPTER_ID) | NO ACTION |
+
+## Referenced By
+
+| Source | Constraint | Columns |
+| --- | --- | --- |
+| [[schemas/DONSYS/Tables/DRIVE_BAGS\|DONSYS.DRIVE_BAGS]] | DRIVE_DRIVE_BAGS_FK | DRIVE_ID, CHAPTER_ID → DRIVE_ID, CHAPTER_ID |
+| [[schemas/DONSYS/Tables/DRIVE_CAMPAIGN_ITEMS\|DONSYS.DRIVE_CAMPAIGN_ITEMS]] | DRIVE_DRIVE_CAMP_ITEMS_FK | DRIVE_ID, CHAPTER_ID → DRIVE_ID, CHAPTER_ID |
+| [[schemas/DONSYS/Tables/DRIVE_ESTIMATED_RESOURCES\|DONSYS.DRIVE_ESTIMATED_RESOURCES]] | DRIVE_DRIVE_EST_RESOURCE_FK | DRIVE_ID, CHAPTER_ID → DRIVE_ID, CHAPTER_ID |
+| [[schemas/DONSYS/Tables/DRIVE_FACILITIES\|DONSYS.DRIVE_FACILITIES]] | DRIVE_DRIVE_FACILITIES_FK | DRIVE_ID, CHAPTER_ID → DRIVE_ID, CHAPTER_ID |
+| [[schemas/DONSYS/Tables/DRIVE_PROCEDURES\|DONSYS.DRIVE_PROCEDURES]] | DRIVE_DRIVE_PROCEDURES_FK | DRIVE_ID, CHAPTER_ID → DRIVE_ID, CHAPTER_ID |
+| [[schemas/DONSYS/Tables/DRIVE_SPONSORS\|DONSYS.DRIVE_SPONSORS]] | DRIVE_DRIVE_SPONSORS_FK | DRIVE_ID, CHAPTER_ID → DRIVE_ID, CHAPTER_ID |
+| [[schemas/DONSYS/Tables/DRIVE_VEHICLES\|DONSYS.DRIVE_VEHICLES]] | DRIVE_DRIVE_VEHICLES_FK | DRIVE_ID, CHAPTER_ID → DRIVE_ID, CHAPTER_ID |
+| [[schemas/DONSYS/Tables/MOBILE_DRIVE_SLOTS\|DONSYS.MOBILE_DRIVE_SLOTS]] | MOBILE_DRIVE_SLOT_DRIVE_FK | DRIVE_ID, CHAPTER_ID → DRIVE_ID, CHAPTER_ID |
+| [[schemas/DONSYS/Tables/MOBILE_SCHEDULE\|DONSYS.MOBILE_SCHEDULE]] | MOBILE_SCHEDULE_DRIVE_FK | DRIVE_ID, CHAPTER_ID → DRIVE_ID, CHAPTER_ID |
+
+## Indexes
+
+| Index | Type | Unique | Columns | Status |
+| --- | --- | --- | --- | --- |
+| DRIVES_IDX3 | NORMAL | NONUNIQUE | RECRUITER_ID | VALID |
+| DRIVES_N5 | NORMAL | NONUNIQUE | TERRITORY_ID | VALID |
+| DRIVES_PK | NORMAL | UNIQUE | DRIVE_ID, CHAPTER_ID | VALID |
+| DRIVE_IDX2 | NORMAL | NONUNIQUE | DRIVE_DATE | VALID |
+
+## Triggers
+
+- [[schemas/DONSYS/Triggers/DRIVES_BD|DRIVES_BD]] — BEFORE EACH ROW DELETE (ENABLED)
+- [[schemas/DONSYS/Triggers/DRIVES_BI|DRIVES_BI]] — BEFORE EACH ROW INSERT (ENABLED)
+- [[schemas/DONSYS/Triggers/DRIVES_BU|DRIVES_BU]] — BEFORE EACH ROW UPDATE (ENABLED)
+
+## Grants
+
+| Grantee | Privilege | Grantable |
+| --- | --- | --- |
+| BLOODC_ROLE | DELETE | NO |
+| BLOODC_ROLE | INSERT | NO |
+| BLOODC_ROLE | SELECT | NO |
+| BLOODC_ROLE | UPDATE | NO |
+
+## Depended On By
+
+| Object | Type | Schema |
+| --- | --- | --- |
+| DON_INFO | FUNCTION | DONSYS |
+| DRIVE_SPON | VIEW | DONSYS |

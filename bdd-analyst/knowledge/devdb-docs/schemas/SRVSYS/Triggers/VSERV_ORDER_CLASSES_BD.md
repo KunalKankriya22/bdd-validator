@@ -1,0 +1,48 @@
+---
+tags:
+  - trigger
+  - SRVSYS
+---
+# VSERV_ORDER_CLASSES_BD
+
+**Schema**: [[schemas/SRVSYS/SRVSYS|SRVSYS]]
+**Table**: [[schemas/SRVSYS/Tables/VSERV_ORDER_CLASSES|VSERV_ORDER_CLASSES]]
+**Type**: BEFORE EACH ROW
+**Event**: DELETE
+**Status**: ENABLED
+
+## Trigger Body
+
+```plsql
+begin
+  insert into VSERV_ORDER_CLASSES_AUDIT
+  (	ORDER_CLASS,
+	CHAPTER_ID,
+	ORDER_PRIORITY,
+	CLASS_DESC,
+	PROCESS_HOURS,
+	EFF_DATE,
+	TERM_DATE,
+	LAST_MODIFIED_DATE,
+	DISPLAY_FLAG,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  (	:old.ORDER_CLASS,
+	:old.CHAPTER_ID,
+	:old.ORDER_PRIORITY,
+	:old.CLASS_DESC,
+	:old.PROCESS_HOURS,
+	:old.EFF_DATE,
+	:old.TERM_DATE,
+	:old.LAST_MODIFIED_DATE,
+	:old.DISPLAY_FLAG,
+	:old.AUDIT_KEY,
+	'DELETE',LT_USER_SESSION.GET_USERID,
+    sysdate
+  ) ;
+  end ;
+```

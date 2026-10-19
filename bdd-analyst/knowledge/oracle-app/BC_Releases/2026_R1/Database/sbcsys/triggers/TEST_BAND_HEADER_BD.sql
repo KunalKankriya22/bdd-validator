@@ -1,0 +1,36 @@
+--------------------------------------------------------
+--  DDL for Trigger TEST_BAND_HEADER_BD
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "TEST_BAND_HEADER_BD" 
+BEFORE DELETE
+ON SBCSYS.TEST_BAND_HEADER
+REFERENCING NEW AS NEW OLD AS OLD
+FOR EACH ROW
+begin
+
+	insert into TEST_BAND_HEADER_AUDIT
+    (
+	UNIT_ID, COLL_DATE, CHAPTER_ID,
+	TB_ID, TEST_ID, TB_SEQ_NO,
+	TEST_CHAPTER_ID, TECH1_USER, TECH1_DATE,
+	TECH2_USER, TECH2_DATE, SUPER_USER,
+	SUPER_DATE, RECON_FLAG, TECH1_INTP,
+	TECH2_INTP, SUPER_INTP, PROGRAM_ID,
+	NOTE_ID, TEST_TYPE, CTRL_VAL,
+	AUDIT_KEY, AUDIT_INSERT_DATS, AUDIT_INSERT_USER
+    )
+    values
+    (
+	:old.UNIT_ID, :old.COLL_DATE, :old.CHAPTER_ID,
+	:old.TB_ID, :old.TEST_ID, :old.TB_SEQ_NO,
+	:old.TEST_CHAPTER_ID, :old.TECH1_USER, :old.TECH1_DATE,
+	:old.TECH2_USER, :old.TECH2_DATE, :old.SUPER_USER,
+	:old.SUPER_DATE, :old.RECON_FLAG, :old.TECH1_INTP,
+	:old.TECH2_INTP, :old.SUPER_INTP, :old.PROGRAM_ID,
+	:old.NOTE_ID, :old.TEST_TYPE, :old.CTRL_VAL,
+	:old.AUDIT_KEY, sysdate, lt_user_session.get_userid
+    );
+end;
+/
+ALTER TRIGGER "TEST_BAND_HEADER_BD" ENABLE;

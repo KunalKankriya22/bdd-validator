@@ -1,0 +1,475 @@
+CREATE OR REPLACE package ONSITE_HH is
+
+  -- Author  : ASHOKV
+  -- Created : 4/9/2019 9:36:01 AM
+  -- Purpose : Health History and Physical Finding routines.
+  -- Version :
+  -- 01 : New version created.  
+  -- 02 : template_id added.
+  -- 03 : MLT 2400 (Set all questions as exception if donor going to HH directly skipping DR)
+  -- 04 : 08/01/2019 -- treat all questions with screener ask flag null as exceptions.
+  -- 05 : 09/20/2019 -- new colum - PARENT_RESP_FLAG changes.
+  -- 06 : 10/14/2020 -- MLT 3730 (search for V06)
+  /* 
+  This routine is called from ONSITE web app (complete form button)
+  Commit logic moved from oracle forms to database.
+  Inputs: transaction id, screener id (user id), program calling this routine
+  Output:  Returns - 'P', 'T' or 'OK'
+  'P' - Based on the Physical Findings responses, the donor is deferred Permanently
+  'T' - Based on the Physical Findings responses, the donor is deferred Temporarly
+  'OK' - no interdictions, committed to database.
+  */  
+
+  procedure generate_questions (p_session_id in varchar2,
+                                p_transaction_id in varchar2,
+                                p_screener_id    in varchar2,
+                                p_prog_name      in varchar2,
+                                p_abbr_flag      out varchar2, -- A or F
+                                p_hh_comp_flag        out varchar2,
+                                p_status         out varchar2);
+
+end ONSITE_HH;
+
+/
+
+
+CREATE OR REPLACE package body ONSITE_HH is
+
+  gv_donor_id        DONATIONS.DONOR_ID%TYPE;
+  gv_don_type        DONATIONS.DONATION_TYPE%TYPE;
+  gv_proc_code       DONATIONS.PROCEDURE_CODE%TYPE;
+  gv_unit_id         DONATIONS.UNIT_ID%TYPE;
+  gd_coll_date       DONATIONS.COLL_DATE%TYPE;
+  gv_user_chapter    DONATIONS.CHAPTER_ID%TYPE;
+  gv_deferral_id     DONATIONS.DEFERRAL_ID%TYPE;
+  gv_def_reason      DONATIONS.DEFERRAL_REASON%TYPE;
+  gd_drive_date      DONATIONS.COLL_DATE%TYPE;
+  gv_don_pgm_id      DONATIONS.PROGRAM_ID%TYPE;
+  gv_transaction_id  DONATIONS.TRANSACTION_ID%TYPE;
+  gv_prog_name       VARCHAR2(30);
+  gv_multi_chapter   CHAPTERS.CHAPTER_ID%TYPE;
+  gd_local_date      DATE;
+  gv_staff_no        SYSTEM_USERS.STAFF_NO%TYPE;  
+  gv_error_msg       VARCHAR2(500);
+  gv_screener_id     PHYSICAL_FINDINGS.INSERT_USER%TYPE;
+  gv_gender          VARCHAR2(1);
+
+  FUNCTION donor_already_responded RETURN BOOLEAN IS  
+    -- Cursor to check if donor responses are completed from LifeTrak application.
+    CURSOR donor_responses_cur IS
+      SELECT 1
+        FROM donor_responses
+       WHERE transaction_id = gv_transaction_id;
+
+    l_dummy PLS_INTEGER;
+    l_rec_found BOOLEAN := FALSE;
+
+  BEGIN
+
+    -- Check if responses are completed.  IF completed, it is given priority over web responses.    
+    OPEN donor_responses_cur;
+    FETCH donor_responses_cur INTO l_dummy;
+    l_rec_found := donor_responses_cur%FOUND;
+    CLOSE donor_responses_cur;      
+
+    RETURN l_rec_found; 
+  END donor_already_responded;    
+
+  FUNCTION abbr_enabled RETURN BOOLEAN IS
+    CURSOR hh_template_cur IS
+    SELECT 1
+      FROM health_history_template
+     WHERE donation_type = gv_don_type
+       AND NVL(abbr_flag, 'N') = 'Y'
+       AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE +1);
+    l_dummy PLS_INTEGER;
+    l_cur_found BOOLEAN;
+  BEGIN
+    OPEN hh_template_cur;
+    FETCH hh_template_cur INTO l_dummy;
+    l_cur_found := hh_template_cur%FOUND;
+    CLOSE hh_template_cur;
+
+    RETURN l_cur_found;
+  END abbr_enabled;  
+
+  FUNCTION donor_resp_qtype RETURN VARCHAR2 IS
+    CURSOR dqh_cur IS
+      SELECT NVL(actual_af_qtype, 'F')
+        FROM donor_hhq_history 
+       WHERE transaction_id = gv_transaction_id
+     ORDER BY INSERT_DATE DESC;  
+
+    l_qtype VARCHAR2(1); 
+  BEGIN
+    l_qtype := 'F'; -- Default 'Full' Questionnaire.
+    OPEN dqh_cur;
+    FETCH dqh_cur INTO l_qtype;
+    CLOSE dqh_cur;
+
+    RETURN l_qtype;
+  END donor_resp_qtype;  
+
+  PROCEDURE insert_health_history IS
+    lv_template_id VARCHAR2(10);
+    nCnt NUMBER;
+  BEGIN
+    select count(1) into nCnt
+      from health_history 
+     where transaction_id = gv_transaction_id;
+
+    if nCnt = 0 then 
+        SELECT hht.template_id into lv_template_id
+          FROM health_history_template hht
+         WHERE hht.donation_type = gv_don_type
+           AND SYSDATE BETWEEN hht.eff_date AND NVL(hht.term_date, SYSDATE+1)
+           AND rownum = 1;
+
+        INSERT into health_history
+          (TRANSACTION_ID,
+           CHAPTER_ID,
+           QUESTION_CODE,
+           ANSWER_CODE,
+           RESPONSE,
+           TEMPLATE_ID,
+           PROGRAM_ID,
+           DONOR_RESP_LANG) 
+          select transaction_id,
+                 gv_user_chapter,
+                 question_code,
+                 decode(donor_response, 'N', 'NO', 'Y', 'YES', 'X', 'NA'),
+                 donor_response,
+                 lv_template_id,
+                 gv_prog_name,
+                 donor_resp_lang
+            from donor_responses
+           where transaction_id = gv_transaction_id
+             and donor_response in ('Y', 'N', 'X')
+             and question_code != 'DUMMY'; 
+     end if;
+  END insert_health_history;
+
+
+  procedure generate_questions (p_session_id in varchar2,
+                                p_transaction_id in varchar2,
+                                p_screener_id    in varchar2,
+                                p_prog_name      in varchar2,
+                                p_abbr_flag      out varchar2, -- A or F
+                                p_hh_comp_flag   out varchar2,
+                                p_status         out varchar2) is
+    lv_qtype_calc VARCHAR2(1);-- Abbr SCR
+    lv_qtype_comments VARCHAR2(1000);-- Abbr SCR
+    lv_qtype_reset_flag VARCHAR2(1);-- Abbr SCR
+    lv_qtype_error VARCHAR2(2000); --Abbr SCR  
+    v_error_loc VARCHAR2(10);      
+    ld_hh_start DATE;
+    ld_hh_end   DATE;
+    ld_sysdate  DATE;  
+    lv_prev_trn_id VARCHAR2(10);
+    nCnt NUMBER;                   
+    procedure init_variables is
+    begin
+      gv_error_msg := NULL;
+      begin        
+        SELECT dn.donor_id,
+               dn.donation_type,
+               dn.procedure_code,
+               dn.unit_id,
+               dn.coll_date,
+               dn.chapter_id,
+               dn.deferral_id,
+               dn.deferral_reason,
+               dn.coll_date drive_date,
+               dn.program_id,
+               d.gender
+          INTO  gv_donor_id,
+                gv_don_type,
+                gv_proc_code,
+                gv_unit_id,
+                gd_coll_date,
+                gv_user_chapter,
+                gv_deferral_id,
+                gv_def_reason,
+                gd_drive_date,
+                gv_don_pgm_id,
+                gv_gender     
+          FROM donations dn, donors d
+         WHERE dn.donor_id = d.donor_id
+           AND transaction_id = p_transaction_id; 
+      exception
+        when no_data_found then
+          gv_error_msg := 'Donation Transaction not found';
+          RETURN;
+      end init_variables;
+
+      gv_transaction_id := p_transaction_id;
+      gv_prog_name      := p_prog_name;
+      --gv_unit_id        := NULL; -- as per oracle code.
+      gv_screener_id    := p_screener_id;
+
+      begin
+        select DECODE(multi_chapter, 'Y', 'ALL', gv_user_chapter)
+          into gv_multi_chapter
+          from lt_application_config;
+      exception
+        when no_data_found then
+          gv_error_msg := 'Configuration missing';  
+          RETURN;
+      end;
+
+      begin
+        select staff_no into gv_staff_no
+          from system_users
+         where user_id = upper(p_screener_id)
+           and sysdate between eff_date and nvl(term_date, sysdate + 1);
+
+      exception
+        when others then
+          gv_error_msg := 'Could not find staff no. for this user'; 
+          RETURN;
+      end;
+
+      gd_local_date := lifetrack_timezone_convert.get_local_time(gv_user_chapter, SYSDATE);
+    exception
+      when others then
+        gv_error_msg := SUBSTR(SQLERRM, 1, 200);
+        RETURN;
+    end init_variables;    
+
+  begin
+    p_abbr_flag := 'N'; -- Full questionnaire as default.
+    p_hh_comp_flag := NULL;
+    p_status := NULL;
+
+    -- initialize gloabal variables.(gv, gd variables in declaration)
+    v_error_loc := 'Loc: 1 ';
+
+    init_variables;
+
+    if gv_error_msg is not null then
+      p_status := v_error_loc || gv_error_msg;
+      RETURN;
+    end if;
+
+
+    v_error_loc := 'Loc: 2 ';    
+
+
+    -- Get the type of questionnaire administered in donor responses
+    if donor_already_responded then      -- 
+      insert_health_history; -- this used to be performed by donor response screen (but moved it to hh pkg for ONSITE app)
+      if donor_resp_qtype = 'A' then
+        p_abbr_flag := 'Y';
+      end if;
+    else
+      --Alert user about type of questionnaire : OUT
+      -- donor_questionnaire
+      if abbr_enabled then
+          donor_questionnaire.calc_qtype(  donor_id_in     => gv_donor_id ,
+                                           coll_date_in    => gd_coll_date,
+                                           don_type_in     => gv_don_type,
+                                           qtype_out       => lv_qtype_calc,
+                                           comments_out    => lv_qtype_comments,
+                                           reset_flag_out  => lv_qtype_reset_flag,
+                                           err_out         => lv_qtype_error
+                                         );        
+          IF lv_qtype_error IS NOT NULL THEN
+            p_status := '21220 - ' || lv_qtype_error;
+            RETURN;
+          END IF;
+
+          IF lv_qtype_calc = 'A' THEN
+            p_abbr_flag := 'Y';
+          END IF;
+      end if;
+    end if;
+    ---------------
+
+   UPDATE donations
+     SET screener_id = UPPER(gv_screener_id)
+   WHERE transaction_id = gv_transaction_id;
+
+   -----------
+
+   begin
+      select HLTH_HIST_START, HLTH_HIST_END, SYSDATE
+        into ld_hh_start, ld_hh_end, ld_sysdate
+        from online_status 
+       where transaction_id= gv_transaction_id;
+   exception
+     when others then
+       p_status := SUBSTR(sqlerrm, 1, 500);
+       RETURN;
+   end;    
+
+    if ld_hh_start is not null then 
+      update online_status
+        set hlth_hist_start = ld_sysdate,
+            hlth_updt_by = gv_screener_id,
+            hlth_updt_time = ld_sysdate 
+       where transaction_id = gv_transaction_id;
+    end if;
+
+    if ld_hh_end is not null then
+      p_hh_comp_flag := 'Y'; -- alert user about hh complete. requires user name and password.
+    end if;
+
+
+    v_error_loc := 'Loc: 3 ';   
+
+    -- Inserts exceptions only questions.
+    INSERT INTO onsite_health_history(session_id, transaction_id, chapter_id, donation_type,
+                ques_code, ques_desc, display_order, sub_question_flag, parent_question_code,
+                exceptions_flag, abbr_flag, new_flag, resp_change_flag, show_prev_answers, 
+                insert_date, insert_user, template_id, 
+                parent_resp_flag, -- V05
+                abbr_display_order -- V06
+                ) 
+    SELECT p_session_id, gv_transaction_id, gv_user_chapter, gv_don_type, 
+           hht.question_code, hht.question_description, hht.display_order, hht.sub_question_flag, hht.parent_question_code,
+           'Y', DECODE(p_abbr_flag, 'Y', hht.abbr_flag, NULL), null, null, null,
+           SYSDATE, gv_screener_id, hht.template_id,
+           hht.parent_resp_flag, -- V05
+           hht.abbr_disp_seq -- V06
+     from health_history_template hht
+    where hht.donation_type = gv_don_type
+      and hht.gender in ('A', gv_gender) 
+      --and NVL(abbr_flag, 'N') IN ('Y', lv_abbr_flag) -- Abbr SCR
+      -- and hht.screener_ask = 'D' -- a null screener ask is considered as an exception in HH. 08/01/2019
+      and gd_coll_date between hht.eff_date and nvl(hht.term_date, sysdate + 10)
+      and hht.question_code in ( SELECT dr.question_code 
+                               from donor_responses dr
+                              where dr.transaction_id = gv_transaction_id 
+                                and dr.check_reqd = 'Y' 
+                             UNION
+                             SELECT hht1.question_code 
+                               from health_history_template hht1
+                              where hht1.donation_type = gv_don_type
+                                and hht1.gender in ('A', gv_gender) 
+                                --and NVL(hht1.abbr_flag, 'N') IN ('Y',lv_abbr_flag) -- Abbr SCR
+                                -- and hht1.screener_ask = 'D' -- a null screener ask is considered as an exception in HH.  08/01/2019
+                                and gd_coll_date between hht1.eff_date and nvl(hht1.term_date, sysdate + 10)
+                                and hht1.question_code not in (select distinct(hh1.question_code) 
+                                                                from health_history hh1
+                                                               where hh1.transaction_id = gv_transaction_id)
+                           );    
+
+      -- Inserts non-exception questions.                     
+      INSERT INTO onsite_health_history(session_id, transaction_id, chapter_id, donation_type,
+                  ques_code, ques_desc, display_order, sub_question_flag, parent_question_code,
+                  exceptions_flag, abbr_flag, new_flag, resp_change_flag, show_prev_answers, 
+                  insert_date, insert_user, template_id,
+                  parent_resp_flag, -- V05
+                  abbr_display_order -- V06
+                  ) 
+      SELECT p_session_id, gv_transaction_id, gv_user_chapter, gv_don_type, 
+             hht.question_code, hht.question_description, hht.display_order, hht.sub_question_flag, hht.parent_question_code,
+             'N',DECODE(p_abbr_flag, 'Y', hht.abbr_flag, NULL), null, null, null,
+             SYSDATE, gv_screener_id, hht.template_id,
+              hht.parent_resp_flag, -- V05
+              hht.abbr_disp_seq -- V06
+        from health_history_template hht
+       where hht.donation_type = gv_don_type
+         and hht.gender in ('A', gv_gender) 
+         --and NVL(abbr_flag, 'N') IN ('Y', lv_abbr_flag) -- Abbr SCR
+         and gd_coll_date between hht.eff_date and nvl(hht.term_date, sysdate + 10)
+         and hht.question_code not in (select onsh.ques_code
+                                       from onsite_health_history onsh
+                                     where onsh.session_id = p_session_id
+                                       and onsh.transaction_id = gv_transaction_id);
+
+    -- Update abbr description.
+    if p_abbr_flag = 'Y' then
+      update onsite_health_history ohh
+        set ques_desc_abbr = (select vq.question_description
+                                from valid_hh_questions vq
+                               where ohh.ques_code ||'-A' = vq.question_code
+                                and gd_coll_date between vq.eff_date and nvl(vq.term_date, gd_coll_date+10)
+                              )
+       where ohh.session_id = p_session_id
+         and ohh.transaction_id = gv_transaction_id
+         and ohh.abbr_flag = 'Y'
+         and exists
+         (select 1
+           from valid_hh_questions vhq
+          where ohh.ques_code ||'-A' = vhq.question_code
+            and gd_coll_date between vhq.eff_date and nvl(vhq.term_date, gd_coll_date+10)
+         );
+     end if;
+
+    -- updates resp_change_flag  
+    update onsite_health_history ohh
+     set resp_change_flag = (select dr.res_cng_flg
+                               from donor_responses dr
+                              where dr.transaction_id = gv_transaction_id
+                                and dr.question_code = ohh.ques_code)
+     where session_id = p_session_id
+      and transaction_id = gv_transaction_id;
+     --  
+
+
+    -- update new_flag  
+    update onsite_health_history ohh
+     set new_flag = (select 'Y'
+                      from valid_hh_questions vhq
+                      where vhq.question_code = ohh.ques_code
+                       and vhq.eff_date between sysdate - 365 and sysdate
+                       and gd_coll_date between vhq.eff_date and nvl(vhq.term_date, gd_coll_date+10) 
+                       and rownum = 1          
+                     )
+     where session_id = p_session_id
+      and transaction_id = gv_transaction_id;
+    --  
+
+    begin
+      select transaction_id  into lv_prev_trn_id
+      from (SELECT transaction_id, rank() over (order by coll_date desc) as rank 
+              FROM donations
+             WHERE  donor_id = gv_donor_id
+              and coll_date <= gd_coll_date
+              ) 
+      where rank = 2;   
+    exception
+      when others then
+        lv_prev_trn_id := null;
+    end;
+    if lv_prev_trn_id is not null then 
+      update onsite_health_history ohh
+        set show_prev_answers = (select  'Y' 
+                                   from health_history hh
+                                  where hh.transaction_id = lv_prev_trn_id
+                                    and hh.question_code = ohh.ques_code
+                                    and rownum = 1)
+       where ohh.session_id = p_session_id
+         and ohh.transaction_id = p_transaction_id;
+    end if;   
+
+
+    -- V03 --MLT 2400 (Set all questions as exception if donor going to HH directly skipping DR)
+    select count(1) into nCnt
+      from health_history
+     where transaction_id = gv_transaction_id;
+
+    if nCnt = 0 then 
+      update onsite_health_history ohh
+       set exceptions_flag = 'Y'
+       where session_id = p_session_id
+        and transaction_id = gv_transaction_id;
+    end if;
+    -----------
+
+    COMMIT;  
+
+    p_status := 'OK';
+
+  EXCEPTION
+    WHEN OTHERS THEN
+      p_status := v_error_loc || SUBSTR(SQLERRM, 1, 200);
+
+  end generate_questions;
+begin
+  -- Initialization
+  NULL;
+end ONSITE_HH;
+
+/

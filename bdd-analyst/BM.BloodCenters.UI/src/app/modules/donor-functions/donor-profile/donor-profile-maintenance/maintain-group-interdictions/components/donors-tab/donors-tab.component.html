@@ -1,0 +1,321 @@
+<div class="layout-wrapper" [class.side-panel-active]="showCommentsPanel">
+  <div class="main-content" [class.side-panel-active]="showCommentsPanel">
+    <div class="donors-tab-wrapper">
+      <!-- Query Panel Card -->
+      <div class="query-panel-card">
+        <form [formGroup]="controlForm" (ngSubmit)="onRetrieve()" class="control-form">
+          <div class="query-fields-wrapper">
+            <!-- Mode + Description grouped wrapper -->
+            <div class="mode-description-group">
+              <mat-form-field appearance="fill" class="mode-field" subscriptSizing="dynamic">
+                <mat-label>Mode</mat-label>
+                <mat-select formControlName="mode" required panelClass="group-interdiction-select-panel">
+                  @for (mode of modeOptions(); track mode.code) {
+                    <mat-option [value]="mode.code">{{ mode.code }}</mat-option>
+                  }
+                </mat-select>
+                @if (controlForm.get('mode')?.hasError('required') && controlForm.get('mode')?.touched) {
+                  <mat-error>Mode is required</mat-error>
+                }
+              </mat-form-field>
+
+              <div class="description-display">
+                <span class="description-label">Description</span>
+                <span class="description-value" [matTooltip]="modeDescription() || ''" matTooltipPosition="above">{{ modeDescription() || '-' }}</span>
+              </div>
+            </div>
+
+            <!-- Vertical Separator -->
+            <div class="vertical-separator"></div>
+
+            <!-- Value wrapper with virtual scrolling for performance -->
+            <mat-form-field appearance="fill" class="value-field" subscriptSizing="dynamic">
+              <mat-label>Value</mat-label>
+              <mat-select formControlName="value" required panelClass="group-interdiction-select-panel">
+                <mat-select-trigger>{{ controlForm.get('value')?.value }}</mat-select-trigger>
+                <mat-option>
+                  <ngx-mat-select-search
+                    [formControl]="valueSearchControl"
+                    placeholderLabel="Search Value..."
+                    noEntriesFoundLabel="No matching values">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @if (isLoadingValues()) {
+                  <mat-option disabled>
+                    <mat-spinner diameter="20" style="margin: 0 auto;" [attr.aria-label]="'Loading values'"></mat-spinner>
+                  </mat-option>
+                } @else {
+                  <cdk-virtual-scroll-viewport itemSize="48" [style.height.px]="Math.min(filteredValueOptions().length * 48, 288)">
+                    @for (val of filteredValueOptions(); track val.code) {
+                      <mat-option [value]="val.code">{{ formatValueOption(val) }}</mat-option>
+                    }
+                  </cdk-virtual-scroll-viewport>
+                }
+              </mat-select>
+              @if (controlForm.get('value')?.hasError('required') && controlForm.get('value')?.touched) {
+                <mat-error>Value is required</mat-error>
+              }
+            </mat-form-field>
+
+
+            <!-- Type wrapper -->
+            <mat-form-field appearance="fill" class="type-field" subscriptSizing="dynamic">
+              <mat-label>Type </mat-label>
+              <mat-select formControlName="type" required>
+                @for (type of deferralChoiceOptions; track type.code) {
+                  <mat-option [value]="type.code">{{ type.description }}</mat-option>
+                }
+              </mat-select>
+              @if (controlForm.get('type')?.hasError('required') && controlForm.get('type')?.touched) {
+                <mat-error>Type is required</mat-error>
+              }
+            </mat-form-field>
+          </div>
+
+          <button mat-stroked-button
+                  type="submit"
+                  class="retrieve-button"
+                  [disabled]="controlForm.invalid || isLoading()"
+                  [attr.aria-label]="'Retrieve donors'">
+            RETRIEVE
+          </button>
+        </form>
+      </div>
+
+      <!-- Content Area -->
+      @if (isLoading()) {
+        <div class="loading-container" role="status" aria-live="polite" [attr.aria-label]="'Loading data'">
+          <mat-spinner diameter="48"></mat-spinner>
+          <span class="cdk-visually-hidden">Loading, please wait...</span>
+        </div>
+      } @else if (!hasRetrieved()) {
+        <!-- Empty Initial State -->
+        <div class="data-panels">
+          <div class="left-panel-card">
+            <div class="panel-header">
+              <h3 class="panel-title">Donors (0)</h3>
+            </div>
+            <div class="table-container">
+              <table class="data-table" [attr.aria-label]="'Donors table'">
+                <thead>
+                  <tr>
+                    <th>
+                      <span class="sort-header-label">
+                        Donor ID
+                        <mat-icon class="sort-icon" aria-hidden="true">arrow_downward</mat-icon>
+                      </span>
+                    </th>
+                    <th>Name</th>
+                  </tr>
+                </thead>
+              </table>
+            </div>
+          </div>
+
+          <div class="right-panel-card">
+            <div class="panel-header">
+              <h3 class="panel-title">Interdictions (0)</h3>
+              <div class="panel-actions">
+                <button mat-stroked-button class="delete-interdiction-button" disabled [attr.aria-label]="'Delete selected interdictions'">
+                  <mat-icon aria-hidden="true">delete</mat-icon>
+                  DELETE
+                </button>
+                <button mat-stroked-button class="comment-button-header" disabled [attr.aria-label]="'View comments'">
+                  <mat-icon aria-hidden="true">comment</mat-icon>
+                  COMMENT
+                </button>
+                <button mat-stroked-button class="add-interdiction-button" disabled [attr.aria-label]="'Add interdiction'">
+                  ADD INTERDICTION
+                </button>
+                <app-search-bar
+                  [config]="searchConfig"
+                  class="interdiction-search" />
+              </div>
+            </div>
+            <div class="table-container">
+              <table class="data-table" [attr.aria-label]="'Interdictions table'">
+                <thead>
+                  <tr>
+                    <th class="col-checkbox">
+                      <mat-checkbox disabled [attr.aria-label]="'Select all interdictions'"></mat-checkbox>
+                    </th>
+                    <th>
+                      <span class="sort-header-label">
+                        Code
+                        <mat-icon class="sort-icon" aria-hidden="true">arrow_downward</mat-icon>
+                      </span>
+                    </th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td colspan="3" class="empty-message-cell">
+                      <div class="empty-message">
+                        <div class="empty-icon-wrapper">
+                          <mat-icon class="empty-icon" aria-hidden="true">search</mat-icon>
+                        </div>
+                        <h4>No Results to Display</h4>
+                        <p>Please enter search criteria to view results.</p>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      } @else {
+        <!-- Data Display -->
+        <div class="data-panels">
+          <!-- Left Panel: Donors -->
+          <div class="left-panel-card">
+            <div class="panel-header">
+              <h3 class="panel-title">Donors ({{ donors().length }})</h3>
+            </div>
+            <div class="table-container" role="region" [attr.aria-label]="'Donors list'">
+              <table class="data-table" [attr.aria-label]="'Donors table'">
+                <thead>
+                  <tr>
+                    <th>
+                      <button class="sort-header" (click)="toggleDonorSort()" [attr.aria-label]="'Sort by Donor ID'">
+                        Donor ID
+                        <mat-icon class="sort-icon" aria-hidden="true">
+                          {{ donorSortDirection() === 'asc' ? 'arrow_downward' : 'arrow_upward' }}
+                        </mat-icon>
+                      </button>
+                    </th>
+                    <th>Name</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (donor of sortedDonors(); track donor.donorId) {
+                    <tr>
+                      <td>{{ donor.donorId || '-' }}</td>
+                      <td>{{ (donor.donorName && donor.donorName.trim() && donor.donorName.trim() !== ',') ? donor.donorName : '-' }}</td>
+                    </tr>
+                  }
+                  @if (sortedDonors().length === 0) {
+                    <tr>
+                      <td colspan="2" class="empty-row">No donors found.</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Right Panel: Interdictions -->
+          <div class="right-panel-card">
+            <div class="panel-header">
+              <h3 class="panel-title">Interdictions ({{ filteredInterdictions().length }})</h3>
+              <div class="panel-actions">
+                <button mat-stroked-button
+                        class="delete-interdiction-button"
+                        (click)="onDeleteSelected()"
+                        [disabled]="selectedCount() === 0 || isLoading()"
+                        [attr.aria-label]="'Delete selected interdictions'">
+                  <mat-icon aria-hidden="true">delete</mat-icon>
+                  DELETE{{ selectedCount() > 0 ? ' (' + selectedCount() + ')' : '' }}
+                </button>
+                <button mat-stroked-button
+                        class="comment-button-header"
+                        (click)="onViewComments(selection.selected[0])"
+                        [disabled]="selectedCount() === 0"
+                        [attr.aria-label]="'View comments for selected interdiction'">
+                  <mat-icon aria-hidden="true">comment</mat-icon>
+                  COMMENT
+                </button>
+                <button mat-stroked-button
+                        class="add-interdiction-button"
+                        (click)="onAddInterdiction()"
+                        [disabled]="donors().length === 0"
+                        [attr.aria-label]="'Add interdiction'">
+                  ADD INTERDICTION
+                </button>
+                <app-search-bar
+                  [config]="searchConfig"
+                  (search)="onSearchChange($event)"
+                  (cleared)="onSearchCleared()"
+                  class="interdiction-search" />
+              </div>
+            </div>
+            <div class="table-container" role="region" [attr.aria-label]="'Interdictions list'">
+              <table class="data-table" [attr.aria-label]="'Interdictions table'">
+                <thead>
+                  <tr>
+                    <th class="col-checkbox">
+                      <mat-checkbox
+                        [checked]="isAllSelected()"
+                        [indeterminate]="isIndeterminate()"
+                        (change)="toggleAllRows()"
+                        [disabled]="isLoading()"
+                        [attr.aria-label]="'Select all interdictions'">
+                      </mat-checkbox>
+                    </th>
+                    <th>
+                      <button class="sort-header" (click)="toggleInterdictionSort()" [attr.aria-label]="'Sort by Code'">
+                        Code
+                        <mat-icon class="sort-icon" aria-hidden="true">
+                          {{ interdictionSortDirection() === 'asc' ? 'arrow_downward' : 'arrow_upward' }}
+                        </mat-icon>
+                      </button>
+                    </th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (interdiction of filteredInterdictions(); track interdiction.code) {
+                    <tr [class.row-selected]="selectedInterdictionForComments?.code === interdiction.code">
+                      <td class="col-checkbox">
+                        <mat-checkbox
+                          [checked]="selection.isSelected(interdiction)"
+                          (change)="toggleRow(interdiction)"
+                          [disabled]="isLoading()"
+                          [attr.aria-label]="'Select interdiction ' + interdiction.code">
+                        </mat-checkbox>
+                      </td>
+                      <td>{{ interdiction.code || '-' }}</td>
+                      <td>{{ interdiction.description || '-' }}</td>
+                    </tr>
+                  }
+                  @if (filteredInterdictions().length === 0) {
+                    <tr>
+                      <td colspan="3" class="empty-row">No interdictions found.</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      }
+    </div>
+  </div>
+
+  <!-- Select Interdictions Side Panel - Overlay (stays as is) -->
+  @if (showSelectPanel) {
+    <div class="select-panel-overlay">
+      <div class="select-panel-backdrop"></div>
+      <div class="select-panel-content">
+        <app-select-interdictions-panel
+          [existingCodes]="selectPanelExistingCodes"
+          [context]="'donor'"
+          (closePanel)="onSelectPanelClose()"
+          (interdictionsSelected)="onInterdictionsSelected($event)" />
+      </div>
+    </div>
+  }
+
+  <!-- Comments Side Panel - Only render when needed -->
+  @if (showCommentsPanel) {
+    <div class="side-panel-container comments-panel">
+      <app-comments-panel
+        [interdiction]="selectedInterdictionForComments"
+        [selectedInterdictions]="selection.selected"
+        [groupMode]="controlForm.get('mode')?.value || ''"
+        [groupValue]="controlForm.get('value')?.value || ''"
+        (closePanel)="onCommentsPanelClose()" />
+    </div>
+  }
+</div>

@@ -1,0 +1,2349 @@
+CREATE OR REPLACE PACKAGE DON_HLA_RBC IS
+/* --------------------------------------------------------------------------
+   PROGRAM VERSION    : 03
+   PROGRAM AUTHOR     : CHANDRA
+   LAST REVISION DATE : 07-03-2006
+                      : 04 (08/10/11) for adding the PLRF type in the search
+                      : 05 - Changed by Kishore on 09/05/2014.
+                           - Changed code to populate the CMV status correctly in 
+                             the HLA_RBC_MATCH_UNITS table.
+                      : 06 - Changed by Kishore on 09/16/2014. IM 10207.
+                      : 07   MLT- 6721
+
+ This package consists of three procedures
+   1. HLA_MATCH         : This procedure is used to match hla antigens 
+                          with that of recepient. Depending upon the
+                          request id (hla_rbc_request) abo match is
+                          done. The output of all matching donors with
+                          grade are stored in hla_rbc_match_lists table.
+   2. RBC_MATCH         : This procedure is used to match rbc antigens
+                          with that of recepient. Depending upon the 
+                          request abo match as well as antibodies match
+                          is performed. The output of matching donors 
+                          is stored in hla_rbc_match_lists.
+   3. RBC_GROUP_MATCH   : This procedure is used to match rbc group anti
+                          gens match. This is an exact match search. That
+                          is if group contains 5 diff antigens the donors
+                          which are selected will have atleast those antigens
+                          apart from others tests. The group request is also
+                          stored as a dummy patient with rbc antigens. The 
+                          output is stored in hla_rbc_match_lists.
+   In all the three procedures data is not committed. The status value 
+   returned should be of size 250 characters. Check for 'OK' for successful
+   in the calling program else status contains the error message.
+
+   4. HLARBC_PROC_CALLER: This procedure will be called from cron job or
+                          dbms_job. This in turn will call one of the above
+                          procedures depending upon the request id. This will
+                          also populate hla_rbc_match_units if requested.
+                          This procedure will commit the data after each request
+                          is processed.
+---------------------------------------------------------------------------- */
+
+PROCEDURE HLA_MATCH 
+                (p_request_id           IN      varchar2,
+                 p_grade_level          IN      number,
+                 p_total                OUT     number,
+                 p_status               OUT     varchar2                
+                );
+
+PROCEDURE RBC_MATCH 
+                (p_request_id           IN      varchar2,
+                 p_total                OUT     number,
+                 p_status               OUT     varchar2                
+                );
+
+PROCEDURE RBC_GROUP_MATCH 
+                (p_request_id           IN      varchar2,
+                 p_total                OUT     number,
+                 p_status               OUT     varchar2                
+                );
+PROCEDURE POPULATE_UNITS_TABLE
+                (p_request_id           IN    varchar2,
+                 request_type           IN    varchar2,
+                 p_status              OUT    varchar2
+                 );
+PROCEDURE HLARBC_PROC_CALLER;
+
+END DON_HLA_RBC ;
+/
+
+CREATE OR REPLACE PACKAGE BODY DON_HLA_RBC IS
+
+ debug_mode      boolean  := FALSE;
+/*  Program Name        : HLA_MATCH   
+    Date Creation       : 10/03/97
+    Program Author      : Chandra
+    Error no. used      : Err1 to Err19.
+*/
+PROCEDURE HLA_MATCH 
+                (p_request_id           IN      varchar2,
+                 p_grade_level          IN      number,
+                 p_total                OUT     number,
+                 p_status               OUT     varchar2                
+                )
+IS
+ g_patient_id           varchar2(10);
+ g_patient_a1           varchar2(6);
+ g_patient_a2           varchar2(6);
+ g_patient_b1           varchar2(6);
+ g_patient_b2           varchar2(6);
+ g_hla_pheno            varchar2(1);    --phenotype matching to be done if Y
+ g_hla_anti             varchar2(1);    -- hla antibodies to be matched
+ g_patient_abo          varchar2(5);    -- donor abo matching req if not null
+ g_match_a1             varchar2(1);
+ g_match_a2             varchar2(1);
+ g_match_b1             varchar2(1);
+ g_match_b2             varchar2(1);
+ g_chapter_id           varchar2(4);
+ g_check_antibody       varchar2(1);
+ G_MAXSIZE              number;
+ total_donors           number;
+ 
+ 
+
+ CURSOR donors_anti_match IS
+      Select donor_id,a1,a2,b1,b2 from donor_hla_antigens where
+      A1 NOT IN (
+            select associated_epitope_id from valid_hla_epitopes
+             where public_epitope_id IN (
+                         select v.public_epitope_id
+                           from valid_hla_epitopes v,patient_hla_antibodies p
+                          where p.patient_id = g_patient_id and 
+                                p.locus = 'A' and
+                                p.epitope_id = v.associated_epitope_id and
+                                sysdate between v.eff_date and 
+                                        nvl(v.term_date,sysdate+1)
+                                        )
+                 )  and
+      A2 NOT IN (
+            select associated_epitope_id from valid_hla_epitopes
+             where public_epitope_id IN (
+                        select v.public_epitope_id
+                          from valid_hla_epitopes v,patient_hla_antibodies p
+                         where p.patient_id = g_patient_id and
+                               p.locus = 'A' and
+                               p.epitope_id = v.associated_epitope_id and
+                               sysdate between v.eff_date and 
+                                        nvl(v.term_date,sysdate+1)
+                                        )
+                 ) and
+      B1 NOT IN (
+            select associated_epitope_id from valid_hla_epitopes
+             where public_epitope_id IN (
+                        select v.public_epitope_id
+                          from valid_hla_epitopes v,patient_hla_antibodies p
+                         where p.patient_id = g_patient_id and
+                               p.locus = 'B' and
+                               p.epitope_id = v.associated_epitope_id and
+                               sysdate between v.eff_date and 
+                                       nvl(v.term_date,sysdate+1)
+                                       )
+                 )  and
+      B2 NOT IN (
+            select associated_epitope_id from valid_hla_epitopes
+             where public_epitope_id IN (
+                        select v.public_epitope_id
+                          from valid_hla_epitopes v,patient_hla_antibodies p
+                         where p.patient_id = g_patient_id and
+                               p.locus = 'B' and
+                               p.epitope_id = v.associated_epitope_id and
+                               sysdate between v.eff_date and 
+                                         nvl(v.term_date,sysdate+1)
+                                         )
+                 )  ;
+
+
+ CURSOR donors_match IS
+    SELECT donor_id,a1,a2,b1,b2 FROM
+         DONOR_HLA_ANTIGENS
+    WHERE 
+        A1 in (select associated_epitope_id from valid_hla_epitopes
+                where public_epitope_id IN
+                            (select public_epitope_id
+                               from valid_hla_epitopes
+                              where ( associated_epitope_id = g_patient_a1 or 
+                                      associated_epitope_id = g_patient_a2 )and
+                                      sysdate between eff_date and 
+                                                     nvl(term_date,sysdate+1) 
+                                    ) 
+                             ) or
+        A2 in (select associated_epitope_id from valid_hla_epitopes
+                where public_epitope_id IN
+                            (select public_epitope_id
+                               from valid_hla_epitopes
+                              where ( associated_epitope_id = g_patient_a1 or
+                                      associated_epitope_id = g_patient_a2 ) and
+                                      sysdate between eff_date and 
+                                                     nvl(term_date,sysdate+1) 
+                                    ) 
+                            ) or
+        B1 in (select associated_epitope_id from valid_hla_epitopes
+                where public_epitope_id IN
+                            (select public_epitope_id
+                               from valid_hla_epitopes
+                              where ( associated_epitope_id = g_patient_b1 or
+                                      associated_epitope_id = g_patient_b2 ) and
+                                      sysdate between eff_date and 
+                                                      nvl(term_date,sysdate+1)
+                                     ) 
+                             ) or
+        B2 in (select associated_epitope_id from valid_hla_epitopes
+                where public_epitope_id IN
+                            (select public_epitope_id
+                               from valid_hla_epitopes
+                              where ( associated_epitope_id = g_patient_b1 or
+                                      associated_epitope_id = g_patient_b2 ) and
+                                      sysdate between eff_date and 
+                                                      nvl(term_date,sysdate+1)
+                                    )  
+              ) ;
+
+ CURSOR grade_donors is
+        SELECT grade_id,grade,grade_level FROM
+                VALID_HLA_GRADING
+        WHERE
+                A1 = g_match_a1 and
+                A2 = g_match_a2 and
+                B1 = g_match_b1 and
+                B2 = g_match_b2 and
+                sysdate between eff_date and nvl(term_date,sysdate+1);
+
+ /* -----------------------Declaration over-------------------------------*/ 
+ 
+ FUNCTION match_two_epitopes
+                        ( pat_epitope IN varchar2,
+                          don_epitope IN varchar2) 
+        RETURN varchar2 IS
+ counter        number;
+ counter2       number;
+ loc_bond       varchar2(1);
+ BEGIN
+   
+        if pat_epitope is null and don_epitope is null then 
+                return 'D';
+        end if;
+        if pat_epitope is null and don_epitope is not null then 
+                return 'D';
+        end if;
+        if pat_epitope is not null and don_epitope is null then
+                return 'U';
+        end if;
+        if pat_epitope = don_epitope then
+                return 'I';
+        end if;
+        begin
+           select bond into loc_bond
+             from  valid_strong_reactivity
+            where
+              ( (epitope_id_1 = pat_epitope and epitope_id_2 = don_epitope) or
+                (epitope_id_1 = don_epitope and epitope_id_2 = pat_epitope)) and
+                sysdate between eff_date and nvl(term_date,sysdate+1);
+           return loc_bond;      /* returns S or C i.e strong or connecting */
+        exception      
+             when no_data_found then
+                begin
+                  select count(*) into counter2 
+                    from valid_hla_epitopes v, valid_hla_epitopes h
+                   where v.associated_epitope_id = pat_epitope and
+                         v.public_epitope_id = h.public_epitope_id and
+                         h.associated_epitope_id = don_epitope and
+                         sysdate between v.eff_date and 
+                                         nvl(v.term_date,sysdate+1)  and
+                         sysdate between h.eff_date and 
+                                         nvl(h.term_date,sysdate+1) ;
+                  if counter2 > 0 then
+                        return 'G'; 
+                  else
+                        return 'D';
+                  end if;
+                end;
+             when others then
+                return 'M';    --multiple rows into validation table
+        end;    
+ END;
+                
+ FUNCTION check_perm_dfrd (s_donor_id IN varchar2)
+        RETURN varchar2 IS
+ ddr_count number;
+ Begin
+     Begin              /* DDR HIT CHECK */
+        ddr_count := 0;
+        Select count(*) into ddr_count 
+        from donor_deferral_registry
+        where center_id = s_donor_id;
+        if ddr_count > 0 then
+                -- 'Permanently Deferred, Entry in Central DDR.';
+                return 'Y';
+        end if;
+     exception
+        when no_data_found then
+                null;
+        when others then
+                null;
+      end;              
+     Begin               /* Local  perm def  in donor_interdiction */
+        ddr_count := 0;
+        Select count(*) into ddr_count
+        from  donor_interdictions di, valid_interdictions vi
+        where   (donor_id = s_donor_id) and
+                di.inter_code = vi.inter_code and
+                vi.deferral_flag = 'Y' and
+                sysdate between di.eff_date and nvl(di.term_date,sysdate+1);
+        --        vi.period_type = 'P';           
+        --message('Count is :'||to_char(ddr_count));pause;
+        if ddr_count >  0 then
+                -- 'Donor is Perm deferred, entry in Local DDR.';
+                return 'Y' ;
+        end if;
+     exception
+        when no_data_found then
+                null;
+        when others then 
+                null;
+     End;
+  return 'N';
+ End; /* function check_perm_dfrd ends */       
+
+ FUNCTION validate_and_init 
+        RETURN varchar2 IS
+  x varchar2(1);
+  chk   number;
+  Begin
+        begin
+          select parameter_value into G_MAXSIZE
+            from valid_parameters 
+           where parameter_code ='MAXDONRET' and
+                 sysdate between eff_date and nvl(term_date,sysdate+1) and
+                 rownum <2;
+        exception
+           when others then
+                p_status := 'Err1. Parameter  MAXDONRET not defined';
+                return 'NOTOK';
+        end;
+        begin
+          select patient_id,hla_pheno,hla_anti,blood_type,chapter_id 
+            into g_patient_id,g_hla_pheno,g_hla_anti,g_patient_abo,g_chapter_id
+            from hla_rbc_request
+           where request_id = p_request_id;
+        exception
+          when no_data_found then
+                p_status := 'Err2. No request id found';
+                return 'NOTOK';
+          when others then
+                p_status := 'Err3. SQL failed'||
+                            substr(sqlerrm,1,100);
+                return 'NOTOK';
+        end;
+        if g_hla_pheno = 'Y' and g_hla_anti = 'Y' then
+                --p_status := 'Can not search by phenotype and antibodies';
+                --return 'NOTOK';
+                g_check_antibody := 'Y';
+        else
+                g_check_antibody := 'N';
+        end if;
+        if g_hla_pheno = 'Y' then
+                begin
+                  Select A1,A2,B1,B2 
+                    into g_patient_a1,g_patient_a2,g_patient_b1,g_patient_b2
+                    from patient_hla_antigens
+                   where patient_id = g_patient_id;
+                exception
+                   when no_data_found then
+                        p_status := 'Err4. Patient hla antigen not found';
+                        return 'NOTOK';
+                   when others then
+                        p_status := 'Err5. SQL failed'||
+                            substr(sqlerrm,1,100);
+                        return 'NOTOK';
+                end;      
+        end if; /* g_hla_pheno */
+        if g_hla_anti = 'Y' then    -- requested for antibodies search
+            Begin
+                Select count(*) into chk
+                  from patient_hla_antibodies
+                 where patient_id = g_patient_id;
+             Exception
+                 when no_data_found then
+                        p_status := 'Err6. Patient hla antibodies not found';
+                        return 'NOTOK';
+                 when others then
+                        p_status := 'Err7. SQL failed'||
+                            substr(sqlerrm,1,100);
+                        return 'NOTOK';
+             End;  -- This will be a cursor as many antibodies may be present
+             if chk = 0 then
+                        /* p_status := 'Err8. Patient hla antibodies not found';
+                        return 'NOTOK'; */
+                        g_check_antibody := 'N';
+             end if;    
+        end if; /* g_hla_anti */           
+        return 'OK';
+    End; 
+  /* ---------------Function validate_and_init  ends ---------------------  */ 
+
+ PROCEDURE compute_match
+                        (pa1            IN      varchar2,
+                         pa2            IN      varchar2,
+                         da1            IN      varchar2,
+                         da2            IN      varchar2,
+                        match_a1        OUT     varchar2,
+                        match_a2        OUT     varchar2 )
+ IS
+   a1a1         varchar2(1);
+   a1a2         varchar2(1);
+   a2a1         varchar2(1);
+   a2a2         varchar2(1);
+
+ BEGIN
+        a1a1 := match_two_epitopes(pa1,da1);
+        a1a2 := match_two_epitopes(pa1,da2);
+        a2a1 := match_two_epitopes(pa2,da1);
+        a2a2 := match_two_epitopes(pa2,da2);
+        Begin
+           Select output_a1,output_a2
+             into match_a1,match_a2
+             from hla_interim_match
+            where match_a1a1 = a1a1 
+              and match_a1a2 = a1a2
+              and match_a2a1 = a2a1
+              and match_a2a2 = a2a2
+              and sysdate between eff_date and nvl(term_date,sysdate+1);
+            return; 
+        Exception
+           when others then
+                match_a1 := 'D';
+                match_a2 := 'D';
+                return;
+        End;
+
+/*      This logic is changed and now the whole logic is in the
+        table HLA_INTERIM_MATCH.
+
+        if a1a1 = 'I' then
+                match_a1 := a1a1;
+                match_a2 := a2a2;
+                return;
+        end if;
+        if a1a2 = 'I' then
+                match_a1 := a1a2;
+                match_a2 := a2a1;
+                return;
+        end if;
+        if a2a1 = 'I' then
+                match_a1 := a2a1;
+                match_a2 := a1a2;
+                return;
+        end if;
+        if a2a2 = 'I' then
+                match_a1 := a1a1;
+                match_a2 := a2a2;
+                return;
+        end if;
+        -----------------------------
+        if a1a1 = 'S' then
+                match_a1 := a1a1;
+                match_a2 := a2a2;
+                return;
+        end if;
+        if a1a2 = 'S' then
+                match_a1 := a1a2;
+                match_a2 := a2a1;
+                return;
+        end if;
+        if a2a1 = 'S' then
+                match_a1 := a2a1;
+                match_a2 := a1a2;
+                return;
+        end if;
+        if a2a2 = 'S' then
+                match_a1 := a1a1;
+                match_a2 := a2a2;
+                return;
+        end if;
+        -----------------------------
+        if a1a1 = 'C' then
+                match_a1 := a1a1;
+                match_a2 := a2a2;
+                return;
+        end if;
+        if a1a2 = 'C' then
+                match_a1 := a1a2;
+                match_a2 := a2a1;
+                return;
+        end if;
+        if a2a1 = 'C' then
+                match_a1 := a2a1;
+                match_a2 := a1a2;
+                return;
+        end if;
+        if a2a2 = 'C' then
+                match_a1 := a1a1;
+                match_a2 := a2a2;
+                return;
+        end if;
+        -----------------------------
+        if a1a1 = 'G' then
+                match_a1 := a1a1;
+                match_a2 := a2a2;
+                return;
+        end if;
+        if a1a2 = 'G' then
+                match_a1 := a1a2;
+                match_a2 := a2a1;
+                return;
+        end if;
+        if a2a1 = 'G' then
+                match_a1 := a2a1;
+                match_a2 := a1a2;
+                return;
+        end if;
+        if a2a2 = 'G' then
+                match_a1 := a1a1;
+                match_a2 := a2a2;
+                return;
+        end if; 
+        -----------------------------
+        if a1a1 = 'U' then
+                match_a1 := a1a1;
+                match_a2 := a2a2;
+                return;
+        end if;
+        if a1a2 = 'U' then
+                match_a1 := a1a2;
+                match_a2 := a2a1;
+                return;
+        end if;
+        if a2a1 = 'U' then
+                match_a1 := a2a1;
+                match_a2 := a1a2;
+                return;
+        end if;
+        if a2a2 = 'U' then
+                match_a1 := a1a1;
+                match_a2 := a2a2;
+                return;
+        end if;
+        -----------------------------
+        if a1a1 = 'D' then
+                match_a1 := a1a1;
+                match_a2 := a2a2;
+                return;
+        end if;
+        if a1a2 = 'D' then
+                match_a1 := a1a2;
+                match_a2 := a2a1;
+                return;
+        end if;
+        if a2a1 = 'D' then
+                match_a1 := a2a1;
+                match_a2 := a1a2;
+                return;
+        end if;
+        if a2a2 = 'D' then
+                match_a1 := a1a1;
+                match_a2 := a2a2;
+                return;
+        end if;
+       This LOGIC IS OLD        */
+ END; /* procedure compute match end */ 
+ 
+ FUNCTION donor_patient_abo_match 
+                        (don_id         IN      varchar2,
+                        pat_blood_type  IN      varchar2)
+ RETURN BOOLEAN IS
+ don_blood_type varchar2(5);     
+ BEGIN
+        begin
+             select blood_type into don_blood_type
+               from donors
+              where donor_id = don_id;
+        exception
+               when others then
+                    RETURN FALSE;
+        end;
+        if don_blood_type = pat_blood_type then
+                RETURN TRUE;
+        else
+                RETURN FALSE;
+        end if;
+ END;   /* function abo match ends */
+
+ PROCEDURE put_on_pipe( p_log_text varchar2) is
+      status number;
+   begin
+      dbms_pipe.pack_message(length(p_log_text));
+      dbms_pipe.pack_message(p_log_text);
+      status := dbms_pipe.send_message('cka_debug');
+      if status != 0 then
+         raise_application_error(-20099, 'Debug Pipe Error');
+      end if;
+   end;
+
+ PROCEDURE populate_donors IS
+      cursor top_match_donors is
+        select request_id,donor_id,grade,grade_level,grade_id 
+          from hla_rbc_match_temp
+         where request_id = p_request_id 
+      order by grade_level;
+ BEGIN
+   total_donors := 0;
+   FOR c1 in top_match_donors
+        LOOP
+          if total_donors >= G_MAXSIZE then
+                return;
+          end if;
+          total_donors := total_donors+1;              
+          Begin
+              INSERT INTO hla_rbc_match_lists
+                        (request_id,
+                        donor_id,
+                        grade_id,
+                        grade,
+                        chapter_id,
+                        grade_level,
+                        program_id,
+                        insert_date,
+                        insert_user)
+              VALUES
+                        (p_request_id,
+                        c1.donor_id,
+                        c1.grade_id,
+                        c1.grade,
+                        g_chapter_id,
+                        c1.grade_level,
+                        'DONHLABK',
+                        sysdate,
+                        LT_USER_SESSION.get_userid);
+          Exception
+              when others then
+                    p_status := 'Err9. Can not insert in hla_rbc_match_lists'||
+                                 substr(sqlerrm,1,100);
+                    return;
+          End;
+        END LOOP;
+ END populate_donors;
+ 
+ FUNCTION check_antibodies_match
+                        (pa1            IN      varchar2,
+                         pa2            IN      varchar2,
+                         pb1            IN      varchar2,
+                         pb2            IN      varchar2)
+        RETURN varchar2 IS
+   a_count        number; 
+ BEGIN
+     begin        /* for exact antibody match - later for crossreact match*/
+         select count(*) into a_count
+           from patient_hla_antibodies
+          where patient_id = g_patient_id and
+                (( locus = 'A' and epitope_id IN (pa1,pa2))
+                  or  ( locus = 'B' and epitope_id IN (pb1,pb2))
+                  );
+          /*
+                           select v.associated_epitope_id 
+                             from valid_hla_epitopes v,valid_hla_epitopes p
+                            where v.public_epitope_id = p.public_epitope_id and
+                                  p.associated_epitope_id in (pa1,pa2) ) )
+                 or
+                 ( locus = 'B' and epitope_id IN (
+                           select v.associated_epitope_id 
+                             from valid_hla_epitopes v,valid_hla_epitopes p
+                            where v.public_epitope_id = p.public_epitope_id and
+                                  p.associated_epitope_id in (pb1,pb2) ) )
+                );
+        */
+         if a_count > 0 then
+                    return 'Y';
+         end if;
+         return 'N';
+     exception
+         when others then
+                   return 'N';
+     end;
+ END; /* check antibodies match  ends*/
+
+
+ PROCEDURE phenotype_match IS
+ BEGIN
+      FOR c1 in donors_match LOOP
+
+          if check_perm_dfrd(c1.donor_id) = 'Y' then
+                GOTO donors_loop;
+          end if; 
+          if g_check_antibody = 'Y' then
+                  if check_antibodies_match(c1.a1,c1.a2,c1.b1,c1.b2) = 'Y' then
+                        GOTO donors_loop;
+                  end if;
+          end if;
+          if g_patient_abo is not null then
+                if donor_patient_abo_match(c1.donor_id,g_patient_abo) then
+                        null;
+                else
+                        GOTO donors_loop;
+                end if;
+          end if;
+          compute_match(g_patient_a1,g_patient_a2,
+                        c1.a1,c1.a2,g_match_a1,g_match_a2);
+          compute_match(g_patient_b1,g_patient_b2,
+                        c1.b1,c1.b2,g_match_b1,g_match_b2);
+          FOR c2 in grade_donors LOOP
+             if c2.grade_level <= p_grade_level then
+                  if debug_mode then
+                      dbms_output.put_line('Best match '||g_match_a1||
+                        g_match_a2||g_match_b1||g_match_b2||' '||
+                        g_patient_a1||','||g_patient_a2||','||g_patient_b1||
+                        ','||g_patient_b2||' '||
+                        c1.a1||','||c1.a2||','||c1.b1||','||c1.b2||
+                     '  Grade_id  '||to_char(c2.grade_id)||' GRADE '||c2.grade);
+                  end if;
+                Begin
+                    INSERT INTO hla_rbc_match_temp
+                        (request_id,
+                         donor_id,
+                         grade_id,
+                         grade,
+                         chapter_id,
+                         grade_level)
+                     VALUES
+                        (p_request_id,
+                        c1.donor_id,
+                        c2.grade_id,
+                        c2.grade, 
+                        g_chapter_id,
+                        c2.grade_level);
+                Exception
+                   when others then
+                      p_status:='Err10. Can not insert in hla_rbc_match_temp'||
+                                substr(sqlerrm,1,100);
+                      return;
+                End;
+             end if;            
+          END LOOP; /* grade donors loop ends */
+     <<donors_loop>>
+        null;
+     END LOOP; /* donors match loop */
+ --       commit;
+     populate_donors;
+     p_status := 'OK';
+ END; /* phenotype match routine ends */
+
+
+ PROCEDURE antibodies_match IS
+   cursor donpat_match is
+       select donor_id,a1,a2,b1,b2
+         from donor_hla_antigens 
+        where a1 not in 
+                 ( select epitope_id 
+                     from patient_hla_antibodies 
+                    where patient_id = g_patient_id and
+                          locus = 'A' ) and
+              a2 not in
+                  (select epitope_id 
+                     from patient_hla_antibodies 
+                    where patient_id = g_patient_id and
+                          locus = 'A' ) and
+              b1 not in 
+                  (select epitope_id 
+                     from patient_hla_antibodies 
+                    where patient_id = g_patient_id and
+                          locus = 'B' ) and
+              b2 not in 
+                  (select epitope_id 
+                     from patient_hla_antibodies 
+                    where patient_id = g_patient_id and
+                          locus = 'B' );
+   chk    number;
+ BEGIN
+     FOR c1 in donors_anti_match LOOP
+         /* if total_donors >= G_MAXSIZE then
+                return;
+            end if;
+            */
+         if check_perm_dfrd(c1.donor_id) = 'Y' then
+                GOTO don_anti_label;
+         end if;
+
+         if g_patient_abo is not null then
+                if donor_patient_abo_match(c1.donor_id,g_patient_abo) then
+                        null;
+                else
+                        GOTO don_anti_label;
+                end if;
+         end if;
+        /* dbms_output.put_line('Best anti match.'||c1.donor_id||', '||
+                lpad(c1.a1,3)||',' ||lpad(c1.a2,3)||','||lpad(c1.b1,3)||','||
+                lpad(c1.b2,3));
+           total_donors := total_donors+1;                
+           put_on_pipe('First anti match '||c1.donor_id||', '||
+                       lpad(c1.a1,3)||',' ||lpad(c1.a2,3)||','||lpad(c1.b1,3)||
+                       ','||lpad(c1.b2,3)||' '|| to_char(total_donors));
+        */
+        if total_donors < G_MAXSIZE then
+            BEGIN
+              INSERT INTO hla_rbc_match_lists
+                      (request_id,
+                      donor_id,
+                      grade_id,
+                      chapter_id,
+                      program_id,
+                      insert_date,
+                      insert_user
+                      )
+              VALUES
+                     (p_request_id,
+                     c1.donor_id,
+                     1,
+                     g_chapter_id,
+                     'DONHLABK',
+                     sysdate,
+                     LT_USER_SESSION.get_userid
+                     );
+            EXCEPTION
+               when others then  
+                 p_status := 'Err 10.1 Can not insert in hla_rbc_match_lists'||
+                             substr(sqlerrm,1,100);
+                 return;
+            END;
+        end if;  
+        Begin
+             INSERT INTO hla_rbc_match_temp
+                  (request_id,
+                   donor_id,
+                   grade_id,
+                   grade,
+                   chapter_id,
+                   grade_level)
+               VALUES
+                  (p_request_id,
+                  c1.donor_id,
+                  1,
+                  null, 
+                  g_chapter_id,
+                  null);
+       Exception
+           when others then
+                p_status:='Err10.2 Can not insert in hla_rbc_match_temp'||
+                          substr(sqlerrm,1,100);
+                return;
+       End;
+     total_donors := total_donors+1;                
+     <<don_anti_label>>         
+         null;
+     END LOOP; /* donors anti match loop */
+
+     if total_donors = 0 then    /* group match but not strong reactive */
+        FOR c1 in donpat_match LOOP
+          /* if total_donors >= G_MAXSIZE then
+                return;
+             end if;
+          */ 
+          if check_perm_dfrd(c1.donor_id) = 'Y' then
+                GOTO don_pat_label;
+          end if;
+          if g_patient_abo is not null then
+                if donor_patient_abo_match(c1.donor_id,g_patient_abo) then
+                        null;
+                else
+                        GOTO don_pat_label;
+                end if;
+           end if;
+           begin
+                select count(*) into chk 
+                  from valid_strong_reactivity
+                 where ( ( epitope_id_1 in ( c1.a1,c1.a2,c1.b1,c1.b2) and
+                           epitope_id_2 in (
+                                select epitope_id 
+                                  from patient_hla_antibodies
+                                 where patient_id = g_patient_id and
+                                       locus = 'A' )  ) or
+                         (epitope_id_2 in ( c1.a1,c1.a2,c1.b1,c1.b2) and
+                          epitope_id_1 in (
+                                select epitope_id 
+                                  from patient_hla_antibodies
+                                 where patient_id = g_patient_id and
+                                       locus = 'A' )  ) 
+                      ) and
+                      sysdate between eff_date and nvl(term_date,sysdate+1);
+           exception
+                when others then
+                     null;
+           end;
+           if chk = 0 then
+              /* dbms_output.put_line('Best anti strong match.'||c1.donor_id||
+                             ', '||lpad(c1.a1,3)||',' ||lpad(c1.a2,3)||','||
+                             lpad(c1.b1,3)||','||lpad(c1.b2,3)); */
+               /*  put_on_pipe('Second anti match '||c1.donor_id||', '||
+                            lpad(c1.a1,3)||',' ||lpad(c1.a2,3)||','||
+                            lpad(c1.b1,3)||','||lpad(c1.b2,3)||' '||
+                            to_char(total_donors));
+               */
+               if total_donors < G_MAXSIZE then
+                  Begin
+                    INSERT INTO hla_rbc_match_lists
+                         (request_id,
+                          donor_id,
+                          grade_id,
+                          chapter_id,
+                          program_id,
+                          insert_date,
+                          insert_user
+                          )
+                      VALUES
+                         (p_request_id,
+                          c1.donor_id,
+                          2,
+                          g_chapter_id,
+                          'DONHLABK',
+                          sysdate,
+                          LT_USER_SESSION.get_userid
+                         );
+                   Exception
+                       when others then
+                             p_status := 'Err12. Can not insert in '||
+                                          'hla_rbc_match_lists'||
+                                         substr(sqlerrm,1,100);
+                       return;
+                    End;
+                end if;  /*  total donors */
+                Begin
+                    INSERT INTO hla_rbc_match_temp
+                        (request_id,
+                         donor_id,
+                         grade_id,
+                         grade,
+                         chapter_id,
+                         grade_level)
+                     VALUES
+                        (p_request_id,
+                        c1.donor_id,
+                        1,
+                        null, 
+                        g_chapter_id,
+                        null);
+                 Exception
+                      when others then
+                           p_status:='Err12.2 Can not insert' ||
+                                      'in hla_rbc_match_temp'||
+                                      substr(sqlerrm,1,100);
+                            return;
+                 End;
+                 total_donors := total_donors+1;                
+           end if; /* chk end */                                             
+        <<don_pat_label>>
+                null;
+        END LOOP;
+     end if;    
+     p_status := 'OK';
+ END;   
+
+BEGIN    /* MAIN */
+ dbms_output.enable('20000');
+ total_donors := 0;
+ if validate_and_init != 'OK' then
+                return;
+ end if;
+/* dbms_output.put_line('validation over '||g_patient_id||' '||g_patient_a1);
+*/
+ /* choose which matching logic to call depending upon request
+        either by
+                1. HLA antigen match
+                2. HLA antibodies antimatch
+ */
+
+ if g_hla_pheno = 'Y' then
+        phenotype_match;
+        /* delete from hla_rbc_match_temp where
+                request_id = p_request_id;
+        */
+ else
+        if g_hla_anti = 'Y' then
+                antibodies_match;
+        else
+                p_status := 'Err13. No search mechanism stated';
+                return;
+        end if;
+ end if;
+ --commit;
+ p_total := total_donors;
+END;
+/*-------------------------------------------------------------------------*/
+
+/*  Program Name        : RBC_MATCH 
+    Date Creation       : 10/03/97
+    Program Author      : Chandra
+    Error no. used      : Err20 to Err49.
+*/
+PROCEDURE RBC_MATCH 
+                (p_request_id           IN      varchar2,
+                 p_total                OUT     number,
+                 p_status               OUT     varchar2                
+                )
+IS
+ g_patient_id           varchar2(10);
+ g_rbc_pheno            varchar2(1) ;   --phenotype matching to be done if Y
+ g_rbc_anti             varchar2(1) ;   -- rbc antibodies to be matched
+ g_patient_abo          varchar2(5);    -- donor abo matching req if not null
+ g_check_antibody       varchar2(1);
+ g_exact_match          varchar2(1);
+ g_chapter_id           varchar2(4);
+ g_atleast_1ant         varchar2(1);   -- for atleast 1 antigens match
+ G_MAXSIZE              number;
+ total_donors           number;
+ 
+ 
+ CURSOR donor_rbc_match IS
+        select distinct donor_id from donor_rbc_antigens d1
+        where  not exists ( Select donor_id
+                                from donor_rbc_antigens d,patient_rbc_antigens p
+                                where d.donor_id = d1.donor_id and
+                                      p.patient_id = g_patient_id and
+                                      d.test_id = p.test_id and
+                                      d.result_code != p.result_code );
+ /*
+ CURSOR donor_rbc_match IS
+        select distinct donor_id from donor_rbc_antigens
+        where donor_id not in ( Select donor_id
+                                from donor_rbc_antigens d,patient_rbc_antigens p
+                                where p.patient_id = g_patient_id and
+                                      d.test_id = p.test_id and
+                                      d.result_code != p.result_code );
+
+CURSOR donor_rbc_anti_match IS
+         Select distinct donor_id from donor_rbc_antigens
+         where donor_id not in 
+              ( Select donor_id
+                  from donor_rbc_antigens d,patient_rbc_antibodies p
+                 where p.patient_id = g_patient_id and
+                       d.test_id = p.test_id and
+                       d.result_code = p.result_code );
+*/
+CURSOR donor_rbc_anti_match IS
+         Select distinct donor_id from donor_rbc_antigens d1
+         where not exists
+              ( Select donor_id
+                  from donor_rbc_antigens d,patient_rbc_antibodies p
+                 where d.donor_id = d1.donor_id and
+                       p.patient_id = g_patient_id and
+                       d.test_id = p.test_id and
+                       d.result_code = p.result_code );
+  CURSOR patient_rbc IS
+        select test_id,result_code 
+          from  patient_rbc_antibodies   --diff from rbc_group_match where 
+                                         --its antigens
+         where  patient_id = g_patient_id;
+ 
+ CURSOR donor_rbc(did in varchar2) IS
+        select test_id,result_code
+          from donor_rbc_antigens
+          where donor_id = did;
+
+ type group_rectyp is record
+        (
+        test_id         varchar2(10),
+        result_code     varchar2(5) 
+        );
+ type group_tabtyp is table of group_rectyp index by binary_integer;
+ 
+ group_rbc_table            group_tabtyp;
+ /* ---------------Declaration over----------------------------------*/ 
+ 
+                        
+ FUNCTION validate_and_init 
+        RETURN varchar2 IS
+  x varchar2(1);
+  i  number;
+  chk   number;
+    Begin
+        begin
+          select parameter_value into G_MAXSIZE
+            from valid_parameters 
+            where parameter_code ='MAXDONRET' and
+                  sysdate between eff_date and nvl(term_date,sysdate+1) and
+                   rownum <2;
+        exception
+           when others then
+                p_status := 'Err20. Parameter  MAXDONRET not defined';
+                return 'NOTOK';
+        end;
+        begin
+          select patient_id,rbc_pheno,rbc_anti,blood_type,
+                 chapter_id,exact_match
+            into g_patient_id,g_rbc_pheno,g_rbc_anti,g_patient_abo,
+                 g_chapter_id,g_exact_match
+          from hla_rbc_request
+          where request_id = p_request_id;
+        exception
+          when no_data_found then
+                p_status := 'Err21. No request id found';
+                return 'NOTOK';
+          when others then
+                p_status := 'Err22. SQL failed'||
+                            substr(sqlerrm,1,100);
+                return 'NOTOK';
+        end;
+        if g_rbc_pheno = 'Y' and g_rbc_anti = 'Y' then
+                -- p_status := 'Can not search by phenotype and antibodies';
+                -- return 'NOTOK';
+                g_check_antibody := 'Y';
+        else
+                g_check_antibody := 'N';
+        end if;
+        if g_rbc_pheno = 'Y' then
+                begin
+                  Select 'X' into x
+                  from patient_rbc_antigens
+                  where patient_id = g_patient_id;
+                exception
+                  when no_data_found then
+                       p_status := 'Err23. Patient rbc antigen not found';
+                       return 'NOTOK';
+                  when too_many_rows then
+                       null;
+                  when others then
+                       p_status := 'Err24. SQL failed on patient_rbc_antigens'||
+                                    substr(sqlerrm,1,100);
+                       return 'NOTOK';
+                end;    
+                -- ADDED NEW feature for atleast one antigens match
+                -- if one of the phenotype is -ve
+                declare
+                   tmp_cnt number;
+                begin
+                  Select count(*) into 
+                         tmp_cnt
+                    from patient_rbc_antigens 
+                    where patient_id = g_patient_id 
+                      and result_code = 'N';
+                  if tmp_cnt > 0 then
+                     g_atleast_1ant := 'Y';
+                  else
+                     g_atleast_1ant := 'N';
+                  end if;
+               end;
+        end if; /* g_rbc_pheno */
+
+        If g_rbc_anti = 'Y' then    -- requested for antibodies search
+            Begin
+                Select count(*) into chk
+                from patient_rbc_antibodies
+                where patient_id = g_patient_id;
+             Exception
+                when no_data_found then
+                     p_status := 'Err25. Patient rbc antibodies not found';
+                     return 'NOTOK';
+                when others then
+                     p_status := 'Err26. SQL failed patient_rbc_antibodies'||
+                                 substr(sqlerrm,1,100);
+                     return 'NOTOK';
+             End;  -- This will be a cursor as many antibodies may be present
+             if chk = 0 then
+                    -- p_status := 'Err27. Patient rbc antibodies not found';
+                    -- return 'NOTOK';
+                g_check_antibody := 'N';
+             end if;  
+        End If;
+
+             i := 1; 
+             FOR g1 in patient_rbc LOOP
+                        group_rbc_table(i).test_id     := g1.test_id;
+                        group_rbc_table(i).result_code := g1.result_code;
+                        i := i+1;
+             END LOOP;    
+        
+        return 'OK';
+    End; 
+  /* ----------------Function validate_and_init  ends ---------------------  */ 
+
+ FUNCTION check_perm_dfrd (s_donor_id IN varchar2)
+        RETURN varchar2 IS
+ ddr_count number;
+ Begin
+     Begin              /* DDR HIT CHECK */
+        ddr_count := 0;
+        Select count(*) into ddr_count 
+        from donor_deferral_registry
+        where center_id = s_donor_id;
+        if ddr_count > 0 then
+                -- 'Permanently Deferred, Entry in Central DDR.';
+                return 'Y';
+        end if;
+     exception
+        when no_data_found then
+                null;
+        when others then
+                null;
+      end;              
+     Begin               /* Local  perm def  in donor_interdiction */
+        ddr_count := 0;
+        Select count(*) into ddr_count
+        from  donor_interdictions di, valid_interdictions vi
+        where   (donor_id = s_donor_id) and
+                di.inter_code = vi.inter_code and
+                vi.deferral_flag = 'Y' and
+                sysdate between di.eff_date and nvl(di.term_date,sysdate+1);
+        --        vi.period_type = 'P';           
+        --message('Count is :'||to_char(ddr_count));pause;
+        if ddr_count >  0 then
+                -- 'Donor is Perm deferred, entry in Local DDR.';
+                return 'Y' ;
+        end if;
+     exception
+        when no_data_found then
+                null;
+        when others then 
+                null;
+     End;
+  return 'N';
+ End; /* function check_perm_dfrd ends */       
+
+ FUNCTION donor_patient_abo_match 
+                        (don_id         IN      varchar2,
+                        pat_blood_type  IN      varchar2)
+ RETURN BOOLEAN IS
+ don_blood_type varchar2(5);     
+ BEGIN
+        begin
+                select blood_type into don_blood_type
+                from donors
+                where donor_id = don_id;
+        exception
+                when others then
+                        RETURN FALSE;
+        end;
+        if don_blood_type = pat_blood_type then
+                RETURN TRUE;
+        else
+                RETURN FALSE;
+        end if;
+ END;   /* function abo match ends */
+ 
+ FUNCTION check_antibodies_match(s_don_id IN varchar2)
+        RETURN varchar2 IS
+ chk            number;
+ BEGIN
+        select count(*) into chk
+        from donor_rbc_antigens d,patient_rbc_antibodies p
+        where   d.donor_id = s_don_id and
+                p.patient_id = g_patient_id and
+                d.test_id   = p.test_id and
+                d.result_code = 'P';
+        if chk > 0 then
+                return 'Y';
+        end if;
+        return 'N';     
+ END ; /* function check antibodies match ends */
+
+ FUNCTION check_exact_match(did    IN    varchar2)
+        RETURN varchar2 IS
+      nCount NUMBER:=0;
+      nCount1 NUMBER:=0;
+
+ BEGIN
+    /*
+     For i in 1..group_rbc_table.count loop
+             For c2 in donor_rbc(did) LOOP
+                  if group_rbc_table(i).test_id = c2.test_id then
+                        if c2.result_code = 'N' then
+                                GOTO next_antigen;
+                        end if;
+                  end if;
+             end loop;
+             return 'N';
+      <<next_antigen>>
+             null;
+      end loop;
+      return 'Y';
+   */
+
+    --- For MLT -6721
+
+       For i in 1..group_rbc_table.count loop
+             For c2 in donor_rbc(did) LOOP
+                  If group_rbc_table(i).test_id = c2.test_id then
+                      if c2.result_code='N'  then
+                        GOTO next_antigen;
+                      end if;
+                  Else
+                       select nvl(count(*),0) into Ncount from valid_antigen_config_det where
+                       antigen_code=group_rbc_table(i).test_id and test_id=c2.test_id and
+                       group_rbc_table(i).result_code = c2.result_code;
+
+                       select nvl(count(*),0) into Ncount1 from valid_antigen_config_det where
+                       antigen_code=c2.test_id and test_id=group_rbc_table(i).test_id and
+                       group_rbc_table(i).result_code = c2.result_code;
+
+                       If ncount > 0 or nCount1 > 0 then 
+                          GOTO next_antigen;
+                       End If;
+                  End if;
+             End loop;
+             return 'N';
+      <<next_antigen>>
+             null;
+      End loop;
+      return 'Y';
+ END;
+
+ FUNCTION check_atleast_one_anti(did    IN    varchar2)
+        RETURN varchar2 IS
+        tmp_cnt number := 0;
+ BEGIN
+    select count(*) into tmp_cnt
+      from donor_rbc_antigens d,patient_rbc_antigens p
+     where p.patient_id= g_patient_id
+       and d.donor_id = did 
+       and (( p.test_id = d.test_id ) OR
+             ( p.test_id in (select antigen_code from valid_antigen_config_det
+                            where test_id=d.test_id)) OR
+             ( p.test_id in (select test_id from valid_antigen_config_det
+                            where antigen_code=d.test_id)) 
+           )
+       and p.result_code = 'N' 
+       and d.result_code = 'N';
+     if tmp_cnt > 0 then
+        return 'Y';
+     else
+        return 'N';
+     end if;
+ END;
+
+ FUNCTION rbc_phenotype_match 
+          RETURN varchar2  IS
+ BEGIN
+   total_donors := 0;
+ --dbms_output.put_line('inside rbc phenotype match routine '||g_patient_id);
+   FOR c1 in donor_rbc_match LOOP
+        if check_perm_dfrd(c1.donor_id) = 'Y' then
+                GOTO rbc_match_loop;
+        end if;
+        if g_atleast_1ant = 'Y' then
+           if check_atleast_one_anti(c1.donor_id) = 'N' then
+              GOTO rbc_match_loop;
+           end if;
+        end if;
+        if g_patient_abo is not null then
+                if donor_patient_abo_match(c1.donor_id,g_patient_abo) then
+                        null;
+                else
+                        GOTO rbc_match_loop;
+                end if;
+        end if;
+        if g_check_antibody = 'Y' then
+                if check_antibodies_match(c1.donor_id) = 'N' then
+                        GOTO rbc_match_loop;
+                end if;
+        end if;
+        if g_exact_match = 'Y' then
+                if check_exact_match(c1.donor_id) = 'N' then
+                        GOTO rbc_match_loop;
+                end if;
+        end if;
+        --dbms_output.put_line('Best rbc match '||c1.donor_id);
+        if total_donors < G_MAXSIZE then
+            Begin
+             INSERT INTO hla_rbc_match_lists
+                        (request_id,
+                        donor_id,
+                        grade_id,
+                        program_id,
+                        insert_date,
+                        chapter_id)
+               VALUES
+                        (p_request_id,
+                        c1.donor_id,
+                        1,
+                        'DONRBCBK',
+                        sysdate,
+                        g_chapter_id);
+             Exception
+                when others then
+                   p_status := 'Err28. Can not insert in hla_rbc_match_lists'||
+                            substr(sqlerrm,1,100);
+                   return 'NOTOK';
+             End;
+       end if;
+       Begin
+             INSERT INTO hla_rbc_match_temp
+                  (request_id,
+                   donor_id,
+                   grade_id,
+                   grade,
+                   chapter_id,
+                   grade_level)
+               VALUES
+                  (p_request_id,
+                  c1.donor_id,
+                  1,
+                  null, 
+                  g_chapter_id,
+                  null);
+       Exception
+           when others then
+                p_status:='Err28.2 Can not insert in hla_rbc_match_temp'||
+                          substr(sqlerrm,1,100);
+                return 'NOTOK';
+       End;
+       total_donors := total_donors+1;        
+    <<rbc_match_loop>>
+        null;   
+    END LOOP  ; /* donor rbc match */ 
+    return 'OK';
+ END; /* rbc phenotype match ends */
+
+ FUNCTION rbc_antibodies_match 
+      RETURN varchar2
+ IS
+ BEGIN
+       total_donors := 0;
+ --dbms_output.put_line('inside rbc antibodies match '||g_patient_id);
+   FOR c1 in donor_rbc_anti_match LOOP
+        if check_perm_dfrd(c1.donor_id) = 'Y' then
+                GOTO rbc_antimatch_loop;
+        end if;
+
+        if g_patient_abo is not null then
+                if donor_patient_abo_match(c1.donor_id,g_patient_abo) then
+                        null;
+                else
+                        GOTO rbc_antimatch_loop;
+                end if;
+        end if;
+        if check_exact_match(c1.donor_id) = 'N' then
+                        GOTO rbc_antimatch_loop;
+                end if;
+        --dbms_output.put_line('Best rbc anti match '||c1.donor_id);
+        if total_donors < G_MAXSIZE then
+            Begin
+               INSERT INTO hla_rbc_match_lists
+                        (request_id,
+                        donor_id,
+                        grade_id,
+                        program_id,
+                        insert_date,
+                        chapter_id)
+               VALUES
+                        (p_request_id,
+                        c1.donor_id,
+                        1,
+                        'DONRBCBK',
+                        sysdate,
+                        g_chapter_id);
+            Exception
+               when others then
+                  p_status := 'Err29. Can not insert in hla_rbc_match_lists'||
+                              substr(sqlerrm,1,100);
+                  return 'NOTOK';
+            End;
+        end if;
+       Begin
+             INSERT INTO hla_rbc_match_temp
+                  (request_id,
+                   donor_id,
+                   grade_id,
+                   grade,
+                   chapter_id,
+                   grade_level)
+               VALUES
+                  (p_request_id,
+                  c1.donor_id,
+                  1,
+                  null, 
+                  g_chapter_id,
+                  null);
+       Exception
+           when others then
+                p_status:='Err29.2 Can not insert in hla_rbc_match_temp'||
+                          substr(sqlerrm,1,100);
+                return 'NOTOK';
+       End;
+       total_donors := total_donors+1;        
+    <<rbc_antimatch_loop>>
+        null;
+    END LOOP  ; /* donor rbc anti match */ 
+    return 'OK';    
+ END; /* rbc antibodies match */
+
+BEGIN    /* MAIN PROGRAM*/
+ total_donors := 0;
+ if validate_and_init != 'OK' then
+                return;
+ end if;
+ --dbms_output.put_line('validation over '||g_patient_id);
+
+ /* choose which matching logic to call depending upon request
+        either by
+                1. RBC antigen match
+                2. RBC antibodies antimatch
+ */
+
+ if g_rbc_pheno = 'Y' then
+        if rbc_phenotype_match != 'OK' then
+           return;
+        end if;
+ else
+        if g_rbc_anti = 'Y' then
+               if rbc_antibodies_match != 'OK' then
+                  return;
+               end if;
+        else
+                p_status := 'Err30. No search mechanism stated';
+                return;
+        end if;
+ end if;
+ --commit;
+ p_total := total_donors;
+END;
+/* ---------------------------------------------------------------------*/
+
+/*  Program Name        : RBC_GROUP_MATCH
+    Date Creation       : 10/03/97
+    Program Author      : Chandra
+    Error no. used      : Err50 to Err59.
+*/
+PROCEDURE RBC_GROUP_MATCH 
+                (p_request_id           IN      varchar2,
+                 p_total                OUT     number,
+                 p_status               OUT     varchar2                
+                )
+IS
+ g_patient_id           varchar2(10);
+ g_rbc_pheno            varchar2(1) ;   --phenotype matching to be done if Y
+ g_rbc_anti             varchar2(1) ;   -- rbc antibodies to be matched
+ g_patient_abo          varchar2(5);    -- donor abo matching req if not null
+ g_check_antibody       varchar2(1);
+ g_chapter_id           varchar2(4);
+ total_donors           number;
+ G_MAXSIZE              number;
+  
+ 
+ CURSOR donor_rbc_match IS
+        select distinct donor_id from donor_rbc_antigens d1
+        where not exists     ( Select donor_id
+                                from donor_rbc_antigens d,patient_rbc_antigens p
+                                where d.donor_id = d1.donor_id and
+                                      p.patient_id = g_patient_id and
+                                      d.test_id = p.test_id and
+                                      d.result_code != p.result_code );
+/* CURSOR donor_rbc_match IS
+        select distinct donor_id from donor_rbc_antigens
+        where donor_id not in ( Select donor_id
+                                from donor_rbc_antigens d,patient_rbc_antigens p
+                                where p.patient_id = g_patient_id and
+                                      d.test_id = p.test_id and
+                                      d.result_code != p.result_code );
+*/
+ CURSOR patient_rbc IS
+        select test_id,result_code 
+         from  patient_rbc_antigens
+         where  patient_id = g_patient_id;
+ 
+ CURSOR donor_rbc(did in varchar2) IS
+        select test_id,result_code
+          from donor_rbc_antigens
+          where donor_id = did;
+
+ type group_rectyp is record
+        (
+        test_id         varchar2(10),
+        result_code     varchar2(5) 
+        );
+ type group_tabtyp is table of group_rectyp index by binary_integer;
+ 
+ group_rbc_table            group_tabtyp;
+
+ /* ----------------------Declaration over----------------------------------*/ 
+ 
+                        
+ FUNCTION validate_and_init 
+        RETURN varchar2 IS
+  x varchar2(1);
+  i  number;
+  chk   number;
+    Begin
+
+        ------- Following added by Mukesh 05/22 -----------
+        begin
+          select parameter_value into G_MAXSIZE
+            from valid_parameters 
+            where parameter_code ='MAXDONRET' and
+                  sysdate between eff_date and nvl(term_date,sysdate+1) and
+                   rownum <2;
+        exception
+           when others then
+                p_status := 'Err20. Parameter  MAXDONRET not defined';
+                return 'NOTOK';
+        end;
+        ---------------------------------------------------
+
+        begin
+          select patient_id,rbc_pheno,rbc_anti,blood_type,chapter_id 
+            into g_patient_id,g_rbc_pheno,g_rbc_anti,g_patient_abo,g_chapter_id
+            from hla_rbc_request
+           where request_id = p_request_id;
+        exception
+          when no_data_found then
+                p_status := 'Err50. No request id found';
+                return 'NOTOK';
+          when others then
+                p_status := 'Err51. SQL failed on hla_rbc_request'||
+                            substr(sqlerrm,1,100);
+                return 'NOTOK';
+        end;
+        if g_rbc_pheno = 'Y' and g_rbc_anti = 'Y' then
+                -- p_status := 'Can not search by phenotype and antibodies';
+                -- return 'NOTOK';
+                g_check_antibody := 'Y';
+        else
+                g_check_antibody := 'N';
+        end if;
+        if g_rbc_pheno = 'Y' then
+                begin
+                  Select 'X' into x
+                    from patient_rbc_antigens
+                   where patient_id = g_patient_id;
+                exception
+                  when no_data_found then
+                        p_status := 'Err52. Patient rbc antigen not found';
+                        return 'NOTOK';
+                  when too_many_rows then
+                        null;
+                  when others then
+                        p_status := 'Err53 SQLfailed on patient_rbc_antigens'||
+                                    substr(sqlerrm,1,100);
+                        return 'NOTOK';
+                end;     
+                i := 1; 
+                FOR g1 in patient_rbc LOOP
+                        group_rbc_table(i).test_id     := g1.test_id;
+                        group_rbc_table(i).result_code := g1.result_code;
+                        i := i+1;
+                END LOOP;                       
+        end if; /* g_hla_pheno */
+
+        return 'OK';
+    End; 
+  /* --------------Function validate_and_init  ends -----------------------  */ 
+
+ FUNCTION check_perm_dfrd (s_donor_id IN varchar2)
+        RETURN varchar2 IS
+ ddr_count number;
+ Begin
+     Begin              /* DDR HIT CHECK */
+        ddr_count := 0;
+        Select count(*) into ddr_count 
+        from donor_deferral_registry
+        where center_id = s_donor_id;
+        if ddr_count > 0 then
+                -- 'Permanently Deferred, Entry in Central DDR.';
+                return 'Y';
+        end if;
+     exception
+        when no_data_found then
+                null;
+        when others then
+                null;
+      end;              
+     Begin               /* Local  perm def  in donor_interdiction */
+        ddr_count := 0;
+        Select count(*) into ddr_count
+          from  donor_interdictions di, valid_interdictions vi
+         where  (donor_id = s_donor_id) and
+                di.inter_code = vi.inter_code and
+                vi.deferral_flag = 'Y' and
+                sysdate between di.eff_date and nvl(di.term_date,sysdate+1);
+                --vi.period_type = 'P';           
+        --message('Count is :'||to_char(ddr_count));pause;
+        if ddr_count >  0 then
+                -- 'Donor is Perm deferred, entry in Local DDR.';
+                return 'Y' ;
+        end if;
+     exception
+        when no_data_found then
+                null;
+        when others then 
+                null;
+     End;
+  return 'N';
+ End; /* function check_perm_dfrd ends */       
+
+ -------- Following added by Mukesh   05/22 -------------
+ FUNCTION donor_patient_abo_match 
+                        (don_id         IN      varchar2,
+                        pat_blood_type  IN      varchar2)
+ RETURN BOOLEAN IS
+ don_blood_type varchar2(5);     
+ BEGIN
+        begin
+                select blood_type into don_blood_type
+                from donors
+                where donor_id = don_id;
+        exception
+                when others then
+                        RETURN FALSE;
+        end;
+        if don_blood_type = pat_blood_type then
+                RETURN TRUE;
+        else
+                RETURN FALSE;
+        end if;
+ END;   /* function abo match ends */
+ ----------------------------------------------------------
+ 
+ FUNCTION check_exact_match(did    IN    varchar2)
+        RETURN varchar2 IS
+        nCount  NUMBER:=0;
+        nCount1 NUMBER:=0;
+
+ BEGIN
+    /* For i in 1..group_rbc_table.count loop
+             For c2 in donor_rbc(did) LOOP
+                  if group_rbc_table(i).test_id = c2.test_id and
+                     group_rbc_table(i).result_code = c2.result_code then
+                        GOTO next_antigen;
+                  end if;
+             end loop;
+             return 'N';
+      <<next_antigen>>
+             null;
+      end loop;
+      return 'Y';
+    */
+
+        --- For MLT -6721
+
+       For i in 1..group_rbc_table.count loop
+             For c2 in donor_rbc(did) LOOP
+                  if group_rbc_table(i).test_id = c2.test_id and
+                     group_rbc_table(i).result_code = c2.result_code then
+                        GOTO next_antigen;
+                   else
+                       select nvl(count(*),0) into ncount from valid_antigen_config_det where
+                       antigen_code=group_rbc_table(i).test_id and test_id=c2.test_id and
+                       group_rbc_table(i).result_code = c2.result_code;
+
+
+                       select nvl(count(*),0) into Ncount1 from valid_antigen_config_det where
+                       antigen_code=c2.test_id and test_id=group_rbc_table(i).test_id and
+                       group_rbc_table(i).result_code = c2.result_code;
+
+
+                       If ncount > 0 or nCount1 > 0 then 
+                          GOTO next_antigen;
+                       End If;
+                  end if;
+             end loop;
+             return 'N';
+      <<next_antigen>>
+             null;
+      end loop;
+      return 'Y';
+ END;
+ 
+ FUNCTION rbc_phenotype_match
+         RETURN varchar2 IS
+ BEGIN
+   total_donors := 0;
+--dbms_output.put_line('inside rbc phenotype match routine '||g_patient_id);
+   FOR c1 in donor_rbc_match LOOP
+        ---------------------------------------------------
+          
+        if check_perm_dfrd(c1.donor_id) = 'Y' then
+                GOTO rbc_match_loop;
+        end if;
+        if check_exact_match(c1.donor_id) = 'N' then            
+                GOTO rbc_match_loop;
+        end if;
+
+        ----------- Following added by Mukesh   05/22  ------------
+        if g_patient_abo is not null then
+                if donor_patient_abo_match(c1.donor_id,g_patient_abo) then
+                        null;
+                else
+                        GOTO rbc_match_loop;
+                end if;
+        end if;
+        -----------------------------------------------------------
+        --dbms_output.put_line('Best rbc match '||c1.donor_id);
+        if total_donors < G_MAXSIZE then
+            Begin
+                INSERT INTO hla_rbc_match_lists
+                        (request_id,
+                        donor_id,
+                        grade_id,
+                        program_id,
+                        insert_date,
+                        chapter_id)
+                VALUES
+                        (p_request_id,
+                        c1.donor_id,
+                        1,
+                        'DONRBCBK',
+                        sysdate,
+                        g_chapter_id);
+            Exception
+                 when others then
+                    p_status := 'Err54. Can not insert in hla_rbc_match_lists'||
+                              substr(sqlerrm,1,100);
+                    return 'NOTOK';
+            End;
+       end if;
+       Begin
+             INSERT INTO hla_rbc_match_temp
+                  (request_id,
+                   donor_id,
+                   grade_id,
+                   grade,
+                   chapter_id,
+                   grade_level)
+               VALUES
+                  (p_request_id,
+                  c1.donor_id,
+                  1,
+                  null, 
+                  g_chapter_id,
+                  null);
+       Exception
+           when others then
+                p_status:='Err54.2 Can not insert in hla_rbc_match_temp'||
+                          substr(sqlerrm,1,100);
+                return 'NOTOK';
+       End;
+       total_donors := total_donors+1;        
+    <<rbc_match_loop>>
+        null;   
+    END LOOP  ; /* donor rbc match */ 
+    return 'OK';
+ END; /* rbc phenotype match ends */
+
+ 
+BEGIN    /* MAIN PROGRAM*/
+ total_donors := 0;
+ if validate_and_init != 'OK' then
+                return;
+ end if;
+/* dbms_output.put_line('validation over '||g_patient_id);
+
+  choose which matching logic to call depending upon request
+        either by
+                1. RBC antigen match
+                
+ */
+
+ if g_rbc_pheno = 'Y' then
+        if rbc_phenotype_match != 'OK' then
+             return;
+        end if;
+ end if;
+ --commit;
+ p_total := total_donors;
+END;
+
+/* ---------------------------------------------------------------------*/
+/*  Program Name        : POPULATE_UNITS_TABLE
+    Date Creation       : 06/03/98
+    Program Author      : Chandra
+    Error no. used      : Err100 to Err120.
+*/
+/* ---------------------------------------------------------------------*/
+PROCEDURE POPULATE_UNITS_TABLE
+                     (p_request_id IN varchar2,
+                      request_type IN varchar2,
+                      p_status    OUT    varchar2)
+                      IS
+  HLADAYS   number := 5 ; -- for testing was 20;
+  RBCDAYS   number := 42;
+  cursor PRODUCTS_CUR(T_UNITID varchar2) is 
+     select P.unit_id,P.coll_date, P.product_type, P.inventory_class,
+            substr(location_id,1,1) WH
+       from active_products P
+      where P.stock_state = 'AV' and P.inventory_class in ('RE','SP') 
+        and P.unit_id = t_unitid
+        and P.coll_date > Sysdate - decode(request_type,'HLA PHENO',HLADAYS,
+                                                'HLA ANTI',HLADAYS,
+                                                'RBC PHENO',RBCDAYS,
+                                                'RBC ANTI',RBCDAYS) 
+        and  ( ((P.product_type like '%PLT%' or P.product_type like '%PLRF%')
+                 and request_type in ('HLA PHENO','HLA ANTI'))
+              or (P.product_type like '%RBC%' and request_type in 
+                                                   ('RBC PHENO','RBC_ANTI')))
+      union
+     select P.unit_id,P.coll_date, P.product_type, P.inventory_class
+            , 'SH' WH
+       from  shipped_products P
+      where  P.stock_state in ('DL','RT')
+        and  P.inventory_class in ('RE','SP') 
+        and  P.coll_date > sysdate - decode(request_type,'HLA PHENO',HLADAYS,
+                                                 'HLA ANTI',HLADAYS,
+                                                  'RBC PHENO',RBCDAYS,
+                                                  'RBC ANTI',RBCDAYS)
+        and  P.unit_id = t_unitid
+        and  ( ((P.product_type like '%PLT%' or P.product_type like '%PLRF%')
+                 and request_type in ('HLA PHENO','HLA ANTI'))
+                 or (P.product_type like '%RBC%' and request_type in
+                                           ('RBC PHENO','RBC_ANTI')))
+
+      union
+     select P.unit_id,P.coll_date, v.inv_product_type, ' ' inventory_class,
+            'IP' WH
+       from components P, valid_products v
+      where P.coll_date > sysdate - decode(request_type,'HLA PHENO',HLADAYS,
+                                                'HLA ANTI',HLADAYS,
+                                                'RBC PHENO',RBCDAYS,
+                                                'RBC ANTI',RBCDAYS)
+        and P.unit_id = t_unitid 
+        and substr(p.product_code,1,5) = substr(v.product_code,1,5) 
+        and (p.COMPONENT_STATUS = 'L' or (p.component_status='S' and
+					  p.program_id='IMIHCLL'))
+        and  ( ((V.product_type like '%PLT%' or V.product_type like '%PLRF%')
+                and request_type in ('HLA PHENO','HLA ANTI'))
+              or (V.product_type like '%RBC%' and request_type in
+                                           ('RBC PHENO','RBC_ANTI')));
+   cursor Donor_cur is
+     select donor_id,GRADE_ID,chapter_id 
+       from hla_rbc_match_temp           -- previously was _lists 
+      where request_id = p_request_id 
+      ORDER BY GRADE;
+
+   cursor RBC_CUR(DID VARCHAR2) is 
+     select  test_id,decode(result_code,'P','+','-') r
+       from donor_rbc_antigens
+      where donor_id = did;
+   cursor DONATION_CUR(D_DONOR_ID VARCHAR2) is
+     select UNIT_ID 
+       FROM DONATIONS 
+      WHERE donor_id = D_DONOR_ID
+        AND coll_date > sysdate - decode(request_type,'HLA PHENO',HLADAYS,
+                                              'HLA ANTI',HLADAYS,
+                                              'RBC PHENO',RBCDAYS,
+                                              'RBC ANTI',RBCDAYS) 
+        and unit_id is not null;
+  
+   PRODUCT PRODUCTS_CUR%rowtype;
+   RBC_ANTIGEN RBC_CUR%rowtype;
+   D_id Donor_cur%ROWTYPE;
+   U_id DONATION_CUR%ROWTYPE;
+   cnt number := 0;
+   PG_DONOR_ID                          VARCHAR2(10); 
+   PG_CHAPTER_ID                        VARCHAR2(4); 
+   PG_REQUEST_ID                        VARCHAR2(10); 
+   PG_UNIT_ID                           VARCHAR2(15); 
+   PG_COLL_DATE                         date;
+   PG_GRADE_ID                          number; 
+   PG_GRADE                             VARCHAR2(5); 
+   PG_GRADE_LEVEL                       VARCHAR2(10); 
+   PG_ABO                               VARCHAR2(5); 
+   PG_WAREHOUSE_CODE                    VARCHAR2(12); 
+   PG_INVENTORY_CLASS                   VARCHAR2(10); 
+   PG_PRODUCT_TYPE                      VARCHAR2(10); 
+   --PG_CMV_STATUS                        VARCHAR2(1); -- Commented by Kishore on 09/04/2014. SCR 12872
+
+   PG_CMV_STATUS                        unit_test_results.result_code%type; -- Added by Kishore on 09/04/2014. SCR 12872
+   PG_ANTIGEN_STRING                    VARCHAR2(500); 
+   PG_RBC_MATCH_COUNT                   number;
+   PG_PROGRAM_ID                        VARCHAR2(8); 
+   PG_INSERT_DATE                       date;
+   PG_INSERT_USER                       VARCHAR2(6); 
+   g_sysdate           date := to_date(to_char(sysdate,'MM-DD-YYYY HH24:MI:SS'),
+                                       'MM-DD-YYYY HH24:MI:SS') ;
+   t_stat                              varchar2(500); 
+   t_unit_id                           units.unit_id%type;            
+ BEGIN
+ pg_request_id := p_request_id;
+ --dbms_output.put_line('IN UNIT SEARCH');
+   FOR d_id IN Donor_cur LOOP
+      FOR u_id IN DONATION_CUR(D_ID.DONOR_ID) LOOP 
+ --dbms_output.put_line('UIID :'||u_id.unit_id);
+          FOR  PRODUCT IN PRODUCTS_CUR(u_id.unit_id) LOOP
+ -- dbms_output.put_line('UIID product:'||u_id.unit_id);
+              pg_unit_id := PRODUCT.unit_id;
+              pg_donor_id := d_id.donor_id;
+              pg_chapter_id := d_id.chapter_id;
+              pg_coll_date := PRODUCT.coll_date;
+              pg_product_type := PRODUCT.product_type;
+              pg_inventory_class:= PRODUCT.inventory_class;
+              pg_warehouse_code  := PRODUCT.wh;
+              pg_grade_id := d_id.grade_id;
+              cnt := cnt+1;
+              IF request_type in ('HLA PHENO','HLA ANTI') 
+                  AND pg_unit_id  IS NOT NULL then
+                   begin 
+                      if request_type = 'HLA PHENO' then
+                         select V.GRADE,V.GRADE_LEVEL,d.blood_type,
+                               'A('||NVL(da.A1,'-')||', '||NVL(da.A2,'-')||
+                              ')  B('||NVL(da.B1,'-')||', '||NVL(da.B2,'-')||')'
+                          into pg_grade, pg_grade_level, pg_abo,
+                               pg_ANTIGEN_STRING
+                          from donors D, valid_hla_grading v,
+                               donor_hla_antigens DA
+                         where D.donor_id = Da.donor_id  and
+                               V.grade_id = D_ID.GRADE_ID and
+                               DA.donor_id = d_id.donor_id;
+                      else
+                         select d.blood_type,
+                               'A('||NVL(da.A1,'-')||', '||NVL(da.A2,'-')||
+                              ')  B('||NVL(da.B1,'-')||', '||NVL(da.B2,'-')||')'
+                           into pg_abo, pg_ANTIGEN_STRING
+                           from donors D,
+                                donor_hla_antigens DA
+                          where D.donor_id = Da.donor_id
+                            and DA.donor_id = d_id.donor_id;
+                          pg_grade := null;
+                          pg_grade_level := null;
+                      end if;
+                        /* -- Commented by Kishore on 09/04/2014. SCR 12872
+                        begin
+                            Select 'Y' into  pg_cmv_status 
+                              from donor_interdictions
+                             where donor_id = d_id.donor_id
+                              and inter_code = 'CMV'
+                             and sysdate between eff_date 
+                                 and nvl(term_date,sysdate+1)
+                            and rownum < 2;
+                        exception
+                           when no_data_found then
+                                pg_cmv_status := 'N';
+                           when others then
+                            null;
+                        end;
+                        -- End of commented section */
+
+                        -- Added by Kishore on 09/04/2014. SCR 12872	
+                        begin
+                          select unit_id
+                            into t_unit_id
+                            from donations
+                           where donor_id = d_id.donor_id
+                           --and rownum = 1 -- Commented by Kishore on 09/16/2014. IM 10207
+                             and coll_date in (select max(coll_date) 
+                                                 from donations 
+                                                where donor_id = d_id.donor_id) -- Added by Kishore on 09/16/2014. IM 10207
+                           order by coll_date desc;
+                        exception
+                          when no_data_found then
+                            t_stat := 'Err201. No donation found for donor ' || d_id.donor_id;
+                            insert into program_errors (
+                              PROGRAM_ID,
+                              MODULE_ID,
+                              INSERT_DATE,
+                              ERROR_MSG)
+                            values (
+                              'PKHLARBC',
+                              'PROC_CALLER',
+                              sysdate,
+                              t_stat);
+                            dbms_output.put_line('PROGRAM_ERROR: ' || t_stat);
+                          when others then
+                            t_stat := 'Err202. ' || SQLCODE || ' - ' || SQLERRM;
+                            insert into program_errors (
+                              PROGRAM_ID,
+                              MODULE_ID,
+                              INSERT_DATE,
+                              ERROR_MSG)
+                            values (
+                              'PKHLARBC',
+                              'PROC_CALLER',
+                              sysdate,
+                              t_stat);
+                            dbms_output.put_line('PROGRAM_ERROR: ' || t_stat);
+                        end;
+  
+                        begin
+                          --select result_code -- Commented by Kishore on 09/16/2014. IM 10207
+                          select decode(result_code, 'NR', 'N', result_code) -- Added by Kishore on 09/16/2014. IM 10207
+                            into pg_cmv_status 
+                            from unit_test_results
+                           where unit_id = t_unit_id
+                             and test_id = 'CMV';
+                        exception
+                          when no_data_found then
+                            pg_cmv_status := null;
+                          when others then
+                            t_stat := 'Err203. ' || SQLCODE || ' - ' || SQLERRM;
+                            insert into program_errors (
+                              PROGRAM_ID,
+                              MODULE_ID,
+                              INSERT_DATE,
+                              ERROR_MSG)
+                            values (
+                              'PKHLARBC',
+                              'PROC_CALLER',
+                              sysdate,
+                              t_stat);
+                            dbms_output.put_line('PROGRAM_ERROR: ' || t_stat);
+                        end;
+                        -- End of change
+                  exception
+                      when others then
+                           null;
+                  end;
+              END IF;
+              IF request_type in ('RBC PHENO','RBC ANTI') 
+                 AND pg_unit_id IS NOT NULL then
+                 --dbms_output.put_line('UNITID:'||pg_unit_id);
+                 select blood_type
+                   into pg_abo
+                   from donors D
+                  where D.donor_id = d_id.donor_id; 
+                  pg_antigen_string := null;
+                  FOR RBC_ANTIGEN IN RBC_CUR(D_ID.DONOR_ID) LOOP
+                      pg_antigen_STRING := pg_antigen_STRING||
+                                     RBC_ANTIGEN.test_id ||RBC_ANTIGEN.R ;
+                  END LOOP;
+              END IF;
+              begin
+                 --dbms_output.put_line('INSERT:'||pg_unit_id);
+
+                insert into HLA_RBC_MATCH_UNITS
+                    (
+                     DONOR_ID       ,
+                     CHAPTER_ID     ,
+                     REQUEST_ID     ,
+                     UNIT_ID        ,
+                     COLL_DATE      ,
+                     GRADE_ID       ,
+                     GRADE          ,
+                     GRADE_LEVEL    ,
+                     ABO            ,
+                     WAREHOUSE_CODE ,
+                     INVENTORY_CLASS,
+                     PRODUCT_TYPE   ,
+                     CMV_STATUS     ,
+                     ANTIGEN_STRING ,
+                     RBC_MATCH_COUNT,
+                     PROGRAM_ID     ,
+                     INSERT_DATE   ,
+                     INSERT_USER  
+                    )
+                values
+                    (
+                     PG_DONOR_ID        ,
+                     PG_CHAPTER_ID      ,
+                     PG_REQUEST_ID      ,
+                     PG_UNIT_ID         ,
+                     PG_COLL_DATE       ,
+                     PG_GRADE_ID        ,
+                     PG_GRADE           ,
+                     PG_GRADE_LEVEL     ,
+                     PG_ABO             ,
+                     PG_WAREHOUSE_CODE  ,
+                     PG_INVENTORY_CLASS ,
+                     PG_PRODUCT_TYPE    ,
+                     PG_CMV_STATUS      ,
+                     PG_ANTIGEN_STRING  ,
+                     null,
+                     'PKHLARBC', 
+                     g_sysdate     ,
+                     LT_USER_SESSION.get_userid 
+                     );
+                exception
+                    when others then
+                         t_stat := 'Err101. INsert error '||
+                                   substr(sqlerrm,1,100);
+                       insert into program_errors
+                           ( 
+                           PROGRAM_ID, 
+                           MODULE_ID, 
+                           INSERT_DATE,
+                           ERROR_MSG
+                           )
+                       values
+                           (
+                           'PKHLARBC',
+                           'PROC_CALLER',
+                           sysdate,
+                           t_stat
+                           );
+                     dbms_output.put_line('PROGRAM_ERROR'||t_stat);
+                end;
+           END LOOP; /********** end of products for a unit **********/
+      END LOOP; /************* end of units for a donor **************/
+   END LOOP;/************* end of donors **************/
+   if t_stat is not null then
+      p_status := t_stat;
+   else
+      p_status := 'OK';
+   end if;
+END;  /* populate_units_table */
+/* ---------------------------------------------------------------------*/
+/*  Program Name        : HLARBC_PROC_CALLER
+    Date Creation       : 06/03/98
+    Program Author      : Chandra
+    Error no. used      : Err80 to Err99.
+*/
+/* ---------------------------------------------------------------------*/
+PROCEDURE HLARBC_PROC_CALLER 
+                     IS
+
+   CURSOR to_proc_request IS
+      Select 
+            REQUEST_ID,         
+            HLA_PHENO ,             
+            HLA_ANTI ,              
+            RBC_ANTI,             
+            RBC_PHENO,              
+            SUBMIT_REQUEST,         
+            EXACT_MATCH ,           
+            UNIT_REQUEST           
+       from HLA_RBC_REQUEST
+      where submit_request = 'Y'
+        and rownum < 2
+         for UPDATE;
+
+    tot_donors           number;
+    status               varchar2(500);
+    request_type         varchar2(15);
+    L_REQUEST_ID         varchar2(10);         
+    L_HLA_PHENO          varchar2(1);              
+    L_HLA_ANTI           varchar2(1);               
+    L_RBC_ANTI           varchar2(1);             
+    L_RBC_PHENO          varchar2(1);              
+    L_SUBMIT_REQUEST     varchar2(1);         
+    L_EXACT_MATCH        varchar2(1);           
+    L_UNIT_REQUEST       varchar2(1);           
+
+BEGIN /* main of proc_caller */
+dbms_output.enable(5000000);
+--dbms_output.put_line('START');
+  FOR c1 IN to_proc_request LOOP
+      L_REQUEST_ID         := c1.request_id ; 
+      L_HLA_PHENO          := c1.hla_pheno  ; 
+      L_HLA_ANTI           := c1.hla_anti  ; 
+      L_RBC_ANTI           := c1.rbc_anti  ; 
+      L_RBC_PHENO          := c1.rbc_pheno  ; 
+      L_SUBMIT_REQUEST     := c1.submit_request  ;
+      L_EXACT_MATCH        := c1.exact_match  ; 
+      L_UNIT_REQUEST       := c1.unit_request   ; 
+
+       update hla_rbc_request
+            set submit_request = 'E'
+       where request_id= c1.request_id;
+
+  END LOOP; /* to_proc_request */
+  COMMIT;   /* release locks */ 
+     /* delete data from the two tables before processing */
+     begin
+        delete from hla_rbc_match_lists
+          where request_id = l_request_id;
+     exception
+        when others then
+             null;
+     end;
+     begin
+        delete from hla_rbc_match_units
+          where request_id = l_request_id;
+     exception
+        when others then
+             null;
+     end;
+     if l_HLA_PHENO = 'Y' or  l_HLA_ANTI = 'Y'  then
+          if l_HLA_PHENO = 'Y' then
+                request_type := 'HLA PHENO';
+          else
+                request_type := 'HLA ANTI';
+          end if;
+          don_hla_rbc.hla_match(l_request_id,
+                                    200,
+                                    tot_donors,
+                                    status);
+          if status != 'OK' then
+                 --message(status);pause;
+                       insert into program_errors
+                           ( 
+                           PROGRAM_ID, 
+                           MODULE_ID, 
+                           INSERT_DATE,
+                           ERROR_MSG
+                           )
+                       values
+                           (
+                           'PKHLARBC',
+                           'PROC_CALLER',
+                           sysdate,
+                           status
+                           );
+                 -- the error should be logged in program error table
+          end if;
+     end if;
+     if l_RBC_PHENO = 'Y' or l_RBC_ANTI = 'Y' then
+          if l_RBC_PHENO = 'Y' then
+                request_type := 'RBC PHENO';
+          else
+                request_type := 'RBC ANTI';
+          end if;
+         if l_RBC_PHENO = 'Y' and l_exact_match = 'Y' then 
+            don_hla_rbc.rbc_group_match(l_request_id,
+                                        tot_donors,
+                                         status);
+         else
+            don_hla_rbc.rbc_match(l_request_id,
+                                  tot_donors,
+                                  status);
+        end if;
+        if status != 'OK' then
+                 --message(status);pause;
+                       insert into program_errors
+                           ( 
+                           PROGRAM_ID, 
+                           MODULE_ID, 
+                           INSERT_DATE,
+                           ERROR_MSG
+                           )
+                       values
+                           (
+                           'PKHLARBC',
+                           'PROC_CALLER',
+                           sysdate,
+                           status
+                           );
+                 -- the error should be logged in program error table
+        end if;
+     end if;
+     /*
+         NOW POPULATE THE HLA_RBC_MATCH_UNITS table if requested
+     */
+     if l_UNIT_REQUEST = 'Y' then
+         don_hla_rbc.populate_units_table(l_request_id,request_type,status);
+         if status != 'OK' then
+                       insert into program_errors
+                           ( 
+                           PROGRAM_ID, 
+                           MODULE_ID ,
+                           INSERT_DATE,
+                           ERROR_MSG
+                           )
+                       values
+                           (
+                           'PKHLARBC',
+                           'PROC_CALLER',
+                           sysdate,
+                           status
+                           );
+         end if;
+     end if;
+     /*
+         NOW UPDATE THE TABLE as REQUEST is processed
+     */
+     update hla_rbc_request
+            set submit_request = 'N'
+      where request_id= l_request_id;
+     /*
+         NOW DELETE The TEMP TABLE as REQUEST is processed
+     */
+     begin
+        delete from hla_rbc_match_temp
+         where request_id= l_request_id;
+     exception
+        when others then
+             null;
+     end;
+     commit;
+END;   /* procedure proc_caller */
+
+END DON_HLA_RBC ; /*-- Package body --*/
+/
+DROP PUBLIC SYNONYM DON_HLA_RBC 
+/
+CREATE PUBLIC SYNONYM DON_HLA_RBC FOR DON_HLA_RBC 
+/
+GRANT EXECUTE ON DON_HLA_RBC TO PUBLIC 
+/

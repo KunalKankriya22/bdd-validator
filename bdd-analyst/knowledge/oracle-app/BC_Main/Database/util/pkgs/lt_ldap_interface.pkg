@@ -1,0 +1,532 @@
+CREATE OR REPLACE PACKAGE lt_ldap_interface AUTHID CURRENT_USER IS
+/* ----------------------------------------
+*
+||    Program Name                : lt_ldap_interface
+||    Date Creation               : 01-01-2013 (LT 2013 Release)
+||    Current Version             : 01 -- Ashok. SCR 19807. This package is used to interface with active directory.
+||                                     -- Same pkg used in both Donor and Lab/Distribution. (checked in same code at both places)
+||                                  02 -- 05/05/2014 - LT2013 R2 and LT2013SP2 - Ashok.
+||                                     -- SCR 20552.  Increased ad_domain and ad_user variable size in ad_authenticate.
+||                                  03 -- MLT 2559 -- ONS_AD_AUTHENTICATE wrapper procedure added..
+||                                  04 -- MLT 5167 -- V04 -- Added support for LDAP over SSL.
+||                                  05 -- ACTIVE_DIRECTORY_CONFIGURATION used
+||                                  06 -- LDAPS intergration using Java Stored Procedure 01/09/2024 - MLT-6522.
+||                                     -- non ssl, without service account issue fixed. 
+||                                  07 -- Offline Auth added.
+*/
+-------------------------------------------- */
+
+
+    PROCEDURE ONS_AD_AUTHENTICATE(ad_user_in IN VARCHAR2, ad_passwd_in IN VARCHAR2, status_out OUT VARCHAR2);
+  /* ad_authenticate function
+     Usage: To authenticate the user credentials against Active Directory.
+     Returns:
+        1) 'OK' - for succesful validation;
+        2) 'Invalid Credentials' - for Invalid credentials.
+        3) 'LDAP Referral Error' - for LDAP error. (Check Base DN.  This is for future use.)
+        4) 'INIT failed' - for INIT error.(Check AD domain address).
+        5)  errmsg - for any error messges.
+  */
+
+    FUNCTION perform_ldap_auth(  svc_userDn_IN     IN VARCHAR2,
+                                  svc_userPwd_IN    IN VARCHAR2,
+                                  userId_IN         IN VARCHAR2,
+                                  userPwd_IN        IN VARCHAR2,
+                                  UserIdAttrib_IN   IN VARCHAR2,
+                                  searchUserBase_IN IN VARCHAR2,
+                                  ldapUrl_IN        IN VARCHAR2)
+        RETURN VARCHAR2;
+
+  FUNCTION ad_authenticate(ad_user_in IN VARCHAR2, ad_passwd_in IN VARCHAR2, ad_debug_in IN BOOLEAN DEFAULT FALSE) RETURN VARCHAR2;
+  /* Get_LT_User Function
+     Usage: Find the LT User ID associated with the AD user ID in system_users table.
+      -- returns 'OK' and output parameter contains the associated LT User ID.
+      -- returns error message and outptut parameter is null;
+  */
+  FUNCTION get_LT_User(ad_user_in IN VARCHAR2, lt_user_out OUT VARCHAR2) RETURN VARCHAR2;
+END lt_ldap_interface;
+
+/
+
+
+CREATE OR REPLACE PACKAGE BODY lt_ldap_interface IS
+
+  PROCEDURE update_ltuser_pwd(lt_user_in VARCHAR2, lt_pwd_in VARCHAR2) IS -- LT2013R2 -  SCR 20552 - 04232014
+    hashing RAW(50);
+  BEGIN
+    hashing := LT_PASSWORD_POLICY.SAVE_HASH(lt_pwd_in);
+
+    UPDATE system_users
+       SET reset_request = 'N',
+           password_modified_date = SYSDATE,
+           lifetrak_password = hashing
+     WHERE user_id = lt_user_in;
+
+    UPDATE lt_password_history
+       SET reset_date = SYSDATE
+     WHERE user_id = lt_user_in
+       AND reset_date IS NULL;
+
+    INSERT INTO lt_password_history
+      VALUES( lt_user_in,
+              hashing,
+              SYSDATE,
+              NULL
+            );
+    COMMIT;
+  END update_ltuser_pwd;
+
+ PROCEDURE ONS_AD_AUTHENTICATE(ad_user_in IN VARCHAR2, ad_passwd_in IN VARCHAR2, status_out OUT VARCHAR2) IS
+ BEGIN
+    status_out := ad_authenticate(ad_user_in,ad_passwd_in);
+
+    if status_out = 'OK' then
+      FOR rec IN (SELECT user_id
+                    FROM system_users
+                   WHERE UPPER(ad_user_id) = UPPER(ad_user_in)
+                     AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE+1)
+                   )
+      LOOP
+        update_ltuser_pwd(rec.user_id, ad_passwd_in);
+      END LOOP;
+    end if;
+ END ONS_AD_AUTHENTICATE;
+
+
+  FUNCTION perform_ldap_auth(  svc_userDn_IN     IN VARCHAR2,
+                                  svc_userPwd_IN    IN VARCHAR2,
+                                  userId_IN         IN VARCHAR2,
+                                  userPwd_IN        IN VARCHAR2,
+                                  UserIdAttrib_IN   IN VARCHAR2,
+                                  searchUserBase_IN IN VARCHAR2,
+                                  ldapUrl_IN        IN VARCHAR2)
+        RETURN VARCHAR2
+    AS
+        LANGUAGE JAVA
+        NAME 'JLdap.performAuthentication (java.lang.String, java.lang.String, java.lang.String,
+                                           java.lang.String, java.lang.String, java.lang.String,
+                                           java.lang.String) return String';
+
+  /****************************************************************************
+  Use this procedure to authenicate login user creditials against LDAP server.
+  (Active Directory).
+  ****************************************************************************/
+  FUNCTION ad_authenticate(ad_user_in IN VARCHAR2, ad_passwd_in IN VARCHAR2, ad_debug_in IN BOOLEAN DEFAULT FALSE)
+    RETURN VARCHAR2
+  IS
+    l_retval    PLS_INTEGER;            -- Used for all API return values
+    l_session   DBMS_LDAP.SESSION;      -- Used to store our LDAP Session
+
+    l_debug_on    BOOLEAN;
+    l_err_ret     VARCHAR2(500);
+
+    l_attrs         dbms_ldap.string_collection;
+    l_result         PLS_INTEGER;
+    l_entryCount     PLS_INTEGER;
+    l_entry        DBMS_LDAP.MESSAGE;
+    l_filter      VARCHAR2(300);
+    l_search_results     dbms_ldap.message;
+    l_user_dn        VARCHAR2(2000);
+    l_svc_pwd       VARCHAR2(300);
+    l_svc_user      VARCHAR2(300);
+    ad_config_rec  ACTIVE_DIRECTORY_CONFIG%ROWTYPE;
+
+    l_status VARCHAR2(2000);
+    l_return VARCHAR2(2000);
+
+
+    FUNCTION ad_enabled RETURN BOOLEAN IS
+        lv_ad_enabled VARCHAR2(1);
+    BEGIN
+        SELECT NVL(ad_enabled, 'N') INTO lv_ad_enabled
+          FROM lt_application_config;
+
+        IF lv_ad_enabled = 'Y' THEN
+            RETURN TRUE;
+        END IF;
+
+        RETURN FALSE;
+    END ad_enabled;
+
+    FUNCTION decrypt_pwd(pwd_in IN RAW) RETURN VARCHAR2 IS
+        l_decrypted_raw  RAW(2000);
+        l_key               RAW(128) := UTL_RAW.cast_to_raw('idemeraw');
+        l_pwd    VARCHAR2(500);
+    BEGIN
+        l_decrypted_raw := DBMS_CRYPTO.decrypt( src => pwd_in,
+                                                typ => DBMS_CRYPTO.des_cbc_pkcs5,
+                                                key => l_key);
+        l_pwd := UTL_RAW.cast_to_varchar2(l_decrypted_raw);
+        RETURN l_pwd;
+    END decrypt_pwd;
+
+    FUNCTION is_mobile_server RETURN BOOLEAN IS
+        ln_cnt NUMBER;
+    BEGIN
+        SELECT COUNT(1) INTO ln_cnt 
+        FROM laptop_id_details;
+
+        IF ln_cnt > 0 THEN
+            RETURN TRUE;
+        END IF;
+
+        RETURN FALSE;
+    END is_mobile_server;
+
+    FUNCTION offline_auth(ad_user_in IN VARCHAR2, ad_passwd_in IN VARCHAR2)
+      RETURN VARCHAR2 IS
+      l_user_id VARCHAR2(50);
+    BEGIN      
+      SELECT user_id
+        INTO l_user_id
+        FROM system_users
+      WHERE UPPER(ad_user_id) = UPPER(ad_user_in)
+        AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE+1);
+
+      IF l_user_id IS NULL THEN
+          RETURN 'Err: User not found in system_users table.';
+      END IF;
+
+      -- user found in system_users table, validate password by calling CHECK_HASH.
+      IF LT_PASSWORD_POLICY.CHECK_HASH(l_user_id, ad_passwd_in) THEN
+          RETURN 'OK';
+      ELSE
+          RETURN 'Err: Invalid Credentials';
+      END IF;
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+        RETURN 'Err: User not found in system_users table.';
+      WHEN TOO_MANY_ROWS THEN
+        RETURN 'Err: More than one user found in system_users table.';
+      WHEN OTHERS THEN
+        RETURN 'Err: ' || SUBSTR(SQLERRM, 1, 100);
+    END offline_auth;
+        
+
+  BEGIN
+    l_err_ret := NULL;
+    l_retval := -1;
+    l_debug_on := ad_debug_in;
+
+    IF ad_debug_in THEN
+      DBMS_OUTPUT.ENABLE(1000000);
+    END IF;
+    ---------
+
+    IF NOT ad_enabled THEN
+        RETURN 'Err: AD not enabled. Please check configuration.';
+    END IF;
+
+    IF ad_user_in IS NULL OR ad_passwd_in IS NULL THEN
+        RETURN 'Err: AD User ID / Password is empty.';
+    END IF;
+
+    -- Get AD config Details;
+    SELECT *
+      INTO ad_config_rec
+      FROM active_directory_config;
+
+
+    IF l_debug_on THEN
+      DBMS_OUTPUT.PUT_LINE('AD Server Variables');
+      DBMS_OUTPUT.PUT_LINE('-----------------------------------');
+      DBMS_OUTPUT.PUT_LINE(RPAD('LDAP Host ', 25, ' ')    || ': ' || ad_config_rec.ad_host);
+      DBMS_OUTPUT.PUT_LINE(RPAD('LDAP Port ', 25, ' ')    || ': ' || ad_config_rec.ad_port);
+      DBMS_OUTPUT.PUT_LINE(RPAD('LDAP Domain ', 25, ' ')  || ': ' || ad_config_rec.ad_user_domain);
+      DBMS_OUTPUT.PUT_LINE(RPAD('LDAP SSL ', 25, ' ')     || ': ' || ad_config_rec.ad_use_ssl);
+      DBMS_OUTPUT.PUT_LINE(RPAD('LDAP user ', 25,' ')     || ': ' || ad_user_in);
+      DBMS_OUTPUT.PUT_LINE('-----------------------------------');
+    END IF;
+
+    /* do not connect to ad server, validate against system_users table */
+
+    IF is_mobile_server 
+      AND ad_config_rec.OFFLINE_AUTH = 'Y' 
+    THEN  
+        RETURN offline_auth(ad_user_in, ad_passwd_in);
+    END IF;
+    
+    IF ad_config_rec.AD_USE_SVC_ACCT  = 'Y'
+    THEN
+        IF ( ad_config_rec.ad_svc_user IS NOT NULL
+                OR
+             ad_config_rec.ad_svc_userdn IS NOT NULL  )
+        THEN
+           NULL;
+        ELSE
+            RAISE_APPLICATION_ERROR(-20003, 'LDAP Service User account is required.');
+        END IF;
+
+        IF ad_config_rec.ad_svc_pwd IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20004, 'LDAP Service User account password is required.');
+        END IF;
+
+        IF l_debug_on THEN
+          DBMS_OUTPUT.PUT_LINE(RPAD('Connecting Service accct. ', 25, ' '));
+        END IF;
+
+        l_svc_pwd := decrypt_pwd(ad_config_rec.ad_svc_pwd);
+    END IF;
+
+    IF ad_config_rec.AD_USE_SSL = 'Y' THEN
+        IF NVL(ad_config_rec.AD_USE_SVC_ACCT, 'N') <> 'Y' THEN
+            RAISE_APPLICATION_ERROR(-20009, 'LDAP Service User account is required for SSL connection');
+        END IF;
+
+        -- filter for searching user.
+        -- '(cn=<ADUSERID>)'        
+
+        l_status := perform_ldap_auth(svc_userDn_IN     => ad_config_rec.ad_svc_userdn,
+                                      svc_userPwd_IN    => l_svc_pwd,
+                                      userId_IN         => ad_user_in,
+                                      userPwd_IN        => ad_passwd_in,
+                                      UserIdAttrib_IN   => ad_config_rec.ad_userid_attrib,
+                                      searchUserBase_IN => ad_config_rec.ad_search_base,
+                                      ldapUrl_IN        => ad_config_rec.ad_host
+                                    );
+        IF l_status = 'SUCCESS' THEN
+            l_return := 'OK';
+        ELSIF l_status LIKE '%javax.naming.AuthenticationException%' THEN
+            l_return := 'Err: Invalid Credentials';
+        ELSE
+            l_return := 'Something Went Wrong. Error: ' || l_status;
+        END IF;
+
+        RETURN l_return;
+    END IF;
+
+    -- Raise all exceptions from DBMS_LDAP.
+    DBMS_LDAP.USE_EXCEPTION := TRUE;
+    -- -------------------------------------------------------------------------
+    -- Obtain an LDAP session. The init() function initializes a session with an
+    -- LDAP server. This actually establishes a connection with the LDAP server
+    -- and returns a handle to the session which can be used for further
+    -- calls into the API.
+    -- -------------------------------------------------------------------------
+    l_session := DBMS_LDAP.INIT(ad_config_rec.ad_host, ad_config_rec.ad_port);
+
+    IF l_debug_on THEN
+      DBMS_OUTPUT.PUT_LINE('-----------------------------------');
+      DBMS_OUTPUT.PUT_LINE(RPAD('LDAP Sesssion ', 25, ' ') || ': ' ||
+                            RAWTOHEX(SUBSTR(l_session, 1, 16)) ||
+                            '- (returned from init)');
+      DBMS_OUTPUT.PUT_LINE('-----------------------------------');
+    END IF;
+
+    -- -------------------------------------------------------------------------
+    -- Bind to the directory. The function simple_bind_s can be used to perform
+    -- simple username/password based authentication to the directory server.
+    -- The username is a directory distinguished name. This function can be
+    -- called only after a valid LDAP session handle is obtained from a call to
+    -- DBMS_LDAP.init(). If the connection was successful, it will return:
+    -- DBMS_LDAP.SUCCESS. This function can raise the following exceptions:
+    --      invalid_session : Raised if the session handle ld is invalid.
+    --      general_error   : For all other errors. The error string associated
+    --                        with this exception will explain the error in
+    --                        detail.
+    -- -------------------------------------------------------------------------
+
+    IF ad_config_rec.AD_USE_SVC_ACCT  = 'Y'
+    THEN
+
+        DBMS_LDAP.USE_EXCEPTION := FALSE;
+
+        l_retval := NULL;
+        -- Connect with SVC User DN first if available.
+        IF ad_config_rec.ad_svc_userdn IS NOT NULL THEN
+
+            l_retval := DBMS_LDAP.SIMPLE_BIND_S(l_session,
+                                                ad_config_rec.ad_svc_userdn,
+                                                l_svc_pwd);
+        END IF;
+
+        -- If unsuccessful with USERDN try with user or domain\user
+        IF l_retVal IS NULL OR l_retval <> DBMS_LDAP_UTL.SUCCESS THEN
+            IF l_debug_on THEN
+              DBMS_OUTPUT.PUT_LINE(RPAD('Using AD_SVC_USER. ', 25, ' '));
+            END IF;
+            IF ad_config_rec.ad_svc_user IS NOT NULL THEN
+
+                IF ad_config_rec.ad_user_domain IS NULL THEN
+                  l_svc_user := ad_config_rec.ad_svc_user;
+                ELSE
+                  l_svc_user := ad_config_rec.ad_user_domain || '\' || ad_config_rec.ad_svc_user;
+                END IF;
+
+                l_retval := DBMS_LDAP.SIMPLE_BIND_S(l_session,
+                                                    l_svc_user,
+                                                    l_svc_pwd);
+             END IF;
+
+            IF l_retval <> DBMS_LDAP_UTL.SUCCESS THEN
+                RAISE_APPLICATION_ERROR(-20005, 'Invalid Service Account Credentials');
+            END IF;
+        END IF;
+
+        IF l_debug_on THEN
+          DBMS_OUTPUT.PUT_LINE(RPAD('Service Acct connected. ', 25, ' '));
+        END IF;
+
+        l_attrs(1) := '*';
+
+        -- filter for searching user.
+        -- '&(objectCategory=user)(sAMAccountName=<ADUSERID>)'
+        SELECT REPLACE(ad_config_rec.ad_search_filter, '<ADUSERID>', ad_user_in)
+         INTO l_filter
+        FROM DUAL;
+
+        IF l_debug_on THEN
+            DBMS_OUTPUT.PUT_LINE('AD search criteira');
+            DBMS_OUTPUT.PUT_LINE('-----------------------------------');
+            DBMS_OUTPUT.PUT_LINE(RPAD('BASE ', 25, ' ')    || ': ' || ad_config_rec.ad_search_base);
+            DBMS_OUTPUT.PUT_LINE(RPAD('Filter ', 25, ' ')    || ': ' || l_filter);
+            DBMS_OUTPUT.PUT_LINE('-----------------------------------');
+        END IF;
+        dbms_ldap.use_exception := FALSE;
+        l_result := dbms_ldap.search_s(ld           => l_session,
+                                        base        => ad_config_rec.ad_search_base,
+                                        scope       => DBMS_LDAP.SCOPE_SUBTREE,
+                                        filter      => l_filter,
+                                        attrs       => l_attrs,
+                                        attronly    => 0,
+                                        res         => l_search_results);
+
+        l_entryCount := dbms_ldap.count_entries(l_session, l_search_results);
+
+        IF l_entryCount > 1 THEN
+            l_retval := DBMS_LDAP.MSGFREE(l_search_results);
+            l_retval := DBMS_LDAP.UNBIND_S(l_session);
+            raise_application_error(-20006, 'More than one entry found with AD user id ' || ad_user_in);
+        ELSIF l_entryCount = 0 THEN
+            l_retval := DBMS_LDAP.MSGFREE(l_search_results);
+            l_retval := DBMS_LDAP.UNBIND_S(l_session);
+            raise_application_error(-20007, 'No entries found for AD user id ' || ad_user_in);
+        END IF;
+
+        l_entry := dbms_ldap.first_entry(l_session, l_search_results);
+
+        l_user_dn := DBMS_LDAP.GET_DN(l_session, l_entry);
+
+        l_retval := DBMS_LDAP.MSGFREE(l_search_results);
+
+        IF l_debug_on THEN
+          DBMS_OUTPUT.PUT_LINE(RPAD('Get User DN ', 25, ' ') || ': ' ||
+                             l_user_dn );
+        END IF;
+    ELSE
+        IF ad_config_rec.ad_user_domain IS NULL THEN
+          l_user_dn := ad_user_in;
+        ELSE
+          l_user_dn := ad_config_rec.ad_user_domain || '\' || ad_user_in;
+        END IF;
+    END IF;
+
+
+    l_retval := DBMS_LDAP.SIMPLE_BIND_S(l_session, l_user_dn, ad_passwd_in);
+    IF l_retval <> DBMS_LDAP_UTL.SUCCESS THEN
+        l_retval := DBMS_LDAP.UNBIND_S(l_session);
+        RAISE_APPLICATION_ERROR(-20008, 'Wrong password');
+    END IF;
+
+
+    IF l_debug_on THEN
+      DBMS_OUTPUT.PUT_LINE(RPAD('simple_bind_s Returned ', 25, ' ') || ': ' ||
+                         TO_CHAR(l_retval) );
+    END IF;
+
+    -- -------------------------------------------------------------------------
+    -- Unbind from the directory
+    -- -------------------------------------------------------------------------
+    l_retval := DBMS_LDAP.UNBIND_S(l_session);
+
+    IF l_debug_on THEN
+      DBMS_OUTPUT.PUT_LINE('-----------------------------------');
+      DBMS_OUTPUT.PUT_LINE(RPAD('unbind_res Returned ', 25, ' ') || ': ' ||
+                      TO_CHAR(l_retval));
+      DBMS_OUTPUT.PUT_LINE('-----------------------------------');
+    END IF;
+
+    RETURN ('OK');
+  EXCEPTION
+    WHEN OTHERS THEN
+      IF l_session IS NOT NULL THEN
+        l_retval := DBMS_LDAP.UNBIND_S(l_session);
+      END IF;
+
+      IF l_debug_on THEN
+        DBMS_OUTPUT.PUT_LINE('-----------------------------------');
+        DBMS_OUTPUT.PUT_LINE(' Error code : ' || TO_CHAR(SQLCODE));
+        DBMS_OUTPUT.PUT_LINE(' Error Message : ' || SUBSTR(SQLERRM,1, 300));
+        DBMS_OUTPUT.PUT_LINE(' Exception encountered .. exiting');
+        DBMS_OUTPUT.PUT_LINE('-----------------------------------');
+      END IF;
+
+      IF SQLCODE =  -31202 AND LOWER(SQLERRM) LIKE '%invalid credentials%'THEN
+        --DBMS_OUTPUT.PUT_LINE('Invalid Credentials');
+        l_err_ret := 'Err: Invalid Credentials';
+      ELSIF SQLCODE = -31202 AND LOWER(SQLERRM) LIKE '%ldap referral error%' THEN
+        --DBMS_OUTPUT.PUT_LINE('LDAP Referral Error');
+        l_err_ret := 'Err: LDAP Referral Error'; /* Future Use only, not used currently. */
+      ELSIF SQLCODE = -31202 THEN
+        --DBMS_OUTPUT.PUT_LINE(SUBSTR(SQLERRM, 1, 100));
+        l_err_ret := 'Err: ' || SUBSTR(SQLERRM, 1, 100);
+      ELSIF SQLCODE = -31203 THEN
+        --DBMS_OUTPUT.PUT_LINE('Init failed');
+        l_err_ret := 'Err: LDAP Server is not reachable. Please check your network connection.';
+        if is_mobile_server then
+          l_err_ret := offline_auth(ad_user_in, ad_passwd_in);
+        end if;
+      ELSE
+        l_err_ret := 'Err: ' || TO_CHAR(SQLCODE) || ' - ' || SUBSTR(SQLERRM, 1, 100);
+      END IF;
+
+      RETURN l_err_ret;
+
+  END ad_authenticate;
+
+  FUNCTION get_LT_User(ad_user_in IN VARCHAR2, lt_user_out OUT VARCHAR2)
+    RETURN VARCHAR2 IS
+      l_lt_user VARCHAR2(50) := NULL;
+      l_cur_found BOOLEAN;
+      l_return	 VARCHAR2(500);
+      err_msg	   VARCHAR2(100);
+      -- Get LT_USER_ID
+      CURSOR lt_ldap_user_cur(ad_user_in VARCHAR2) IS
+        SELECT user_id
+          FROM system_users
+         WHERE UPPER(ad_user_id) = UPPER(ad_user_in);
+
+      -- Get Error Message;
+      CURSOR valid_errors_cur(err_code_in VARCHAR2) IS
+        SELECT error
+          FROM valid_errors
+         WHERE error_code = err_code_in;
+  BEGIN
+    lt_user_out := NULL;
+
+    OPEN lt_ldap_user_cur(ad_user_in);
+    FETCH lt_ldap_user_cur INTO l_lt_user; -- User ID is a required field, can not be null;
+    l_cur_found := lt_ldap_user_cur%FOUND;
+    CLOSE lt_ldap_user_cur;
+
+    IF l_cur_found THEN -- LT user linked with AD user - found in system_users table.
+      lt_user_out := l_lt_user;
+      l_return := 'OK';
+    ELSE	-- LT User linked with AD user - not found in system_users table.
+      OPEN valid_errors_cur('9413');
+      FETCH valid_errors_cur INTO err_msg;
+      CLOSE valid_errors_cur;
+
+      IF err_msg IS NULL THEN
+        err_msg := 'Err: No error description for error code 9413';
+      ELSE
+        err_msg := 'Err: 9413 - ' || err_msg;
+      END IF;
+      l_return := err_msg;
+    END IF;
+
+    RETURN (l_return);
+  END get_LT_User;
+
+END lt_ldap_interface;
+/

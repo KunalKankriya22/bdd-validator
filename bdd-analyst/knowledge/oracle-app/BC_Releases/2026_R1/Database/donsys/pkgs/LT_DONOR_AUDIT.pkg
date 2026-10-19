@@ -1,0 +1,1541 @@
+/* *********************************************************************************
+  Name              : LT_DONOR_AUDIT.pkg
+  Created By        : Kishore Gummadi
+  Date Of Creation  : 02/12/13
+  Purpose           : This package will populate the AUDIT_QRY_TEMP
+                      table based on values from the history tables.
+
+  Version History
+  
+  Date         Version        Description
+  ---------------------------------------------------------------------------------
+  02/12/2013   01             Initial development - Kishore
+  05/06/2013   02             Added extra logic for MERGED_DONORS table as it does 
+                              not have the DONOR_ID column - Kishore
+  05/09/2013   03             Added code to insert records in AUDIT_QRY_TEMP table
+                              in the same order as defined in the COLUMN_POSITION column
+                              of APPL_REP_COLUMNS table - Kishore
+  06/27/2013                  Removed the "owner" clause from all SQL statements - Kishore
+  07/24/2013   04             IM 9526 - Added extra logic to retrieve information based on NEW_DONOR_ID
+                              column instead of DONOR_ID for MERGED_DONOR_INTERDICTIONS table - Kishore
+
+                              IM 9524 - Added logic to print the DONOR_RESPONSES (where each
+                              TRANSACTION_ID has multiple records) correctly - Kishore
+
+                              IM 9531 - Added logic to print the DONATION_INTERDICTION data (where
+                              the DEFERRAL_ID is not present) by using the TRANSACTION_ID - Kishore
+  08/14/2013   04             IM 9563 - Added logic to change the "select_str" from varchar2 to CLOB
+                              because the string that was being generated in getting too big.
+
+  09/23/2013   05             IM 9382 - Added logic to update the insert date to GMT time if the 
+                              table is DONOR_INTERDICTIONS and if the interdiction code is not FEM or MALE
+
+  10/10/2013   06             IM 9382 - Added logic to update the insert date to GMT time if the 
+                              table is DONATION_INTERDICTIONS and if the interdiction code is not PHIDN or SCIDN
+
+  10/23/2013   07             IM 9382 - Added logic to update the insert date in data details to GMT time if the
+                              table is DONATION_INTERDICTIONS and if the interdiction code is not PHIDN or SCIDN
+
+  11/21/2013   08             IM 9382 - Added logic to update the insert date in data details if the table
+                              is either DONOR_INTERDICTIONS or DONATION_INTERDICTIONS. Also apply GMT
+                              conversion to insert date as it is being converted to local time in the DPQAUDIT form
+
+  12/12/2013   09             IM 9833 - Added logic to not change the date to local chapter time if the column name
+                              is either EXPIRY_DATE or EXP_DATE. 
+
+  12/12/2013   09             IM 9836 - Added code to check for INSERT_DATS and INSERT_DATE columns
+                              in Lab application tables. Also check for INSERT_USER and INSERT_USER_ID columns in
+                              Lab application tables.
+
+  05/10/2016   10	Seshu	Removed the @lab code for merging database work
+
+  *********************************************************************************   */
+
+CREATE OR REPLACE PACKAGE LT_DONOR_AUDIT as
+  Procedure POPULATE_HISTORY(p_chapter_id in varchar2,
+                             p_donor_id in varchar2,
+                             p_from_date in varchar2,
+                             p_to_date in varchar2,
+                             p_unit_id in varchar2,
+                             p_coll_date in varchar2,
+                             p_deferral_id in varchar2,
+                             p_user_id in varchar2,
+                             p_status out varchar2);
+END LT_DONOR_AUDIT;
+/
+
+create or replace package body LT_DONOR_AUDIT as
+
+  procedure POPULATE_HISTORY(p_chapter_id in varchar2,
+                             p_donor_id in varchar2,
+                             p_from_date in varchar2,
+                             p_to_date in varchar2,
+                             p_unit_id in varchar2,
+                             p_coll_date in varchar2,
+                             p_deferral_id in varchar2,
+                             p_user_id in varchar2,
+                             p_status out varchar2) as
+
+    cursor c1 (p_appl_type in varchar2, p_appl_type1 in varchar2) is
+    select table_name
+      from appl_rep_tables
+     where /*owner = 'OPS$DONSYS' -- Commented by Kishore on 06/27/2013. IM 9423
+       and*/ application = p_appl_type
+       and type = 'T'
+     union
+    select table_name
+      from appl_rep_tables
+     where /*owner = 'OPS$DONSYS' -- Commented by Kishore on 06/27/2013. IM 9423
+       and*/ application = p_appl_type1
+       and type = 'T';
+
+    cursor c2 (p_appl_type in varchar2,
+               p_table_name in varchar2) is
+    select column_name, column_position -- Added "column_position"  to "select" statement. Added by Kishore on 05/09/2013. IM 9381
+      from appl_rep_columns
+     where application = p_appl_type
+       and table_name = p_table_name
+     --and owner = 'OPS$DONSYS' -- Commented by Kishore on 06/27/2013. IM 9423
+     order by column_position;
+
+    cursor c3 is
+    select * 
+      from audit_qry_temp
+     where lt_user_id = p_user_id
+      order by table_name, rec_num, col_num; -- Added "col_num"  to "order by" clause. Added by Kishore on 05/09/2013. IM 9381
+
+    -- Added by Kishore on 10/10/2013. IM 9382
+    cursor c4 (p_user in varchar2, p_inter_phidn in varchar2, p_inter_scidn in varchar2) is
+    select distinct rec_num
+      from audit_qry_temp
+     where upper(lt_user_id) = upper(p_user)
+       and table_name = 'DONATION_INTERDICTIONS'
+       and (data_details = 'INTER_CODE: ' || upper(p_inter_phidn) or
+            data_details = 'INTER_CODE: ' || upper(p_inter_scidn));
+    -- End of change
+
+  
+    t_appl_type         appl_rep_tables.application%type;
+    t_appl_type1        appl_rep_tables.application%type;
+    t_appl_type2        appl_rep_tables.application%type;
+    t_start_time        date;
+    t_data_type         all_tab_columns.data_type%type;
+    t_ins_dt_field      varchar2(50);
+    t_ins_usr_field     varchar2(50);
+    t_prog_id_field     varchar2(50);
+    t_donor_id_field    varchar2(50);
+    t_unit_id_field     varchar2(50);
+    t_def_id_field      varchar2(50);
+    t_aud_tbl_name      varchar2(50);
+    t_base_tbl_name     varchar2(50);
+    t_aud_key_field     varchar2(50);
+    t_trans_id_field    varchar2(50);
+    t_from_date         varchar2(20);
+    t_to_date           varchar2(20);
+    t_timezone_active   lt_application_config.time_zone_enabled%type;
+    t_rec_num           audit_qry_temp.rec_num%type;
+    t_table_name        audit_qry_temp.table_name%type;
+    t_col_num           number;
+    t_unit_table_count  number;
+    t_def_table_count   number;
+    t_from_exists       varchar2(1);
+    t_rowid             varchar2(100);
+    t_trans_col_num     number;
+    t_record_num        audit_qry_temp.rec_num%type;
+    t_inter_fem         valid_regint_reasons.inter_code%type;
+    t_inter_male        valid_regint_reasons.inter_code%type;
+    t_inter_phidn       valid_regint_reasons.inter_code%type;
+    t_inter_scidn       valid_regint_reasons.inter_code%type;
+    t_sysdate           date;
+
+    col_str		varchar2(5000);
+    l_str               clob;
+    select_str          clob;
+    insert_str          clob;
+    ins_dt_str          varchar2(1000);
+    ins_usr_str         varchar2(1000);
+    prog_id_str         varchar2(1000);
+    donor_id_str        varchar2(1000);
+    unit_id_str         varchar2(1000);
+    def_id_str          varchar2(1000);
+    aud_tbl_str         varchar2(1000);
+    base_tbl_str        varchar2(1000);
+    aud_key_str         varchar2(1000);
+    trans_id_str        varchar2(1000);
+    cursor_str          varchar2(1000);
+
+    rollback_and_exit   exception;
+
+    type rid_arr_typ is table of varchar2(100) index by pls_integer;
+    rid_array           rid_arr_typ;
+  begin
+    t_start_time := sysdate;
+    -- Delete temporary table
+    begin
+      delete from audit_qry_temp where lt_user_id = p_user_id;
+    end;
+    commit;
+
+    dbms_output.enable(3000000);
+    p_status := 'OK';
+
+    -- Apply time zone changes to date range
+    begin
+      select nvl(time_zone_enabled, 'N')  
+        into t_timezone_active
+        from lt_application_config;
+    exception
+      when no_data_found then
+        t_timezone_active := 'N';
+      when others then
+        p_status := 'Err1: ' || SQLCODE || ' - ' || SQLERRM;
+        raise rollback_and_exit;
+    end;
+
+    /* From Date and To Date are in MM-DD-YYYY format. So no time zone changes necessary for now
+    if t_timezone_active = 'Y' then
+      t_from_date := to_char(lifetrack_timezone_convert.get_gmt_time(p_chapter_id, 
+                                                                     to_date(p_from_date, 'MM-DD-YYYY HH24:MI:SS')), 
+                             'MM-DD-YYYY HH24:MI:SS');
+      t_to_date := to_char(lifetrack_timezone_convert.get_gmt_time(p_chapter_id, 
+                                                                     to_date(p_to_date, 'MM-DD-YYYY HH24:MI:SS')), 
+                             'MM-DD-YYYY HH24:MI:SS');
+    else
+      t_from_date := p_from_date;
+      t_to_date := p_to_date;
+    end if;
+    */
+
+    -- Added by Kishore on 09/23/2013. IM 9382
+    if t_timezone_active = 'Y' then
+      t_sysdate := lifetrack_timezone_convert.get_local_time(p_chapter_id, sysdate);
+    else
+      t_sysdate := sysdate;
+    end if;
+    -- End of change
+
+    t_from_date := p_from_date;
+    t_to_date := p_to_date;
+
+    if p_donor_id is not null then
+      t_appl_type := 'DONOR';
+      if p_unit_id is not null then
+        t_appl_type1 := 'UNIT';
+      elsif p_deferral_id is not null then
+        t_appl_type1 := 'DEFERRAL';
+      else
+        t_appl_type1 := null;
+      end if;
+    elsif p_unit_id is not null then
+      t_appl_type := 'UNIT';
+    elsif p_deferral_id is not null then
+      t_appl_type := 'DEFERRAL';
+    else
+      p_status := 'Application Type is not specified';
+      raise rollback_and_exit;
+    end if;
+    
+    for c1rec in c1 (t_appl_type, t_appl_type1) loop
+      t_ins_dt_field := null;
+      t_ins_usr_field := null;
+      t_prog_id_field := null;
+      t_donor_id_field := null;
+      t_unit_id_field := null;
+      t_def_id_field := null;
+      t_aud_tbl_name := null;
+      t_base_tbl_name := null;
+      t_aud_key_field := null;
+      t_trans_id_field := null;
+      
+      -- Check if the table is an AUDIT
+
+      aud_tbl_str := 'select upper(substr(''' || c1rec.table_name || ''', -5)) from dual';
+
+      begin
+        execute immediate aud_tbl_str into t_aud_tbl_name;
+      exception
+        when no_data_found then
+          t_aud_tbl_name := null;
+        when others then
+          p_status := 'Err2: ' || SQLCODE || ' - ' || SQLERRM;
+          raise rollback_and_exit;
+      end;
+
+      -- If table is an AUDIT, get the base table name
+      if t_aud_tbl_name = 'AUDIT' then
+        base_tbl_str := 'select substr(''' || c1rec.table_name || ''', 1, instr(''' || 
+                                c1rec.table_name || ''', ''_AUDIT'', -1) -1) from dual';
+
+        begin
+          execute immediate base_tbl_str into t_base_tbl_name;
+        exception
+          when no_data_found then
+            t_base_tbl_name := null;
+          when others then
+            p_status := 'Err3: ' || SQLCODE || ' - ' || SQLERRM;
+            raise rollback_and_exit;
+        end;
+
+        -- If the base table exists, then check if it has an audit key
+        if t_base_tbl_name is not null then
+          aud_key_str := 'select column_name from all_tab_columns ' ||
+                         'where table_name = ''' || t_base_tbl_name ||
+                       --''' and column_name = ''AUDIT_KEY'' and owner = ''OPS$DONSYS'''; -- Commented by Kishore on 06/27/2013. IM 9423
+                         ''' and column_name = ''AUDIT_KEY'''; -- Added by Kishore on 06/27/2013. IM 9423
+      
+          begin
+            execute immediate aud_key_str into t_aud_key_field;
+          exception
+            when no_data_found then
+              t_aud_key_field := null;
+            when others then
+              p_status := 'Err4: ' || SQLCODE || ' - ' || SQLERRM;
+              raise rollback_and_exit;
+          end;
+        end if;        
+      end if;
+
+      -- Check if the Insert Date is INSERT_DATE or INSERT_DATS or AUDIT_INSERT_DATS
+      if t_aud_tbl_name = 'AUDIT' then
+        ins_dt_str := 'select column_name from all_tab_columns ' ||
+                      'where table_name = ''' || c1rec.table_name ||
+                    --''' and column_name = ''AUDIT_INSERT_DATS'' and owner = ''OPS$DONSYS'''; -- Commented by Kishore on 06/27/2013. IM 9423
+                      ''' and column_name = ''AUDIT_INSERT_DATS'''; -- Added by Kishore on 06/27/2013. IM 9423
+      
+        begin
+          execute immediate ins_dt_str into t_ins_dt_field;
+        exception
+          when no_data_found then
+            t_ins_dt_field := null;
+          when others then
+            p_status := 'Err5: ' || SQLCODE || ' - ' || SQLERRM;
+            raise rollback_and_exit;
+        end;
+      else
+        ins_dt_str := 'select column_name from all_tab_columns ' ||
+                      'where table_name = ''' || c1rec.table_name ||
+                    --''' and column_name = ''INSERT_DATE'' and owner = ''OPS$DONSYS'''; -- Commented by Kishore on 06/27/2013. IM 9423
+                      ''' and column_name = ''INSERT_DATE'''; -- Added by Kishore on 06/27/2013. IM 9423
+      
+        begin
+          execute immediate ins_dt_str into t_ins_dt_field;
+        exception
+          when no_data_found then
+            t_ins_dt_field := null;
+          when others then
+            p_status := 'Err6: ' || SQLCODE || ' - ' || SQLERRM;
+            raise rollback_and_exit;
+        end;
+
+        if t_ins_dt_field is null then
+          ins_dt_str := 'select column_name from all_tab_columns ' ||
+                        'where table_name = ''' || c1rec.table_name ||
+                      --''' and column_name = ''INSERT_DATS'''; -- Commented by Kishore on 12/12/2013. IM 9836
+                        ''' and column_name in (''INSERT_DATS'', ''INSERT_DATE'')'; -- Added by Kishore on 12/12/2013. IM 9836
+
+          begin
+            execute immediate ins_dt_str into t_ins_dt_field;
+          exception
+            when no_data_found then
+              t_ins_dt_field := null;
+            when others then
+              p_status := 'Err7: ' || SQLCODE || ' - ' || SQLERRM;
+              raise rollback_and_exit;
+          end;
+        end if;
+      end if; -- if t_aud_tbl_name = 'AUDIT' then
+
+      -- Check if the INSERT_USER or USER_ID (in AUDIT table) column is present or not
+      if t_aud_tbl_name = 'AUDIT' then
+        ins_usr_str := 'select column_name from all_tab_columns ' ||
+                       'where table_name = ''' || c1rec.table_name ||
+                     --''' and column_name = ''USER_ID'' and owner = ''OPS$DONSYS'''; -- Commented by Kishore on 06/27/2013. IM 9423
+                       ''' and column_name = ''USER_ID'''; -- Added by Kishore on 06/27/2013. IM 9423
+
+        begin
+          execute immediate ins_usr_str into t_ins_usr_field;
+        exception
+          when no_data_found then
+            t_ins_usr_field := null;
+          when others then
+            p_status := 'Err8: ' || SQLCODE || ' - ' || SQLERRM;
+            raise rollback_and_exit;
+        end;
+      else
+        ins_usr_str := 'select column_name from all_tab_columns ' ||
+                       'where table_name = ''' || c1rec.table_name ||
+                     --''' and column_name = ''INSERT_USER'' and owner = ''OPS$DONSYS'''; -- Commented by Kishore on 06/27/2013. IM 9423
+                       ''' and column_name = ''INSERT_USER'''; -- Added by Kishore on 06/27/2013. IM 9423
+
+        begin
+          execute immediate ins_usr_str into t_ins_usr_field;
+        exception
+          when no_data_found then
+            ins_usr_str := 'select column_name from all_tab_columns ' ||
+                           'where table_name = ''' || c1rec.table_name ||
+                         --''' and column_name = ''INSERT_USER'''; -- Commented by Kishore on 12/12/2013. IM 9836
+                           ''' and column_name in (''INSERT_USER'', ''INSERT_USER_ID'')'; -- Added by Kishore on 12/12/2013. IM 9836
+
+            begin
+              execute immediate ins_usr_str into t_ins_usr_field;
+            exception
+              when no_data_found then
+                t_ins_usr_field := null;
+              when others then
+                p_status := 'Err9: ' || SQLCODE || ' - ' || SQLERRM;
+                raise rollback_and_exit;
+            end;
+          when others then
+            p_status := 'Err10: ' || SQLCODE || ' - ' || SQLERRM;
+            raise rollback_and_exit;
+        end;
+      end if;
+
+      -- Check if the PROGRAM_ID column is present or not
+      prog_id_str := 'select column_name from all_tab_columns ' ||
+                     'where table_name = ''' || c1rec.table_name ||
+                   --''' and column_name = ''PROGRAM_ID'' and owner = ''OPS$DONSYS'''; -- Commented by Kishore on 06/27/2013. IM 9423
+                     ''' and column_name = ''PROGRAM_ID'''; -- Added by Kishore on 06/27/2013. IM 9423
+
+      begin
+        execute immediate prog_id_str into t_prog_id_field;
+      exception
+        when no_data_found then
+          prog_id_str := 'select column_name from all_tab_columns ' ||
+                         'where table_name = ''' || c1rec.table_name ||
+                         ''' and column_name = ''PROGRAM_ID''';
+
+          begin
+            execute immediate prog_id_str into t_prog_id_field;
+          exception
+            when no_data_found then
+              t_prog_id_field := null;
+            when others then
+              p_status := 'Err11: ' || SQLCODE || ' - ' || SQLERRM;
+              raise rollback_and_exit;
+          end;    
+        when others then
+          p_status := 'Err12: ' || SQLCODE || ' - ' || SQLERRM;
+          raise rollback_and_exit;
+      end;
+
+      -- Check if the DONOR_ID column is present or not
+      donor_id_str := 'select column_name from all_tab_columns ' ||
+                      'where table_name = ''' || c1rec.table_name ||
+                    --''' and column_name = ''DONOR_ID'' and owner = ''OPS$DONSYS'''; -- Commented by Kishore on 06/27/2013. IM 9423
+                      ''' and column_name = ''DONOR_ID'''; -- Added by Kishore on 06/27/2013. IM 9423
+
+      begin
+        execute immediate donor_id_str into t_donor_id_field;
+      exception
+        when no_data_found then
+          t_donor_id_field := null;
+        when others then
+          p_status := 'Err13: ' || SQLCODE || ' - ' || SQLERRM;
+          raise rollback_and_exit;
+      end;
+
+      -- Check if the UNIT_ID column is present or not
+      unit_id_str := 'select column_name from all_tab_columns ' ||
+                     'where table_name = ''' || c1rec.table_name ||
+                   --''' and column_name = ''UNIT_ID'' and owner = ''OPS$DONSYS'''; -- Commented by Kishore on 06/27/2013. IM 9423
+                     ''' and column_name = ''UNIT_ID'''; -- Added by Kishore on 06/27/2013. IM 9423
+
+      begin
+        execute immediate unit_id_str into t_unit_id_field;
+      exception
+        when no_data_found then
+          unit_id_str := 'select column_name from all_tab_columns ' ||
+                         'where table_name = ''' || c1rec.table_name ||
+                         ''' and column_name = ''UNIT_ID'' ';
+
+          begin
+            execute immediate unit_id_str into t_unit_id_field;
+          exception
+            when no_data_found then
+              t_unit_id_field := null;
+            when others then
+              p_status := 'Err14: ' || SQLCODE || ' - ' || SQLERRM;
+              raise rollback_and_exit;
+          end;
+        when others then
+          p_status := 'Err14: ' || SQLCODE || ' - ' || SQLERRM;
+          raise rollback_and_exit;
+      end;
+
+      -- Check if the DEFERRAL_ID column is present or not
+      def_id_str := 'select column_name from all_tab_columns ' ||
+                    'where table_name = ''' || c1rec.table_name ||
+                  --''' and column_name = ''DEFERRAL_ID'' and owner = ''OPS$DONSYS'''; -- Commented by Kishore on 06/27/2013. IM 9423
+                    ''' and column_name = ''DEFERRAL_ID'''; -- Added by Kishore on 06/27/2013. IM 9423
+
+      begin
+        execute immediate def_id_str into t_def_id_field;
+      exception
+        when no_data_found then
+          t_def_id_field := null;
+        when others then
+          p_status := 'Err15: ' || SQLCODE || ' - ' || SQLERRM;
+          raise rollback_and_exit;
+      end;
+
+      -- Check if the TRANSACTION_ID column is present or not
+      --if t_unit_id_field is null then -- Commented by Kishore on 07/26/2013. IM 9531
+      if t_unit_id_field is null or t_def_id_field is null then -- Added by Kishore on 07/26/2013. IM 9531
+        if t_aud_tbl_name = 'AUDIT' then
+          trans_id_str := 'select column_name from all_tab_columns ' ||
+                          'where table_name = ''' || t_base_tbl_name ||
+                        --''' and column_name = ''TRANSACTION_ID'' and owner = ''OPS$DONSYS'''; -- Commented by Kishore on 06/27/2013. IM 9423
+                          ''' and column_name = ''TRANSACTION_ID'''; -- Added by Kishore on 06/27/2013. IM 9423
+          
+          begin
+            execute immediate trans_id_str into t_trans_id_field;
+          exception
+            when no_data_found then
+              t_trans_id_field := null;
+            when others then
+              p_status := 'Err19.5: ' || SQLCODE || ' - ' || SQLERRM;
+              raise rollback_and_exit;
+          end;
+        else
+          trans_id_str := 'select column_name from all_tab_columns ' ||
+                          'where table_name = ''' || c1rec.table_name ||
+                        --''' and column_name = ''TRANSACTION_ID'' and owner = ''OPS$DONSYS'''; -- Commented by Kishore on 06/27/2013. IM 9423
+                          ''' and column_name = ''TRANSACTION_ID'''; -- Added by Kishore on 06/27/2013. IM 9423
+          
+          begin
+            execute immediate trans_id_str into t_trans_id_field;
+          exception
+            when no_data_found then
+              t_trans_id_field := null;
+            when others then
+              p_status := 'Err19.5: ' || SQLCODE || ' - ' || SQLERRM;
+              raise rollback_and_exit;
+          end;
+        end if;
+      end if;
+
+      if p_donor_id is not null then
+        if p_unit_id is not null then
+          begin
+            select count(*)
+              into t_unit_table_count
+              from appl_rep_tables
+             where /*owner = 'OPS$DONSYS' -- Commented by Kishore on 06/27/2013. IM 9423
+               and*/ application = 'UNIT'
+               and type = 'T'
+               and table_name = c1rec.table_name;
+          exception
+            when others then
+              p_status := 'Err16: ' || SQLCODE || ' - ' || SQLERRM;
+              raise rollback_and_exit;
+          end;
+
+          if t_unit_table_count > 0 then
+            t_appl_type2 := 'UNIT';
+          else
+            t_appl_type2 := 'DONOR';
+          end if;
+        elsif p_deferral_id is not null then
+          begin
+            select count(*)
+              into t_def_table_count
+              from appl_rep_tables
+             where /*owner = 'OPS$DONSYS' -- Commented by Kishore on 06/27/2013. IM 9423
+               and*/ application = 'DEFERRAL'
+               and type = 'T'
+               and table_name = c1rec.table_name;
+          exception
+            when others then
+              p_status := 'Err17: ' || SQLCODE || ' - ' || SQLERRM;
+              raise rollback_and_exit;
+          end;
+
+          if t_def_table_count > 0 then
+            t_appl_type2 := 'DEFERRAL';
+          else
+            t_appl_type2 := 'DONOR';
+          end if;
+        else
+          t_appl_type2 := 'DONOR';
+        end if;
+      else
+        t_appl_type2 := t_appl_type;
+      end if;
+
+      -- Added by Kishore on 07/25/2013. IM 9524
+      if t_appl_type2 = 'DONOR' then
+        if t_aud_key_field is not null then
+          if t_donor_id_field is not null then
+            cursor_str := 'select rowid ' ||
+                          'from ' || c1rec.table_name || ' ' ||
+                          'where audit_key in (select audit_key ' ||
+                                               'from ' || t_base_tbl_name || ' ' ||
+                                               'where donor_id = ''' || p_donor_id || ''') ';
+          end if;
+        else
+          if c1rec.table_name = 'MERGED_DONORS' then
+            cursor_str := 'select rowid ' ||
+                          'from ' || c1rec.table_name || ' ' ||
+                          'where primary_donor_id = ''' || p_donor_id || ''' ';
+          elsif c1rec.table_name = 'MERGED_DONOR_INTERDICTIONS' then
+            cursor_str := 'select rowid ' ||
+                          'from ' || c1rec.table_name || ' ' ||
+                          'where new_donor_id = ''' || p_donor_id || ''' ';
+          else
+            cursor_str := 'select rowid ' ||
+                          'from ' || c1rec.table_name || ' ' ||
+                          'where donor_id = ''' || p_donor_id || ''' ';
+          end if;
+        end if;
+      elsif t_appl_type2 = 'UNIT' then
+        if t_aud_key_field is not null then
+          if t_unit_id_field is not null then
+            cursor_str := 'select rowid ' ||
+                          'from ' || c1rec.table_name || ' ' ||
+                          'where audit_key in (select audit_key ' ||
+                                               'from ' || t_base_tbl_name || ' ' ||
+                                               'where unit_id = ''' || p_unit_id || ''') ';
+          else
+            if t_trans_id_field is not null then
+              cursor_str := 'select rowid ' ||
+                            'from ' || c1rec.table_name || ' ' ||
+                            'where audit_key in (select audit_key ' ||
+                                                 'from ' || t_base_tbl_name || ' ' ||
+                                                 'where transaction_id in (select transaction_id ' ||
+                                                                           'from donations ' ||
+                                                                           'where unit_id = ''' || p_unit_id || ''')) ';
+            end if;
+          end if;
+        else
+          if t_unit_id_field is not null then
+            cursor_str := 'select rowid ' ||
+                          'from ' || c1rec.table_name || ' ' ||
+                          'where unit_id = ''' || p_unit_id || ''' ';
+          else
+            if t_trans_id_field is not null then
+              cursor_str := 'select rowid ' ||
+                            'from ' || c1rec.table_name || ' ' ||
+                            'where transaction_id in (select transaction_id ' ||
+                                                      'from donations ' ||
+                                                      'where unit_id = ''' || p_unit_id || ''') ';
+            end if;
+          end if; -- if t_unit_id_field is not null then
+        end if; -- if t_aud_key_field is not null then
+      elsif t_appl_type2 = 'DEFERRAL' then
+        if t_aud_key_field is not null then
+          if t_def_id_field is not null then -- Added by Kishore on 07/26/2013. IM 9531
+            cursor_str := 'select rowid ' ||
+                          'from ' || c1rec.table_name || ' ' ||
+                          'where audit_key in (select audit_key ' ||
+                                               'from ' || t_base_tbl_name || ' ' ||
+                                               'where deferral_id = ''' || p_deferral_id || ''') ';
+          else -- Added by Kishore on 07/26/2013. IM 9531
+            -- Added by Kishore on 07/26/2013. IM 9531
+            if t_trans_id_field is not null then
+              cursor_str := 'select rowid ' ||
+                            'from ' || c1rec.table_name || ' ' ||
+                            'where audit_key in (select audit_key ' ||
+                                                 'from ' || t_base_tbl_name || ' ' ||
+                                                 'where transaction_id in (select transaction_id ' ||
+                                                                           'from donations ' ||
+                                                                           'where deferral_id = ''' || p_deferral_id || ''')) ';
+            end if;
+            -- End of change
+          end if; -- Added by Kishore on 07/26/2013. IM 9531
+        else
+          if t_def_id_field is not null then -- Added by Kishore on 07/26/2013. IM 9531
+            cursor_str := 'select rowid ' ||
+                          'from ' || c1rec.table_name || ' ' ||
+                          'where deferral_id = ''' || p_deferral_id || ''' ';
+          else -- Added by Kishore on 07/26/2013. IM 9531
+            -- Added by Kishore on 07/26/2013. IM 9531
+            if t_trans_id_field is not null then
+              cursor_str := 'select rowid ' ||
+                            'from ' || c1rec.table_name || ' ' ||
+                            'where transaction_id in (select transaction_id ' ||
+                                                      'from donations ' ||
+                                                      'where deferral_id = ''' || p_deferral_id || ''') ';
+            end if;
+            -- End of change
+          end if; -- Added by Kishore on 07/26/2013. IM 9531
+        end if;
+      end if; -- if t_appl_type2 = 'DONOR' then
+      --dbms_output.put_line('Cursor SQL: ' || cursor_str);
+
+      execute immediate cursor_str bulk collect into rid_array;
+
+      col_str := null; -- Added by Kishore on 07/25/2013. IM 9524
+      select_str := ' '; -- Added by Kishore on 07/25/2013. IM 9524
+      insert_str := ' '; -- Added by Kishore on 07/25/2013. IM 9524
+      t_from_exists := 'N'; -- Added by Kishore on 07/25/2013. IM 9524
+
+      for i in 1 .. rid_array.count loop
+        --col_str := null; -- Commented by Kishore on 07/25/2013. IM 9524
+        --select_str := null; -- Commented by Kishore on 07/25/2013. IM 9524
+        --insert_str := null; -- Commented by Kishore on 07/25/2013. IM 9524
+        --t_from_exists := 'N'; -- Commented by Kishore on 07/25/2013. IM 9524
+        --dbms_output.put_line('Appl Type: ' || t_appl_type2);
+        --dbms_output.put_line('Table Name: ' || c1rec.table_name);
+        for c2rec in c2 (t_appl_type2, c1rec.table_name) loop
+          begin
+            select data_type 
+              into t_data_type
+              from all_tab_columns
+             where /*owner = 'OPS$DONSYS' -- Commented by Kishore on 06/27/2013. IM 9423
+               and*/ table_name = c1rec.table_name
+               and column_name = c2rec.column_name;
+          exception
+            when no_data_found then
+              begin
+                select data_type 
+                  into t_data_type
+                  from all_tab_columns
+                 where table_name = c1rec.table_name
+                   and column_name = c2rec.column_name;
+              exception
+                when no_data_found then
+                  p_status := 'Data Type not found in Lab for column - ' || c1rec.table_name || '.' || c2rec.column_name;
+                  raise rollback_and_exit;
+                when others then
+                  p_status := 'Err18: ' || SQLCODE || ' - ' || SQLERRM;
+                  raise rollback_and_exit;
+              end;
+            when others then
+              p_status := 'Err19: ' || SQLCODE || ' - ' || SQLERRM;
+              raise rollback_and_exit;
+          end;
+
+          -- Added "column_position"  to "select" string. Added by Kishore on 05/09/2013. IM 9381
+          --select_str := select_str || 'select rownum, ''' || p_user_id || ''', ' || c2rec.column_position || ', '; -- Commented by Kishore on 07/25/2013. IM 9524
+          --select_str := select_str || 'select ' || i || ', ''' || p_user_id || ''', ' || c2rec.column_position || ', '; -- Added by Kishore on 07/25/2013. IM 9524
+          DBMS_LOB.append (select_str, 'select ' || i || ', ''' || p_user_id || ''', ' || c2rec.column_position || ', '); -- Added by Kishore on 07/25/2013. IM 9524
+
+          if t_ins_dt_field is not null then
+            --select_str := select_str || 'nvl(to_char(' || t_ins_dt_field || ', ''MM-DD-YYYY HH24:MI''), ''******''), ';
+            DBMS_LOB.append (select_str, 'nvl(to_char(' || t_ins_dt_field || ', ''MM-DD-YYYY HH24:MI''), ''******''), ');
+          else
+            --select_str := select_str || '''******'', ';
+            DBMS_LOB.append (select_str, '''******'', ');
+          end if;
+
+          if t_ins_usr_field is not null then
+            --select_str := select_str || 'nvl(' || t_ins_usr_field || ', ''******''), ';
+            DBMS_LOB.append (select_str, 'nvl(' || t_ins_usr_field || ', ''******''), ');
+          else
+            --select_str := select_str || '''******'', ';
+            DBMS_LOB.append (select_str, '''******'', ');
+          end if;
+
+          if t_prog_id_field is not null then
+            --select_str := select_str || 'nvl(' || t_prog_id_field || ', ''******''), ';
+            DBMS_LOB.append (select_str, 'nvl(' || t_prog_id_field || ', ''******''), ');
+          else
+            --select_str := select_str || '''******'', ';
+            DBMS_LOB.append (select_str, '''******'', ');
+          end if;
+
+          col_str := null;
+          if upper(t_data_type) = 'DATE' then
+            --if upper(c2rec.column_name) in ('EXPIRY_DATE') then -- Commented by Kishore on 12/12/2013. IM 9833
+            if upper(c2rec.column_name) in ('EXPIRY_DATE', 'EXP_DATE') then -- Added by Kishore on 12/12/2013. IM 9833
+              col_str := '''' || upper(c2rec.column_name) || ': '' || to_char(' || 
+                         c2rec.column_name || ', ''MM-DD-YYYY HH24:MI'') ';
+            else
+              col_str := '''' || upper(c2rec.column_name) || ': '' || 
+                         to_char(decode(to_char(' || c2rec.column_name || ', ''HH24:MI''), ''00:00'', ' || 
+                         c2rec.column_name || ', lifetrack_timezone_convert.get_local_time(''' || 
+                         p_chapter_id || ''', ' || c2rec.column_name || ')' || 
+                         '), ''MM-DD-YYYY HH24:MI'') ';
+            end if;
+          elsif upper(t_data_type) in ('NUMBER', 'INTEGER') then
+            col_str := '''' || upper(c2rec.column_name) || ': '' || to_char(' || 
+                       c2rec.column_name || ') ';
+          else
+            col_str := '''' || upper(c2rec.column_name) || ': '' || ' || 
+                       c2rec.column_name || ' ';
+          end if;
+
+          if col_str is not null then
+            if t_appl_type2 = 'DONOR' then
+              if t_aud_key_field is not null then
+                if t_donor_id_field is not null then -- Added by Kishore on 05/06/2013
+                  t_from_exists := 'Y';
+                  /* -- Commented by Kishore on 07/25/2013. IM 9524
+                  select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                'from ' || c1rec.table_name || ' ' ||
+                                'where audit_key in (select audit_key ' ||
+                                                     'from ' || t_base_tbl_name || ' ' ||
+                                                     'where donor_id = ''' || p_donor_id || ''' ';
+                  -- End of commented section */
+
+                  -- Added by Kishore on 07/25/2013. IM 9524
+                  /*
+                  select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                'from ' || c1rec.table_name || ' ' ||
+                                'where rowid = ''' || rid_array(i) || ''' ' ||
+                                'and audit_key in (select audit_key ' ||
+                                                   'from ' || t_base_tbl_name || ' ' ||
+                                                   'where donor_id = ''' || p_donor_id || ''' ';
+                  */
+                  DBMS_LOB.append (select_str, col_str);
+                  DBMS_LOB.append (select_str, ', ''' || c1rec.table_name || ''' ' ||
+                                               'from ' || c1rec.table_name || ' ' ||
+                                               'where rowid = ''' || rid_array(i) || ''' ' ||
+                                               'and audit_key in (select audit_key ' ||
+                                                                  'from ' || t_base_tbl_name || ' ' ||
+                                                                  'where donor_id = ''' || p_donor_id || ''' ');
+                  -- End of change
+                end if; -- Added by Kishore on 05/06/2013
+              else
+                if c1rec.table_name = 'MERGED_DONORS' then -- Added by Kishore on 05/06/2013
+                  -- Added by Kishore on 05/06/2013
+                  t_from_exists := 'Y';
+                  /*
+                  select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                'from ' || c1rec.table_name || ' ' ||
+                                'where primary_donor_id = ''' || p_donor_id || ''' ' ||
+                                'and rowid = ''' || rid_array(i) || ''' '; -- Added by Kishore on 07/25/2013. IM 9524
+                  */
+                  DBMS_LOB.append (select_str, col_str);
+                  DBMS_LOB.append (select_str, ', ''' || c1rec.table_name || ''' ' ||
+                                               'from ' || c1rec.table_name || ' ' ||
+                                               'where primary_donor_id = ''' || p_donor_id || ''' ' ||
+                                               'and rowid = ''' || rid_array(i) || ''' '); -- Added by Kishore on 07/25/2013. IM 9524
+                  -- End of change
+                elsif c1rec.table_name = 'MERGED_DONOR_INTERDICTIONS' then -- Added by Kishore on 07/24/2013
+                  -- Added by Kishore on 07/24/2013
+                  t_from_exists := 'Y';
+                  /*
+                  select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                'from ' || c1rec.table_name || ' ' ||
+                                'where new_donor_id = ''' || p_donor_id || ''' ' ||
+                                'and rowid = ''' || rid_array(i) || ''' '; -- Added by Kishore on 07/25/2013. IM 9524
+                  */
+                  DBMS_LOB.append (select_str, col_str);
+                  DBMS_LOB.append (select_str, ', ''' || c1rec.table_name || ''' ' ||
+                                               'from ' || c1rec.table_name || ' ' ||
+                                               'where new_donor_id = ''' || p_donor_id || ''' ' ||
+                                               'and rowid = ''' || rid_array(i) || ''' '); -- Added by Kishore on 07/25/2013. IM 9524
+                  -- End of change
+                else -- Added by Kishore on 05/06/2013
+                  t_from_exists := 'Y';
+                  /*
+                  select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                'from ' || c1rec.table_name || ' ' ||
+                                'where donor_id = ''' || p_donor_id || ''' ' ||
+                                'and rowid = ''' || rid_array(i) || ''' '; -- Added by Kishore on 07/25/2013. IM 9524
+                  */
+                  DBMS_LOB.append (select_str, col_str);
+                  DBMS_LOB.append (select_str, ', ''' || c1rec.table_name || ''' ' ||
+                                               'from ' || c1rec.table_name || ' ' ||
+                                               'where donor_id = ''' || p_donor_id || ''' ' ||
+                                               'and rowid = ''' || rid_array(i) || ''' '); -- Added by Kishore on 07/25/2013. IM 9524
+                end if; -- Added by Kishore on 05/06/2013
+              end if;
+            
+              if t_unit_id_field is not null  and p_unit_id is not null then
+                /*
+                select_str := select_str || 'and ' || t_unit_id_field || ' = ''' ||
+                              p_unit_id || ''' ';
+                */
+                DBMS_LOB.append (select_str, 'and ' || t_unit_id_field || ' = ''' ||
+                                             p_unit_id || ''' ');
+              end if;
+            
+              if t_def_id_field is not null and p_deferral_id is not null then
+                /*
+                select_str := select_str || 'and ' || t_def_id_field || ' = ''' ||
+                              p_deferral_id || ''' ';
+                */
+                DBMS_LOB.append (select_str, 'and ' || t_def_id_field || ' = ''' ||
+                                             p_deferral_id || ''' ');
+              end if;
+
+              if t_ins_dt_field is not null and t_from_date is not null and t_to_date is not null then
+                /*
+                select_str := select_str || 'and trunc(' || t_ins_dt_field || ') between to_date(''' ||
+                              t_from_date || ''', ''MM-DD-YYYY HH24:MI:SS'') and to_date(''' ||
+                              t_to_date || ''', ''MM-DD-YYYY HH24:MI:SS'') ';
+                */
+                DBMS_LOB.append (select_str, 'and trunc(' || t_ins_dt_field || ') between to_date(''' ||
+                                             t_from_date || ''', ''MM-DD-YYYY HH24:MI:SS'') and to_date(''' ||
+                                             t_to_date || ''', ''MM-DD-YYYY HH24:MI:SS'') ');
+              end if;
+
+              if t_aud_key_field is not null then
+                --select_str := select_str || ' ) union ';
+                DBMS_LOB.append (select_str, ' ) union ');
+              else
+                --select_str := select_str || ' union ';
+                DBMS_LOB.append (select_str, ' union ');
+              end if;
+            elsif t_appl_type2 = 'UNIT' then
+              --dbms_output.put_line('Audit Key Field: ' || t_aud_key_field);
+              --dbms_output.put_line('Unit ID Field: ' || t_unit_id_field);
+              --dbms_output.put_line('Trans ID Field: ' || t_trans_id_field);
+              if t_aud_key_field is not null then
+                if t_unit_id_field is not null then
+                  t_from_exists := 'Y';
+                  /* -- Commented by Kishore on 07/25/2013. IM 9524
+                  select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                'from ' || c1rec.table_name || ' ' ||
+                                'where audit_key in (select audit_key ' ||
+                                                     'from ' || t_base_tbl_name || ' ' ||
+                                                     'where unit_id = ''' || p_unit_id || ''' ';
+                  -- End of commented section */
+
+                  -- Added by Kishore on 07/25/2013. IM 9524
+                  /*
+                  select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                'from ' || c1rec.table_name || ' ' ||
+                                'where rowid = ''' || rid_array(i) || ''' ' ||
+                                'and audit_key in (select audit_key ' ||
+                                                   'from ' || t_base_tbl_name || ' ' ||
+                                                   'where unit_id = ''' || p_unit_id || ''' ';
+                  */
+                  DBMS_LOB.append (select_str, col_str);
+                  DBMS_LOB.append (select_str, ', ''' || c1rec.table_name || ''' ' ||
+                                               'from ' || c1rec.table_name || ' ' ||
+                                               'where rowid = ''' || rid_array(i) || ''' ' ||
+                                               'and audit_key in (select audit_key ' ||
+                                                                  'from ' || t_base_tbl_name || ' ' ||
+                                                                  'where unit_id = ''' || p_unit_id || ''' ');
+                  -- End of change
+                else
+                  if t_trans_id_field is not null then
+                    t_from_exists := 'Y';
+                    /* -- Commented by Kishore on 07/25/2013. IM 9524
+                    select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                  'from ' || c1rec.table_name || ' ' ||
+                                  'where audit_key in (select audit_key ' ||
+                                                       'from ' || t_base_tbl_name || ' ' ||
+                                                       'where transaction_id in (select transaction_id ' ||
+                                                                                 'from donations ' ||
+                                                                                 'where unit_id = ''' || p_unit_id || ''' ';
+                    -- End of commented section */
+
+                    -- Added by Kishore on 07/25/2013. IM 9524
+                    /*
+                    select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                  'from ' || c1rec.table_name || ' ' ||
+                                  'where rowid = ''' || rid_array(i) || ''' ' ||
+                                  'and audit_key in (select audit_key ' ||
+                                                     'from ' || t_base_tbl_name || ' ' ||
+                                                     'where transaction_id in (select transaction_id ' ||
+                                                                               'from donations ' ||
+                                                                               'where unit_id = ''' || p_unit_id || ''' ';
+                    */
+                    DBMS_LOB.append (select_str, col_str);
+                    DBMS_LOB.append (select_str, ', ''' || c1rec.table_name || ''' ' ||
+                                                 'from ' || c1rec.table_name || ' ' ||
+                                                 'where rowid = ''' || rid_array(i) || ''' ' ||
+                                                 'and audit_key in (select audit_key ' ||
+                                                                    'from ' || t_base_tbl_name || ' ' ||
+                                                                    'where transaction_id in (select transaction_id ' ||
+                                                                                              'from donations ' ||
+                                                                                              'where unit_id = ''' || p_unit_id || ''' ');
+                    -- End of change
+                  end if;
+                end if;
+                   
+                if p_coll_date is not null then
+                  --select_str := select_str || 'and to_char(coll_date, ''MM-DD-YYYY'') = ''' || p_coll_date || ''' ';
+                  DBMS_LOB.append (select_str, 'and to_char(coll_date, ''MM-DD-YYYY'') = ''' || p_coll_date || ''' ');
+                end if;
+                  
+                if t_donor_id_field is not null and p_donor_id is not null then
+                  --select_str := select_str || 'and donor_id = ''' || p_donor_id || ''' ';
+                  DBMS_LOB.append (select_str, 'and donor_id = ''' || p_donor_id || ''' ');
+                end if;
+                  
+                if t_unit_id_field is not null then
+                  --select_str := select_str || ' ) ';
+                  DBMS_LOB.append (select_str, ' ) ');
+                else
+                  if t_trans_id_field is not null then
+                    --select_str := select_str || ' )) ';
+                    DBMS_LOB.append (select_str, ' )) ');
+                  end if;
+                end if;
+              else
+                if t_unit_id_field is not null then
+                  t_from_exists := 'Y';
+                  /*
+                  select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                'from ' || c1rec.table_name || ' ' ||
+                                'where unit_id = ''' || p_unit_id || ''' ' ||
+                                'and rowid = ''' || rid_array(i) || ''' '; -- Added by Kishore on 07/25/2013. IM 9524
+                  */
+                  DBMS_LOB.append (select_str, col_str);
+                  DBMS_LOB.append (select_str, ', ''' || c1rec.table_name || ''' ' ||
+                                               'from ' || c1rec.table_name || ' ' ||
+                                               'where unit_id = ''' || p_unit_id || ''' ' ||
+                                               'and rowid = ''' || rid_array(i) || ''' '); -- Added by Kishore on 07/25/2013. IM 9524
+                else
+                  if t_trans_id_field is not null then
+                    t_from_exists := 'Y';
+                    /* -- Commented by Kishore on 07/25/2013. IM 9524
+                    select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                  'from ' || c1rec.table_name || ' ' ||
+                                  'where transaction_id in (select transaction_id ' ||
+                                                            'from donations ' ||
+                                                            'where unit_id = ''' || p_unit_id || ''' ';
+                    -- End of commented section */
+
+                    -- Added by Kishore on 07/25/2013. IM 9524
+                    /*
+                    select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                  'from ' || c1rec.table_name || ' ' ||
+                                  'where rowid = ''' || rid_array(i) || ''' ' ||
+                                  'and transaction_id in (select transaction_id ' ||
+                                                          'from donations ' ||
+                                                          'where unit_id = ''' || p_unit_id || ''' ';
+                    */
+                    DBMS_LOB.append (select_str, col_str);
+                    DBMS_LOB.append (select_str, ', ''' || c1rec.table_name || ''' ' ||
+                                                 'from ' || c1rec.table_name || ' ' ||
+                                                 'where rowid = ''' || rid_array(i) || ''' ' ||
+                                                 'and transaction_id in (select transaction_id ' ||
+                                                                         'from donations ' ||
+                                                                         'where unit_id = ''' || p_unit_id || ''' ');
+                    -- End of change
+                  end if;
+                end if; -- if t_unit_id_field is not null then
+              
+                if p_coll_date is not null then
+                  --select_str := select_str || 'and to_char(coll_date, ''MM-DD-YYYY'') = ''' || p_coll_date || ''' ';
+                  DBMS_LOB.append (select_str, 'and to_char(coll_date, ''MM-DD-YYYY'') = ''' || p_coll_date || ''' ');
+                end if;
+               
+                if t_donor_id_field is not null and p_donor_id is not null then
+                  --select_str := select_str || 'and donor_id = ''' || p_donor_id || ''' ';
+                  DBMS_LOB.append (select_str, 'and donor_id = ''' || p_donor_id || ''' ');
+                end if;
+              
+                if t_unit_id_field is not null then
+                  null;
+                else
+                  if t_trans_id_field is not null then
+                    --select_str := select_str || ' ) ';
+                    DBMS_LOB.append (select_str, ' ) ');
+                  end if;
+                end if;
+              end if; -- if t_aud_key_field is not null then
+
+              --select_str := select_str || ' union ';
+              DBMS_LOB.append (select_str, ' union ');
+            elsif t_appl_type2 = 'DEFERRAL' then
+              if t_aud_key_field is not null then
+                if t_def_id_field is not null then -- Added by Kishore on 07/26/2013. IM 9531
+                  t_from_exists := 'Y';
+                  /* -- Commented by Kishore on 07/25/2013. IM 9524
+                  select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                'from ' || c1rec.table_name || ' ' ||
+                                'where audit_key in (select audit_key ' ||
+                                                     'from ' || t_base_tbl_name || ' ' ||
+                                                     'where deferral_id = ''' || p_deferral_id || ''' ';
+                  -- End of commented section */
+
+                  -- Added by Kishore on 07/25/2013. IM 9524
+                  /*
+                  select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                'from ' || c1rec.table_name || ' ' ||
+                                'where rowid = ''' || rid_array(i) || ''' ' ||
+                                'and audit_key in (select audit_key ' ||
+                                                   'from ' || t_base_tbl_name || ' ' ||
+                                                   'where deferral_id = ''' || p_deferral_id || ''' ';
+                  */
+                  DBMS_LOB.append (select_str, col_str);
+                  DBMS_LOB.append (select_str, ', ''' || c1rec.table_name || ''' ' ||
+                                               'from ' || c1rec.table_name || ' ' ||
+                                               'where rowid = ''' || rid_array(i) || ''' ' ||
+                                               'and audit_key in (select audit_key ' ||
+                                                                  'from ' || t_base_tbl_name || ' ' ||
+                                                                  'where deferral_id = ''' || p_deferral_id || ''' ');
+                  -- End of change
+                else -- Added by Kishore on 07/26/2013. IM 9531
+                  -- Added by Kishore on 07/26/2013. IM 9531
+                  t_from_exists := 'Y';
+                  /*
+                  select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                'from ' || c1rec.table_name || ' ' ||
+                                'where rowid = ''' || rid_array(i) || ''' ' ||
+                                'and audit_key in (select audit_key ' ||
+                                                   'from ' || t_base_tbl_name || ' ' ||
+                                                   'where transaction_id in (select transaction_id ' ||
+                                                                             'from donations ' ||
+                                                                             'where deferral_id = ''' || p_deferral_id || ''' ';
+                  */
+                  DBMS_LOB.append (select_str, col_str);
+                  DBMS_LOB.append (select_str, ', ''' || c1rec.table_name || ''' ' ||
+                                               'from ' || c1rec.table_name || ' ' ||
+                                               'where rowid = ''' || rid_array(i) || ''' ' ||
+                                               'and audit_key in (select audit_key ' ||
+                                                                  'from ' || t_base_tbl_name || ' ' ||
+                                                                  'where transaction_id in (select transaction_id ' ||
+                                                                                            'from donations ' ||
+                                                                                            'where deferral_id = ''' || p_deferral_id || ''' ');
+                  -- End of change
+                end if; -- Added by Kishore on 07/26/2013. IM 9531
+
+                -- Added by Kishore on 07/26/2013. IM 9531
+                if t_donor_id_field is not null then
+                  if p_donor_id is not null then
+                    /*
+                    select_str := select_str || 'and donor_id = ''' ||
+                                  p_donor_id || ''' ';
+                    */
+                    DBMS_LOB.append (select_str, 'and donor_id = ''' ||
+                                                 p_donor_id || ''' ');
+                  end if;
+                end if;
+
+                if t_def_id_field is not null then
+                  --select_str := select_str || ' ) ';
+                  DBMS_LOB.append (select_str, ' ) ');
+                else
+                  if t_trans_id_field is not null then
+                    --select_str := select_str || ' )) ';
+                    DBMS_LOB.append (select_str, ' )) ');
+                  end if;
+                end if;
+                -- End of change
+              else -- if t_aud_key_field is not null then
+                if t_def_id_field is not null then -- Added by Kishore on 07/26/2013. IM 9531
+                  t_from_exists := 'Y';
+                  /*
+                  select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                'from ' || c1rec.table_name || ' ' ||
+                                'where deferral_id = ''' || p_deferral_id || ''' ' ||
+                                'and rowid = ''' || rid_array(i) || ''' '; -- Added by Kishore on 07/25/2013. IM 9524
+                  */
+                  DBMS_LOB.append (select_str, col_str);
+                  DBMS_LOB.append (select_str, ', ''' || c1rec.table_name || ''' ' ||
+                                               'from ' || c1rec.table_name || ' ' ||
+                                               'where deferral_id = ''' || p_deferral_id || ''' ' ||
+                                               'and rowid = ''' || rid_array(i) || ''' '); -- Added by Kishore on 07/25/2013. IM 9524
+                else -- Added by Kishore on 07/26/2013. IM 9531
+                  -- Added by Kishore on 07/26/2013. IM 9531
+                  if t_trans_id_field is not null then
+                    t_from_exists := 'Y';
+                    /*
+                    select_str := select_str || col_str || ', ''' || c1rec.table_name || ''' ' ||
+                                  'from ' || c1rec.table_name || ' ' ||
+                                  'where rowid = ''' || rid_array(i) || ''' ' ||
+                                  'and transaction_id in (select transaction_id ' ||
+                                                          'from donations ' ||
+                                                          'where deferral_id = ''' || p_deferral_id || ''' ';
+                    */
+                    DBMS_LOB.append (select_str, col_str);
+                    DBMS_LOB.append (select_str, ', ''' || c1rec.table_name || ''' ' ||
+                                                 'from ' || c1rec.table_name || ' ' ||
+                                                 'where rowid = ''' || rid_array(i) || ''' ' ||
+                                                 'and transaction_id in (select transaction_id ' ||
+                                                                         'from donations ' ||
+                                                                         'where deferral_id = ''' || p_deferral_id || ''' ');
+                  end if;
+                  -- End of change
+                end if; -- Added by Kishore on 07/26/2013. IM 9531
+
+                -- Added by Kishore on 07/26/2013. IM 9531
+                if t_donor_id_field is not null then
+                  if p_donor_id is not null then
+                    /*
+                    select_str := select_str || 'and donor_id = ''' ||
+                                  p_donor_id || ''' ';
+                    */
+                    DBMS_LOB.append (select_str, 'and donor_id = ''' ||
+                                                 p_donor_id || ''' ');
+                  end if;
+                end if;
+
+                if t_def_id_field is not null then
+                  null;
+                else
+                  if t_trans_id_field is not null then
+                    --select_str := select_str || ' ) ';
+                    DBMS_LOB.append (select_str, ' ) ');
+                  end if;
+                end if;
+                -- End of change
+              end if; -- if t_aud_key_field is not null then
+
+              --select_str := select_str || ' union '; -- Added by Kishore on 07/26/2013. IM 9531
+              DBMS_LOB.append (select_str, ' union '); -- Added by Kishore on 07/26/2013. IM 9531
+            
+              /* -- Commented by Kishore on 07/26/2013. IM 9531
+              if t_donor_id_field is not null then
+                if p_donor_id is not null then
+                  select_str := select_str || 'and donor_id = ''' ||
+                                p_donor_id || ''' ';
+                end if;
+              end if;
+
+              if t_trans_id_field is not null then
+                select_str := select_str || ' ) ';
+              end if;
+              -- End of commented section */
+            end if; -- if t_appl_type2 = 'DONOR' then
+          end if; -- if col_str is not null then
+        end loop; -- c2rec loop
+      end loop; -- for i in 1 .. rid_array.count loop
+
+      select_str := rtrim(rtrim(rtrim(ltrim(select_str)), 'union'));
+      if c1rec.table_name = 'UTRS' then
+        null;
+        --dbms_output.put_line('Length of Select String: ' || length(select_str));
+        /*
+        l_str := select_str;
+        loop
+          exit when l_str is null;
+          dbms_output.put_line( substr( l_str, 1, 1000));
+          l_str := substr( l_str, 1001);
+        end loop;
+        */
+        --dbms_output.put_line('Select String: ' || select_str);
+      end if;
+
+      if select_str is not null and t_from_exists = 'Y' then
+        -- Added "col_num"  to "insert" statement. Added by Kishore on 05/09/2013. IM 9381        
+        insert_str := 'insert into audit_qry_temp ' ||
+                      '(rec_num, lt_user_id, col_num, insert_date, insert_user, program_id, data_details, table_name) ' ||
+                      select_str;
+        
+        begin
+          execute immediate insert_str;
+        exception
+          when others then
+            --dbms_output.put_line('Insert String: ' || substr(insert_str, 1, 10000));
+            p_status := 'Err20: ' || SQLCODE || ' - ' || SQLERRM;
+            raise rollback_and_exit;
+        end;
+      end if;
+        
+      commit;                     
+    end loop; -- c1rec loop
+
+    commit;
+
+    t_rec_num := null;
+    t_table_name := null;
+    t_col_num := 0;
+    t_trans_col_num := 0;
+    for c3rec in c3 loop
+      if c3rec.rec_num = nvl(t_rec_num, -1) and c3rec.table_name = nvl(t_table_name, '*') then
+        null;
+      else
+        t_col_num := 1;
+      end if;
+
+      -- Added by Kishore on 07/25/2013. IM 9524
+      -- Check if the table is an AUDIT
+      aud_tbl_str := 'select upper(substr(''' || c3rec.table_name || ''', -5)) from dual';
+
+      begin
+        execute immediate aud_tbl_str into t_aud_tbl_name;
+      exception
+        when no_data_found then
+          t_aud_tbl_name := null;
+        when others then
+          p_status := 'Err2.1: ' || SQLCODE || ' - ' || SQLERRM;
+          raise rollback_and_exit;
+      end;
+
+      -- If table is an AUDIT, get the base table name
+      if t_aud_tbl_name = 'AUDIT' then
+        base_tbl_str := 'select substr(''' || c3rec.table_name || ''', 1, instr(''' || 
+                                c3rec.table_name || ''', ''_AUDIT'', -1) -1) from dual';
+
+        begin
+          execute immediate base_tbl_str into t_base_tbl_name;
+        exception
+          when no_data_found then
+            t_base_tbl_name := null;
+          when others then
+            p_status := 'Err3.1: ' || SQLCODE || ' - ' || SQLERRM;
+            raise rollback_and_exit;
+        end;
+
+        -- If the base table exists, then check if it has an audit key
+        if t_base_tbl_name is not null then
+          aud_key_str := 'select column_name from all_tab_columns ' ||
+                         'where table_name = ''' || t_base_tbl_name ||
+                         ''' and column_name = ''AUDIT_KEY''';
+      
+          begin
+            execute immediate aud_key_str into t_aud_key_field;
+          exception
+            when no_data_found then
+              t_aud_key_field := null;
+            when others then
+              p_status := 'Err4.1: ' || SQLCODE || ' - ' || SQLERRM;
+              raise rollback_and_exit;
+          end;
+        end if;        
+      end if;
+
+      -- Check if the TRANSACTION_ID column is present or not
+      if t_aud_tbl_name = 'AUDIT' then
+        trans_id_str := 'select column_name from all_tab_columns ' ||
+                        'where table_name = ''' || t_base_tbl_name ||
+                        ''' and column_name = ''TRANSACTION_ID''';
+          
+        begin
+          execute immediate trans_id_str into t_trans_id_field;
+        exception
+          when no_data_found then
+            t_trans_id_field := null;
+          when others then
+            p_status := 'Err5.1: ' || SQLCODE || ' - ' || SQLERRM;
+            raise rollback_and_exit;
+        end;
+      else
+        trans_id_str := 'select column_name from all_tab_columns ' ||
+                        'where table_name = ''' || c3rec.table_name ||
+                        ''' and column_name = ''TRANSACTION_ID''';
+        
+        begin
+          execute immediate trans_id_str into t_trans_id_field;
+        exception
+          when no_data_found then
+            t_trans_id_field := null;
+          when others then
+            p_status := 'Err5.2: ' || SQLCODE || ' - ' || SQLERRM;
+            raise rollback_and_exit;
+        end;
+      end if;
+
+      if t_trans_id_field is not null then
+        if c3rec.table_name = nvl(t_table_name, '*') then
+          null;
+        else
+          t_trans_col_num := 1;
+        end if;
+
+        begin
+          update audit_qry_temp
+             set col_num = t_trans_col_num,
+                 rec_num = 1
+           where rec_num = c3rec.rec_num
+             and insert_date = c3rec.insert_date
+             and upper(insert_user) = upper(c3rec.insert_user)
+             and upper(program_id) = upper(c3rec.program_id)
+             and upper(table_name) = upper(c3rec.table_name)
+             and upper(data_details) = upper(c3rec.data_details)
+             and upper(lt_user_id) = upper(c3rec.lt_user_id);
+        exception
+          when others then
+            p_status := 'Err21: ' || SQLCODE || ' - ' || SQLERRM;
+            raise rollback_and_exit;
+        end;
+      else
+      -- End of change
+
+        begin
+          update audit_qry_temp
+             set col_num = t_col_num
+           where rec_num = c3rec.rec_num
+             and insert_date = c3rec.insert_date
+             and upper(insert_user) = upper(c3rec.insert_user)
+             and upper(program_id) = upper(c3rec.program_id)
+             and upper(table_name) = upper(c3rec.table_name)
+             and upper(data_details) = upper(c3rec.data_details)
+             and upper(lt_user_id) = upper(c3rec.lt_user_id);
+        exception
+          when others then
+            p_status := 'Err22: ' || SQLCODE || ' - ' || SQLERRM;
+            raise rollback_and_exit;
+        end;
+      end if; -- Added by Kishore on 07/25/2013. IM 9524
+        
+      t_rec_num := c3rec.rec_num;
+      t_table_name := c3rec.table_name;
+      t_col_num := t_col_num + 1;
+      t_trans_col_num := t_trans_col_num + 1; -- Added by Kishore on 07/25/2013. IM 9524
+    end loop;
+
+    begin
+      update audit_qry_temp
+         set details_flag = 'Y'
+       where upper(lt_user_id) = upper(p_user_id);
+    exception
+      when others then
+        p_status := 'Err22: ' || SQLCODE || ' - ' || SQLERRM;
+        raise rollback_and_exit;
+    end;
+
+    commit;
+
+    /* -- Commented by Kishore on 11/21/2013. IM 9382
+    -- Added by Kishore on 09/23/2013. IM 9382
+    begin
+      select inter_code
+        into t_inter_fem 
+        from valid_regint_reasons 
+       where inter_reason = 'INTRFEMALE'
+         and t_sysdate between eff_date and nvl(term_date, sysdate + 10);
+    exception
+      when no_data_found then
+        t_inter_fem := null;
+      when others then
+        p_status := 'Err221: ' || SQLCODE || ' - ' || SQLERRM;
+        raise rollback_and_exit;
+    end;
+
+    begin
+      select inter_code
+        into t_inter_male
+        from valid_regint_reasons 
+       where inter_reason = 'INTRMALE'
+         and t_sysdate between eff_date and nvl(term_date, sysdate + 10);
+    exception
+      when no_data_found then
+        t_inter_male := null;
+      when others then
+        p_status := 'Err222: ' || SQLCODE || ' - ' || SQLERRM;
+        raise rollback_and_exit;
+    end;
+
+    if t_inter_fem is not null and t_inter_male is not null then
+      begin
+        select rec_num
+          into t_record_num
+          from audit_qry_temp
+         where upper(lt_user_id) = upper(p_user_id)
+           and table_name = 'DONOR_INTERDICTIONS'
+           and (data_details = 'INTER_CODE: ' || upper(t_inter_fem) or
+                data_details = 'INTER_CODE: ' || upper(t_inter_male));
+      exception
+        when no_data_found then
+          t_record_num := null;
+        when others then
+          p_status := 'Err223: ' || SQLCODE || ' - ' || SQLERRM;
+          raise rollback_and_exit;
+      end;
+
+      if t_record_num is not null then
+        begin
+          update audit_qry_temp
+             set insert_date = to_char(lifetrack_timezone_convert.get_gmt_time(p_chapter_id, to_date(insert_date, 'MM-DD-YYYY HH24:MI')))
+           where upper(lt_user_id) = upper(p_user_id)
+             and table_name = 'DONOR_INTERDICTIONS'
+             and rec_num != t_record_num;
+        exception
+          when others then
+            p_status := 'Err224: ' || SQLCODE || ' - ' || SQLERRM;
+            raise rollback_and_exit;
+        end;
+      end if;
+    end if;
+
+    commit;
+    -- End of change
+
+    -- Added by Kishore on 10/10/2013. IM 9382
+    begin
+      select inter_code
+        into t_inter_phidn
+        from valid_regint_reasons 
+       where inter_reason = 'NOPHYSICAL'
+         and t_sysdate between eff_date and nvl(term_date, sysdate + 10);
+    exception
+      when no_data_found then
+        t_inter_fem := null;
+      when others then
+        p_status := 'Err225: ' || SQLCODE || ' - ' || SQLERRM;
+        raise rollback_and_exit;
+    end;
+
+    begin
+      select inter_code
+        into t_inter_scidn 
+        from valid_regint_reasons 
+       where inter_reason = 'NOSCREENER'
+         and t_sysdate between eff_date and nvl(term_date, sysdate + 10);
+    exception
+      when no_data_found then
+        t_inter_fem := null;
+      when others then
+        p_status := 'Err226: ' || SQLCODE || ' - ' || SQLERRM;
+        raise rollback_and_exit;
+    end;
+
+    if t_inter_phidn is not null and t_inter_scidn is not null then
+      for c4rec in c4 (p_user_id, t_inter_phidn, t_inter_scidn) loop      
+        if c4rec.rec_num is not null then
+          -- Added by Kishore on 10/23/2013. IM 9382
+          begin
+            update audit_qry_temp
+               set data_details = 'INSERT_DATE: ' || insert_date
+             where upper(lt_user_id) = upper(p_user_id)
+               and table_name = 'DONATION_INTERDICTIONS'
+               and rec_num = c4rec.rec_num
+               and data_details like 'INSERT_DATE: %';
+          exception
+            when others then
+              p_status := 'Err228: ' || SQLCODE || ' - ' || SQLERRM;
+              raise rollback_and_exit;
+          end;
+          -- End of change
+
+          begin
+            update audit_qry_temp
+               set insert_date = to_char(lifetrack_timezone_convert.get_gmt_time(p_chapter_id, to_date(insert_date, 'MM-DD-YYYY HH24:MI')), 'MM-DD-YYYY HH24:MI')
+             where upper(lt_user_id) = upper(p_user_id)
+               and table_name = 'DONATION_INTERDICTIONS'
+               and rec_num = c4rec.rec_num;
+          exception
+            when others then
+              p_status := 'Err229: ' || SQLCODE || ' - ' || SQLERRM;
+              raise rollback_and_exit;
+          end;
+        end if;
+      end loop;
+    end if;
+
+    commit;
+    -- End of change
+    -- End of commented section (11/21/2013) */
+
+    -- Added by Kishore on 11/21/2013. IM 9382
+    begin
+      update audit_qry_temp
+         set data_details = 'INSERT_DATE: ' || insert_date
+       where upper(lt_user_id) = upper(p_user_id)
+         and table_name in ('DONATION_INTERDICTIONS', 'DONOR_INTERDICTIONS')
+         and data_details like 'INSERT_DATE: %';
+    exception
+      when others then
+        p_status := 'Err230: ' || SQLCODE || ' - ' || SQLERRM;
+        raise rollback_and_exit;
+    end;
+
+    begin
+      update audit_qry_temp
+         set insert_date = to_char(lifetrack_timezone_convert.get_gmt_time(p_chapter_id, to_date(insert_date, 'MM-DD-YYYY HH24:MI')), 'MM-DD-YYYY HH24:MI')
+      where upper(lt_user_id) = upper(p_user_id)
+        and table_name in ('DONATION_INTERDICTIONS', 'DONOR_INTERDICTIONS');
+    exception
+      when others then
+        p_status := 'Err231: ' || SQLCODE || ' - ' || SQLERRM;
+        raise rollback_and_exit;
+    end;
+
+    commit;
+    -- End of change (11/21/2013)
+  exception
+    when rollback_and_exit then
+      rollback;
+      delete from audit_qry_temp where lt_user_id = p_user_id;
+      commit;
+  end POPULATE_HISTORY;
+
+end LT_DONOR_AUDIT;
+
+/
+
+Create or Replace Public Synonym LT_DONOR_AUDIT for OPS$DONSYS.LT_DONOR_AUDIT;
+
+show errors
+

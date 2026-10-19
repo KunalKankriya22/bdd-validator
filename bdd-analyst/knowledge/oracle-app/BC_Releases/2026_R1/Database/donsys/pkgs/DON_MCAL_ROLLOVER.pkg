@@ -1,0 +1,730 @@
+CREATE OR REPLACE PACKAGE DON_MCAL_ROLLOVER  IS
+ g_curdate date := trunc(sysdate) ;
+ g_run_number number := 0;
+ g_chapter_id varchar2(4) ;
+ g_log_seq number := 1 ;
+ procedure decide_rollover (parm_chapter_id in varchar2) ;
+ procedure crt_drive_info(hold_reason_code in varchar2) ;
+ procedure get_base_date(base_date out date) ;
+ procedure get_preferences ;
+ procedure estimate_resources ;
+ procedure decode_preferences (i1 in number,base_date in date);
+ procedure sort_dates ;
+ procedure check_resources (feasible_flag out varchar2) ;
+ procedure add_log_entry(sponsor_id in varchar2,
+                        future_drive_date in date,
+                        log_type in varchar2,
+                        log_text in varchar2,
+                        user_display in varchar2) ;
+END DON_MCAL_ROLLOVER ;
+/
+CREATE OR REPLACE PACKAGE BODY DON_MCAL_ROLLOVER  IS
+ cur_spon_id varchar2(10) ;
+
+ month_pref1 varchar2(100) ;
+ month_pref2 varchar2(100) ;
+ month_pref3 varchar2(100) ;
+ month_pref4 varchar2(100) ;
+ month_pref5 varchar2(100) ;
+ month_pref6 varchar2(100) ;
+ month_pref7 varchar2(100) ;
+ month_pref8 varchar2(100) ;
+ month_pref9 varchar2(100) ;
+ month_pref10 varchar2(100) ;
+ month_pref11 varchar2(100) ;
+ month_pref12 varchar2(100) ;
+
+ pref_proj_draw number ;
+ pref_proj_show number ;
+
+ pref_start_time date ;
+ pref_end_time date ;
+
+ pref_drive_type varchar2(5) ;
+ pref_open_drive_ind varchar2(5) ;
+ pref_location_id varchar2(10) ;
+
+ staff_for_this_drive number ;
+ van_for_this_drive number ;
+ coach_for_this_drive number ;
+ this_date date ;
+
+ far_out_months number ;
+
+ first_date_of_month date ;
+ first_day_of_month varchar2(10) ;
+ last_date_of_month date ;
+ last_day_of_month varchar2(10) ;
+ day_pref_string varchar2(7) ;
+ this_day varchar2(9) ;
+ day_pref varchar2(1) ;
+ counter number := 1;
+ date_count number ;
+ number_of_drives number ;
+ drive_days number ;
+
+ efficiency_range number ;
+
+  TYPE DateListTabTyp IS TABLE OF number
+      INDEX BY BINARY_INTEGER;
+  DateList DateListTabTyp ;
+PROCEDURE decide_rollover (parm_chapter_id in varchar2) is
+ base_date date ;
+
+ travel_time number ;
+ total_hrs number ;
+ proj_cost number ;
+
+ max_drives_allowed number ;
+ maxcpu number ;
+ staff_rate number ;
+ max_hours number ;
+
+ feasible_flag varchar2(10) ;
+
+ /*---------------------------------------------------------------------------
+ Get the sponsors who had a drive after the last time rollover program was 
+ done, and who has rollover preferences.
+ ---------------------------------------------------------------------------*/
+ cursor c1 is select distinct sponsor_id from drive_sponsors
+ where drive_sponsors.drive_id in
+       (select drive_id from drives
+        where  drive_date > (select trunc(nvl(last_rollover_done,sysdate))
+                             from rollover_log
+                             where chapter_id = g_chapter_id )
+         and   drive_date <= trunc(sysdate) + .99999
+         and   drive_type in ('I','C')
+         and   status = 'CNFRM'
+         and   chapter_id = g_chapter_id)
+  and  chapter_id = g_chapter_id
+  and  exists (select 'x' from rollover_preferences
+               where sponsor_id = drive_sponsors.sponsor_id
+                 and sysdate between eff_date and nvl(term_date,sysdate+1)) ;
+
+
+ /*-- Get the different parameters --*/
+  cursor c2 is
+    select parameter_code,to_number(parameter_value) parmval
+    from valid_parameters
+    where parameter_code in ('MAXDR','EFRNG','MPCPU','SRATE','MAXHR','DRDAT')
+     and  chapter_id = g_chapter_id ;
+
+
+BEGIN
+  dbms_output.enable(1000000);
+
+ g_chapter_id := parm_chapter_id ;
+
+  /*-- Get run number --*/
+  begin
+    select nvl(max(run_number),0)+1 into g_run_number
+     from  rollover_run_log
+     where rollover_run_date = trunc(sysdate)
+     and   chapter_id = g_chapter_id ;
+  exception
+    when others then 
+        add_log_entry(null,null,null,'Error in getting run number  - Err code '||to_char(sqlcode)||' '||sqlerrm,'Y') ;
+        return ;
+  end ;
+
+ for c2rec in c2 loop
+    if c2rec.parameter_code = 'MAXDR' then
+         max_drives_allowed := c2rec.parmval ;
+    elsif c2rec.parameter_code = 'EFRNG' then
+         efficiency_range := c2rec.parmval ;
+    elsif c2rec.parameter_code = 'MPCPU' then
+         maxcpu := c2rec.parmval ;
+    elsif c2rec.parameter_code = 'SRATE' then
+         staff_rate := c2rec.parmval ;
+    elsif c2rec.parameter_code = 'MAXHR' then
+         max_hours := c2rec.parmval ;
+    elsif c2rec.parameter_code = 'DRDAT' then
+         drive_days := c2rec.parmval ;
+    end if ;
+ end loop ;
+for c1rec in c1 loop
+ cur_spon_id := c1rec.sponsor_id ;
+ add_log_entry(cur_spon_id,null,null,'Sponsor selected for rollover - '||cur_spon_id,'Y') ;
+ get_base_date(base_date) ;
+ add_log_entry(cur_spon_id,null,null,'Base Date decided - '||to_char(base_date,'MM-DD-YY'),'Y') ;
+ get_preferences ;
+ add_log_entry(cur_spon_id,null,null,'Preferences selected successfully','Y') ;
+ estimate_resources ;
+ add_log_entry(cur_spon_id,null,null,'Resources estimated successfully','Y') ;
+
+ for i1 in 0..far_out_months loop
+
+   if (add_months(base_date,i1) - sysdate)/30 > far_out_months then
+       exit ;
+   end if ;
+
+   if DateList.count > 0 then
+      DateList.delete ;
+      counter := 1;
+   end if ;         
+
+   decode_preferences(i1,base_date) ;
+   add_log_entry(cur_spon_id,null,null,'Preference decoding done successfully for '||to_char(add_months(base_date,i1),'MONTH'),'Y') ;
+
+   if DateList.count > 0 then
+      sort_dates ;   -- Sort the dates in ascending order
+   else
+      date_count := 0 ;
+   end if ;
+
+   for l in 1..DateList.count loop
+        add_log_entry(cur_spon_id,null,null,'Date selected in list:'||to_char(DateList(l)),'Y') ;
+   end loop ;
+
+   -- Find the first suitable date
+   for m in 1..date_count loop
+       this_date := to_date(lpad(to_char(DateList(m)),2,'0')||to_char(add_months(base_date,i1),'MMYYYY'),'DDMMYYYY') ;
+        add_log_entry(cur_spon_id,null,null,'Considering date from list:'||to_char(this_date,'MM-DD-YY'),'Y') ;
+       if this_date < base_date then -- Can be less if current month under insepection is same as base date
+          goto next_iter ;
+       end if ;
+  ---- Check drive feasibility
+       feasible_flag := 'Y' ;
+       check_resources(feasible_flag) ;  -- Check resources
+       if feasible_flag != 'Y' then
+          goto next_iter ;
+       end if ;
+  ---- Check for number of drives on that day
+ if number_of_drives >= max_drives_allowed then
+        crt_drive_info('TMNDR') ;    -- Create drive with hold_reason 'TMNDR' ;
+        exit ;
+ end if ;
+  -- Check for category rules
+--     check_category_rules(feasible_flag) ;
+--     if feasible_flag = 'N' then  
+--        crt_drive_info('CATRL') ;    -- Create drive with hold_reason 'CATRL' ;
+--        exit ;
+--     end if ;
+
+  -- Check projected cost
+  -- 60 as setup/breakdown time will be parameterized
+   total_hrs := (pref_end_time - pref_start_time) * 24 + (travel_time/60) + 60 ;
+   begin
+     select nvl(travel_time,0) into travel_time
+     from locations
+     where location_id = pref_location_id ;
+   end ;
+   proj_cost := (total_hrs * staff_for_this_drive * staff_rate) / staff_for_this_drive ;
+   if proj_cost >= maxcpu then 
+         crt_drive_info('OCOST') ;    -- Create drive with hold_reason 'OCOST' ;
+         exit ;
+   end if ;
+   -- Check maximum hours
+   if total_hrs > max_hours then null;
+         crt_drive_info('DMXHR') ;
+         exit ;
+   end if ;
+   crt_drive_info(null) ;
+   exit ;
+
+   <<next_iter>>
+       null ;
+   end loop ;
+ end loop ; -- for loop (far_out_months)
+end loop ;  -- End cursor for loop
+-- Remember to update the date field last_rollover_done
+ begin
+   update rollover_log set last_rollover_done=sysdate
+   where chapter_id=g_chapter_id ;
+   if sql%notfound then
+        add_log_entry(null,null,null,'No data found while trying to update ROLLOVER_LOG','Y') ;
+   end if ;
+ exception
+   when others then
+        add_log_entry(null,null,null,'Error in updating ROLLOVER_LOG - Err code - '||to_char(sqlcode)||' '||sqlerrm,'Y') ;
+ end ;
+exception
+  when others then dbms_output.put_line('Raised Error') ;
+END decide_rollover;
+PROCEDURE crt_drive_info (hold_reason_code in varchar2) is
+     err_flag varchar2(1) ;
+     err_msg  varchar2(100) ;
+     new_id varchar2(10) ;
+     v_territory_id varchar2(10) ;
+     v_recruiter_id varchar2(6) ;
+     v_contact_id varchar2(10) ;
+     user_def exception ;
+  begin
+    don_common_pack.generate_new_id('DRV',new_id,err_flag,err_msg) ;
+    if err_flag = 'Y' then
+        add_log_entry(cur_spon_id,null,null,err_msg,'Y') ;
+        raise user_def ;
+    end if ;
+
+    begin
+      select territory_id into v_territory_id
+      from sponsors
+      where sponsor_id = cur_spon_id
+       and  chapter_id = 'WAD' ;
+      if v_territory_id is null then
+        add_log_entry(cur_spon_id,this_date,null,'Territory ID not specified for sponsor','Y') ;
+        return ;
+      end if ;
+    exception
+      when others then
+        add_log_entry(cur_spon_id,this_date,null,'Error in selecting territory - Err code-'||to_char(sqlcode)||' '||sqlerrm,'Y') ;
+        raise ;
+    end ;
+    begin
+      select recruiter_id into v_recruiter_id
+      from territory_assignments
+      where territory_id = v_territory_id
+       and  chapter_id = 'WAD'
+       and  sysdate between eff_date and nvl(term_date,sysdate+1) ;
+    exception
+      when no_data_found then 
+        add_log_entry(cur_spon_id,this_date,null,'No recruiter is assigned to this territory','Y') ;
+        raise ;
+      when others then 
+        add_log_entry(cur_spon_id,this_date,null,'Error in selecting from territory_assignments - Err code-'||to_char(sqlcode)||' '||sqlerrm,'Y') ;
+        raise ;
+    end ;
+
+     begin
+        select contact_id into v_contact_id
+        from sponsor_contacts
+        where sponsor_id = cur_spon_id
+         and  chapter_id = 'WAD'
+         and  contact_type = 'DC'
+         and  rownum = 1 ;
+     exception
+         when no_data_found then 
+                add_log_entry(cur_spon_id,this_date,null,'No contact found for this sponsor','Y') ;
+                raise ;
+         when others then 
+                add_log_entry(cur_spon_id,this_date,null,'Error in selecting from sponsor_contacts - Err code-'||to_char(sqlcode)||' '||sqlerrm,'Y') ;
+                raise ;
+     end ;
+
+    begin
+      insert into drives
+      (chapter_id,
+       drive_id,
+       program_id,
+       drive_date,
+       drive_type,
+       schedule_start_time,
+       schedule_end_time,
+       recruiter_id,
+       location_id,
+       status,
+       open_drive_ind,
+       drive_category,
+       territory_id,
+       schedule_stup_bkdown_time,
+       hold_reason_code,
+       rollover_status)
+       values
+       (g_chapter_id,
+        new_id,
+        'YYY',
+        this_date,
+        pref_drive_type,
+        to_date(to_char(this_date,'MMDDYY')||' '||to_char(pref_start_time,'HH24MI'),'MMDDYY HH24MI'),
+        to_date(to_char(this_date,'MMDDYY')||' '||to_char(pref_end_time,'HH24MI'),'MMDDYY HH24MI'),
+        v_recruiter_id,
+        pref_location_id,
+        decode(hold_reason_code,null,'CNFRM','HOLD'),
+        pref_open_drive_ind,
+        'GENL',
+        v_territory_id,
+        60,
+        hold_reason_code,
+        'Y') ;
+     exception
+        when others then 
+                add_log_entry(cur_spon_id,this_date,null,'Error in inserting in DRIVES table -'||to_char(sqlcode)||' '||sqlerrm,'Y') ;
+                raise ;
+     end ;
+
+     begin
+        insert into drive_sponsors
+        (drive_id,
+         sponsor_id,
+         chapter_id,
+         projected_show,
+         projected_draw,
+         contact_id,
+         program_id,
+         proj_deferral_rate)
+        values
+        (new_id,
+         cur_spon_id,
+         g_chapter_id,
+         pref_proj_show,
+         pref_proj_draw,
+         v_contact_id,
+         'YYY',
+         round(pref_proj_draw/pref_proj_show ) );
+     exception
+        when others then 
+                add_log_entry(cur_spon_id,this_date,null,'Error in inserting in DRIVE_SPONSORS table -'||to_char(sqlcode)||' '||sqlerrm,'Y') ;
+                raise ;
+     end ;
+
+     begin
+        insert into drive_estimated_resources
+        (drive_id,
+         chapter_id,
+         resource_code,
+         number_reqd,
+         program_id)
+        values
+        (new_id,
+         g_chapter_id,
+         'STAFF',
+         staff_for_this_drive,
+         'YYY') ;
+     exception
+        when others then 
+                add_log_entry(cur_spon_id,this_date,null,'Error in inserting in DRIVE_ESTIMATED_RESOURCES table -'||to_char(sqlcode)||' '||sqlerrm,'Y') ;
+                raise ;
+     end ;
+
+     begin
+        insert into drive_estimated_resources
+        (drive_id,
+         chapter_id,
+         resource_code,
+         number_reqd,
+         program_id)
+        values
+        (new_id,
+         g_chapter_id,
+         'VAN',
+         van_for_this_drive,
+         'YYY') ;
+
+     exception
+        when others then 
+                add_log_entry(cur_spon_id,this_date,null,'Error in inserting in DRIVE_ESTIMATED_RESOURCES table -'||to_char(sqlcode)||' '||sqlerrm,'Y') ;
+                raise ;
+     end ;
+
+     begin
+        insert into drive_estimated_resources
+        (drive_id,
+         chapter_id,
+         resource_code,
+         number_reqd,
+         program_id)
+        values
+        (new_id,
+         g_chapter_id,
+         'COACH',
+         coach_for_this_drive,
+         'YYY') ;
+     exception
+        when others then 
+                add_log_entry(cur_spon_id,this_date,null,'Error in inserting in DRIVE_ESTIMATED_RESOURCES table -'||to_char(sqlcode)||' '||sqlerrm,'Y') ;
+                raise ;
+     end ;
+     add_log_entry(cur_spon_id,null,null,'Drive ID created:'||new_id,'Y') ;
+  exception
+     when user_def then raise ;
+  end crt_drive_info;
+
+procedure get_base_date (base_date out date) is
+ temp_base_date date ;
+ begin
+   select max(drive_date) into temp_base_date
+   from drives
+   where drive_id in
+          (select drive_id from drive_sponsors
+           where sponsor_id = cur_spon_id
+            and  chapter_id = g_chapter_id)
+    and  drive_date >= trunc(sysdate)
+    and  drive_type in ('I','C')
+    and  nvl(status,'*') != 'CANCL'
+    and  chapter_id = g_chapter_id ;
+    if temp_base_date is null then
+       base_date := trunc(sysdate) + drive_days ;
+    else
+       base_date := temp_base_date + drive_days ;
+    end if ;
+    exception
+     when others then 
+                add_log_entry(cur_spon_id,this_date,null,'Error in selecting base date -'||to_char(sqlcode)||' '||sqlerrm,'Y') ;
+                raise ;
+end  get_base_date;
+
+procedure get_preferences is
+ temp_start_time varchar2(5) ;
+ temp_end_time varchar2(5) ;
+ begin
+   select month_pref1,month_pref2,month_pref3,month_pref4,month_pref5,
+          month_pref6,month_pref7,month_pref8,month_pref9,month_pref10,
+          month_pref11,month_pref12,far_out_months,pref_proj_draw,
+          pref_proj_show,pref_start_time,pref_end_time,pref_drive_type,
+          pref_open_drive_ind,pref_location_id
+    into  month_pref1,month_pref2,month_pref3,month_pref4,month_pref5,
+          month_pref6,month_pref7,month_pref8,month_pref9,month_pref10,
+          month_pref11,month_pref12,far_out_months,pref_proj_draw,
+          pref_proj_show,temp_start_time,temp_end_time,pref_drive_type,
+          pref_open_drive_ind,pref_location_id
+    from  rollover_preferences
+   where  sponsor_id = cur_spon_id
+    and   sysdate between eff_date and nvl(term_date,sysdate+1) ;
+
+    pref_start_time := to_date(to_char(sysdate,'MMDDYY')||' '||temp_start_time,'MMDDYY HH24:MI');
+    pref_end_time := to_date(to_char(sysdate,'MMDDYY')||' '||temp_end_time,'MMDDYY HH24:MI');
+
+   exception
+     when no_data_found then 
+                add_log_entry(cur_spon_id,null,null,'No preferences found for '||cur_spon_id,'N') ; 
+     when others then 
+                add_log_entry(cur_spon_id,null,null,'Error in get_preference - Err code '||to_char(sqlcode)||' '||sqlerrm,'N') ; 
+                raise ;
+end get_preferences ;
+
+procedure estimate_resources is
+begin
+ staff_for_this_drive := ceil((pref_proj_show / ((pref_end_time - pref_start_time) * 24)) / efficiency_range) ;
+ if pref_drive_type = 'C' then
+    van_for_this_drive := 0 ;
+    coach_for_this_drive := 1 ;
+ elsif pref_drive_type = 'I' then
+    van_for_this_drive := 1 ;
+    coach_for_this_drive := 0 ;
+ end if ;
+exception
+ when others then
+        add_log_entry(cur_spon_id,null,null,'Error in estimate_resources - Err code '||to_char(sqlcode)||' '||sqlerrm,'N') ; 
+        raise ;
+end estimate_resources ;
+
+procedure decode_preferences (i1 in number,base_date in date) is
+ selected_day number ;
+ month_pref varchar2(100) ;
+ pref_length number := 0;
+ start_pos number ;
+ loop_monthyr varchar2(6) ;
+ date_exists varchar2(1) ;
+ v_from_day number ;
+ v_to_day number ;
+ v_day varchar2(3) ;
+begin
+   /*-- Find out which preference to be used. substr(loop_monthyr,5) gives the month number. --*/
+
+   loop_monthyr :=  substr(to_char(add_months(base_date,i1),'YYYYMMDD'),1,6) ;
+   if substr(loop_monthyr,5,2) = '01' and month_pref1 is not null then month_pref := month_pref1 ;
+   elsif substr(loop_monthyr,5,2) = '02' and month_pref2 is not null then month_pref := month_pref2 ;
+   elsif substr(loop_monthyr,5,2) = '03' and month_pref3 is not null then month_pref := month_pref3 ;
+   elsif substr(loop_monthyr,5,2) = '04' and month_pref4 is not null then month_pref := month_pref4 ;
+   elsif substr(loop_monthyr,5,2) = '05' and month_pref5 is not null then month_pref := month_pref5 ;
+   elsif substr(loop_monthyr,5,2) = '06' and month_pref6 is not null then month_pref := month_pref6 ;
+   elsif substr(loop_monthyr,5,2) = '07' and month_pref7 is not null then month_pref := month_pref7 ;
+   elsif substr(loop_monthyr,5,2) = '08' and month_pref8 is not null then month_pref := month_pref8 ;
+   elsif substr(loop_monthyr,5,2) = '09' and month_pref9 is not null then month_pref := month_pref9 ;
+   elsif substr(loop_monthyr,5,2) = '10' and month_pref10 is not null then month_pref := month_pref10 ;
+   elsif substr(loop_monthyr,5,2) = '11' and month_pref11 is not null then month_pref := month_pref11 ;
+   elsif substr(loop_monthyr,5,2) = '12' and month_pref12 is not null then month_pref := month_pref12 ;
+   end if ;
+
+  if month_pref is null then
+     return ;
+  end if ;
+   /*-- Get the first and last date of the month --*/
+   begin
+     select trunc(add_months(base_date,i1),'MON'),
+            to_char(trunc(add_months(base_date,i1),'MON'),'DAY'),
+            last_day(add_months(base_date,i1)),
+            to_char(last_day(add_months(base_date,i1)),'DAY')
+     into first_date_of_month,first_day_of_month,last_date_of_month,last_day_of_month
+     from dual ;
+   end ;
+   -- Populate an array of possible dates in the month
+   start_pos := 8 ;
+   if substr(month_pref,5,2) = 'WP' then
+     /*------------------------------------------------------
+      Preference format ->  JAN:WP:xxxxx:
+          First 3 characters -> Monthname
+          4th character      -> :
+          5 and 6            -> Pref. type i.e. WP/DR
+          7th character      -> :
+          8 to 12            -> 1 to 5 characters. 1/2/3/4/L. Denotes week number of month
+      ------------------------------------------------------*/
+     loop /*-- Infinite loop --*/
+     if pref_length + start_pos = length(month_pref) then
+        exit ;
+     end if ;
+     start_pos := start_pos + pref_length + 1 ;
+     for i2 in 1..7 loop
+      /*-- Get the week numbers of the month from the preference string --*/
+      pref_length := instr(month_pref,':',start_pos,1)-start_pos ;
+      day_pref_string := substr(month_pref,start_pos,pref_length) ;
+
+      if substr(day_pref_string,1,1) = '1' then this_day := 'SUNDAY' ;
+      elsif substr(day_pref_string,1,1) = '2' then this_day := 'MONDAY' ;
+      elsif substr(day_pref_string,1,1) = '3' then this_day := 'TUESDAY' ;
+      elsif substr(day_pref_string,1,1) = '4' then this_day := 'WEDNESDAY' ;
+      elsif substr(day_pref_string,1,1) = '5' then this_day := 'THURSDAY' ;
+      elsif substr(day_pref_string,1,1) = '6' then this_day := 'FRIDAY' ;
+      elsif substr(day_pref_string,1,1) = '7' then this_day := 'SATURDAY' ;
+      end if ;
+      for j in 2..pref_length loop
+         day_pref := substr(day_pref_string,j,1) ;
+         if day_pref != 'L' then--- day_pref in 1,2,3,4
+          if this_day = first_day_of_month then
+              selected_day := 1 ;
+          else
+              selected_day := to_number(to_char(next_day(first_date_of_month,this_day),'DD')) ;
+          end if ;
+          if (selected_day + (to_number(day_pref)-1) * 7) <= to_number(to_char(last_date_of_month,'DD')) then
+             selected_day := selected_day + (to_number(day_pref)-1) * 7 ;
+          else
+             goto next_step ;
+          end if ;
+         else --- if 'L'
+            if this_day = last_day_of_month then
+               selected_day := to_number(to_char(last_date_of_month,'DD')) ;
+            else
+                selected_day := to_number(to_char(next_day(last_date_of_month,this_day)-7,'DD')) ;
+            end if ;
+        end if ;
+
+        /*-- Check if this date is already selected --*/
+        date_exists := 'N' ;
+        for i3 in 1..counter-1 loop
+           if DateList(i3) = selected_day then
+              date_exists := 'Y' ;
+              exit ;
+           end if ;
+        end loop ;
+        if date_exists = 'N' then
+           DateList(counter) := selected_day ; 
+           counter := counter + 1 ;
+        end if ;
+        <<next_step>> 
+        null;
+      end loop ; -- End for j loop
+     end loop ; -- End for i2 loop
+     end loop ; -- End infinite loop
+   elsif substr(month_pref,5,2) = 'DR' then
+     start_pos := 8 ;
+     v_from_day := substr(month_pref,start_pos,instr(month_pref,':',start_pos,1)-start_pos) ;
+     start_pos := instr(month_pref,':',8,1)+1 ;
+     v_to_day := substr(month_pref,start_pos,instr(month_pref,':',start_pos,1)-start_pos) ;
+     start_pos := instr(month_pref,':',start_pos,1)+1 ;
+     day_pref_string := substr(month_pref,start_pos,instr(month_pref,':',start_pos,1)-start_pos);
+     dbms_output.put_line('day_pref_string:'||day_pref_string);
+
+     for l1 in 1..v_to_day-v_from_day+1 loop
+         v_day := to_char(to_date(lpad(to_char(v_from_day+l1-1),2,'0')||to_char(first_date_of_month,'MMYY'),'DDMMYY'),'DY') ;
+         dbms_output.put_line('V_DAY:'||v_day);
+         for l2 in 1..length(day_pref_string) loop
+             if (substr(month_pref,start_pos+l2-1,1) = '1' and v_day = 'SUN') or
+              (substr(month_pref,start_pos+l2-1,1) = '2' and v_day = 'MON') or
+              (substr(month_pref,start_pos+l2-1,1) = '3' and v_day = 'TUE') or
+              (substr(month_pref,start_pos+l2-1,1) = '4' and v_day = 'WED') or
+              (substr(month_pref,start_pos+l2-1,1) = '5' and v_day = 'THU') or
+              (substr(month_pref,start_pos+l2-1,1) = '6' and v_day = 'FRI') or
+              (substr(month_pref,start_pos+l2-1,1) = '7' and v_day = 'SAT') then
+                goto next_l1 ;
+             end if ;
+         end loop ;
+         DateList(counter) := v_from_day + l1 - 1 ;
+         counter := counter + 1 ;
+         <<next_l1>> 
+         null ;
+     end loop ;
+   end if ;
+end decode_preferences ;
+
+procedure sort_dates is
+ small number ;
+ placeholder number ;
+ temp number ;
+begin
+   date_count := DateList.count ;
+   for k in 1..date_count loop
+       small := DateList(k) ;
+       placeholder := k ;
+       for l in k+1..date_count loop
+           if DateList(l) < small then
+              small := DateList(l) ;
+              placeholder := l;
+           end if ;
+       end loop ;-- end for l loop
+       temp := DateList(k) ;
+       DateList(k) := DateList(placeholder) ;
+       DateList(placeholder) := temp ;
+   end loop ; -- end for k loop
+end sort_dates ;
+
+procedure check_resources (feasible_flag out varchar2) is 
+ proj_draw number ;
+ staff_booked number ;
+ van_booked number ;
+ coach_booked number ;
+ staff_avail number ;
+ van_avail number ;
+ coach_avail number ;
+begin
+     don_mcal_common.get_resource_util(this_date,g_chapter_id,null,'STAFF',staff_booked,staff_avail);
+     don_mcal_common.get_resource_util(this_date,g_chapter_id,null,'VAN',van_booked,van_avail);
+     don_mcal_common.get_resource_util(this_date,g_chapter_id,null,'COACH',coach_booked,coach_avail);
+
+     if staff_for_this_drive > staff_avail - staff_booked then
+       if staff_for_this_drive > 0 then
+            feasible_flag := 'STAFF' ;
+       end if ;
+     elsif van_for_this_drive > van_avail - van_booked then
+       if van_for_this_drive > 0 then
+            feasible_flag := 'VAN' ;
+        end if ;
+     elsif coach_for_this_drive > coach_avail - coach_booked then
+       if coach_for_this_drive > 0 then
+            feasible_flag := 'COACH' ;
+        end if ;
+     end if ;
+end check_resources ;
+
+procedure add_log_entry(sponsor_id in varchar2,
+                        future_drive_date in date,
+                        log_type in varchar2,
+                        log_text in varchar2,
+                        user_display in varchar2) is
+begin
+  insert into rollover_run_log
+  (rollover_run_date,
+   run_number,
+   chapter_id,
+   sponsor_id,
+   future_drive_date,
+   log_seq,
+   log_type,
+   log_date,
+   log_text,
+   user_display)
+  values
+  (g_curdate,
+   g_run_number,
+   g_chapter_id,
+   sponsor_id,
+   future_drive_date,
+   g_log_seq,
+   log_type,
+   sysdate,
+   log_text,
+   user_display) ;
+
+   g_log_seq := g_log_seq + 1 ;
+
+exception
+   when others then dbms_output.put_line('Error in add_log_entry:'||to_char(sqlcode)||' '||sqlerrm);
+end add_log_entry ;
+
+end DON_MCAL_ROLLOVER ;
+/
+DROP PUBLIC SYNONYM DON_MCAL_ROLLOVER
+/
+CREATE PUBLIC SYNONYM DON_MCAL_ROLLOVER FOR DON_MCAL_ROLLOVER
+/
+GRANT EXECUTE ON DON_MCAL_ROLLOVER TO PUBLIC
+/

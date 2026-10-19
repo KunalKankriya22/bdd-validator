@@ -1,0 +1,56 @@
+---
+tags:
+  - trigger
+  - SRVSYS
+---
+# SET_INVENTORY_LEVELS_BD
+
+**Schema**: [[schemas/SRVSYS/SRVSYS|SRVSYS]]
+**Table**: [[schemas/SRVSYS/Tables/SET_INVENTORY_LEVELS|SET_INVENTORY_LEVELS]]
+**Type**: BEFORE EACH ROW
+**Event**: DELETE
+**Status**: ENABLED
+
+## Trigger Body
+
+```plsql
+begin
+  insert into SET_INVENTORY_LEVELS_AUDIT
+  (	INVENTORY_CLASS,
+	INVENTORY_TYPE,
+	CHAPTER_ID,
+	PRODUCT_TYPE,
+	BLOOD_TYPE,
+	QTY,
+	EFF_DATE,
+	LAST_MODIFIED_DATE,
+	CUSTOMER_ID,
+	TIER,
+	TERM_DATE,
+	ATTRIB_CODE,
+	ATTRIB_GROUP,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  (	:old.INVENTORY_CLASS,
+	:old.INVENTORY_TYPE,
+	:old.CHAPTER_ID,
+	:old.PRODUCT_TYPE,
+	:old.BLOOD_TYPE,
+	:old.QTY,
+	:old.EFF_DATE,
+	:old.LAST_MODIFIED_DATE,
+	:old.CUSTOMER_ID,
+	:old.TIER,
+	:old.TERM_DATE,
+	:old.ATTRIB_CODE,
+	:old.ATTRIB_GROUP,
+	:old.AUDIT_KEY,
+	'DELETE',LT_USER_SESSION.GET_USERID,
+    sysdate
+  ) ;
+  end ;
+```

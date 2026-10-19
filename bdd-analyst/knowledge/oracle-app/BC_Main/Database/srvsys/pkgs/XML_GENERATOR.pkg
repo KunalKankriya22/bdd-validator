@@ -1,0 +1,396 @@
+CREATE OR REPLACE PACKAGE XML_Generator AS
+
+/*****************************************************************************
+Developed By : Basker Edwin
+Create Date  : 06.10.2002
+Purpose      : This procedure will create an XML file with the elements and 
+	       attributes as per the given DTD(Document Type Definition)
+	       The DTD name is U9000.dtd. The Generated file will be
+	       loaded onto ZLB's website
+
+Reqd setup   :Define the Error log and XML file creation dirs in the master.
+Date Mod     :01.07.2004
+Version      :2.03.08
+             : 02 (Not to look at the code schme for non alpha numeric sites)
+		   3.2.0 release
+             : 03 Change the product type to product code - LT 3.3.0 release
+
+Date Mod     : 04.18.2011 
+Version      : 03      by: Hussein; replace user by lt_session_user.get_userid 
+
+
+
+
+**************************************************************************** */
+
+   PROCEDURE GEN_EDN_XML (pl_ship_no in varchar2,pl_Status out varchar2);
+
+END XML_GENERATOR;
+/
+
+CREATE OR REPLACE PACKAGE BODY XML_GENERATOR AS
+
+Procedure GEN_EDN_XML(pl_ship_no in varchar2,pl_Status out varchar2) Is
+
+ in_file   UTL_FILE.File_Type;
+ hErrLog   UTL_FILE.File_Type;
+
+ Cursor Ship_cur is Select * from shipments where shipment_no=pl_Ship_No;
+ Cursor Carton_cur is Select * from boxes where shipment_no=pl_Ship_No;
+ Cursor Unit_cur(plCarton_id in varchar2)  is Select * from pick_slip_products
+                             where box_id=plCarton_id and product_status
+			     in ('SH', 'DL');
+
+  szShipDate           VARCHAR2(15);
+  szXMLDir             VARCHAR2(40);
+  szXMLFile            VARCHAR2(75);
+  szXMLERDir           varchar2(70);
+  szXmlVersion         VARCHAR2(100); 
+  szDocType            VARCHAR2(100); 
+  szNoteEle            VARCHAR2(200);
+  szShipEle            VARCHAR2(200);
+  szCartonEle          VARCHAR2(200);
+  szUnitEle            VARCHAR2(200);
+  szCartonEndTag       VARCHAR2(100);
+  szShipEndtag         VARCHAR2(100);
+  szNoteEndtag         VARCHAR2(100);
+  szShipIdentifier     VARCHAR2(21);
+  szCenter             VARCHAR2(40); 
+  szFraction           VARCHAR2(40);
+  szConsignee          VARCHAR2(40);
+  szAboRh              VARCHAR2(10);
+  szAbo                VARCHAR2(15);
+  szRh                 VARCHAR2(15);   
+  szAboFlg             VARCHAR2(1); 
+  szWeight             NUMBER(6,3);
+  codabar_unit_scheme  varchar2(1);
+  v_unit_id            varchar2(15);
+  szTestedAbo          VARCHAR2(10);
+  szStatus             VARCHAR2(200);
+  szProdType           VARCHAR2(10);
+  szProdCode           VARCHAR2(10);
+  eExcept              EXCEPTION;
+  LogExcept            EXCEPTION;
+  user1                VARCHAR2(15):=LT_USER_SESSION.get_userid;
+
+  Function check_Log_file return varchar2 is 
+  Begin
+      Select code_desc into szXMLERDir from vserv_master where
+      code_type='XMLDR' and code='XMLER' and rownum =1 and
+      sysdate between eff_date and nvl(term_date,sysdate+1);
+     
+     hErrLog  := UTL_FILE.FOPEN(szXMLERDir,'XMLERRLOG.log','a');
+     UTL_FILE.FCLOSE(hErrLog);
+     return('OK');
+
+  Exception
+      When No_data_found then
+          Return('4312');
+      When UTL_FILE.INVALID_PATH then
+	  Return('4311');
+      When OTHERS then 
+	  Return('4313');
+  End check_log_file;
+
+BEGIN
+
+    ---Check the Error Log file
+  
+    Begin
+ 
+       szStatus:=check_log_file;
+       if szStatus='OK' then
+	   hErrLog  := UTL_FILE.FOPEN(szXMLERDir,'XMLERRLOG.log','a');
+       else
+	   Raise LogExcept;
+       end if;
+
+     Exception 
+       When others then 
+	 Raise LogExcept;
+     End;
+
+    -- Get the XML file directory and create the file if successful
+     Begin
+          Select code_desc into szXMLDir from vserv_master where
+	  code_type='XMLDR' and code='XMLDR' and rownum =1 
+          and sysdate between eff_date and nvl(term_date,sysdate+1); 
+     Exception
+	When others then
+           szStatus:='XML file directory set up missing';
+	   Raise eExcept;
+     End;
+
+     begin
+	select nvl(codabar_unit_scheme,'*') into  codabar_unit_scheme
+	 from institutions
+	 where sysdate between eff_date and nvl(term_date,sysdate);
+     exception
+	when no_data_found then
+	   szStatus := 'No institution data available .... Aborting';
+	   Raise eExcept;
+     end;
+    
+      szXMLFile:=pl_ship_no||'.xml';
+      in_file  := UTL_FILE.FOPEN(szXMLDir,szXMLFile, 'w');
+
+    -- Get the Shipment Information
+    
+    FOR Ship_rec in Ship_cur Loop
+        szShipDate:=To_Char(Ship_rec.shipment_date,'YYYY-MM-DD'); 
+        szConsignee:=Ship_rec.consignee_id;
+
+        select customer_id into  szFraction  from consignee where 
+	consignee_id=Ship_rec.consignee_id and rownum=1 and
+	sysdate between eff_date and nvl(term_date,sysdate+1);
+    END LOOP;
+
+    -- Get the center
+    
+    Begin
+        select inst_short_name into szCenter from institutions where rownum =1
+        and sysdate between eff_date and nvl(term_date,sysdate+1);
+    Exception when no_data_found then 
+        szCenter:='UnKnkwn';
+    End;
+
+    -- Get the product type [RPFF, RPL]
+
+    Begin
+       select distinct  product_code into szProdCode from shipped_products
+       where shipment_no=pl_ship_no and rownum=1;
+    
+       if szProdCode is null then
+          szStatus:='No Product available';
+	  Raise eExcept;
+      end if;
+
+      szProdCode:=substr(szProdCode,1,5);
+
+    Exception 
+       When No_data_found then
+          szStatus:='No Products in the Shipment';
+	  Raise eExcept;
+       When Too_Many_rows then
+	  szStatus:='Multiple Product codes in the shipment';
+	  Raise eExcept;
+    End;
+
+    --Form the string
+
+    szXmlVersion:='<?xml version='|| '"1.0"' ||' encoding=' || '"UTF-8"?>'; 
+
+    szDocType:='<!DOCTYPE note SYSTEM '||'"U9000.dtd">';
+
+    szNoteEle   :='<note created_date='||'"'||szShipDate||'"'|| 
+		 ' identifier='||'"'||pl_Ship_No||'"'||'  version='||'"1.0">';
+
+    szShipIdentifier:=to_char(sysdate,'mmddrr')||substr(pl_ship_no,-4);
+
+    szShipEle   :='<shipment center='||'"'||szCenter||'"'|| 
+		  ' identifier='||'"'||szShipIdentifier||'"'||
+		  ' product='||'"'||szProdCode||'"'||
+		  ' fractionator='||'"'||szFraction||'"'||
+		  ' consignee='||'"'||szConsignee||'"'||
+		  ' ship_date='||'"'||szShipDate||'">';
+ 
+    szShipEle:=Lpad(szShipEle,Length(szShipEle)+5,'X');
+    szShipEle:=Translate(szShipEle,'X',' ');
+
+    UTL_FILE.PUT_LINE(in_file, szXmlVersion);
+    UTL_FILE.PUT_LINE(in_file, szDocType);
+    UTL_FILE.PUT_LINE(in_file, szNoteEle);
+    UTL_FILE.PUT_LINE(in_file, szShipEle);
+
+   -- Loop for boxes(Cartons)
+
+  FOR Carton_rec in Carton_cur LOOP
+
+       szCartonEle:='<carton carton_type='|| '"CA" identifier='||'"'||
+       Carton_rec.box_id||'"'||' pack_date='||'"'||
+       to_char(Carton_rec.packed_date,'yyyy-mm-dd')||'">';
+     
+      szCartonEle:=Lpad(szCartonEle,Length(szCartonEle)+9,'X');
+      szCartonEle:=Translate(szCartonEle,'X',' ');
+     
+      UTL_FILE.PUT_LINE(in_file, szCartonEle);
+
+      ---Take the units one by one(Loop for each units)
+
+      For unit_rec in unit_cur(carton_rec.box_id) Loop  --Unit loop starts
+         If length(unit_rec.unit_id) = 7 then
+             If codabar_unit_scheme='A' then
+	        begin
+	          select machine_code||substr(unit_rec.unit_id,3)
+	          into v_unit_id from bar_code_prefixes
+       	          where eye_read_trns=substr(unit_rec.unit_id,1,2)
+	          and sysdate between eff_date and nvl(term_date,sysdate);
+                exception
+	          when others then
+	              szStatus:= 'Problem with bar_code translation for '||
+		      unit_rec.unit_id||' '||sqlerrm;
+	        end;
+             Else
+	       v_unit_id:=unit_rec.unit_id;
+             End if;
+        Else
+	  v_unit_id := unit_rec.unit_id;
+        End if;
+
+           -- Get the tested abo code from UTRS table
+
+         /* ****************************************************** 
+	         Sending ABO in the XML file is stopped after 
+	          discussing with Helge, Subhash, Kim-11.08.02
+
+	   Begin
+
+              select result_status_1 into szTestedAbo from UTRS
+	      where unit_id=unit_rec.unit_id and test_id='ABORH'
+	       and nvl(cancel_flag,'N')='N';
+
+	       szAboFlg:='Y';
+
+            Exception 
+	        WHEN Others then
+	            szAboFlg:='N';
+            End;
+              
+	      --Get the ABO description if ABO is available
+ 
+	    If nvl(szAboFlg,'')='Y' then
+
+               Begin
+	          select abo_desc into szAboRh from vserv_abo where
+	          abo_code=szTestedAbo and sysdate between eff_date and
+		   nvl(term_date,sysdate+1);
+                 
+		  szAbo:=RTrim(substr(szAboRh,1,instr(szAboRh,' ',1)));
+                  szRh:=RTrim(substr(szAboRh,instr(szAboRh,' ',1)+1,3));
+              
+	      Exception
+                  WHEN others then
+		    szAboFlg:='N';
+	       End;
+          End if;
+
+        ***************************************** */ --ABO comments ends here
+
+	    -- Get the Weight
+
+           Begin 
+	      select nvl(component_weight/1000,0) into szWeight from 
+	      components where unit_id=unit_rec.unit_id and 
+              product_code=unit_rec.product_code and
+	      component_prefix=unit_rec.aliquot and
+	      reject_reason_code is null and coll_date=unit_rec.coll_date;
+
+           Exception
+	     When no_data_found then
+	         szStatus:='Component weight is not found ';
+                 Raise eExcept;
+	     when too_many_rows then
+	         szStatus:='Duplicate records in the components table';
+	         raise eExcept;
+             when others then
+	         szStatus:=substr(sqlerrm,1,50)||' -Weight';
+	         raise eExcept; 
+	   End;
+
+
+	      /*  szUnitEle:='<unit identifier='||'"'||unit_rec.unit_id||'"'||
+	                   ' collection_date='||'"'||
+			   to_char(unit_rec.coll_date,'yyyy-mm-dd')||'"'||
+			   ' abo='||'"'||Upper(szAbo)||'"'||' rh='||'"'||
+			   Upper(szRh)||'"'||' weight='||'"'||
+			   to_char(szweight)||'"'||' weight_unit='||'"KG"/>';
+              */
+
+	       szUnitEle:='<unit identifier='||'"'||v_unit_id||'"'||
+	                  ' collection_date='||'"'||
+		          to_char(unit_rec.coll_date,'yyyy-mm-dd')||'"'||
+			  ' weight='||'"'|| to_char(szweight)||'"'||
+			  ' weight_unit='||'"KG"/>';
+ 
+	      szUnitEle:=Lpad(szUnitEle,Length(szUnitEle)+13,'X');
+              szUnitEle:=Translate(szUnitEle,'X',' ');
+              UTL_FILE.PUT_LINE(in_file, szUnitEle);
+
+      End loop;  -- Unit loop ends here
+
+         szCartonEndTag:='</carton>';
+	 szCartonEndTag:=Lpad(szCartonEndTag,Length(szCartonEndTag)+9,'X');
+	 szCartonEndTag:=Translate(szCartonEndTag,'X',' ');
+         UTL_FILE.PUT_LINE(in_file, szCartonEndTag);
+
+  END LOOP;
+ 
+  szShipEndTag:='</shipment>';
+  szShipEndTag:=Lpad(szShipEndTag,Length(szShipEndTag)+5,'X');
+  szShipEndtag:=Translate(szShipEndTag,'X',' ');
+
+  UTL_FILE.PUT_LINE(in_file, szShipEndTag);
+
+ szNoteEndTag:='</note>';
+
+  UTL_FILE.PUT_LINE(in_file, szNoteEndTag);
+  UTL_FILE.FCLOSE(in_file); 
+  
+  UTL_FILE.PUT_LINE(hErrLog,to_char(sysdate,'mm-dd-yy hh24:mi')||
+	     '  Status: '||'Successful'||' ['||user1||']');
+
+	     pl_Status:='OK'; 
+  UTL_FILE.FCLOSE(hErrLog);
+
+EXCEPTION 
+
+  WHEN UTL_FILE.INVALID_PATH then
+       UTL_FILE.PUT_LINE(hErrLog,to_char(sysdate,'mm-dd-yy hh24:mi')||
+	    '  Status: '||'Invalid XML File Directory' ||' ['||user1||']');
+       UTL_FILE.FCLOSE(hErrLog);
+       pl_Status:='NOTOK';
+
+  WHEN UTL_FILE.INVALID_OPERATION then
+       UTL_FILE.FCLOSE (in_file); 
+  
+       UTL_FILE.PUT_LINE(hErrLog,to_char(sysdate,'mm-dd-yy hh24:mi')||
+        	 '  Status: '||'Invalid Operation'||' ['||user1||']');
+       UTL_FILE.FCLOSE(hErrLog);
+       pl_Status:='NOTOK';
+
+  WHEN UTL_FILE.INVALID_FILEHANDLE then
+       UTL_FILE.FCLOSE (in_file); 
+       UTL_FILE.PUT_LINE(hErrLog,to_char(sysdate,'mm-dd-yy hh24:mi')||
+		 '  Status: '||'Invalid File Handle' ||' ['||user1||']');
+       UTL_FILE.FCLOSE(hErrLog);
+       pl_Status:='NOTOK';
+
+ WHEN UTL_FILE.READ_ERROR THEN
+       UTL_FILE.FCLOSE(in_file);
+       UTL_FILE.PUT_LINE(hErrLog,to_char(sysdate,'mm-dd-yy hh24:mi')||
+		 '  Status: '||'Read Error'||' ['||user1||']');
+       UTL_FILE.FCLOSE(hErrLog);
+       pl_Status:='NOTOK';
+
+ WHEN eExcept THEN
+       UTL_FILE.FCLOSE(in_file);
+       UTL_FILE.PUT_LINE(hErrLog,to_char(sysdate,'mm-dd-yy hh24:mi')||
+		 '  Status: '||szStatus||' ['||user1||']');
+       UTL_FILE.FCLOSE(hErrLog);
+       pl_Status:='NOTOK';
+ WHEN LogExcept THEN
+      pl_Status:=nvl(szStatus,'4313');
+
+WHEN OTHERS then
+       UTL_FILE.FCLOSE(in_file);
+       UTL_FILE.PUT_LINE(hErrLog,to_char(sysdate,'mm-dd-yy hh24:mi')||
+		 '  Status: '||substr(sqlerrm,1,50)||' ['||user1||']');
+       UTL_FILE.FCLOSE(hErrLog);
+       pl_Status:='NOTOK';
+
+ End GEN_EDN_XML;
+
+END XML_GENERATOR;
+/
+
+

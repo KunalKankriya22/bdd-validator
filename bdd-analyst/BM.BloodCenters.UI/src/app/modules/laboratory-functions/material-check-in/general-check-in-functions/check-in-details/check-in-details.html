@@ -1,0 +1,572 @@
+<div class="check-in-details-layout" role="region" aria-label="Check-In Details">
+
+  <!-- Page Header with Breadcrumb -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Global loading overlay -->
+  @if (isLoading()) {
+    <div class="global-loading-overlay" role="status" aria-live="polite" aria-busy="true"
+         cdkTrapFocus cdkTrapFocusAutoCapture>
+      <!-- NI-3: tabindex="-1" cdkFocusInitial gives focus trap a focusable target -->
+      <div tabindex="-1" cdkFocusInitial class="sr-only">Loading in progress</div>
+      <mat-spinner diameter="36" aria-hidden="true"></mat-spinner>
+      <span class="sr-only">Loading, please wait...</span>
+    </div>
+  }
+
+  <!-- NI-2/S-3: assertive live region at top level — always in DOM, announces errors before and after RETRIEVE -->
+  <span class="sr-only" aria-live="assertive" aria-atomic="true">{{ a11yErrorMessage() }}</span>
+
+  <div class="page-content">
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FILTER PANEL: Collection Date + Drive ID + Description + RETRIEVE
+         ═══════════════════════════════════════════════════════════════ -->
+    <div class="filter-panel" role="search" aria-label="Check-in filter panel">
+      <form [formGroup]="filterForm" class="filter-row">
+
+        <!-- Collection Date — datepicker, defaults to today, DD-MMM-YYYY -->
+        <mat-form-field
+          appearance="fill"
+          floatLabel="always"
+          class="filter-field filter-field--md"
+          subscriptSizing="dynamic">
+          <mat-label>Collection Date</mat-label>
+          <input
+            matInput
+            [matDatepicker]="collDatePicker"
+            formControlName="collectionDate"
+            placeholder="DD-MMM-YYYY"
+            aria-label="Collection Date"
+            aria-required="true"
+            [min]="minCollDate"
+            [max]="maxCollDate"
+            [attr.aria-invalid]="filterForm.get('collectionDate')?.invalid && filterForm.get('collectionDate')?.touched"
+            (input)="onCollDateInput($event)"
+            (blur)="onCollDateBlur($event)" />
+          <mat-datepicker-toggle matIconSuffix [for]="collDatePicker" aria-label="Open collection date calendar">
+          </mat-datepicker-toggle>
+          <mat-datepicker #collDatePicker></mat-datepicker>
+          @if (filterForm.get('collectionDate')?.hasError('matDatepickerParse') || filterForm.get('collectionDate')?.hasError('invalidDateFormat')) {
+            <mat-error>Collection Date is invalid</mat-error>
+          } @else if (filterForm.get('collectionDate')?.hasError('matDatepickerMin')) {
+            <mat-error>Collection date cannot be more than {{ timeLimitDays() }} days old</mat-error>
+          } @else if (filterForm.get('collectionDate')?.hasError('matDatepickerMax')) {
+            <mat-error>Collection date cannot be in the future</mat-error>
+          } @else if (filterForm.get('collectionDate')?.hasError('required') && filterForm.get('collectionDate')?.touched) {
+            <mat-error>Collection Date is required</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Drive ID — searchable dropdown (loads drives within ±1 day of collection date) -->
+        <mat-form-field
+          appearance="fill"
+          floatLabel="always"
+          class="filter-field filter-field--md"
+          subscriptSizing="dynamic">
+          <mat-label>Drive ID</mat-label>
+          <mat-select
+            formControlName="driveId"
+            aria-label="Drive ID"
+            [attr.aria-invalid]="filterForm.get('driveId')?.invalid && filterForm.get('driveId')?.touched"
+            (selectionChange)="onDriveChange($event.value)">
+            @if (drivesLoading()) {
+              <mat-option disabled class="drive-loading-option">
+                <span class="drive-loading">
+                  <mat-spinner diameter="20" class="drive-spinner" aria-hidden="true"></mat-spinner>
+                  <span>Loading...</span>
+                </span>
+              </mat-option>
+            } @else {
+              @if (driveOptions().length > 0) {
+                <mat-option>
+                  <ngx-mat-select-search
+                    [formControl]="driveSearchCtrl"
+                    placeholderLabel="Search drive..."
+                    noEntriesFoundLabel="No matching drives">
+                  </ngx-mat-select-search>
+                </mat-option>
+              }
+              @for (drive of filteredDrives(); track drive.value) {
+                <mat-option [value]="drive.value">{{ drive.label }}</mat-option>
+              }
+              @if (driveOptions().length === 0) {
+                <mat-option disabled>No drives available for selected date</mat-option>
+              }
+            }
+          </mat-select>
+          @if (filterForm.get('driveId')?.invalid && filterForm.get('driveId')?.touched) {
+            <mat-error>Drive ID is required</mat-error>
+          }
+        </mat-form-field>
+        <!-- M-1: Drive loading live announcement for screen readers -->
+        <span class="sr-only" aria-live="polite" aria-atomic="true">{{ drivesLoading() ? 'Loading available drives…' : '' }}</span>
+
+        <!-- Description — plain display-field (read-only, auto-populated) -->
+        <!-- M-5: aria-live announces drive description update to screen readers -->
+        <div class="display-field display-field--desc" role="group" aria-labelledby="lbl-drive-desc">
+          <span id="lbl-drive-desc" class="display-field__label">Description</span>
+          <span class="display-field__value" aria-live="polite" aria-atomic="true">{{ driveDescription() || '—' }}</span>
+        </div>
+
+        <!-- RETRIEVE button -->
+        <div class="filter-actions">
+          <button
+            mat-stroked-button
+            type="button"
+            class="retrieve-button"
+            (click)="onRetrieve()"
+            [disabled]="isLoading() || !filterForm.get('driveId')?.value"
+            aria-label="Retrieve check-in details for selected drive and date">
+            RETRIEVE
+          </button>
+        </div>
+
+      </form>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         EMPTY STATE — shown before RETRIEVE is clicked
+         ═══════════════════════════════════════════════════════════════ -->
+    @if (!hasData()) {
+      <div class="empty-state" role="status" aria-live="polite">
+        <mat-icon class="empty-state__icon" aria-hidden="true">search</mat-icon>
+        <p class="empty-state__title">No Results to Display</p>
+        <p class="empty-state__subtitle">Scan or enter a Unit ID to begin.</p>
+      </div>
+    }
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         CONTENT CARD — shown after RETRIEVE
+         ═══════════════════════════════════════════════════════════════ -->
+    @if (hasData()) {
+      <div class="content-card" role="region" aria-label="Check-in details entry">
+
+        <!-- Section heading inside card -->
+        <h2 class="section-header">Check-In Details for Drive ID {{ filterDriveId }}</h2>
+
+        <form [formGroup]="unitForm">
+
+          <!-- ───────────────────────────────────────────────────────────
+               ROW 1: Unit ID* | Bleed Start Date | Time | Bleed End Date | Time | Donor Card ABO
+               ─────────────────────────────────────────────────────────── -->
+          <div class="detail-row detail-row--six-col">
+
+            <!-- Unit ID — shared component (barcode validation, formatting, double-entry) -->
+            <app-unit-id-field
+              [validateFfValue]="'DONOR'"
+              [required]="true"
+              [placeholder]="'W123418051501'"
+              (postValidate)="onUnitPostValidate($event)"
+              (validated)="onUnitValidated($event)"
+              (cleared)="onUnitCleared()"
+              class="detail-field">
+            </app-unit-id-field>
+
+            <!-- Bleed Start Date — datepicker, auto-populated from collection date -->
+            <mat-form-field
+              appearance="fill"
+              floatLabel="always"
+              class="detail-field"
+              subscriptSizing="dynamic">
+              <mat-label>Bleed Start Date</mat-label>
+              <input
+                matInput
+                [matDatepicker]="bleedStartPicker"
+                formControlName="bleedStartDate"
+                placeholder="DD-MMM-YYYY"
+                aria-label="Bleed Start Date"
+                aria-required="true"
+                [attr.aria-invalid]="(!!bleedStartDateError() || (unitForm.get('bleedStartDate')?.invalid && unitForm.get('bleedStartDate')?.touched)) || null"
+                [attr.aria-readonly]="bleedFieldsLocked() || null"
+                [min]="collectionDateForPicker"
+                [max]="collectionDateForPicker"
+                [errorStateMatcher]="bleedStartDateMatcher"
+                [attr.readonly]="bleedFieldsLocked() || null" />
+              <mat-datepicker-toggle matIconSuffix [for]="bleedStartPicker" [disabled]="bleedFieldsLocked()" aria-label="Open bleed start date calendar">
+              </mat-datepicker-toggle>
+              <mat-datepicker #bleedStartPicker></mat-datepicker>
+              @if (bleedStartDateError()) {
+                <mat-error>{{ bleedStartDateError() }}</mat-error>
+              } @else if (unitForm.get('bleedStartDate')?.hasError('matDatepickerMin') || unitForm.get('bleedStartDate')?.hasError('matDatepickerMax') || unitForm.get('bleedStartDate')?.hasError('matDatepickerParse')) {
+                <mat-error>Bleed start date must match the collection date.</mat-error>
+              } @else if (unitForm.get('bleedStartDate')?.hasError('required') && unitForm.get('bleedStartDate')?.touched) {
+                <mat-error>Bleed start date is required.</mat-error>
+              }
+            </mat-form-field>
+
+            <!-- Bleed Start Time — enter as HHMM (e.g. 0830), normalizes to HH:MM on blur -->
+            <mat-form-field
+              appearance="fill"
+              floatLabel="always"
+              class="detail-field"
+              subscriptSizing="dynamic">
+              <mat-label>Start Time</mat-label>
+              <input
+                matInput
+                type="text"
+                inputmode="numeric"
+                maxlength="5"
+                placeholder="HHMM"
+                formControlName="bleedStartTime"
+                aria-label="Bleed Start Time (enter HHMM)"
+                aria-required="true"
+                [attr.aria-invalid]="(bleedStartFutureError() || !!bleedStartTimeError() || (unitForm.get('bleedStartTime')?.invalid && unitForm.get('bleedStartTime')?.touched)) || null"
+                [attr.aria-readonly]="bleedFieldsLocked() || null"
+                [errorStateMatcher]="bleedStartTimeMatcher"
+                [attr.readonly]="bleedFieldsLocked() || null"
+                (blur)="onBleedStartTimeBlur()" />
+              <mat-hint>e.g. 0830</mat-hint>
+              @if (bleedStartFutureError()) {
+                <mat-error>Bleed start time cannot be in the future</mat-error>
+              } @else if (bleedStartTimeError()) {
+                <mat-error>{{ bleedStartTimeError() }}</mat-error>
+              } @else if (unitForm.get('bleedStartTime')?.hasError('required') && unitForm.get('bleedStartTime')?.touched) {
+                <mat-error>Bleed start time is required.</mat-error>
+              }
+            </mat-form-field>
+
+            <!-- Bleed End Date — datepicker, auto-populated from collection date -->
+            <mat-form-field
+              appearance="fill"
+              floatLabel="always"
+              class="detail-field"
+              subscriptSizing="dynamic">
+              <mat-label>Bleed End Date</mat-label>
+              <input
+                matInput
+                [matDatepicker]="bleedEndPicker"
+                formControlName="bleedEndDate"
+                placeholder="DD-MMM-YYYY"
+                aria-label="Bleed End Date"
+                aria-required="true"
+                [attr.aria-invalid]="(unitForm.get('bleedEndDate')?.invalid && unitForm.get('bleedEndDate')?.touched) || null"
+                [attr.aria-readonly]="bleedFieldsLocked() || null"
+                [min]="collectionDateForPicker"
+                [max]="collectionDateForPicker"
+                [errorStateMatcher]="bleedEndDateMatcher"
+                [attr.readonly]="bleedFieldsLocked() || null" />
+              <mat-datepicker-toggle matIconSuffix [for]="bleedEndPicker" [disabled]="bleedFieldsLocked()" aria-label="Open bleed end date calendar">
+              </mat-datepicker-toggle>
+              <mat-datepicker #bleedEndPicker></mat-datepicker>
+              @if (unitForm.get('bleedEndDate')?.hasError('matDatepickerMin') || unitForm.get('bleedEndDate')?.hasError('matDatepickerMax') || unitForm.get('bleedEndDate')?.hasError('matDatepickerParse')) {
+                <mat-error>Bleed end date must match the collection date.</mat-error>
+              } @else if (unitForm.get('bleedEndDate')?.hasError('required') && unitForm.get('bleedEndDate')?.touched) {
+                <mat-error>Bleed end date is required.</mat-error>
+              }
+            </mat-form-field>
+
+            <!-- Bleed End Time — enter as HHMM (e.g. 1430), normalizes to HH:MM on blur -->
+            <mat-form-field
+              appearance="fill"
+              floatLabel="always"
+              class="detail-field"
+              subscriptSizing="dynamic">
+              <mat-label>End Time</mat-label>
+              <input
+                matInput
+                type="text"
+                inputmode="numeric"
+                maxlength="5"
+                placeholder="HHMM"
+                formControlName="bleedEndTime"
+                aria-label="Bleed End Time (enter HHMM)"
+                aria-required="true"
+                [attr.aria-invalid]="(bleedEndFutureError() || bleedEndBeforeStartError() || !!bleedSepTimeError() || !!bleedEndTimeError() || (unitForm.get('bleedEndTime')?.invalid && unitForm.get('bleedEndTime')?.touched)) || null"
+                [attr.aria-readonly]="bleedFieldsLocked() || null"
+                [errorStateMatcher]="bleedEndTimeMatcher"
+                [attr.readonly]="bleedFieldsLocked() || null"
+                (blur)="onBleedEndTimeBlur()" />
+              <mat-hint>e.g. 1430</mat-hint>
+              @if (bleedEndFutureError()) {
+                <mat-error>Bleed end time cannot be in the future</mat-error>
+              } @else if (bleedEndBeforeStartError()) {
+                <mat-error>Bleed end time must be after bleed start time</mat-error>
+              } @else if (bleedSepTimeError()) {
+                <mat-error>{{ bleedSepTimeError() }}</mat-error>
+              } @else if (bleedEndTimeError()) {
+                <mat-error>{{ bleedEndTimeError() }}</mat-error>
+              } @else if (unitForm.get('bleedEndTime')?.hasError('required') && unitForm.get('bleedEndTime')?.touched) {
+                <mat-error>Bleed end time is required.</mat-error>
+              }
+            </mat-form-field>
+
+            <!-- Donor Card ABO — editable dropdown -->
+            <mat-form-field
+              appearance="fill"
+              floatLabel="always"
+              class="detail-field"
+              subscriptSizing="dynamic">
+              <mat-label>Donor Card ABO</mat-label>
+              <mat-select
+                formControlName="donorFormAbo"
+                aria-label="Donor Card ABO">
+                <mat-option [value]="null">None</mat-option>
+                @for (opt of aboOptions(); track opt.value) {
+                  <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+
+          </div>
+
+          <!-- ───────────────────────────────────────────────────────────
+               ROW 2: Donor Info | Description | Bag Config | Configuration
+               ─────────────────────────────────────────────────────────── -->
+          <div class="detail-row">
+
+            <!-- Donor Info — M-5: aria-live announces update; M-6: role=group with labelledby -->
+            <div class="display-field detail-display-field" role="group" aria-labelledby="lbl-donor-info">
+              <span id="lbl-donor-info" class="display-field__label">Donor Card ABO</span>
+              <span class="display-field__value" aria-live="polite" aria-atomic="true">{{ donorInfo() || '—' }}</span>
+            </div>
+
+            <!-- Description — M-6: role=group with labelledby -->
+            <div class="display-field detail-display-field" role="group" aria-labelledby="lbl-unit-desc">
+              <span id="lbl-unit-desc" class="display-field__label">Description</span>
+              <span class="display-field__value">{{ unitDescription() || '--' }}</span>
+            </div>
+
+            <!-- Bag Config — read-only display (FMB: InsertAllowed=false, KeyboardNavigable=false, VisualAttributeName=DISPLAYITEM) -->
+            <div class="display-field detail-display-field" role="group" aria-labelledby="lbl-bag-config">
+              <span id="lbl-bag-config" class="display-field__label">Bag Config</span>
+              <span class="display-field__value">{{ bagConfig() || '—' }}</span>
+            </div>
+
+            <!-- Configuration — M-6: role=group with labelledby -->
+            <div class="display-field detail-display-field" role="group" aria-labelledby="lbl-configuration">
+              <span id="lbl-configuration" class="display-field__label">Configuration</span>
+              <span class="display-field__value">{{ configuration() || '-' }}</span>
+            </div>
+
+          </div>
+
+          <!-- ───────────────────────────────────────────────────────────
+               ATTRIBUTE GROUP SECTION
+               ─────────────────────────────────────────────────────────── -->
+          <!-- M-4: Live region announces attribute row add/delete to screen readers -->
+          <span class="sr-only" aria-live="polite" aria-atomic="true">{{ attrStatusMessage() }}</span>
+
+          <div class="attr-section" role="region" aria-label="Attribute group configuration">
+
+            <!-- Section sub-header: label + ADD ATTRIBUTES button -->
+            <div class="attr-section__header">
+              <span class="attr-section__title">Attribute Group</span>
+              <button
+                mat-button
+                color="primary"
+                type="button"
+                (click)="onAddAttribute()"
+                [disabled]="!canAddAttribute()"
+                aria-label="Add attributes — one row per click">
+                + ADD ATTRIBUTES
+              </button>
+            </div>
+
+            <!-- Attribute table header row -->
+            @if (attributeRows().length > 0) {
+              <div class="attr-table" role="table" aria-label="Attribute rows" [attr.aria-rowcount]="attributeRows().length + 1">
+                <div class="attr-table__header" role="rowgroup">
+                  <div class="attr-table__header-row" role="row" aria-rowindex="1">
+                    <span class="attr-col attr-col--group"      role="columnheader">Attribute Group</span>
+                    <span class="attr-col attr-col--group-desc" role="columnheader">Attribute Group Description</span>
+                    <span class="attr-col attr-col--code"       role="columnheader">Attribute Code</span>
+                    <span class="attr-col attr-col--code-desc"  role="columnheader">Attribute Code Description</span>
+                    <span class="attr-col attr-col--del"        role="columnheader"><span class="sr-only">Delete</span></span>
+                  </div>
+                </div>
+
+                <!-- Attribute data rows -->
+                <div role="rowgroup">
+                @for (row of attributeRows(); track trackById($index, row)) {
+                  <div class="attr-table__row" role="row" [attr.aria-rowindex]="$index + 2">
+
+                    <!-- Attribute Group select -->
+                    <div class="attr-col attr-col--group" role="cell">
+                      <mat-form-field
+                        appearance="fill"
+                        floatLabel="always"
+                        subscriptSizing="dynamic"
+                        class="attr-field">
+                        <mat-label>
+                          <span class="sr-only">Attribute Group row {{ $index + 1 }}</span>
+                        </mat-label>
+                        <mat-select
+                          [value]="row.group"
+                          [attr.aria-label]="'Attribute Group for row ' + ($index + 1)"
+                          (selectionChange)="onGroupChange(row, $event.value)">
+                          <mat-option>
+                            <ngx-mat-select-search
+                              [formControl]="row.groupSearchCtrl"
+                              placeholderLabel="Search group..."
+                              noEntriesFoundLabel="No matching groups">
+                            </ngx-mat-select-search>
+                          </mat-option>
+                          @for (grp of row.filteredGroups(); track grp.value) {
+                            <mat-option [value]="grp.value">{{ grp.label }}</mat-option>
+                          }
+                        </mat-select>
+                      </mat-form-field>
+                    </div>
+
+                    <!-- Attribute Group Description — plain text -->
+                    <div class="attr-col attr-col--group-desc" role="cell">
+                      <span class="attr-display-value" [attr.aria-label]="'Group description: ' + (row.groupDesc || 'none')">
+                        {{ row.groupDesc || '—' }}
+                      </span>
+                    </div>
+
+                    <!-- Attribute Code select -->
+                    <div class="attr-col attr-col--code" role="cell">
+                      <mat-form-field
+                        appearance="fill"
+                        floatLabel="always"
+                        subscriptSizing="dynamic"
+                        class="attr-field"
+                        [class.attr-field--disabled]="!row.group">
+                        <mat-label>
+                          <span class="sr-only">Attribute Code row {{ $index + 1 }}</span>
+                        </mat-label>
+                        <mat-select
+                          [value]="row.code"
+                          [disabled]="!row.group"
+                          [attr.aria-label]="'Attribute Code for row ' + ($index + 1)"
+                          (selectionChange)="onCodeChange(row, $event.value)">
+                          <mat-option>
+                            <ngx-mat-select-search
+                              [formControl]="row.codeSearchCtrl"
+                              placeholderLabel="Search code..."
+                              noEntriesFoundLabel="No matching codes">
+                            </ngx-mat-select-search>
+                          </mat-option>
+                          @for (code of row.filteredCodes(); track code.value) {
+                            <mat-option [value]="code.value">{{ code.label }}</mat-option>
+                          }
+                        </mat-select>
+                      </mat-form-field>
+                    </div>
+
+                    <!-- Attribute Code Description — plain text -->
+                    <div class="attr-col attr-col--code-desc" role="cell">
+                      <span class="attr-display-value" [attr.aria-label]="'Code description: ' + (row.codeDesc || 'none')">
+                        {{ row.codeDesc || '—' }}
+                      </span>
+                    </div>
+
+                    <!-- Delete button -->
+                    <div class="attr-col attr-col--del" role="cell">
+                      <button
+                        mat-icon-button
+                        type="button"
+                        color="warn"
+                        (click)="onDeleteAttribute(row.id)"
+                        [attr.aria-label]="'Delete attribute row ' + ($index + 1)">
+                        <mat-icon aria-hidden="true">delete</mat-icon>
+                      </button>
+                    </div>
+
+                  </div>
+                }
+                </div><!-- end rowgroup -->
+              </div>
+            } @else {
+              <!-- aria-live removed: attrStatusMessage signal already announces add/delete -->
+              <p class="no-attributes-text">
+                No attributes added. Click "+ ADD ATTRIBUTES" to add attribute rows.
+              </p>
+            }
+
+          </div>
+
+          <!-- ───────────────────────────────────────────────────────────
+               MACHINE SECTION — conditional (shown when requiresEquipment)
+               ─────────────────────────────────────────────────────────── -->
+          @if (showMachine()) {
+            <div class="machine-section" role="region" aria-label="Machine configuration">
+              <div class="machine-section__row">
+
+                <!-- Machine select with barcode suffix -->
+                <mat-form-field
+                  appearance="fill"
+                  floatLabel="always"
+                  class="detail-field"
+                  subscriptSizing="dynamic">
+                  <mat-label>Machine <span class="required-marker" aria-hidden="true">*</span></mat-label>
+                  <mat-select
+                    formControlName="machine"
+                    aria-label="Select Machine, required"
+                    aria-required="true"
+                    [attr.aria-invalid]="unitForm.get('machine')?.invalid && unitForm.get('machine')?.touched"
+                    (selectionChange)="onMachineChange($event.value)">
+                    <mat-option>
+                      <ngx-mat-select-search
+                        [formControl]="machineSearchCtrl"
+                        placeholderLabel="Search machine..."
+                        noEntriesFoundLabel="No matching machines">
+                      </ngx-mat-select-search>
+                    </mat-option>
+                    @for (machine of filteredMachines(); track machine.value) {
+                      <mat-option [value]="machine.value">{{ machine.label }}</mat-option>
+                    }
+                  </mat-select>
+                  <mat-icon matSuffix class="barcode-suffix-icon" aria-hidden="true">qr_code_scanner</mat-icon>
+                  @if (unitForm.get('machine')?.hasError('required') && unitForm.get('machine')?.touched) {
+                    <mat-error>Machine is required</mat-error>
+                  }
+                </mat-form-field>
+
+                <!-- Machine Description — read-only display -->
+                <div class="display-field detail-display-field" role="group" aria-labelledby="lbl-machine-desc">
+                  <span id="lbl-machine-desc" class="display-field__label">Machine Description</span>
+                  <span class="display-field__value">{{ donorCue() || '—' }}</span>
+                </div>
+
+                <!-- Serial Number — read-only display -->
+                <div class="display-field detail-display-field" role="group" aria-labelledby="lbl-serial-number">
+                  <span id="lbl-serial-number" class="display-field__label">Serial Number</span>
+                  <span class="display-field__value">{{ serialNumber() || '—' }}</span>
+                </div>
+
+              </div>
+
+              <!-- Helper text -->
+              <p class="machine-section__hint" aria-live="polite">
+                Scan, enter manually, or select from the list
+              </p>
+            </div>
+          }
+
+          <!-- ───────────────────────────────────────────────────────────
+               FOOTER BUTTONS: CANCEL + SAVE (right-aligned)
+               ─────────────────────────────────────────────────────────── -->
+          <div class="form-footer" role="group" aria-label="Form actions">
+            <button
+              mat-button
+              color="primary"
+              type="button"
+              (click)="onCancel()"
+              aria-label="Cancel and reset unit details">
+              CANCEL
+            </button>
+
+            <button
+              mat-raised-button
+              color="primary"
+              type="button"
+              (click)="onSave()"
+              [disabled]="isLoading() || unitForm.invalid || !unitIdField?.isValid"
+              [attr.aria-label]="isLoading() ? 'Saving, please wait' : 'Save check-in details'">
+              @if (isLoading()) {
+                <mat-spinner diameter="18" class="btn-spinner" aria-hidden="true"></mat-spinner>
+              } @else {
+                SAVE
+              }
+            </button>
+          </div>
+
+        </form>
+      </div>
+    }
+
+  </div>
+</div>

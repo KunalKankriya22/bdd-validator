@@ -1,0 +1,42 @@
+---
+tags:
+  - trigger
+  - SRVSYS
+---
+# VSERV_ABO_COMPATIBILITY_BD
+
+**Schema**: [[schemas/SRVSYS/SRVSYS|SRVSYS]]
+**Table**: [[schemas/SRVSYS/Tables/VSERV_ABO_COMPATIBILITY|VSERV_ABO_COMPATIBILITY]]
+**Type**: BEFORE EACH ROW
+**Event**: DELETE
+**Status**: ENABLED
+
+## Trigger Body
+
+```plsql
+begin
+  insert into VSERV_ABO_COMPATIBILITY_AUDIT
+  (	REQUEST_ABO,
+	COMPATIBLE_ABO,
+	EFF_DATE,
+	TERM_DATE,
+	LAST_MODIFIED_DATE,
+	PRODUCT_TYPE,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  (	:old.REQUEST_ABO,
+	:old.COMPATIBLE_ABO,
+	:old.EFF_DATE,
+	:old.TERM_DATE,
+	:old.LAST_MODIFIED_DATE,
+	:old.PRODUCT_TYPE,
+	:old.AUDIT_KEY,
+	'DELETE',LT_USER_SESSION.GET_USERID,
+    sysdate
+  ) ;
+  end ;
+```

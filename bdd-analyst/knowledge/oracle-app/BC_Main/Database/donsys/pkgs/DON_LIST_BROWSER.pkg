@@ -1,0 +1,208 @@
+CREATE OR REPLACE PACKAGE DON_LIST_BROWSER IS
+
+
+/************************************************************************************
+Developed By : 
+Create Date  : 
+Purpose      : 
+Date Mod     : 04/15/2011
+Version	 : 02	Modified By: Hussein  replace user by lt_sesseion_user.get_user_id	
+*************************************************************************************/
+
+PROCEDURE LOCK_RETURN_DONOR
+ (PL_STATUS IN varchar2
+ ,PL_CLAUSE_1 IN varchar2
+ ,PL_CLAUSE_2 IN varchar2
+ ,PL_ORDER_CLAUSE IN varchar2
+ ,PL_LIST_ID IN varchar2
+ ,PL_NXT_ROWNUM IN number
+ ,PL_DONOR_ID OUT varchar2
+ );
+PROCEDURE NO_STATUS_CHANGE
+ (PL_STATUS IN varchar2
+ ,PL_CLAUSE_1 IN varchar2
+ ,PL_CLAUSE_2 IN varchar2
+ ,PL_ORDER_CLAUSE IN varchar2
+ ,PL_LIST_ID IN varchar2
+ ,PL_PRE_ROWNUM IN number
+ ,PL_DONOR_ID OUT varchar2
+ ,PL_NXT_ROWNUM OUT number
+ );
+PROCEDURE LOCK_RELEASE_DONOR
+ (PL_LIST_ID IN varchar2
+ ,PL_DONOR_ID IN varchar2
+ );
+END DON_LIST_BROWSER;
+/
+
+CREATE OR REPLACE PACKAGE BODY DON_LIST_BROWSER IS
+
+
+/* ______________________________*/
+/* If the selected status is SCHEDULED or NOT ELIGIBLE , the following routine
+   would be called  */
+/* ____________________________________*/
+
+/* ____________________________________________*/
+       /* Release the lock */
+
+PROCEDURE LOCK_RETURN_DONOR
+ (PL_STATUS IN varchar2
+ ,PL_CLAUSE_1 IN varchar2
+ ,PL_CLAUSE_2 IN varchar2
+ ,PL_ORDER_CLAUSE IN varchar2
+ ,PL_LIST_ID IN varchar2
+ ,PL_NXT_ROWNUM IN number
+ ,PL_DONOR_ID OUT varchar2
+ )
+ IS
+
+        cursor_handle         INTEGER;
+        v_donor_id            VARCHAR2(10);
+        v_count               NUMBER:=0;
+        execute_feedback      INTEGER;
+        v_row_counter         NUMBER:=0;
+        v_no_Ys               NUMBER:=0;
+        q_str                 varchar2(1500);
+        Procedure parse_cursor is
+        begin
+          DBMS_SQL.PARSE (cursor_handle,q_str,DBMS_SQL.V7);
+        exception
+          when others then
+             dbms_output.put_line('Error:'||substr(sqlerrm,1,200));
+        End parse_cursor;
+        Procedure xecute_cursor is
+        begin
+          execute_feedback:=DBMS_SQL.EXECUTE(cursor_handle);
+        exception
+           when others then
+              dbms_output.put_line('Error:'||substr(sqlerrm,1,200));
+        End xecute_cursor;
+Begin
+      cursor_handle:=DBMS_SQL.OPEN_CURSOR;
+      q_str:='Select a.donor_id from donor_lists a,donors b where'||
+             '  a.call_code=nvl('||pl_status||','||' a.call_code) ' || ' and '||
+             '  a.list_id= '''||pl_list_id||'''  and a.donor_id=b.donor_id '||
+             ' and a.locked_by is null and ' ||pl_clause_1|| ' OR '||
+             ' (( a.call_code=''MSG'' and sysdate > a.call_after and '||
+             ' a.contact_flag=''N'') or '||
+             ' ( a.call_code=''CLBCK'' and sysdate > a.call_after and '||
+             ' a.contact_flag=''N''))) ' ||
+             ' order by ' || pl_order_clause;
+      dbms_output.put_line(substr(q_str,1,249));
+      dbms_output.put_line(substr(q_str,250,249));
+      parse_cursor;
+      dbms_output.put_line('CURSOR HANDLE:'||to_char(cursor_handle));
+      DBMS_SQL.DEFINE_COLUMN(cursor_handle,1,v_donor_id,10);
+      xecute_cursor;
+   Loop
+     begin
+       If DBMS_SQL.FETCH_ROWS(cursor_handle)!=0 then
+          DBMS_SQL.COLUMN_VALUE(cursor_handle,1,v_donor_id);
+          dbms_output.put_line('Donor ID='||v_donor_id);
+           Update donor_lists set locked_by=LT_USER_SESSION.get_userid where
+           list_id=pl_list_id and donor_id=v_donor_id;
+       Else
+          v_donor_id:=null;
+          Update donor_lists set contact_flag='N' where
+          list_id=pl_list_id;
+       End if;
+     exception when others then
+          null;
+     end;
+     Exit;
+   End loop;
+   DBMS_SQL.CLOSE_CURSOR(cursor_handle);
+    pl_donor_id:=v_donor_id;
+    COMMIT;
+ Exception
+      When others then
+       null;
+ End lock_return_donor;
+PROCEDURE NO_STATUS_CHANGE
+ (PL_STATUS IN varchar2
+ ,PL_CLAUSE_1 IN varchar2
+ ,PL_CLAUSE_2 IN varchar2
+ ,PL_ORDER_CLAUSE IN varchar2
+ ,PL_LIST_ID IN varchar2
+ ,PL_PRE_ROWNUM IN number
+ ,PL_DONOR_ID OUT varchar2
+ ,PL_NXT_ROWNUM OUT number
+ )
+ IS
+
+     cursor_handle         INTEGER;
+     v_donor_id            VARCHAR2(10);
+     v_count               NUMBER:=0;
+     execute_feedback      INTEGER;
+     v_row_counter         NUMBER:=0;
+     v_no_Ys               NUMBER:=0;
+     q_str1                 varchar2(1500);
+      Procedure parse_cursor is
+       begin
+         DBMS_SQL.PARSE (cursor_handle,q_str1,DBMS_SQL.V7);
+       exception
+          when others then
+             dbms_output.put_line('Error:'||substr(sqlerrm,1,200));
+      End parse_cursor;
+      Procedure xecute_cursor is
+        begin
+          execute_feedback:=DBMS_SQL.EXECUTE(cursor_handle);
+        exception
+           when others then
+             dbms_output.put_line('Error:'||substr(sqlerrm,1,200));
+      End xecute_cursor;
+Begin
+      cursor_handle:=DBMS_SQL.OPEN_CURSOR;
+      q_str1 :='Select a.donor_id from donor_lists a,donors b where'||
+             '  a.call_code=nvl('||pl_status||','||' a.call_code) ' || ' and '||
+             '  a.list_id= '''||pl_list_id||'''  and a.donor_id=b.donor_id '||
+             '  and a.locked_by is null and '|| pl_clause_1 ||
+             ' order by ' || pl_order_clause;
+             dbms_output.put_line(substr(q_str1,1,249));
+             dbms_output.put_line(substr(q_str1,250,249));
+             parse_cursor;
+             dbms_output.put_line('CURSOR HANDLE:'||to_char(cursor_handle));
+             DBMS_SQL.DEFINE_COLUMN(cursor_handle,1,v_donor_id,10);
+             xecute_cursor;
+     Loop
+       begin
+         If  DBMS_SQL.FETCH_ROWS(cursor_handle)!=0 then
+             DBMS_SQL.COLUMN_VALUE(cursor_handle,1,v_donor_id);
+             dbms_output.put_line('Donor ID='||v_donor_id);
+             v_row_counter:=v_row_counter+1;
+            if v_row_counter > pl_pre_rownum then
+               v_count:=v_row_counter;
+               exit;
+            end if;
+         Else
+            v_donor_id:=null;
+            Exit;
+         End if;
+       exception when others then
+            null;
+       end;
+    End loop;
+     DBMS_SQL.CLOSE_CURSOR(cursor_handle);
+     pl_donor_id:=v_donor_id;
+     pl_nxt_rownum:=v_count;
+      COMMIT;
+ Exception
+      When others then
+       null;
+ End no_status_change;
+PROCEDURE LOCK_RELEASE_DONOR
+ (PL_LIST_ID IN varchar2
+ ,PL_DONOR_ID IN varchar2
+ )
+ IS
+
+       v_donor_id   varchar2(10);
+Begin
+        Update donor_lists set locked_by=null where list_id=pl_list_id and
+        locked_by=LT_USER_SESSION.get_userid;         ------ and donor_id=pl_donor_id;
+        commit;
+  End lock_release_donor;
+END DON_LIST_BROWSER;
+/
+

@@ -1,0 +1,9 @@
+set serveroutput on
+execute SF_API.DONOR_DATA_PROCESSOR
+execute SF_API.LAB_DATA_PROCESSOR
+execute SF_API.ARCHIVE_DATA
+execute SF_API.ARCHIVE_CONTROLLER
+SPOOL OFF;
+exit;
+
+

@@ -1,0 +1,242 @@
+<div class="mof-page">
+
+  <app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+  <div class="mof-content">
+
+    <!-- ── LEFT: Test list panel ── -->
+    <div class="mof-list-panel" role="navigation" aria-label="Test list">
+
+      <div class="mof-list-panel__search">
+        <mat-form-field class="mof-search-field" appearance="fill" subscriptSizing="dynamic">
+          <img matPrefix src="assets/images/icons/search.svg" alt="" aria-hidden="true" class="mof-search-icon" />
+          <input
+            matInput
+            type="search"
+            placeholder="Search by test ID or descrip..."
+            [(ngModel)]="searchText"
+            (ngModelChange)="onSearch()"
+            aria-label="Search by test ID or description"
+            autocomplete="off" />
+        </mat-form-field>
+
+      </div>
+
+      @if (testsLoading) {
+        <div class="mof-list-panel__loading">
+          <mat-spinner diameter="28" aria-label="Loading tests" />
+        </div>
+      } @else {
+        <ul class="mof-list-panel__list" role="listbox" aria-label="Test list" aria-live="polite">
+          @for (test of filteredTests; track test.testId) {
+            <li
+              class="mof-list-panel__item"
+              [class.mof-list-panel__item--selected]="selectedTest?.testId === test.testId"
+              role="option"
+              [attr.aria-selected]="selectedTest?.testId === test.testId"
+              (click)="selectTest(test)"
+              (keydown.enter)="selectTest(test)"
+              (keydown.space)="$event.preventDefault(); selectTest(test)"
+              (keydown.arrowdown)="$event.preventDefault(); focusNextListItem($event)"
+              (keydown.arrowup)="$event.preventDefault(); focusPreviousListItem($event)"
+              tabindex="0">
+              <span class="mof-list-panel__item-name">{{ test.description }}</span>
+              <span class="mof-list-panel__item-id">{{ test.testId }}</span>
+            </li>
+          }
+          @if (filteredTests.length === 0) {
+            <li class="mof-list-panel__empty" role="presentation">No tests found.</li>
+          }
+        </ul>
+      }
+
+    </div>
+
+    <!-- ── RIGHT: Detail panel ── -->
+    <div class="mof-detail-panel" role="main" aria-label="Test band details">
+
+      @if (selectedTest) {
+
+        <div class="mof-detail-panel__header">
+          <h2 class="mof-detail-panel__title">
+            Valid Test Bands : {{ selectedTest.description }}
+          </h2>
+        </div>
+
+        <div class="mof-detail-panel__body">
+
+          <!-- Test Kit dropdown -->
+          <div class="mof-test-kit-row">
+            <mat-form-field appearance="fill" class="mof-test-kit-field">
+              <mat-label>Test Kit <span class="required-mark" aria-hidden="true">*</span></mat-label>
+              <mat-select
+                [(ngModel)]="selectedTestType"
+                (ngModelChange)="onTestTypeChange()"
+                [disabled]="testTypesLoading"
+                required
+                aria-required="true">
+                @for (tt of testTypes; track tt.testType) {
+                  <mat-option [value]="tt.testType">{{ tt.testType }} - {{ tt.testTypeDesc }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+          </div>
+
+          @if (!selectedTestType) {
+            <!-- Empty state: no test kit selected -->
+            <div class="mof-empty-state">
+              <mat-icon class="mof-empty-state__icon" aria-hidden="true">search</mat-icon>
+              <p class="mof-empty-state__text">No Results to Display</p>
+              <p class="mof-empty-state__hint">Choose a Test Kit to begin.</p>
+            </div>
+          } @else if (bandsLoading) {
+            <div class="mof-bands-loading">
+              <mat-spinner diameter="32" aria-label="Loading bands" />
+            </div>
+          } @else {
+            <!-- Bands table -->
+            <table mat-table [dataSource]="rows" class="mof-table" aria-label="Valid test bands"
+                   cdkDropList [cdkDropListData]="rows" (cdkDropListDropped)="onDrop($event)">
+
+              <!-- Drag Handle Column -->
+              <ng-container matColumnDef="drag">
+                <th mat-header-cell *matHeaderCellDef class="mof-col-drag">
+                  <span class="cdk-visually-hidden">Reorder</span>
+                </th>
+                <td mat-cell *matCellDef="let row" class="mof-col-drag">
+                  <mat-icon class="mof-drag-handle" cdkDragHandle
+                            aria-label="Drag to reorder"
+                            matTooltip="Drag to reorder" matTooltipPosition="right">
+                    drag_indicator
+                  </mat-icon>
+                </td>
+              </ng-container>
+
+              <!-- Sequence Column -->
+              <ng-container matColumnDef="sequence">
+                <th mat-header-cell *matHeaderCellDef class="mof-col-sequence">Sequence</th>
+                <td mat-cell *matCellDef="let row; let i = index" class="mof-col-sequence">
+                  {{ i + 1 }}
+                </td>
+              </ng-container>
+
+              <!-- Band Name Column (editable) -->
+              <ng-container matColumnDef="bandName">
+                <th mat-header-cell *matHeaderCellDef class="mof-col-band">Band <span class="required-mark" aria-hidden="true">*</span></th>
+                <td mat-cell *matCellDef="let row" class="mof-col-band">
+                  <mat-form-field appearance="fill" class="inline-field" subscriptSizing="dynamic">
+                    <input
+                      matInput
+                      type="text"
+                      [(ngModel)]="row.bandName"
+                      (ngModelChange)="onRowChange()"
+                      [attr.aria-label]="'Band name for row ' + row.bandSeq"
+                      aria-required="true"
+                      maxlength="6"
+                      autocomplete="off" />
+                  </mat-form-field>
+                </td>
+              </ng-container>
+
+              <!-- Effective Date Column (editable) -->
+              <ng-container matColumnDef="effDate">
+                <th mat-header-cell *matHeaderCellDef class="mof-col-date">Effective Date <span class="required-mark" aria-hidden="true">*</span></th>
+                <td mat-cell *matCellDef="let row" class="mof-col-date">
+                  <mat-form-field appearance="fill" subscriptSizing="dynamic" class="inline-field inline-field--date"
+                                  [class.mat-form-field-invalid]="getEffDateError(row)">
+                    <input matInput
+                           [matDatepicker]="effPicker"
+                           [value]="parseDateForPicker(row.effDate)"
+                           [errorStateMatcher]="getEffDateMatcher(row)"
+                           [matTooltip]="getEffDateError(row) || ''"
+                           matTooltipPosition="below"
+                           (dateChange)="onEffDateChange(row, $event.value)"
+                           (blur)="onDateInputBlur(row, $event, 'effDate')"
+                           placeholder="DD-MMM-YYYY"
+                           [attr.aria-label]="'Effective date for row ' + row.bandSeq"
+                           aria-required="true"
+                           autocomplete="off" />
+                    <mat-datepicker-toggle matIconSuffix [for]="effPicker"></mat-datepicker-toggle>
+                    <mat-datepicker #effPicker></mat-datepicker>
+                    <mat-error>{{ getEffDateError(row) }}</mat-error>
+                  </mat-form-field>
+                </td>
+              </ng-container>
+
+              <!-- Termination Date Column (editable) -->
+              <ng-container matColumnDef="termDate">
+                <th mat-header-cell *matHeaderCellDef class="mof-col-date">Termination Date</th>
+                <td mat-cell *matCellDef="let row" class="mof-col-date">
+                  <mat-form-field appearance="fill" subscriptSizing="dynamic" class="inline-field inline-field--date"
+                                  [class.mat-form-field-invalid]="getTermDateError(row)">
+                    <input matInput
+                           [matDatepicker]="termPicker"
+                           [value]="parseDateForPicker(row.termDate)"
+                           [errorStateMatcher]="getTermDateMatcher(row)"
+                           [matTooltip]="getTermDateError(row) || ''"
+                           matTooltipPosition="below"
+                           (dateChange)="onTermDateChange(row, $event.value)"
+                           (blur)="onDateInputBlur(row, $event, 'termDate')"
+                           placeholder="DD-MMM-YYYY"
+                           [attr.aria-label]="'Termination date for row ' + row.bandSeq"
+                           autocomplete="off" />
+                    <mat-datepicker-toggle matIconSuffix [for]="termPicker"></mat-datepicker-toggle>
+                    <mat-datepicker #termPicker></mat-datepicker>
+                    <mat-error>{{ getTermDateError(row) }}</mat-error>
+                  </mat-form-field>
+                </td>
+              </ng-container>
+
+              <!-- Modification Date Column (read-only) -->
+              <ng-container matColumnDef="modDate">
+                <th mat-header-cell *matHeaderCellDef class="mof-col-mod-date">Modification Date</th>
+                <td mat-cell *matCellDef="let row" class="mof-col-mod-date">
+                  {{ formatDate(row.lastModifiedDate) }}
+                </td>
+              </ng-container>
+
+              <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+              <tr mat-row *matRowDef="let row; columns: displayedColumns;" cdkDrag></tr>
+
+              <tr class="mat-row" *matNoDataRow>
+                <td class="mat-cell mof-empty-cell" [attr.colspan]="displayedColumns.length">
+                  No bands added. Click "+ ADD NEW BAND" to begin.
+                </td>
+              </tr>
+            </table>
+
+            <button type="button" class="mof-add-btn" (click)="addNewBand()">
+              <mat-icon class="mof-add-btn__icon" aria-hidden="true">add</mat-icon>
+              ADD NEW BAND
+            </button>
+          }
+
+        </div>
+
+        <div class="mof-detail-panel__footer">
+          <div class="mof-footer-right">
+            <button type="button" class="mof-footer-clear" mat-button
+                    (click)="clearAll()" [disabled]="!isDirty">
+              CLEAR ALL
+            </button>
+            <button type="button" mat-stroked-button class="mof-footer-cancel"
+                    (click)="cancel()" [disabled]="!isDirty">
+              CANCEL
+            </button>
+            <button type="button" mat-raised-button class="mof-footer-save"
+                    [disabled]="!isDirty || hasInvalidRows || isSaving"
+                    (click)="save()">
+              @if (isSaving) { <mat-spinner diameter="16" class="mof-save-spinner" aria-label="Saving changes" /> } @else { SAVE }
+            </button>
+          </div>
+        </div>
+
+      } @else {
+        <div class="mof-detail-panel__empty">
+          <p>Select a test from the list to view its bands.</p>
+        </div>
+      }
+
+    </div>
+  </div>
+</div>

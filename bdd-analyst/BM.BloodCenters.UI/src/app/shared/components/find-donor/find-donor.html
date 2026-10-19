@@ -1,0 +1,338 @@
+<div class="find-donor-dialog" role="dialog" aria-modal="true" aria-labelledby="find-donor-title">
+
+  <!-- Header -->
+  <div class="dialog-header">
+    <h2 id="find-donor-title" class="dialog-title">Find Donor</h2>
+    <button
+      type="button"
+      mat-icon-button
+      class="close-btn"
+      tabindex="-1"
+      (click)="onCancel()"
+      aria-label="Close Find Donor dialog">
+      <mat-icon>close</mat-icon>
+    </button>
+  </div>
+
+  <!-- Search Form -->
+  <div class="search-form-wrapper">
+    <form [formGroup]="searchForm" class="search-form" (ngSubmit)="onSearch()">
+      <!-- Row 1 -->
+      <div class="form-row">
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label>Scan ID</mat-label>
+          <input matInput formControlName="scanId" autocomplete="off" maxlength="13"
+                 (input)="onUppercaseInput($event, 'scanId')">
+          @if (searchForm.get('scanId')?.hasError('scanIdLength')) {
+            <mat-error>Scan ID must be exactly 13 characters</mat-error>
+          }
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label>Donor ID</mat-label>
+          <input matInput formControlName="donorId" autocomplete="off"
+                 (input)="onUppercaseInput($event, 'donorId')"
+                 (blur)="onDonorIdBlur()">
+          @if (isLookingUpDonorId) {
+            <mat-spinner matSuffix diameter="16"></mat-spinner>
+          }
+          @if (doubleEntryState['donorId'] === 'pending') {
+            <mat-hint>Re-enter Donor ID</mat-hint>
+          }
+          @if (doubleEntryState['donorId'] === 'mismatch') {
+            <mat-error>Donor ID did not match. Please re-enter.</mat-error>
+          }
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label>Type</mat-label>
+          <mat-select formControlName="alternateIdType">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="typeSearchControl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="No results found">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (type of filteredAlternateIdTypes(); track type.code) {
+              <mat-option [value]="type.code">{{ type.code }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label>Alternate ID</mat-label>
+          <input matInput formControlName="alternateId" autocomplete="off"
+                 (input)="onUppercaseInput($event, 'alternateId')">
+        </mat-form-field>
+      </div>
+
+      <!-- Row 2 -->
+      <div class="form-row">
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label>Last Name</mat-label>
+          <input matInput formControlName="lastName" autocomplete="off" maxlength="50"
+                 (input)="onUppercaseInput($event, 'lastName'); searchForm.get('lastName')?.markAsTouched()"
+                 (blur)="onFieldDoubleEntryBlur('lastName'); onConfirmatoryFieldBlur('lastName')">
+          @if (doubleEntryState['lastName'] === 'pending') {
+            <mat-hint>Re-enter Last Name</mat-hint>
+          }
+          @if (doubleEntryState['lastName'] === 'mismatch') {
+            <mat-error>Last Name did not match. Please re-enter.</mat-error>
+          } @else if (searchForm.get('lastName')?.hasError('required') && searchForm.get('lastName')?.touched) {
+            <mat-error>Last Name is required</mat-error>
+          } @else if (searchForm.get('lastName')?.hasError('pattern')) {
+            <mat-error>Invalid characters in last name</mat-error>
+          }
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label>DOB</mat-label>
+          <input matInput [matDatepicker]="dobPicker" formControlName="dob" placeholder="DD-MMM-YYYY"
+                 [max]="maxDob"
+                 (input)="onDobInput($event)" (blur)="validateDob(); onFieldDoubleEntryBlur('dob'); onConfirmatoryFieldBlur('dob')">
+          <mat-datepicker-toggle matIconSuffix [for]="dobPicker"></mat-datepicker-toggle>
+          <mat-datepicker #dobPicker [startAt]="maxDob"></mat-datepicker>
+          @if (doubleEntryState['dob'] === 'pending') {
+            <mat-hint>Re-enter DOB</mat-hint>
+          }
+          @if (doubleEntryState['dob'] === 'mismatch') {
+            <mat-error>DOB did not match. Please re-enter.</mat-error>
+          } @else if (searchForm.get('dob')?.hasError('required') && searchForm.get('dob')?.touched) {
+            <mat-error>DOB is required</mat-error>
+          } @else if (searchForm.get('dob')?.hasError('invalidDate')) {
+            <mat-error>Date is invalid</mat-error>
+          } @else if (searchForm.get('dob')?.hasError('futureDob') || searchForm.get('dob')?.hasError('matDatepickerMax')) {
+            <mat-error>DOB cannot be in future</mat-error>
+          }
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label>Sex</mat-label>
+          <mat-select formControlName="sex" (selectionChange)="onFieldDoubleEntryBlur('sex')">
+            @for (option of sexOptions; track option.value) {
+              <mat-option [value]="option.value">{{ option.label }}</mat-option>
+            }
+          </mat-select>
+          @if (doubleEntryState['sex'] === 'pending') {
+            <mat-hint>Re-enter Sex</mat-hint>
+          }
+          @if (doubleEntryState['sex'] === 'mismatch') {
+            <mat-error>Sex did not match. Please re-enter.</mat-error>
+          } @else if (searchForm.get('sex')?.hasError('required') && searchForm.get('sex')?.touched) {
+            <mat-error>Sex is required</mat-error>
+          }
+        </mat-form-field>
+
+        @if (config.firstNameVisible) {
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>First Name</mat-label>
+            <input matInput formControlName="firstName" autocomplete="off" maxlength="50"
+                   (input)="onUppercaseInput($event, 'firstName')"
+                   (keydown.enter)="onSearch()"
+                   (keydown.tab)="onSearch()"
+                   (blur)="onFieldDoubleEntryBlur('firstName'); onConfirmatoryFieldBlur('firstName')">
+            @if (doubleEntryState['firstName'] === 'pending') {
+              <mat-hint>Re-enter First Name</mat-hint>
+            }
+            @if (doubleEntryState['firstName'] === 'mismatch') {
+              <mat-error>First Name did not match. Please re-enter.</mat-error>
+            } @else if (searchForm.get('firstName')?.hasError('required') && searchForm.get('firstName')?.touched) {
+              <mat-error>First Name is required</mat-error>
+            }
+          </mat-form-field>
+        }
+      </div>
+    </form>
+  </div>
+
+  <!-- Results Area -->
+  <div class="results-area">
+    @if (loading) {
+      <div class="loading-state" role="status" aria-label="Loading search results">
+        <mat-spinner diameter="40"></mat-spinner>
+      </div>
+    } @else if (!hasSearched || results.length === 0) {
+      <div class="empty-state" role="status">
+        @if (!hasSearched) {
+          <mat-icon class="empty-icon">search</mat-icon>
+          <p class="empty-title">No Results to Display</p>
+          <p class="empty-subtitle">Please enter search criteria to view Results</p>
+        } @else {
+          <mat-icon class="empty-icon">search</mat-icon>
+          <p class="empty-title">No Results Found</p>
+          <p class="empty-subtitle">Try adjusting your search criteria</p>
+        }
+      </div>
+    } @else {
+      <!-- Results Table -->
+      <div class="table-wrapper">
+        <table mat-table [dataSource]="results" class="results-table">
+          <colgroup>
+            <col class="col-grade">
+            <col class="col-donorId">
+            <col class="col-lastName">
+            <col class="col-firstName">
+            <col class="col-middleName">
+            <col class="col-dob">
+            <col class="col-sex">
+            <col class="col-abo">
+            <col class="col-alternateId">
+          </colgroup>
+          <!-- Grade Column -->
+          <ng-container matColumnDef="grade">
+            <th mat-header-cell *matHeaderCellDef>Grade</th>
+            <td mat-cell *matCellDef="let row">{{ row.grade != null ? row.grade : '-' }}</td>
+          </ng-container>
+
+          <!-- Donor ID Column -->
+          <ng-container matColumnDef="donorId">
+            <th mat-header-cell *matHeaderCellDef>Donor ID</th>
+            <td mat-cell *matCellDef="let row">{{ row.donorId }}</td>
+          </ng-container>
+
+          <!-- Last Name Column -->
+          <ng-container matColumnDef="lastName">
+            <th mat-header-cell *matHeaderCellDef>Last Name</th>
+            <td mat-cell *matCellDef="let row"
+                [class.mismatch-cell]="isNameMismatch(row, 'lastName')">
+              {{ row.lastName }}
+            </td>
+          </ng-container>
+
+          <!-- First Name Column -->
+          <ng-container matColumnDef="firstName">
+            <th mat-header-cell *matHeaderCellDef>First Name</th>
+            <td mat-cell *matCellDef="let row"
+                [class.mismatch-cell]="isNameMismatch(row, 'firstName')">
+              {{ row.firstName }}
+            </td>
+          </ng-container>
+
+          <!-- Middle Name Column -->
+          <ng-container matColumnDef="middleName">
+            <th mat-header-cell *matHeaderCellDef>Middle Name</th>
+            <td mat-cell *matCellDef="let row">{{ row.middleName || '-' }}</td>
+          </ng-container>
+
+          <!-- Date of Birth Column -->
+          <ng-container matColumnDef="dob">
+            <th mat-header-cell *matHeaderCellDef>Date of Birth</th>
+            <td mat-cell *matCellDef="let row"
+                [class.mismatch-cell]="isMismatch(row, 'dob')">
+              {{ formatDate(row.dob) }}
+            </td>
+          </ng-container>
+
+          <!-- Sex Column -->
+          <ng-container matColumnDef="sex">
+            <th mat-header-cell *matHeaderCellDef>Sex</th>
+            <td mat-cell *matCellDef="let row"
+                [class.mismatch-cell]="isMismatch(row, 'sex')">
+              {{ row.sex === 'M' ? 'Male' : row.sex === 'F' ? 'Female' : row.sex }}
+            </td>
+          </ng-container>
+
+          <!-- ABO/Rh Column -->
+          <ng-container matColumnDef="aboRh">
+            <th mat-header-cell *matHeaderCellDef>ABO</th>
+            <td mat-cell *matCellDef="let row">{{ row.aboRh || '-' }}</td>
+          </ng-container>
+
+          <!-- Alternate ID Column -->
+          <ng-container matColumnDef="alternateId">
+            <th mat-header-cell *matHeaderCellDef>Alternate ID</th>
+            <td mat-cell *matCellDef="let row">{{ row.alternateId || '-' }}</td>
+          </ng-container>
+
+          <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+          <tr mat-row
+              *matRowDef="let row; columns: displayedColumns;"
+              class="result-row"
+              [class.selected-row]="isRowSelected(row)"
+              (click)="onRowSelect(row)"
+              (keydown.enter)="onRowSelect(row)"
+              tabindex="0"
+              [attr.aria-selected]="isRowSelected(row)"
+              role="row">
+          </tr>
+        </table>
+      </div>
+    }
+  </div>
+
+  <!-- Contact Information -->
+  @if (selectedDonor) {
+    <div class="contact-info-section">
+      <h3 class="contact-title">Contact Information</h3>
+      <div class="contact-grid">
+        <div class="contact-field">
+          <span class="contact-label">Address</span>
+          <span class="contact-value">{{ getFullAddress(selectedDonor) }}</span>
+        </div>
+        <div class="contact-field">
+          <span class="contact-label">Phone Number</span>
+          <span class="contact-value">{{ getPhoneNumber(selectedDonor) }}</span>
+        </div>
+        <div class="contact-field">
+          <span class="contact-label">Alternate Type</span>
+          <span class="contact-value">{{ selectedDonor.alternateIdType || '-' }}</span>
+        </div>
+        <div class="contact-field">
+          <span class="contact-label">Alternate ID</span>
+          <span class="contact-value">{{ selectedDonor.alternateId || '-' }}</span>
+        </div>
+      </div>
+    </div>
+  }
+
+  <!-- Footer Actions -->
+  <div class="dialog-footer">
+    <div class="footer-actions">
+      <button
+        type="button"
+        mat-stroked-button
+        class="action-btn cancel-btn"
+        (click)="onCancel()"
+        aria-label="Cancel and close dialog">
+        CANCEL
+      </button>
+      <button
+        type="button"
+        mat-stroked-button
+        class="action-btn clear-btn"
+        (click)="onClear()"
+        aria-label="Clear search criteria">
+        CLEAR
+      </button>
+      <button
+        type="button"
+        mat-stroked-button
+        class="action-btn hold-btn"
+        [disabled]="isHoldDisabled"
+        (click)="onHold()"
+        aria-label="Hold donor">
+        HOLD
+      </button>
+      <button
+        type="button"
+        mat-stroked-button
+        class="action-btn new-btn"
+        [disabled]="isNewDisabled"
+        (click)="onNew()"
+        aria-label="Create new donor">
+        NEW
+      </button>
+      <button
+        type="button"
+        mat-stroked-button
+        class="action-btn select-btn"
+        [disabled]="isSelectDisabled"
+        (click)="onSelect()"
+        aria-label="Select donor">
+        SELECT
+      </button>
+    </div>
+  </div>
+
+</div>

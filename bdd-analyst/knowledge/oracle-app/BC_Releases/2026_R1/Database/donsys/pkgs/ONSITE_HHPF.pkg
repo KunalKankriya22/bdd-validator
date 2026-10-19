@@ -1,0 +1,1149 @@
+CREATE OR REPLACE package ONSITE_HHPF is
+
+  -- Author  : ASHOKV
+  -- Created : 4/9/2019 9:36:01 AM
+  -- Purpose : Health History and Physical Finding routines.
+  -- Version :
+  -- 01 : New version created.  PF_COMMIT routine added.
+  -- 02 : PF_COMMIT routine modified to add reason out parameter.
+  -- 03 : PF_PLACE_REMOVE_INTERDICTION modified: terminateOVRDF code added
+  -- 04 : pf_commit_v02 (obselete) removed.  pf_pending_commit routine added.
+  -- 05 : place_pf_interdictions routine added.
+
+  /* called from ONSITE Physical Findings - pending button. 
+    This routine places interdictions based on PF values */
+  Procedure pf_pending_commit(p_transaction_id in varchar2,
+                              p_screener_id    in varchar2,
+                              p_prog_name      in varchar2,
+                              p_status         out varchar2,
+                              p_reason         out varchar2);
+
+  /* 
+  This routine is called from ONSITE web app (complete form button)
+  Commit logic moved from oracle forms to database.
+  Inputs: transaction id, screener id (user id), program calling this routine
+  Output:  Returns - 'P', 'T' or 'OK'
+  'P' - Based on the Physical Findings responses, the donor is deferred Permanently
+  'T' - Based on the Physical Findings responses, the donor is deferred Temporarly
+  'OK' - no interdictions, committed to database.
+  */                                
+  Procedure pf_commit(p_transaction_id in varchar2,
+                          p_screener_id    in varchar2,
+                          p_prog_name      in varchar2,
+                          p_status         out varchar2,
+                          p_reason         out varchar2);                      
+
+ PROCEDURE pf_place_remove_interdiction( p_transaction_id in varchar2,
+                                          p_screener_id    in varchar2,
+                                          p_prog_name      in varchar2,
+                                          p_physical_code  in varchar2,
+                                          p_place_remove   in varchar2,
+                                          p_status         out varchar2);
+
+ /* called from DETACH screen */   
+ Procedure place_pf_interdictions(  p_transaction_id in varchar2,
+                                    p_prog_name      in varchar2,
+                                    p_status         out varchar2);
+
+end ONSITE_HHPF;
+
+/
+
+
+CREATE OR REPLACE package body ONSITE_HHPF is
+
+  gv_donor_id        DONATIONS.DONOR_ID%TYPE;
+  gv_don_type        DONATIONS.DONATION_TYPE%TYPE;
+  gv_proc_code       DONATIONS.PROCEDURE_CODE%TYPE;
+  gv_unit_id         DONATIONS.UNIT_ID%TYPE;
+  gd_coll_date       DONATIONS.COLL_DATE%TYPE;
+  gv_user_chapter    DONATIONS.CHAPTER_ID%TYPE;
+  gv_deferral_id     DONATIONS.DEFERRAL_ID%TYPE;
+  gv_def_reason      DONATIONS.DEFERRAL_REASON%TYPE;
+  gd_drive_date      DONATIONS.COLL_DATE%TYPE;
+  gv_don_pgm_id      DONATIONS.PROGRAM_ID%TYPE;
+  gv_transaction_id  DONATIONS.TRANSACTION_ID%TYPE;
+  gv_prog_name       VARCHAR2(30);
+  gv_multi_chapter   CHAPTERS.CHAPTER_ID%TYPE;
+  gd_local_date      DATE;
+  gv_staff_no        SYSTEM_USERS.STAFF_NO%TYPE;  
+  gv_error_msg       VARCHAR2(500);
+  gv_screener_id     PHYSICAL_FINDINGS.INSERT_USER%TYPE;
+
+
+  procedure pf_update_weight is
+    lv_pf_weight VALID_PARAMETERS.Parameter_Value%TYPE;
+    lv_weight    PHYSICAL_FINDINGS.Physical_Value%TYPE;
+  begin
+    begin
+      select parameter_value into lv_pf_weight
+        from valid_parameters
+       where parameter_code = 'PF_WEIGHT'
+         and sysdate between eff_date and nvl(term_date, sysdate + 10);
+    exception
+      when others then
+        lv_pf_weight := 'WEIGHT';
+    end;
+
+    if lv_pf_weight IS NOT NULL then
+      SELECT NVL(pf.physical_value_repeat, pf.physical_value) INTO lv_weight
+        FROM physical_findings pf
+       WHERE pf.transaction_id = gv_transaction_id
+         AND pf.physical_code = lv_pf_weight;
+
+      IF lv_weight IS NOT NULL AND LTRIM(lv_weight, '0123456789') IS NULL THEN
+        update donors
+           set donor_weight = TO_NUMBER(LTRIM(lv_weight))
+         where donor_id = gv_donor_id;
+      END IF;
+    end if;
+  exception
+    when no_data_found then
+      null;
+    when others then
+      gv_error_msg := 'Loc B: ' || SUBSTR(sqlerrm, 1, 200);
+      RETURN;
+  end pf_update_weight;
+
+
+  /* ***********************************************************
+     This routine places interdiction on donor and unit 
+     The interdiction owner(U,D or B) is checked from the valid_interdiction, accrodingly
+     the interdictions gets placed 
+  ******************************************************************* */
+
+  PROCEDURE pf_place_interdictions(p_physical_code IN VARCHAR2 DEFAULT NULL) IS
+    v_routine_status VARCHAR2(500);
+
+    v_origin_from VARCHAR2(8);
+    v_inter_owner    VARCHAR2(8);
+    v_error_spot  Varchar2(2);
+    nCount        NUMBER := 0;
+
+    cursor phy_cur is
+      select PHYSICAL_CODE,
+             PHYSICAL_VALUE,
+             INTER_CODE,
+             PROGRAM_ID,
+             INSERT_DATE,
+             INSERT_USER,
+             comments,
+             physical_value_repeat,
+             chapter_id
+        from physical_findings
+       where transaction_id = gv_transaction_id
+         and physical_code = NVL(p_physical_code, physical_code)
+         and inter_code is not null;
+
+    PROCEDURE check_owner(pl_inter_code in varchar2,pl_owner out varchar2) IS
+      v_owner    VARCHAR2(10);
+    BEGIN
+      select inter_owner into v_owner from valid_interdictions 
+                where inter_code=pl_inter_code;
+       pl_owner:=v_owner;
+    EXCEPTION when others then
+      null;
+    END check_owner;
+
+    Procedure Place_inter_on_unit(pl_origin in varchar2,
+                                  pl_reason in varchar2,
+                                  pl_inter  in varchar2,
+                                  pl_user   in varchar2) IS
+    Begin
+      -- Replaced sysdate with t_coll_date for Collection Date. Changed by Kishore on 03/31/2010
+      INSERT INTO DONATION_INTERDICTIONS
+        (TRANSACTION_ID,
+         CHAPTER_ID,
+         INTER_CODE,
+         INTER_TYPE,
+         SOURCE_CODE,
+         RELEASE_USER,
+         RELEASE_DATE,
+         UNIT_ID,
+         TERM_REASON,
+         TERM_DATE,
+         GROUP_ID,
+         ORIGINATED_FROM,
+         REASON_CODE,
+         GROUP_MODE,
+         PROGRAM_ID,
+         INSERT_USER,
+         INSERT_DATE,
+         COLL_DATE,
+         COMMENTS)
+      VALUES
+        (gv_transaction_id,
+         gv_user_chapter,
+         pl_inter,
+         'INTER',
+         NULL,
+         NULL,
+         NULL,
+         NULL,
+         NULL,
+         NULL,
+         NULL,
+         pl_origin,
+         pl_reason,
+         NULL,
+         gv_prog_name,
+         pl_user,
+         gd_local_date,
+         trunc(gd_coll_date),
+         'Deferral override'); -- Changed "sysdate" to "v_local_time". Changed by Kishore on 05/08/2011. IM 5436
+
+    End place_inter_on_unit;
+
+
+    PROCEDURE process_comments(pl_phy_rec IN phy_cur%ROWTYPE) IS
+      nNotes        NUMBER := 0;
+      szNoteID      VARCHAR2(10);
+      lv_phy_value  VARCHAR2(20); 
+    BEGIN
+      lv_phy_value := NVL(pl_phy_rec.physical_value_repeat, pl_phy_rec.physical_value);
+
+      --Get the note ID
+      begin
+        select note_id
+          into szNoteID
+          from donor_interdictions
+         where donor_id = gv_donor_id
+           and inter_code = pl_phy_rec.inter_code
+           and nvl(originated_from, ' ') = pl_phy_rec.physical_code
+           and nvl(reason_code, ' ') = lv_phy_value
+           and transaction_id = gv_transaction_id
+           and rownum = 1;
+      exception
+        when no_data_found then
+          null;
+        when others then
+          null;
+      end;
+
+      If szNoteId is not null then
+        null;
+      Else
+        select note_sequence.nextval into szNoteID from dual;
+
+        update donor_interdictions
+           set note_id = szNoteID
+         where donor_id = gv_donor_id
+           and inter_code = pl_phy_rec.inter_code
+           and nvl(originated_from, ' ') = pl_phy_rec.physical_code
+           and nvl(reason_code, ' ') = lv_phy_value
+           and transaction_id = gv_transaction_id
+           and rownum = 1;
+      End If;
+
+      --check if the note ID exists in the central notes table. If exists then update or create one
+
+      select count(*)
+        into nNotes
+        from central_notes
+       where note_id = szNoteID;
+
+      If nNotes = 0 then
+        insert into central_notes
+          (NOTE_ID,
+           CHAPTER_ID,
+           NOTE_SEQUENCE,
+           NOTE,
+           PROGRAM_ID,
+           INSERT_DATE,
+           INSERT_USER)
+        VALUES
+          (szNoteID,
+           pl_phy_rec.chapter_id,
+           1,
+           substr(pl_phy_rec.comments, 1, 240),
+           'ONIHLTHS',
+           SYSDATE,
+           pl_phy_rec.insert_user);
+      Else
+        update central_notes
+           set note = substr(pl_phy_rec.comments, 1, 240)
+         where note_id = szNoteID;
+      End If;
+
+    END process_comments;
+  BEGIN
+
+    /* putting Interdictions for unexpected physical findings values */
+
+    -- Step 1: first delete the existing interdictions in all the three tables placed by this physical findings
+    -- 07/19/2019: delete all the interdictions for that transactions from the PF program.
+
+    IF p_physical_code is null then -- Added physcial code check - not to delete all interdictions when this routine was called for a single physical code.
+        DELETE from donor_interdictions
+         where transaction_id = gv_transaction_id
+           and program_id = gv_prog_name
+           and inter_type in ('INTER', 'HOLDS');
+           /*
+           and originated_from in
+               (select physical_code
+                  from physical_findings_template
+                 where donation_type = gv_don_type
+                   and procedure_code = gv_proc_code);*/
+
+        DELETE from donation_interdictions
+         where transaction_id = gv_transaction_id
+           and program_id = gv_prog_name
+           and inter_type in ('INTER', 'HOLDS');
+           /*
+           and originated_from in
+               (select physical_code
+                  from physical_findings_template
+                 where donation_type = gv_don_type
+                   and procedure_code = gv_proc_code; */
+
+        DELETE from inter_transactions
+         where transaction_id = gv_transaction_id
+           and program_id = gv_prog_name
+           and inter_type in ('INTER', 'HOLDS');
+           /*
+           and originated_from in
+               (select physical_code
+                  from physical_findings_template
+                 where donation_type = gv_don_type
+                   and procedure_code = gv_proc_code); */
+    END IF;
+    -- STep 2: Place the interdictions 
+
+    FOR phy_rec IN phy_cur loop
+      Begin
+        v_routine_status := null;
+        v_origin_from    := null;
+
+        check_owner(phy_rec.inter_code, v_inter_owner);
+
+
+        IF v_inter_owner = 'D' then
+          /* place inter on donor */
+
+          v_error_spot := 'A';
+
+          /* Select nvl(count(*),0) into nCount from donor_interdictions where donor_id=pl_donor_id and
+          transaction_id=:ctrl_blk_1.s_transaction_id and inter_code=phy_rec.inter_code and
+          originated_from =phy_rec.physical_code and reason_code=phy_rec.physical_value and release_date is null; */ --DA - added for SCR 778
+          --Correct reason code was not getting populated if there was a repeat value 
+          --reason_code=phy_rec.physical_value removed
+
+          select nvl(count(*), 0)
+            into nCount
+            from donor_interdictions
+           where donor_id = gv_donor_id
+             and transaction_id = gv_transaction_id
+             and inter_code = phy_rec.inter_code
+             and originated_from = phy_rec.physical_code
+             and release_date is null;
+
+          If nCount = 0 then
+            -- End of change
+            -- Changed "ALL" to "v_chapter_id". Changed by Kishore on 05/03/2011. IM 5421
+            DON_INTER.INTER_UPGRADE_PLACE(gv_donor_id,
+                                          gv_multi_chapter,
+                                          gv_unit_id,
+                                          gv_transaction_id,
+                                          phy_rec.inter_code,
+                                          phy_rec.physical_code,
+                                          NVL(phy_rec.physical_value_repeat, phy_rec.physical_value),
+                                          phy_rec.insert_user,
+                                          null,
+                                          null,
+                                          gv_prog_name,
+                                          gd_coll_date,
+                                          null,
+                                          null,
+                                          v_routine_status);
+
+            if v_routine_status != 'OK' then
+              gv_error_msg := v_routine_status || ' Loc:' || v_error_spot;
+              RETURN;
+            else
+              IF phy_rec.comments is not null then
+                --get the note ID
+                process_comments(phy_rec);
+              End If;
+            end if;
+
+          End If;
+
+        ELSIF v_inter_owner = 'U' then
+          /* place inter on donation */
+
+          v_error_spot := 'B';
+          PLACE_INTER_ON_UNIT(phy_rec.physical_code,
+                              phy_rec.physical_value,
+                              phy_rec.inter_code,
+                              phy_rec.insert_user);
+
+        ELSE
+          /* place inter on both */
+
+          v_error_spot := 'C';
+
+          PLACE_INTER_ON_UNIT(phy_rec.physical_code,
+                              phy_rec.physical_value,
+                              phy_rec.inter_code, 
+                              phy_rec.insert_user);
+
+          Select nvl(count(*), 0)
+            into nCount
+            from donor_interdictions
+           where donor_id = gv_donor_id
+             and transaction_id = gv_transaction_id
+             and inter_code = phy_rec.inter_code
+             and originated_from = phy_rec.physical_code
+             and reason_code = phy_rec.physical_value
+             and release_date is null;
+
+          If nCount = 0 then
+            -- Changed "ALL" to "v_chapter_id". Changed by Kishore on 05/03/2011. IM 5421
+            DON_INTER.INTER_UPGRADE_PLACE(gv_donor_id,
+                                          gv_multi_chapter,
+                                          gv_unit_id,
+                                          gv_transaction_id,
+                                          phy_rec.inter_code,
+                                          phy_rec.physical_code,
+                                          phy_rec.physical_value,
+                                          phy_rec.insert_user,
+                                          null,
+                                          null,
+                                          gv_prog_name,
+                                          gd_coll_date,
+                                          null,
+                                          null,
+                                          v_routine_status);
+
+            if v_routine_status != 'OK' then
+              gv_error_msg := v_routine_status || ' Loc:' || v_error_spot;
+              RETURN;
+            else
+              IF phy_rec.comments is not null then
+                --get the note ID
+                process_comments(phy_rec);
+              End If;
+            end if;
+          End If;
+
+        END IF;
+
+      End;
+    END LOOP;
+
+  EXCEPTION
+    when others then
+      gv_error_msg := substr(sqlerrm, 1, 250) || ' Loc:' || v_error_spot;
+      RETURN;
+  END pf_place_interdictions;
+
+  Procedure pf_update_Def_status is
+  begin
+    if gv_deferral_id is not null then
+      UPDATE online_status
+         set status_flag = 'D'
+       where transaction_id = gv_transaction_id;
+    end if;
+  End pf_update_Def_status;
+
+  PROCEDURE get_def_string(plString out varchar2) IS
+    Cursor ques_cur is
+      select distinct sort_sequence
+        from health_history_template a, health_history b
+       where b.transaction_id = gv_transaction_id
+         and b.inter_code is not null
+         and gd_coll_date between b.incident_date and
+             nvl(b.def_thru_date, sysdate + 10)
+         and b.question_code = a.question_code
+         and a.donation_type = gv_don_type
+         and gd_coll_date between a.eff_date and
+             nvl(a.term_date, sysdate + 10) -- Added by Kishore on 05/13/2011. IM 3757
+       order by 1;
+
+    v_ques_cde   varchar2(10);
+    v_strg       varchar2(500);
+    v_len        number;
+    szPhyStrg    VARCHAR2(60);
+
+    PROCEDURE get_phy_def_string(plString out varchar2) IS
+      Cursor ques_cur is
+        select distinct SORT_SEQUENCE_3
+          from valid_master_codes a, physical_findings b
+         where b.transaction_id = gv_transaction_id
+           and b.inter_code is not null
+           and a.code_type = 'PHYCD'
+           and a.code = b.physical_code
+           and gd_drive_date between a.eff_date and
+               nvl(a.term_date, sysdate + 1)
+         order by 1;
+
+      lv_ques_cde       varchar2(10);
+      lv_strg           varchar2(500);
+      lv_len            number;
+    BEGIN      
+      ---The following code will bring the qtns. no at the time of query-------
+      open ques_cur;
+      loop
+        begin
+          fetch ques_cur
+            into lv_ques_cde;
+          exit when ques_cur%notfound;
+          lv_strg := lv_strg || lv_ques_cde || ',';
+        end;
+      end loop;
+      close ques_cur;
+
+      lv_len  := NVL(length(lv_strg), 0);
+      lv_strg := substr(lv_strg, 1, lv_len - 1);
+      --     select deferral_reason into v_def_reason from donations where transaction_id=:ctrl_blk_1.s_transaction_id;
+      --     If v_def_reason is not null then
+      --        v_strg:=v_def_reason||','||v_strg;
+      --     End If;
+      plString := lv_strg;
+    END get_phy_def_string;
+
+  BEGIN
+
+    ---The following code will bring the qtns. no at the time of query-------
+    open ques_cur;
+    loop
+      begin
+        fetch ques_cur  into v_ques_cde;
+        exit when ques_cur%notfound;
+        v_strg := v_strg || v_ques_cde || ',';
+      end;
+    end loop;
+    close ques_cur;
+
+    v_len  := NVL(length(v_strg), 0);
+    v_strg := substr(v_strg, 1, v_len - 1);
+
+    get_phy_def_string(szPhyStrg);
+    If szPhyStrg is not null then
+      if v_strg is not null then
+        v_strg := v_strg || ',' || szPhyStrg;
+      else
+        v_strg := szPhyStrg;
+      end if;
+    End If;
+
+    if v_strg is null then
+      v_strg := '0';
+    end if;
+    plString := v_strg;
+  EXCEPTION
+    when others then
+      gv_error_msg := 'Loc G:' || SUBSTR(SQLERRM, 1, 200);
+      RETURN;
+  END get_def_string;
+
+
+  PROCEDURE pf_get_status(pf_status_out OUT VARCHAR2) IS
+    szIntType      VARCHAR2(5);
+    v_flag         VARCHAR2(1);
+    v_period_type  VARCHAR2(10);
+    sPerSts        VARCHAR2(1);
+    sTmpSts        VARCHAR2(1);
+  BEGIN
+    for pf_rec in (select INTER_CODE
+                     from physical_findings
+                    where transaction_id = gv_transaction_id
+                      and inter_code is not null) Loop
+      begin
+        select inter_type, period_type, nvl(deferral_flag, 'N')
+          into szIntType, v_period_type, v_flag
+          from valid_interdictions
+         where inter_code = pf_rec.inter_code
+           and sysdate between eff_date and nvl(term_date, sysdate + 10);
+      exception
+        when no_data_found then
+          gv_error_msg := 'Could not identify deferral type for ' || pf_rec.inter_code;
+          RETURN; 
+        when others then
+          gv_error_msg := 'Loc: F' || SUBSTR(SQLERRM, 1, 200);
+          RETURN;
+      end;
+
+      If szIntType = 'INTER' then
+        if v_period_type = 'P' and v_flag = 'Y' then
+          sPerSts := 'P';
+        end if;
+
+        if v_period_type != 'P' and v_flag = 'Y' then
+          --added for 3.2.0
+          sTmpSts := 'T';
+        end if;
+      Elsif szIntType = 'HOLDS' then
+        --added for 3.2.0
+        sTmpSts := 'T';
+      End if;
+
+    end loop;
+
+    pf_status_out := 'OK';
+
+    If nvl(sPerSts, ' ') = 'P' then
+      pf_status_out := 'P'; --'Based on the Physical Findings responses, the donor is deferred Permanently';
+      RETURN;
+    END IF;
+
+    If nvl(sTmpSts, ' ') = 'T' then
+      pf_status_out := 'T'; --'Based on the Physical Findings responses, the donor is deferred Temporarly';
+      RETURN;
+    END IF;
+  END pf_get_status;
+
+  PROCEDURE pf_update_status IS
+    szString       VARCHAR2(90);
+    v_stopped_flag VARCHAR2(1);    
+  BEGIN  
+    If gv_def_reason is null then
+      -- if the defreason is populated thru inquiry at registration, do not update with '0'
+      get_def_string(szString);
+
+      if gv_error_msg is not null then
+        RETURN;
+      end if;
+
+      Update donations
+         set physical_id = gv_staff_no, deferral_reason = szString
+       where transaction_id = gv_transaction_id;
+    Else
+      Update donations
+         set physical_id = gv_staff_no
+       where transaction_id = gv_transaction_id;
+    End If;
+
+    UPDATE online_status
+       SET donor_stopped_at = DECODE(donor_stopped_at,
+                                     'P',
+                                     NULL,
+                                     donor_stopped_at),
+           phy_findings_end = SYSDATE,
+           phy_ovr_rsn      = NULL,
+           phy_updt_by      = gv_screener_id,
+           phy_updt_time    = SYSDATE
+     WHERE transaction_id = gv_transaction_id;
+
+    --added for 3.2.0     
+    begin
+      select nvl(donor_stopped_at, 'X')
+        into v_stopped_flag
+        from online_status
+       where transaction_id = gv_transaction_id;
+    exception
+      when others then
+        gv_error_msg := SUBSTR(sqlerrm, 1, 200);
+    end;
+
+    If v_stopped_flag = 'X' and gv_don_pgm_id = 'ONILKREG' then
+      Update online_status
+         set status_flag = 'P'
+       where transaction_id = gv_transaction_id;
+
+      update donations
+         set deferral_id = null
+       where transaction_id = gv_transaction_id;
+    End If;
+
+    COMMIT;
+
+  END pf_update_status;
+
+    procedure pf_init_variables(p_transaction_id in varchar2,
+                                p_screener_id    in varchar2,
+                                p_prog_name      in varchar2) is
+    begin
+      gv_error_msg := NULL;
+      begin        
+        SELECT donor_id,
+               donation_type,
+               procedure_code,
+               unit_id,
+               coll_date,
+               chapter_id,
+               deferral_id,
+               deferral_reason,
+               coll_date drive_date,
+               program_id
+          INTO  gv_donor_id,
+                gv_don_type,
+                gv_proc_code,
+                gv_unit_id,
+                gd_coll_date,
+                gv_user_chapter,
+                gv_deferral_id,
+                gv_def_reason,
+                gd_drive_date,
+                gv_don_pgm_id     
+          FROM donations
+         WHERE transaction_id = p_transaction_id; 
+      exception
+        when no_data_found then
+          gv_error_msg := 'Donation Transaction not found';
+          RETURN;
+      end;
+
+      gv_transaction_id := p_transaction_id;
+      gv_prog_name      := p_prog_name;
+      gv_unit_id        := NULL; -- as per oracle code.
+      gv_screener_id    := p_screener_id;
+
+      begin
+        select DECODE(multi_chapter, 'Y', 'ALL', gv_user_chapter)
+          into gv_multi_chapter
+          from lt_application_config;
+      exception
+        when no_data_found then
+          gv_error_msg := 'Configuration missing';  
+          RETURN;
+      end;
+
+      begin
+        select staff_no into gv_staff_no
+          from system_users
+         where user_id = upper(p_screener_id)
+           and sysdate between eff_date and nvl(term_date, sysdate + 1);
+
+      exception
+        when others then
+          gv_error_msg := 'Could not find staff no. for this user'; 
+          RETURN;
+      end;
+
+      gd_local_date := lifetrack_timezone_convert.get_local_time(gv_user_chapter, SYSDATE);
+    exception
+      when others then
+        gv_error_msg := SUBSTR(SQLERRM, 1, 200);
+        RETURN;
+    end pf_init_variables;
+
+    procedure init_variables(p_transaction_id in varchar2,
+                                p_prog_name      in varchar2) is
+    begin
+      gv_error_msg := NULL;
+      begin        
+        SELECT donor_id,
+               donation_type,
+               procedure_code,
+               unit_id,
+               coll_date,
+               chapter_id,
+               deferral_id,
+               deferral_reason,
+               coll_date drive_date,
+               program_id
+          INTO  gv_donor_id,
+                gv_don_type,
+                gv_proc_code,
+                gv_unit_id,
+                gd_coll_date,
+                gv_user_chapter,
+                gv_deferral_id,
+                gv_def_reason,
+                gd_drive_date,
+                gv_don_pgm_id     
+          FROM donations
+         WHERE transaction_id = p_transaction_id; 
+      exception
+        when no_data_found then
+          gv_error_msg := 'Donation Transaction not found';
+          RETURN;
+      end;
+
+      gv_transaction_id := p_transaction_id;
+      gv_prog_name      := p_prog_name;
+      gv_unit_id        := NULL; -- as per oracle code.
+      gv_screener_id    := NULL;
+      gv_staff_no       := NULL;
+      
+      begin
+        select DECODE(multi_chapter, 'Y', 'ALL', gv_user_chapter)
+          into gv_multi_chapter
+          from lt_application_config;
+      exception
+        when no_data_found then
+          gv_error_msg := 'Configuration missing';  
+          RETURN;
+      end;
+
+
+      gd_local_date := lifetrack_timezone_convert.get_local_time(gv_user_chapter, SYSDATE);
+      
+    exception
+      when others then
+        gv_error_msg := SUBSTR(SQLERRM, 1, 200);
+        RETURN;
+    end init_variables;
+
+
+
+  Procedure pf_pending_commit(p_transaction_id in varchar2,
+                              p_screener_id    in varchar2,
+                              p_prog_name      in varchar2,
+                              p_status         out varchar2,
+                              p_reason         out varchar2) is
+    v_status       VARCHAR2(200);
+    v_error_loc    VARCHAR2(20);
+    v_reason       VARCHAR2(200);
+  Begin
+
+    -- initialize gloabal variables.(gv, gd variables in declaration)
+    v_error_loc := 'Loc: 1 ';
+
+    pf_init_variables(p_transaction_id, p_screener_id, p_prog_name);
+
+    if gv_error_msg is not null then
+      p_status := v_error_loc || gv_error_msg;
+      RETURN;
+    end if;
+
+    v_error_loc := 'Loc: 2 ';    
+    --LT_2018 (SCR:151856)                            
+    pf_update_weight;
+
+    if gv_error_msg is not null then
+       p_status := v_error_loc || gv_error_msg;
+       RETURN;    
+    end if;  
+
+    v_error_loc := 'Loc: 3 ';   
+
+    pf_place_interdictions;
+
+    if gv_error_msg is not null then
+      pf_update_Def_status;
+      COMMIT;
+      p_status := 'Could not place interdiction: ' || v_error_loc || gv_error_msg;
+      RETURN;
+    end if;
+
+    p_status := 'OK';
+    p_reason := NULL;
+
+    COMMIT;  
+
+  EXCEPTION
+    WHEN OTHERS THEN
+      p_status := v_error_loc || SUBSTR(SQLERRM, 1, 200);
+  End pf_pending_commit;
+
+
+  Procedure pf_commit(p_transaction_id in varchar2,
+                      p_screener_id    in varchar2,
+                      p_prog_name      in varchar2,
+                      p_status         out varchar2,
+                      p_reason         out varchar2) is
+    v_status       VARCHAR2(200);
+    v_error_loc    VARCHAR2(20);
+    v_reason       VARCHAR2(200);
+  Begin
+
+    -- initialize gloabal variables.(gv, gd variables in declaration)
+    v_error_loc := 'Loc: 1 ';
+
+    pf_init_variables(p_transaction_id, p_screener_id, p_prog_name);
+
+    if gv_error_msg is not null then
+      p_status := v_error_loc || gv_error_msg;
+      RETURN;
+    end if;
+
+    v_error_loc := 'Loc: 2 ';    
+    --LT_2018 (SCR:151856)                            
+    pf_update_weight;
+
+    if gv_error_msg is not null then
+       p_status := v_error_loc || gv_error_msg;
+       RETURN;    
+    end if;  
+
+    v_error_loc := 'Loc: 3 ';   
+
+    pf_place_interdictions;
+
+    if gv_error_msg is not null then
+      pf_update_Def_status;
+      COMMIT;
+      p_status := 'Could not place interdiction: ' || v_error_loc || gv_error_msg;
+      RETURN;
+    end if;
+
+    -- IM: 9455; when 'X' out of the application, system thinks that PF is complete.
+    --/*
+    --Update online_status set PHY_FINDINGS_END=SYSDATE,PHY_OVR_RSN=null,PHY_UPDT_BY=:ctrl_blk_1.SCREENER_ID,
+    --            PHY_UPDT_TIME=sysdate where transaction_id=:ctrl_blk_1.s_transaction_id;
+    --
+    v_error_loc := 'Loc: 4 ';  
+    pf_get_status(v_status); 
+
+    if gv_error_msg is not null then
+      p_status := v_error_loc || gv_error_msg;
+      RETURN;
+    end if;
+
+
+    if v_status = 'OK' then
+      v_error_loc := 'Loc: 5 ';  
+      pf_update_status;
+      if gv_error_msg is not null then
+        p_status := v_error_loc || gv_error_msg;
+        RETURN;
+      end if;
+      pf_update_Def_status; 
+      p_status := 'OK';      
+    elsif v_status IN ('P', 'T') then
+      v_error_loc := 'Loc: 6 ';      
+      get_def_string(v_reason);
+
+      if gv_error_msg is not null then
+        p_status := v_error_loc || gv_error_msg;
+        RETURN;
+      end if;        
+      pf_update_Def_status; 
+      p_status := v_status; 
+      p_reason := v_reason;
+    end if;
+
+    COMMIT;  
+
+  EXCEPTION
+    WHEN OTHERS THEN
+      p_status := v_error_loc || SUBSTR(SQLERRM, 1, 200);
+  End pf_commit;
+
+  PROCEDURE pf_place_remove_interdiction( p_transaction_id in varchar2,
+                                          p_screener_id    in varchar2,
+                                          p_prog_name      in varchar2,
+                                          p_physical_code  in varchar2,
+                                          p_place_remove   in varchar2,
+                                          p_status         out varchar2) IS
+      v_error_loc    VARCHAR2(20);
+      v_reason       VARCHAR2(200);
+      procedure init_variables is
+      begin
+        gv_error_msg := NULL;
+        begin        
+          SELECT donor_id,
+                 donation_type,
+                 procedure_code,
+                 unit_id,
+                 coll_date,
+                 chapter_id,
+                 deferral_id,
+                 deferral_reason,
+                 coll_date drive_date,
+                 program_id
+            INTO  gv_donor_id,
+                  gv_don_type,
+                  gv_proc_code,
+                  gv_unit_id,
+                  gd_coll_date,
+                  gv_user_chapter,
+                  gv_deferral_id,
+                  gv_def_reason,
+                  gd_drive_date,
+                  gv_don_pgm_id    
+            FROM donations
+           WHERE transaction_id = p_transaction_id; 
+        exception
+          when no_data_found then
+            gv_error_msg := 'Donation Transaction not found';
+            RETURN;
+        end;
+
+        gv_transaction_id := p_transaction_id;
+        gv_prog_name      := p_prog_name;
+        gv_unit_id        := NULL; -- as per oracle code.
+        gv_screener_id    := p_screener_id;
+
+        begin
+          select DECODE(multi_chapter, 'Y', 'ALL', gv_user_chapter)
+            into gv_multi_chapter
+            from lt_application_config;
+        exception
+          when no_data_found then
+            gv_error_msg := 'Configuration missing';  
+            RETURN;
+        end;
+
+        begin
+          select staff_no into gv_staff_no
+            from system_users
+           where user_id = upper(p_screener_id)
+             and sysdate between eff_date and nvl(term_date, sysdate + 1);
+
+        exception
+          when others then
+            gv_error_msg := 'Could not find staff no. for this user'; 
+            RETURN;
+        end;
+
+        gd_local_date := lifetrack_timezone_convert.get_local_time(gv_user_chapter, SYSDATE);
+      exception
+        when others then
+          gv_error_msg := SUBSTR(SQLERRM, 1, 200);
+          RETURN;
+      end init_variables;                                        
+
+      PROCEDURE terminate_OVRDF IS
+        CURSOR di_cur IS
+          SELECT donor_id, chapter_id, unit_id, inter_code, originated_from, reason_code,group_mode, group_id, insert_date
+            FROM donor_interdictions
+           WHERE transaction_id = gv_transaction_id
+             AND inter_code = 'OVRDF'
+             AND group_id = 'TBV'
+             AND originated_from = 'ONPLKREG';
+
+        di_rec di_cur%ROWTYPE;
+        ld_localDt DATE;
+        lb_recFound BOOLEAN;
+        ld_termDt DATE;
+        lv_status VARCHAR2(2000);
+      BEGIN
+        OPEN di_cur;
+        FETCH di_cur into di_rec;
+        lb_recFound := di_cur%FOUND;
+        CLOSE di_cur;
+
+        IF lb_recFound THEN
+          ld_localDt := lifetrack_timezone_convert.get_local_time(gv_user_chapter, SYSDATE);
+          ld_termDt := trunc(di_rec.insert_date);
+
+          DON_INTER.inter_upgrade_remove(di_rec.donor_id,
+                               di_rec.chapter_id,--szChapterID, -- global.chapter_id,
+                               di_rec.unit_id, -- :exist_inter_blk.unit_id,
+                               NULL,
+                               di_rec.inter_code, --:rem_intr_blk.inter_code,
+                               di_rec.originated_from, -- :exist_inter_blk.originated_from,
+                               di_rec.reason_code,
+                               p_screener_id,
+                               di_rec.group_mode,
+                               di_rec.group_id,
+                               p_prog_name,
+                               NULL,
+                               ld_termDt,
+                               ld_localDt,
+                               'NOEFF',
+                               'PHYTD due to TBV - no longer in effect',
+                               lv_status);
+          IF lv_status <> 'OK' THEN
+            gv_error_msg := lv_status;
+          END IF ;                              
+        END IF;                    
+      END terminate_OVRDF;
+
+  BEGIN
+    if p_place_remove not in ('PLACE','REMOVE') then
+      p_status := 'PLACE/REMOVE flag missing';
+      RETURN;
+    end if;
+
+    if p_physical_code is null OR p_transaction_id is null OR p_screener_id is null OR p_prog_name is null then
+      p_status := 'Required input parameters missing.';
+      RETURN;      
+    end if;
+
+    init_variables;    
+    -- initialize gloabal variables.(gv, gd variables in declaration)
+    v_error_loc := 'Loc: 1 ';
+
+    init_variables;
+
+    if gv_error_msg is not null then
+      p_status := v_error_loc || gv_error_msg;
+      RETURN;
+    end if;
+
+    v_error_loc := 'Loc: 2 ';    
+
+    DELETE from donor_interdictions
+     where transaction_id = gv_transaction_id
+       --and program_id = gv_prog_name
+       and inter_type in ('INTER', 'HOLDS')
+       and originated_from = p_physical_code;
+
+      DELETE from donation_interdictions
+       where transaction_id = gv_transaction_id
+         --and program_id = gv_prog_name
+         and inter_type in ('INTER', 'HOLDS')
+         and originated_from = p_physical_code;
+
+      DELETE from inter_transactions
+       where transaction_id = gv_transaction_id
+         --and program_id = gv_prog_name
+         and inter_type in ('INTER', 'HOLDS')
+         and originated_from = p_physical_code;
+
+
+    if p_place_remove = 'PLACE' then
+      pf_place_interdictions(p_physical_code);
+    elsif p_place_remove = 'REMOVE' then
+       v_error_loc := 'Loc: 3 ';   
+     --if gv_prog_name = 'ONPLKREG' then
+      terminate_OVRDF;
+     --end if;
+    end if;
+
+
+    if gv_error_msg is not null then
+      ROLLBACK;
+      p_status := 'Could not place interdiction: ' || v_error_loc || gv_error_msg;
+      RETURN;
+    end if;
+
+    p_status := 'OK';
+    COMMIT;
+
+   EXCEPTION
+      WHEN OTHERS THEN
+        ROLLBACK;
+        p_status := v_error_loc || SUBSTR(SQLERRM, 1, 200);
+
+  END pf_place_remove_interdiction;
+  
+ /* called from DETACH screen */    
+ Procedure place_pf_interdictions(  p_transaction_id in varchar2,
+                                    p_prog_name      in varchar2,
+                                    p_status         out varchar2) is
+    v_status       VARCHAR2(2000);
+    v_error_loc    VARCHAR2(500);
+  Begin
+
+    -- initialize gloabal variables.(gv, gd variables in declaration)
+    v_error_loc := 'Loc: 1 - place_pf_interdictions';
+
+    init_variables(p_transaction_id, p_prog_name);
+
+    if gv_error_msg is not null then
+      p_status := v_error_loc || gv_error_msg;
+      RETURN;
+    end if;
+
+    v_error_loc := 'Loc: 2 - place_pf_interdictions';   
+
+    pf_place_interdictions;
+
+    if gv_error_msg is not null then
+      pf_update_Def_status;
+      COMMIT;
+      p_status := 'Could not place interdiction: ' || v_error_loc || gv_error_msg;
+      RETURN;
+    end if;
+
+    p_status := 'OK';
+
+    COMMIT;  
+
+  EXCEPTION
+    WHEN OTHERS THEN
+      p_status := v_error_loc || SUBSTR(SQLERRM, 1, 200);
+  End place_pf_interdictions;
+ 
+
+begin
+  -- Initialization
+  NULL;
+end ONSITE_HHPF;
+
+/

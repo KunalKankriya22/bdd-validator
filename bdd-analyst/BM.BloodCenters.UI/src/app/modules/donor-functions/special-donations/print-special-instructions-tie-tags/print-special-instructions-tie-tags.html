@@ -1,0 +1,200 @@
+<!-- Page Header -->
+<app-page-header-with-breadcrumb [config]="headerConfig" />
+
+<div class="print-sit">
+  <!-- Filter Card -->
+  <div class="print-sit__filter-card">
+    <div class="filter-row">
+      <!-- Donor ID -->
+      <mat-form-field appearance="fill" class="filter-field filter-field--donor-id">
+        <mat-label>Donor ID</mat-label>
+        <mat-select
+          [(ngModel)]="selectedDonorId"
+          (ngModelChange)="onDonorSelected($event)"
+          required
+          #donorIdSelect="ngModel">
+          <mat-select-trigger>
+            {{ selectedDonorId }}
+          </mat-select-trigger>
+          <mat-option>
+            <ngx-mat-select-search
+              [formControl]="donorSearchControl"
+              placeholderLabel="Search..."
+              noEntriesFoundLabel="No matching donors">
+            </ngx-mat-select-search>
+          </mat-option>
+          @for (donor of filteredDonors(); track donor.donorId) {
+            <mat-option [value]="donor.donorId">{{ donor.displayValue }}</mat-option>
+          }
+          @if (filteredDonors().length === 0) {
+            <mat-option disabled class="no-data-option">
+              No Data Available
+            </mat-option>
+          }
+        </mat-select>
+        @if (donorIdSelect.invalid && donorIdSelect.touched) {
+          <mat-error>Donor ID is required</mat-error>
+        }
+      </mat-form-field>
+
+      <!-- Donor Name (auto-populated, read-only) -->
+      <div class="donor-name-display" role="status" [class.donor-name-display--visible]="selectedDonorName()">
+        <span class="donor-name-label">Donor Name</span>
+        <span class="donor-name-value">{{ selectedDonorName() }}</span>
+      </div>
+
+      <!-- Actions -->
+      <div class="filter-actions">
+        <button
+          type="button"
+          mat-button
+          class="btn-retrieve"
+          [disabled]="isRetrieveDisabled()"
+          (click)="onRetrieve()"
+          aria-label="Retrieve tie tags for selected donor">
+          RETRIEVE
+        </button>
+        <button
+          type="button"
+          mat-button
+          class="btn-clear"
+          (click)="onClearAll()"
+          [disabled]="!selectedDonorId || isLoading()"
+          aria-label="Clear all filters">
+          CLEAR ALL
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Table Card -->
+  <div class="print-sit__table-card">
+    <!-- Initial Empty State (before retrieve) -->
+    @if (!hasRetrieved() && !isLoading()) {
+      <div class="empty-container" role="status">
+        <div class="empty-icon-circle" aria-hidden="true">
+          <mat-icon class="empty-icon">search</mat-icon>
+        </div>
+        <p class="empty-message">No Results to Display</p>
+        <p class="empty-hint">Please enter search criteria to view results</p>
+      </div>
+    }
+
+    <!-- Results Section (shows when loading OR after first retrieve) -->
+    @if (hasRetrieved() || isLoading()) {
+      <!-- Table Actions Bar -->
+      <div class="table-actions-bar">
+        @if (hasSelection()) {
+          <div class="table-action-buttons">
+            <button
+              type="button"
+              mat-button
+              class="btn-print"
+              (click)="onPrint()"
+              aria-label="Print selected tie tags">
+              PRINT
+            </button>
+            <button
+              type="button"
+              mat-button
+              class="btn-view-instructions"
+              [disabled]="selectedCodes().size !== 1"
+              (click)="onViewPrintInstructions()"
+              aria-label="View print instructions">
+              VIEW PRINT INSTRUCTIONS
+            </button>
+          </div>
+        }
+        <app-search-bar
+          [config]="searchConfig"
+          [searchText]="interdictionSearch()"
+          (search)="onInterdictionSearchChange($event)" />
+      </div>
+
+      <!-- Table -->
+      <div class="table-scroll-container">
+        <table class="tie-tags-table" aria-label="Tie Tags">
+          <thead>
+            <tr>
+              <th class="col-checkbox" scope="col">
+                <mat-checkbox
+                  [checked]="isAllSelected()"
+                  [indeterminate]="isSomeSelected()"
+                  (change)="onToggleSelectAll()"
+                  aria-label="Select all tie tags">
+                </mat-checkbox>
+              </th>
+              <th class="col-interdiction-code col-sortable" scope="col"
+                  tabindex="0"
+                  (click)="onToggleSort()"
+                  (keydown.enter)="onToggleSort()"
+                  (keydown.space)="$event.preventDefault(); onToggleSort()"
+                  [attr.aria-sort]="sortState() === 'asc' ? 'ascending' : sortState() === 'desc' ? 'descending' : 'none'">
+                <span class="col-header-content">
+                  Interdiction Code
+                  @if (sortState() === 'asc') {
+                    <mat-icon class="sort-icon sort-icon--active" aria-hidden="true">arrow_upward</mat-icon>
+                  } @else if (sortState() === 'desc') {
+                    <mat-icon class="sort-icon sort-icon--active" aria-hidden="true">arrow_downward</mat-icon>
+                  } @else {
+                    <mat-icon class="sort-icon sort-icon--inactive" aria-hidden="true">unfold_more</mat-icon>
+                  }
+                </span>
+              </th>
+              <th class="col-tie-tag-text" scope="col">Tie Tag Text</th>
+              <th class="col-number-of-label" scope="col">Number of Label</th>
+            </tr>
+          </thead>
+          <tbody>
+            @if (isLoading()) {
+              <tr>
+                <td colspan="4" class="loading-cell">
+                  <div class="table-loading-container" role="status">
+                    <mat-spinner diameter="48" aria-hidden="true"></mat-spinner>
+                    <p class="loading-text">Loading data...</p>
+                  </div>
+                </td>
+              </tr>
+            } @else if (hasError()) {
+              <tr>
+                <td colspan="4" class="error-cell">
+                  <div class="table-error-container" role="alert">
+                    <mat-icon class="error-icon" aria-hidden="true">error_outline</mat-icon>
+                    <p class="error-message">{{ errorMessage() }}</p>
+                  </div>
+                </td>
+              </tr>
+            } @else if (tieTags().length === 0) {
+              <tr>
+                <td colspan="4" class="empty-cell">
+                  <div class="table-empty-container" role="status">
+                    <div class="empty-icon-circle" aria-hidden="true">
+                      <mat-icon class="empty-icon">search</mat-icon>
+                    </div>
+                    <p class="empty-hint">No print special instructions tie tags available to display</p>
+                  </div>
+                </td>
+              </tr>
+            } @else {
+              @for (tag of sortedTieTags(); track tag.interdictionCode) {
+                <tr class="data-row" [class.data-row--selected]="isSelected(tag.interdictionCode)">
+                  <td class="col-checkbox">
+                    <mat-checkbox
+                      [checked]="isSelected(tag.interdictionCode)"
+                      (change)="onSelectRow(tag.interdictionCode)"
+                      [attr.aria-label]="'Select ' + tag.interdictionCode">
+                    </mat-checkbox>
+                  </td>
+                  <td class="col-interdiction-code">{{ tag.interdictionCode }}</td>
+                  <td class="col-tie-tag-text">{{ tag.tieTagText }}</td>
+                  <td class="col-number-of-label">{{ tag.numberOfLabel }}</td>
+                </tr>
+              }
+            }
+          </tbody>
+        </table>
+      </div>
+
+    }
+  </div>
+</div>

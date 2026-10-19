@@ -1,0 +1,513 @@
+<div class="page-wrapper">
+  <div class="sticky-header">
+    <app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+  </div>
+
+<div class="page-layout" [class.side-panel-active]="sidePanelOpen()">
+  <div class="main-content" [class.side-panel-active]="sidePanelOpen()">
+    <div class="investigate-container">
+
+  <!-- Section 1: Filter Bar -->
+  <section class="section-card filter-section" aria-labelledby="filter-heading">
+    <h2 id="filter-heading" class="sr-only">Search Filters</h2>
+
+    <form [formGroup]="filterForm" class="filter-form">
+      <div class="filter-row" [class.has-details]="hasRetrieved() && batchDetails()">
+        <!-- Batch ID -->
+        <mat-form-field appearance="fill" class="filter-field batch-id-field" [hideRequiredMarker]="true">
+          <mat-label>Batch ID <span class="required-marker">*</span></mat-label>
+          <mat-select
+            formControlName="batchId"
+            id="batchId"
+            [disabled]="isLoadingBatches()"
+            aria-required="true">
+            <mat-select-trigger>
+              {{ filterForm.get('batchId')?.value === 'NEW' ? 'NEW' : filterForm.get('batchId')?.value }}
+            </mat-select-trigger>
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="batchSearchControl"
+                placeholderLabel="Search batches..."
+                noEntriesFoundLabel="No matching batches">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option value="NEW" class="create-new-option">+ Create New</mat-option>
+            @for (batch of filteredBatches; track batch.batchId) {
+              <mat-option [value]="batch.batchId">
+                {{ batch.batchId }}
+              </mat-option>
+            }
+            @if (filteredBatches.length === 0) {
+              <mat-option disabled>No data available</mat-option>
+            }
+          </mat-select>
+          <mat-error>Batch ID is required</mat-error>
+        </mat-form-field>
+
+        <!-- Batch Status (shown after retrieve) -->
+        @if (hasRetrieved() && batchDetails()) {
+          <mat-form-field appearance="fill" class="filter-field batch-status-field">
+            <mat-label>Batch Status</mat-label>
+            <mat-select
+              [formControl]="batchStatusControl"
+              (selectionChange)="onBatchStatusChange($event.value)"
+              [disabled]="isResolved"
+              aria-label="Batch status">
+              <mat-option value="PENDG">Pending</mat-option>
+              <mat-option value="INVAL">Invalid</mat-option>
+            </mat-select>
+          </mat-form-field>
+
+          <!-- Found On (shown after retrieve) -->
+          <div class="field-label-display" role="group" aria-label="Found On">
+            <span class="label" id="found-on-label">Found On</span>
+            <span class="value" aria-labelledby="found-on-label">{{ foundOnDisplay }}</span>
+          </div>
+        }
+
+        <!-- Retrieve Button -->
+        <button
+          mat-stroked-button
+          type="button"
+          class="retrieve-button"
+          (click)="onRetrieve()"
+          [disabled]="isRetrieveDisabled"
+          aria-label="Retrieve batch data">
+          @if (isLoading()) {
+            <mat-spinner diameter="20" class="button-spinner"></mat-spinner>
+          } @else {
+            RETRIEVE
+          }
+        </button>
+      </div>
+    </form>
+  </section>
+
+  <!-- Loading State -->
+  @if (isLoading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading batch data"></mat-spinner>
+      <span class="loading-text">Loading investigation data...</span>
+    </div>
+  }
+
+  <!-- Cell Templates (always in DOM for ViewChild resolution) -->
+  <ng-template #donorIdCellTemplate let-row>
+    <span class="donor-id-cell">
+      {{ row.donorId }}
+      @if (isInvestigationPending(row.donorId)) {
+        <mat-icon
+          class="investigation-icon"
+          [attr.aria-label]="getMatchTooltip(row.donorId)"
+          role="img"
+          tabindex="0"
+          [matTooltip]="getMatchTooltip(row.donorId)"
+          matTooltipPosition="above"
+          matTooltipClass="multiline-tooltip">
+          info_outline
+        </mat-icon>
+      }
+    </span>
+  </ng-template>
+
+  <ng-template #diffCellDonorName let-row>
+    <div [class.diff-cell]="row.highlightDonorName">
+      {{ row.donorName }}
+      @if (row.highlightDonorName) { <span class="sr-only">(differs from primary)</span> }
+    </div>
+  </ng-template>
+  <ng-template #diffCellHomeNumber let-row>
+    <div [class.diff-cell]="row.highlightHomeNumber">
+      {{ row.homeNumber }}
+      @if (row.highlightHomeNumber) { <span class="sr-only">(differs from primary)</span> }
+    </div>
+  </ng-template>
+  <ng-template #diffCellAddress let-row>
+    <div [class.diff-cell]="row.highlightAddress"
+      class="address-cell"
+      [matTooltip]="row.address"
+      matTooltipPosition="above"
+      [matTooltipDisabled]="!row.address || row.address === '-'">
+      {{ row.address }}
+      @if (row.highlightAddress) { <span class="sr-only">(differs from primary)</span> }
+    </div>
+  </ng-template>
+  <ng-template #altAddressCellTemplate let-row>
+    <a class="alt-address-link" href="javascript:void(0)"
+      (click)="onAltAddressClick($event, row)"
+      aria-label="View alternate address for {{ row.donorName }}">
+      ALT ADDRESS
+    </a>
+  </ng-template>
+
+  <ng-template #mergeFlagCellTemplate let-row>
+    <mat-form-field appearance="fill" class="inline-merge-flag-field">
+      <mat-select
+        [value]="row.donorId === selectedDonor()?.donorId ? localMergeFlag() : row.mergeFlag"
+        (selectionChange)="onInlineMergeFlagChange($event.value, row)"
+        [disabled]="isResolved"
+        (click)="$event.stopPropagation()"
+        aria-label="Merge Flag">
+        <mat-option value="NOMER">No Merge</mat-option>
+        <mat-option value="PRIMR">Primary</mat-option>
+        <mat-option value="SECON">Secondary</mat-option>
+        <mat-option value="FALSE">False Duplicate</mat-option>
+      </mat-select>
+    </mat-form-field>
+  </ng-template>
+
+  <!-- Section 2: Results Table -->
+  @if (hasRetrieved() && !isLoading() && isNewSetMode()) {
+    <section class="section-card results-section" aria-labelledby="create-set-heading">
+      <h2 id="create-set-heading" class="sr-only">Create New Duplicate Set</h2>
+
+      <div class="create-set-table-container">
+        <div class="create-set-header">
+          <span class="create-set-title">Add Donors to New Set: <strong>{{ newSetId() }}</strong></span>
+          <button mat-button class="add-new-row-btn" (click)="addCreateSetRow()" type="button">
+            <mat-icon aria-hidden="true">add</mat-icon> ADD NEW ROW
+          </button>
+        </div>
+
+        @if (hasCreateSetErrors) {
+          <div class="validation-error-inline" role="alert">
+            <mat-icon aria-hidden="true">error</mat-icon>
+            <span>Please address the fields indicated below.</span>
+          </div>
+        }
+
+        <table class="data-table create-set-table">
+          <thead>
+            <tr>
+              <th scope="col" class="col-merge-flag">Merge Flag</th>
+              <th scope="col" class="col-donor-id">Donor ID <span class="required-marker">*</span></th>
+              <th scope="col" class="col-name">Donor Name</th>
+              <th scope="col" class="col-dob">DOB</th>
+              <th scope="col" class="col-sex">Sex</th>
+              <th scope="col" class="col-phone">Work Phone</th>
+              <th scope="col" class="col-phone">Home Phone</th>
+              <th scope="col" class="col-address">Address</th>
+              <th scope="col" class="col-alt-address">Alt Address</th>
+              <th scope="col" class="col-action"><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (row of createSetRows; track row.id; let i = $index) {
+              <tr [formGroup]="row.form" class="create-set-row" [class.error-row]="hasRowErrors(row)">
+                <td>
+                  <mat-form-field appearance="fill" class="inline-field">
+                    <mat-select formControlName="mergeFlag" aria-label="Merge Flag">
+                      <mat-option value="NOMER">No Merge</mat-option>
+                      <mat-option value="PRIMR">Primary</mat-option>
+                      <mat-option value="SECON">Secondary</mat-option>
+                      <mat-option value="FALSE">False Duplicate</mat-option>
+                    </mat-select>
+                  </mat-form-field>
+                </td>
+                <td>
+                  <mat-form-field appearance="fill" class="inline-field"
+                    [class.mat-form-field-invalid]="row.errors?.['donorId']"
+                    [matTooltip]="row.errors?.['donorId'] || ''"
+                    matTooltipPosition="below"
+                    matTooltipClass="create-set-error-tooltip">
+                    <input matInput formControlName="donorId" (blur)="onDonorIdBlur(row, i)"
+                           placeholder="Enter Donor ID" autocomplete="off"
+                           aria-required="true" aria-label="Donor ID">
+                  </mat-form-field>
+                  @if (row.errors?.['donorId']) {
+                    <span class="sr-only" role="alert">{{ row.errors?.['donorId'] }}</span>
+                  }
+                  @if (row.donorLoading) {
+                    <mat-spinner diameter="16" class="inline-spinner"
+                      aria-label="Validating donor ID" role="status"></mat-spinner>
+                  }
+                </td>
+                <td>
+                  <span class="truncate-cell"
+                    #nameCell
+                    #nameTooltip="matTooltip"
+                    [matTooltip]="row.donorData?.name || ''"
+                    [matTooltipShowDelay]="300"
+                    matTooltipPosition="above"
+                    (mouseenter)="showTooltipIfOverflowing(nameCell, nameTooltip)">
+                    {{ row.donorData?.name || '' }}
+                  </span>
+                </td>
+                <td>{{ row.donorData?.dob || '' }}</td>
+                <td>{{ row.donorData?.gender || '' }}</td>
+                <td>
+                  <span class="truncate-cell"
+                    #workPhoneCell
+                    #workPhoneTooltip="matTooltip"
+                    [matTooltip]="row.donorData?.workPhone || ''"
+                    [matTooltipShowDelay]="300"
+                    matTooltipPosition="above"
+                    (mouseenter)="showTooltipIfOverflowing(workPhoneCell, workPhoneTooltip)">
+                    {{ row.donorData?.workPhone || '' }}
+                  </span>
+                </td>
+                <td>
+                  <span class="truncate-cell"
+                    #homePhoneCell
+                    #homePhoneTooltip="matTooltip"
+                    [matTooltip]="row.donorData?.homePhone || ''"
+                    [matTooltipShowDelay]="300"
+                    matTooltipPosition="above"
+                    (mouseenter)="showTooltipIfOverflowing(homePhoneCell, homePhoneTooltip)">
+                    {{ row.donorData?.homePhone || '' }}
+                  </span>
+                </td>
+                <td>
+                  <span class="truncate-cell"
+                    #addressCell
+                    #addressTooltip="matTooltip"
+                    [matTooltip]="row.donorData?.address || ''"
+                    [matTooltipShowDelay]="300"
+                    matTooltipPosition="above"
+                    (mouseenter)="showTooltipIfOverflowing(addressCell, addressTooltip)">
+                    {{ row.donorData?.address || '' }}
+                  </span>
+                </td>
+                <td>
+                  @if (row.donorValid === true) {
+                    <a class="alt-address-link" href="javascript:void(0)"
+                      (click)="onCreateSetAltAddressClick($event, row)"
+                      aria-label="View alternate address">
+                      ALT ADDRESS
+                    </a>
+                  }
+                </td>
+                <td>
+                  @if (i >= 2) {
+                    <button mat-icon-button (click)="removeCreateSetRow(i)" type="button"
+                            aria-label="Remove row" class="delete-row-btn">
+                      <mat-icon aria-hidden="true">delete</mat-icon>
+                    </button>
+                  }
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+
+      </div>
+    </section>
+  }
+
+  @if (hasRetrieved() && !isLoading() && !isNewSetMode() && tableData().length > 0) {
+    <section class="section-card results-section" aria-labelledby="results-heading">
+      <h2 id="results-heading" class="sr-only">Duplicate Donor Results</h2>
+
+      <app-data-table
+        [config]="tableConfig"
+        [data]="tableData()"
+        [loading]="isLoading()"
+        [highlightedRow]="selectedDonor()"
+        (rowClick)="onRowClicked($event)">
+      </app-data-table>
+
+    </section>
+  }
+
+    </div>
+
+    <!-- Initial state / No results after search -->
+    @if (!isLoading() && !isNewSetMode() && (!hasRetrieved() || tableData().length === 0)) {
+      <div class="empty-state" role="status">
+        <mat-icon class="empty-icon">search</mat-icon>
+        <p class="empty-title">No Results to Display</p>
+        <p class="empty-subtitle">Please enter search criteria to view results</p>
+      </div>
+    }
+
+    <!-- Section 3: Investigation Panel -->
+    @if (hasRetrieved() && !isLoading() && (isNewSetMode() || tableData().length > 0)) {
+      <section class="investigation-section" aria-labelledby="investigation-heading">
+        <h2 id="investigation-heading" class="sr-only">Investigation Details</h2>
+
+        <div class="investigation-inner">
+          <div class="investigation-header">
+            <div class="investigation-header-left">
+              <span class="investigation-label">Investigation for</span>
+              <span class="investigation-donor-name">{{ investigationDonorName }}</span>
+            </div>
+          </div>
+
+          <div class="investigation-cards">
+            @for (section of sectionConfig; track section.key) {
+              <div class="investigation-card">
+                <div class="card-header">
+                  <span class="card-label">{{ section.label }}</span>
+                  <span class="visit-badge" [class.checked]="getVisitStatus(section.key) === 'Checked'"
+                        [class.visited]="getVisitStatus(section.key) === 'Visited'"
+                        [class.not-visited]="getVisitStatus(section.key) === 'Not Visited'">
+                    {{ getVisitStatus(section.key) }}
+                  </span>
+                </div>
+
+                <button
+                  mat-stroked-button
+                  class="open-button"
+                  (click)="onOpenSection(section.key)"
+                  [disabled]="section.disabled || isNewSetMode()"
+                  type="button"
+                  [attr.aria-label]="'Open ' + section.label + ' for investigation'">
+                  {{ section.buttonLabel }}
+                </button>
+
+                <mat-checkbox
+                  [checked]="localSectionChecks()[section.key]"
+                  (change)="onMarkAsChecked(section.key, $event.checked)"
+                  [disabled]="isResolved || isCheckboxDisabled(section.key) || isNewSetMode()"
+                  color="primary"
+                  [attr.aria-label]="'Mark ' + section.label + ' as checked'">
+                  Mark as checked
+                </mat-checkbox>
+
+                @if (getReviewStatus(section.key); as review) {
+                  <div class="checked-info">
+                    <span class="checked-by">Checked By {{ review.user }}</span>
+                    <span class="checked-date">{{ review.date }}</span>
+                  </div>
+                }
+              </div>
+            }
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="action-buttons">
+          @if (isNewSetMode()) {
+            <button
+              mat-raised-button
+              class="commit-button"
+              (click)="onSaveNewSet()"
+              [disabled]="!isNewSetSaveEnabled()"
+              type="button"
+              aria-label="Save new set">
+              @if (isSavingNewSet()) {
+                <mat-spinner diameter="18" class="button-spinner"></mat-spinner>
+              } @else {
+                SAVE CHANGES
+              }
+            </button>
+          } @else {
+            <button
+              mat-stroked-button
+              class="save-button"
+              (click)="onSaveChanges()"
+              [disabled]="isSaveDisabled"
+              type="button"
+              aria-label="Save changes">
+              @if (isSaving()) {
+                <mat-spinner diameter="18" class="button-spinner"></mat-spinner>
+              } @else {
+                SAVE CHANGES
+              }
+            </button>
+            <button
+              mat-raised-button
+              class="commit-button"
+              (click)="onCommitInvestigation()"
+              [disabled]="!isCommitEnabled || isCommitting()"
+              type="button"
+              aria-label="Commit investigation">
+              @if (isCommitting()) {
+                <mat-spinner diameter="18" class="button-spinner"></mat-spinner>
+            } @else {
+              COMMIT INVESTIGATION
+            }
+          </button>
+          }
+        </div>
+      </section>
+    }
+  </div>
+
+  <!-- Live region for results announcement -->
+  <div aria-live="polite" class="sr-only">
+    @if (hasRetrieved() && !isLoading() && !isNewSetMode() && tableData().length > 0) {
+      {{ tableData().length }} donor records found
+    }
+  </div>
+
+  <!-- Gray Backdrop -->
+  @if (sidePanelOpen()) {
+    <div class="panel-backdrop" (click)="onPanelClose()"></div>
+  }
+
+  <!-- Side Window Panel -->
+  <div class="side-panel" [class.open]="sidePanelOpen()" [style.width]="sidePanelOpen() ? sidePanelWidth() : '0'"
+    role="dialog" aria-modal="true" [attr.aria-label]="'Investigation panel: ' + currentSection()">
+    @if (sidePanelOpen()) {
+      @switch (currentSection()) {
+        @case ('donations') {
+          <app-donor-within-test-dialog
+            [donorId]="currentCheckDonorId()"
+            [donorName]="currentCheckDonorName()"
+            [dob]="getSelectedDonorField('dateOfBirth')"
+            [sex]="getSelectedDonorField('sex')"
+            [abo]="''"
+            (closePanel)="onPanelClose()">
+          </app-donor-within-test-dialog>
+        }
+        @case ('demographics') {
+          <app-donor-demographics
+            [inputDonorId]="currentCheckDonorId()"
+            [inputReadOnly]="false"
+            [queryMode]="false"
+            (closePanelEvent)="onPanelClose()"
+            (panelWidthChange)="onPanelWidthChange($event)">
+          </app-donor-demographics>
+        }
+        @case ('attributes') {
+          <app-donor-attributes
+            [inputDonorId]="currentCheckDonorId()"
+            [inputDonorName]="currentCheckDonorName()"
+            [inputDob]="getSelectedDonorField('dateOfBirth')"
+            [inputSex]="getSelectedDonorField('sex')"
+            [inputAbo]="''"
+            (closePanelEvent)="onPanelClose()">
+          </app-donor-attributes>
+        }
+        @default {
+          <div class="side-panel-container">
+            <div class="side-panel-header">
+              <h2 class="side-panel-title">
+                @switch (currentSection()) {
+                  @case ('interdictions') { Donor Interdictions }
+                }
+              </h2>
+              <button
+                type="button"
+                mat-icon-button
+                class="side-panel-close"
+                aria-label="Close panel"
+                (click)="onPanelClose()">
+                <mat-icon>close</mat-icon>
+              </button>
+            </div>
+            <div class="side-panel-content-wrapper">
+              <div class="side-panel-content">
+                @switch (currentSection()) {
+                  @case ('interdictions') {
+                    <app-donor-interdictions-content
+                      [donorId]="currentCheckDonorId()"
+                      (closePanel)="onPanelClose()">
+                    </app-donor-interdictions-content>
+                  }
+                  @default {
+                    <div class="panel-placeholder">
+                      <p>Content for {{ currentSection() }} will be displayed here.</p>
+                    </div>
+                  }
+                }
+              </div>
+            </div>
+          </div>
+        }
+      }
+    }
+  </div>
+</div>
+</div>

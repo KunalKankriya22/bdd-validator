@@ -1,0 +1,314 @@
+<app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+<section
+  class="offline-product-shipment-container"
+  aria-labelledby="page-title"
+  role="region">
+
+  <!-- Loading State -->
+  @if (loading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading"></mat-spinner>
+      <span class="sr-only">Loading, please wait...</span>
+    </div>
+  }
+
+  <!-- Error State -->
+  @if (error()) {
+    <div class="error-container" role="alert" aria-live="assertive" [id]="elementId('error-container')">
+      <mat-icon aria-hidden="true">error</mat-icon>
+      <p>{{ error() }}</p>
+    </div>
+  }
+
+  <!-- Main Form -->
+  @if (isReady()) {
+    <form
+      [formGroup]="form"
+      [id]="elementId('form')"
+      class="shipment-form"
+      novalidate>
+
+      <!-- Single Form Card (matching Figma) -->
+      <section class="form-card" aria-label="Shipment details">
+        <!-- Row 1: Shipment Number, Date, Consignee ID, Consignee Name -->
+        <div class="form-row">
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label [id]="labelId('shipmentNo')">Shipment Number</mat-label>
+            <mat-select
+              [id]="elementId('shipmentNo')"
+              formControlName="shipmentNo"
+              [attr.aria-describedby]="elementId('shipmentNo-hint')">
+              <mat-option>
+                <ngx-mat-select-search [formControl]="shipmentSearchCtrl"
+                  placeholderLabel="Search..."
+                  noEntriesFoundLabel="No shipments found" />
+              </mat-option>
+              @for (shipment of filteredShipments(); track shipment.shipmentNo) {
+                <mat-option [value]="shipment.shipmentNo">{{ shipment.shipmentNo }}</mat-option>
+              }
+            </mat-select>
+            <mat-hint [id]="elementId('shipmentNo-hint')">Leave field blank to start a new shipment</mat-hint>
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label [id]="labelId('actualShipmentDate')">Actual Shipment Date</mat-label>
+            <input
+              matInput
+              [id]="elementId('actualShipmentDate')"
+              formControlName="actualShipmentDate"
+              placeholder="DD-MMM-YYYY HH:mm"
+              [matTooltip]="'Format: DD-MMM-YYYY HH:mm (e.g., 17-JUN-2026 14:30)'"
+              matTooltipPosition="above"
+              (blur)="onShipmentDateBlur()"
+              [attr.aria-invalid]="f['actualShipmentDate'].invalid && (f['actualShipmentDate'].touched || submitted())"
+              [attr.aria-describedby]="f['actualShipmentDate'].invalid && (f['actualShipmentDate'].touched || submitted()) ? errorId('actualShipmentDate') : null"
+              aria-required="true">
+            @if (f['actualShipmentDate'].invalid && (f['actualShipmentDate'].touched || submitted())) {
+              <mat-error [id]="errorId('actualShipmentDate')">
+                @if (f['actualShipmentDate'].errors?.['required']) {
+                  Actual Shipment Date/Time is required
+                }
+                @if (f['actualShipmentDate'].errors?.['pattern']) {
+                  Invalid format. Use DD-MMM-YYYY HH:mm (e.g., 17-JUN-2026 14:30)
+                }
+                @if (f['actualShipmentDate'].errors?.['futureDateTime']) {
+                  Shipment date and time cannot be in the future
+                }
+              </mat-error>
+            }
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label [id]="labelId('consigneeId')">Consignee ID</mat-label>
+            <mat-select
+              [id]="elementId('consigneeId')"
+              formControlName="consigneeId"
+              [attr.aria-invalid]="f['consigneeId'].invalid && (f['consigneeId'].touched || submitted())"
+              [attr.aria-describedby]="f['consigneeId'].invalid && (f['consigneeId'].touched || submitted()) ? errorId('consigneeId') : null"
+              aria-required="true">
+              <mat-option>
+                <ngx-mat-select-search [formControl]="consigneeSearchCtrl"
+                  placeholderLabel="Search..."
+                  noEntriesFoundLabel="No consignees found" />
+              </mat-option>
+              @for (consignee of filteredConsignees(); track consignee.consigneeId) {
+                <mat-option [value]="consignee.consigneeId">{{ consignee.consigneeId }} - {{ consignee.name }}</mat-option>
+              }
+            </mat-select>
+            @if (f['consigneeId'].invalid && (f['consigneeId'].touched || submitted())) {
+              <mat-error [id]="errorId('consigneeId')">Consignee ID is required</mat-error>
+            }
+          </mat-form-field>
+
+          <div class="field-readonly" role="group" [attr.aria-labelledby]="labelId('consigneeName')">
+            <span class="field-readonly__label" [id]="labelId('consigneeName')">Consignee Name</span>
+            <span class="field-readonly__value" [id]="elementId('consigneeName')">{{ f['consigneeName'].value || '-' }}</span>
+          </div>
+        </div>
+
+        <!-- Row 2: Address fields -->
+        <div class="form-row">
+          <div class="field-readonly" role="group" [attr.aria-labelledby]="labelId('addressLine1')">
+            <span class="field-readonly__label" [id]="labelId('addressLine1')">Address Line 1</span>
+            <span class="field-readonly__value" [id]="elementId('addressLine1')">{{ f['addressLine1'].value || '-' }}</span>
+          </div>
+          <div class="field-readonly" role="group" [attr.aria-labelledby]="labelId('addressLine2')">
+            <span class="field-readonly__label" [id]="labelId('addressLine2')">Address Line 2</span>
+            <span class="field-readonly__value" [id]="elementId('addressLine2')">{{ f['addressLine2'].value || '-' }}</span>
+          </div>
+          <div class="field-readonly" role="group" [attr.aria-labelledby]="labelId('addressLine3')">
+            <span class="field-readonly__label" [id]="labelId('addressLine3')">Address Line 3</span>
+            <span class="field-readonly__value" [id]="elementId('addressLine3')">{{ f['addressLine3'].value || '-' }}</span>
+          </div>
+          <div class="field-readonly" role="group" [attr.aria-labelledby]="labelId('city')">
+            <span class="field-readonly__label" [id]="labelId('city')">City</span>
+            <span class="field-readonly__value" [id]="elementId('city')">{{ f['city'].value || '-' }}</span>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="field-readonly" role="group" [attr.aria-labelledby]="labelId('state')">
+            <span class="field-readonly__label" [id]="labelId('state')">State</span>
+            <span class="field-readonly__value" [id]="elementId('state')">{{ f['state'].value || '-' }}</span>
+          </div>
+          <div class="field-readonly" role="group" [attr.aria-labelledby]="labelId('postalZip')">
+            <span class="field-readonly__label" [id]="labelId('postalZip')">Postal/ZIP</span>
+            <span class="field-readonly__value" [id]="elementId('postalZip')">{{ f['postalZip'].value || '-' }}</span>
+          </div>
+          <div class="field-readonly" role="group" [attr.aria-labelledby]="labelId('country')">
+            <span class="field-readonly__label" [id]="labelId('country')">Country</span>
+            <span class="field-readonly__value" [id]="elementId('country')">{{ f['country'].value || '-' }}</span>
+          </div>
+          <div aria-hidden="true"></div>
+        </div>
+
+        <!-- Row 3: Carrier, Track, Flight + Buttons -->
+        <div class="carrier-row">
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label [id]="labelId('carrier')">Carrier</mat-label>
+            <mat-select
+              [id]="elementId('carrier')"
+              formControlName="carrier"
+              [attr.aria-invalid]="f['carrier'].invalid && (f['carrier'].touched || submitted())"
+              [attr.aria-describedby]="f['carrier'].invalid && (f['carrier'].touched || submitted()) ? errorId('carrier') : null"
+              aria-required="true">
+              <mat-option>
+                <ngx-mat-select-search [formControl]="carrierSearchCtrl"
+                  placeholderLabel="Search..."
+                  noEntriesFoundLabel="No carriers found" />
+              </mat-option>
+              @for (carrier of filteredCarriers(); track carrier.code) {
+                <mat-option [value]="carrier.code">{{ carrier.code }} - {{ carrier.codeDesc }}</mat-option>
+              }
+            </mat-select>
+            @if (f['carrier'].invalid && (f['carrier'].touched || submitted())) {
+              <mat-error [id]="errorId('carrier')">Carrier is required</mat-error>
+            }
+          </mat-form-field>
+
+          <div class="field-readonly" role="group" [attr.aria-labelledby]="labelId('carrierDesc')">
+            <span class="field-readonly__label" [id]="labelId('carrierDesc')">Carrier Description</span>
+            <span class="field-readonly__value" [id]="elementId('carrierDesc')">{{ f['carrierDesc'].value || '-' }}</span>
+          </div>
+
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label [id]="labelId('trackNumber')">Track Number</mat-label>
+            <input
+              matInput
+              [id]="elementId('trackNumber')"
+              formControlName="trackNumber"
+              maxlength="15"
+              [attr.aria-invalid]="f['trackNumber'].invalid && (f['trackNumber'].touched || submitted())"
+              [attr.aria-describedby]="f['trackNumber'].invalid && (f['trackNumber'].touched || submitted()) ? errorId('trackNumber') : null"
+              aria-required="true">
+            @if (f['trackNumber'].invalid && (f['trackNumber'].touched || submitted())) {
+              <mat-error [id]="errorId('trackNumber')">
+                @if (f['trackNumber'].errors?.['required']) {
+                  Track Number is required
+                }
+                @if (f['trackNumber'].errors?.['maxlength']) {
+                  Track Number cannot exceed 15 characters
+                }
+              </mat-error>
+            }
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label [id]="labelId('flightNo')">Flight No</mat-label>
+            <input
+              matInput
+              [id]="elementId('flightNo')"
+              formControlName="flightNo"
+              maxlength="6">
+            @if (f['flightNo'].invalid && (f['flightNo'].touched || submitted())) {
+              <mat-error [id]="errorId('flightNo')">Flight No cannot exceed 6 characters</mat-error>
+            }
+          </mat-form-field>
+
+          <button
+            mat-button
+            type="button"
+            class="btn-retrieve"
+            [id]="elementId('retrieve-btn')"
+            [disabled]="form.invalid"
+            (click)="onRetrieve()">
+            RETRIEVE
+          </button>
+
+          <button
+            mat-button
+            type="button"
+            class="btn-clear-all"
+            [id]="elementId('clear-all-btn')"
+            aria-label="Clear all fields"
+            (click)="onClearAll()">
+            CLEAR ALL
+          </button>
+        </div>
+      </section>
+    </form>
+
+    <!-- Result Section -->
+      <div class="box-list-section">
+        <!-- Action Buttons -->
+        <div class="grid-actions" role="group" [attr.aria-label]="'Box list actions'">
+          <button
+            mat-button
+            type="button"
+            class="btn-clear-all"
+            [id]="elementId('grid-clear-all-btn')"
+            (click)="onClearAll()">
+            CLEAR ALL
+          </button>
+          <button
+            mat-button
+            type="button"
+            class="btn-retrieve"
+            [id]="elementId('view-products-btn')"
+            (click)="onViewProductsInBox()">
+            VIEW PRODUCTS IN BOX
+          </button>
+          <button
+            mat-button
+            type="button"
+            class="btn-retrieve"
+            [id]="elementId('view-consignees-btn')"
+            (click)="onViewConsigneesInZone()">
+            VIEW CONSIGNEES IN THE SAME ZONE
+          </button>
+          <button
+            mat-raised-button
+            color="primary"
+            type="button"
+            [id]="elementId('complete-box-entry-btn')"
+            [disabled]="loading() || (!shipmentData())"
+            (click)="onCompleteBoxEntry()">
+            COMPLETE BOX ENTRY
+          </button>
+        </div>
+
+        <!-- Box Entry + Data Table -->
+        <div class="box-table-container">
+          <div class="box-entry-inline-row">
+            <div class="box-entry-cell box-id-cell">
+              <mat-form-field appearance="fill" class="box-id-inline-field">
+                <mat-label>Box ID</mat-label>
+                <input matInput
+                  [(ngModel)]="boxIdInput"
+                  [ngModelOptions]="{standalone: true}"
+                  [matAutocomplete]="boxAuto"
+                  [disabled]="addingBox()"
+                  placeholder="Scan or enter Box ID"
+                  maxlength="10"
+                  (keydown.enter)="onBoxManualEntry()">
+                <mat-autocomplete #boxAuto="matAutocomplete"
+                  (optionSelected)="onBoxSelected($event.option.value)">
+                  @for (box of filteredBoxes(); track box.boxId) {
+                    <mat-option [value]="box.boxId">{{ box.boxId }}</mat-option>
+                  }
+                </mat-autocomplete>
+                <span matSuffix class="suffix-icons">
+                  <img src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" [class.scan-icon--disabled]="addingBox()" />
+                  <mat-icon class="dropdown-arrow" aria-hidden="true">arrow_drop_down</mat-icon>
+                </span>
+              </mat-form-field>
+            </div>
+            <div class="box-entry-cell" aria-hidden="true">-</div>
+            <div class="box-entry-cell" aria-hidden="true">-</div>
+            <div class="box-entry-cell" aria-hidden="true">-</div>
+          </div>
+
+          @if (showBoxTable()) {
+            <app-data-table
+              [config]="boxListTableConfig()"
+              [data]="sortedSessionBoxes()"
+              [loading]="loading()"
+              (rowClick)="onRowSelect($event)"
+              (sortChange)="onBoxSortChange($event)"
+              [attr.aria-label]="'Box list data table'">
+            </app-data-table>
+          }
+        </div>
+      </div>
+  }
+</section>

@@ -1,0 +1,88 @@
+---
+type: table
+used_by_count: 68
+tags:
+  - table
+---
+
+# COMPONENTS
+
+**Used by 68 screens**
+
+## Screens Using This Table (Read/Write)
+
+- [[cpicom2]]
+- [[cpicomp]]
+- [[cpicompd]]
+- [[cpqautos]]
+- [[cpqcomp]]
+- [[cpqlot]]
+- [[cpqunit4]]
+- [[genqlots]]
+- [[imchkin]]
+- [[imiqc]]
+- [[imuunits]]
+- [[laiqc]]
+- [[laiqcun]]
+- [[pkilabdc]]
+
+## Screens Using This as LOV/Dropdown Source
+
+- [[cpiattr]]
+- [[cpibagsu]]
+- [[cpicheck]]
+- [[cpichnge]]
+- [[cpichold]]
+- [[cpicnote]]
+- [[cpicoint]]
+- [[cpicom2]]
+- [[cpicomp]]
+- [[cpicompd]]
+- [[cpiconv]]
+- [[cpicratt]]
+- [[cpicrint]]
+- [[cpicrsup]]
+- [[cpicrym2]]
+- [[cpicryo]]
+- [[cpicryo1]]
+- [[cpicryom]]
+- [[cpicryou]]
+- [[cpidisca]]
+- [[cpifrza]]
+- [[cpifrzm]]
+- [[cpimodi]]
+- [[cpimpool]]
+- [[cpiphe2]]
+- [[cpipher]]
+- [[cpipool2]]
+- [[cpiprmgr]]
+- [[cpirej]]
+- [[cpisdal2]]
+- [[cpisdalq]]
+- [[cpisdcof]]
+- [[cpisdcup]]
+- [[cpisddfn]]
+- [[cpispli2]]
+- [[cpisplit]]
+- [[cpiweigh]]
+- [[cpiwhout]]
+- [[cpqattrb]]
+- [[cpqintal]]
+- [[fricon2]]
+- [[friconv]]
+- [[frispike]]
+- [[frisuit]]
+- [[frisuito]]
+- [[imiattr]]
+- [[imichkin]]
+- [[imichkof]]
+- [[laicdisb]]
+- [[lailabe2]]
+- [[lailabel]]
+- [[laiover]]
+- [[laiprlbl]]
+- [[lairesch]]
+- [[lairpint]]
+- [[laisuper]]
+- [[pkilabdc]]
+- [[pkrepcl]]

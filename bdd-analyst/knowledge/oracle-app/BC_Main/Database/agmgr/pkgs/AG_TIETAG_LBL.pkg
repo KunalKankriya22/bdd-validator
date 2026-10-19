@@ -1,0 +1,1100 @@
+create or replace PACKAGE AG_TIETAG_LBL AS 
+
+/*-----------------------------------------------------------------------------------
+|| Author       : WellSky BC.
+|| Description  : Core pkg that deals with tietag labels
+||              : 
+|| Requirements : 
+|| Call Syntax  :
+|| Version
+|| 01   04/22/2024  MLT-6779 - New pkg creation.
+|| 02   04/30/2024  MLT-6781 - Convert ABO code, SORT_TEST_STRING routine added.
+|| 03   06/16/2024  MLT-6921 - GEN_TIETAG_File modified to use bc_ttstartstop table.
+||                  MLT-6961 - TieTag label layout changes. Order Antigens. 
+||                           - Use AGMGR master code.
+|| 04   07/01/2024  MLT-7011 - User ATEST code. Modified Unlicensed/Unapproved Testing 
+||                           - query to print only unconfirmed antigens.
+|| 05   07/08/2024  Phenotype query updated. Added user ID to tietag file name.
+|| 06   08/06/2024  MLT-7063 - changes to 'Confirm Unlicensed/Unapproved Testing'
+||                                - 1) Unconfirmed only  to Confirmed or unconfirmed.
+||                                - 2) Current donation to current OR historicl.
+||                             - changes to 'Current Donation'
+||                                - 1) Licensed to Licensed or Unlicensed
+||------2024.1.0 Release version 06----------------------------------------------------------------------------
+||  
+*/-----------------------------------------------------------------------------------
+
+    TYPE print_list_vt IS TABLE OF VARCHAR2(100);
+        
+
+    PROCEDURE gen_tietag_file(pUnitId           IN VARCHAR2,
+                              pAboCode          IN VARCHAR2,
+                              pExpDate          IN DATE,
+                              pPrintAgCodes     IN VARCHAR2,
+                              pPrinterId        IN VARCHAR2,
+                              pNoLabels         IN NUMBER,
+                              pUserId           IN VARCHAR2,
+                              pChapterId        IN VARCHAR2,
+                              pStatus           OUT VARCHAR2); 
+                              
+    PROCEDURE sort_test_string(pTestString_in          IN VARCHAR2, 
+                                pSortedTestString_out   OUT VARCHAR2,
+                                pStatus_out             OUT VARCHAR2);
+
+    FUNCTION version_no RETURN VARCHAR2;
+
+END AG_TIETAG_LBL;
+
+/
+
+create or replace PACKAGE BODY AG_TIETAG_LBL AS
+    /*
+        create or replace public synonym AG_TIETAG_LBL for AGMGR.AG_TIETAG_LBL;
+        grant execute on AGMGR.AG_TIETAG_LBL to public;
+        
+        -- Required Config
+        -- 1) System parameter - AGDIR
+        -- 2) DB Directory that is linked to AGDIR with proper permissions.
+        -- 3)
+    */  
+    gv_version_no VARCHAR2(03) := '06';
+
+    FUNCTION version_no RETURN VARCHAR2 IS
+    BEGIN
+        RETURN gv_version_no;
+    END version_no;
+
+
+    PROCEDURE log_err(err_cd in varchar2, err_text in varchar2) is
+       PRAGMA AUTONOMOUS_TRANSACTION;
+    BEGIN
+       INSERT INTO user_error_log
+       (insert_dats,     user_id,        program_name,
+        error_code,      error_msg)
+       VALUES
+       (SYSDATE,         'SYSTEM',       'AGTIETAG',
+        SUBSTR(err_cd,1,4),   SUBSTR(err_text,1,500));
+       COMMIT;
+    END log_err;
+    
+    
+    PROCEDURE gen_tietag_file(pUnitId           IN VARCHAR2,
+                              pAboCode          IN VARCHAR2,
+                              pExpDate          IN DATE,
+                              pPrintAgCodes     IN VARCHAR2,
+                              pPrinterId        IN VARCHAR2,
+                              pNoLabels         IN NUMBER,
+                              pUserId           IN VARCHAR2,
+                              pChapterId        IN VARCHAR2,
+                              pStatus           OUT VARCHAR2) IS
+        
+        -- Constants
+        lc_AboMasterCode CONSTANT VARCHAR2(3) := 'ABO'; -- Blood Types Master Code
+
+        -- Local Variables
+        lv_dbDirPath    all_directories.directory_path%TYPE;
+        lv_fileName     VARCHAR2(300);
+        
+        TYPE mc_aat IS TABLE OF VARCHAR2(200) INDEX BY VARCHAR2(10);
+        master_codes_list     mc_aat;
+
+        TYPE strings_aat IS TABLE OF VARCHAR2(1000) INDEX BY PLS_INTEGER;
+        TYPE strings_nt IS TABLE OF VARCHAR2(1000);
+ 
+        lines_list          strings_aat;
+        start_codes_list    strings_aat;
+        stop_codes_list     strings_aat; -- dbms_utility.maxname_array;
+        
+        
+        hist_conf_ag_list           strings_nt := strings_nt();
+        hist_conf_ag_formatted_list strings_nt := strings_nt();        
+        current_ag_list             strings_nt := strings_nt();
+        current_ag_formatted_list   strings_nt := strings_nt();        
+        unlicensed_ag_list          strings_nt := strings_nt();
+        unlicensed_ag_formatted_list strings_nt := strings_nt();
+        special_ag_list             strings_nt := strings_nt();
+        special_ag_formatted_list   strings_nt := strings_nt();        
+        phenotype_ag_list           strings_nt := strings_nt();
+        phenotype_ag_formatted_list strings_nt := strings_nt();
+        
+        lv_donorId      VARCHAR2(20);
+        lv_BloodType    VARCHAR2(500);
+        ld_localTime    DATE;
+        
+        lv_scanUnitId     VARCHAR2(30);
+        lv_chkDigit     VARCHAR2(10);
+        lv_unitWithCheckDigit   VARCHAR2(30);
+        
+        
+        agCodes_print_list  ag_tietag_lbl.print_list_vt := ag_tietag_lbl.print_list_vt();
+        ---
+        
+        -- Exceptions
+        error_status    EXCEPTION;
+        --
+
+
+        -- Inputs validation.
+        PROCEDURE validate_inputs(status_out OUT VARCHAR2) IS
+            nCnt NUMBER;
+        BEGIN
+            status_out := 'OK';
+            
+            IF pUnitId is NULL OR pAboCode IS NULL or pExpDate is NULL THEN
+                raise_application_error(-20001, 'Required Input parameters - Unit Id, Blood Type, Exp Date');  
+            END IF;
+            
+            IF pPrintAgCodes IS NULL THEN
+                raise_application_error(-20002, 'Required Input parameters - AG Codes String');              
+            END IF;
+            
+            SELECT COUNT(1) INTO nCnt
+              FROM units
+             WHERE unit_id = pUnitId;
+             
+            IF nCnt = 0 THEN
+                raise_application_error(-20003, 'Invalid Unit Id.');
+            END IF; 
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                status_out := SQLERRM;
+        END validate_inputs; 
+
+
+        FUNCTION format_list_nt(list_in IN strings_nt, line_cnt_in IN NUMBER DEFAULT 3) RETURN strings_nt IS
+            lv_string VARCHAR2(2000);
+            list_return strings_nt := strings_nt();
+
+            c_line_length NUMBER := 54;
+            start_pos NUMBER;
+            lv_temp_string VARCHAR2(100);
+            new_length NUMBER;
+            line_indx NUMBER;
+            
+            FUNCTION get_new_length(string_in IN VARCHAR2) RETURN NUMBER IS
+                ln_str_len NUMBER;
+                ln_sep_pos NUMBER;
+                ln_return   NUMBER;
+            BEGIN
+                ln_str_len := LENGTH(string_in);
+                
+                IF ln_str_len = c_line_length THEN
+                    ln_sep_pos := INSTR(string_in, master_codes_list('FDSEP'), -1);
+                    ln_return := ln_sep_pos;
+                ELSE
+                    ln_return := ln_str_len;
+                END IF;
+                
+                RETURN ln_return;
+            END get_new_length;
+        BEGIN
+            
+            FOR indx IN 1 .. line_cnt_in
+            LOOP
+                list_return.EXTEND;
+                list_return(indx) := '';
+            END LOOP;
+            
+            IF list_in.COUNT = 0 THEN
+                NULL;
+            ELSE
+                FOR indx IN list_in.FIRST .. list_in.LAST 
+                LOOP
+                    lv_string := lv_string || master_codes_list('FDSEP')  || list_in(indx);
+                END LOOP;
+                
+                lv_string := LTRIM(lv_string, master_codes_list('FDSEP'));
+                
+                --DBMS_OUTPUT.PUT_LINE(lv_string);
+                
+
+                start_pos   := 1;
+                line_indx   := 1;
+                
+                WHILE(line_indx < line_cnt_in+1) 
+                LOOP 
+                    lv_temp_string := SUBSTR(lv_string, start_pos, c_line_length);
+                    new_length  := get_new_length(lv_temp_string);  
+                    
+                    list_return(line_indx) :=  SUBSTR(lv_string, start_pos, new_length);                    
+                    line_indx := line_indx + 1;
+                    
+                    start_pos := start_pos + new_length;
+                    
+                END LOOP;
+
+         
+            END IF;            
+            RETURN list_return;
+        END format_list_nt;
+
+
+        PROCEDURE load_antigens_lists IS
+            PROCEDURE load_hist_conf_ag IS
+                ser_ag_list strings_nt := strings_nt();
+                mol_ag_list strings_nt := strings_nt();            
+            BEGIN
+
+                -- User Selected
+                -- Confirmed only
+                -- Historical or Current Donation
+                -- Licensed/Approved OR Unlicensed/Unapproved
+
+                SELECT hdr.antigen_code || hdr.result_code val
+                BULK COLLECT INTO ser_ag_list
+                 FROM   ag_donor_tests_hdr hdr,
+                        valid_tests_don tsts,
+                        valid_antigen_groups grps
+                WHERE hdr.donor_id = lv_donorId
+                 AND hdr.confirm_flag  ='Y'
+                 AND hdr.antigen_code = tsts.test_id
+                 AND tsts.test_id = grps.ser_ag_test_id
+                 AND tsts.test_group = 'AG'
+                 AND ld_localTime BETWEEN tsts.eff_date AND NVL(tsts.term_Date, ld_localTime+1)
+                 AND hdr.antigen_code IN (SELECT  COLUMN_VALUE
+                                          FROM TABLE(agCodes_print_list))
+                 ORDER BY grps.antigen_grp_disp_order, grps.ser_test_disp_order;
+
+                SELECT hdr.antigen_code || hdr.result_code val
+                BULK COLLECT INTO mol_ag_list
+                 FROM   ag_donor_tests_hdr hdr,
+                        valid_tests_don tsts,
+                        valid_antigen_groups grps
+                WHERE hdr.donor_id= lv_donorId
+                 AND hdr.confirm_flag = 'Y'
+                 AND hdr.antigen_code = tsts.test_id
+                 AND tsts.test_id = grps.mol_ag_test_id
+                 AND tsts.test_group = 'MAG'
+                 AND ld_localTime BETWEEN tsts.eff_date AND NVL(tsts.term_Date, ld_localTime+1)
+                 AND hdr.antigen_code IN (SELECT  COLUMN_VALUE
+                                          FROM TABLE(agCodes_print_list))
+                 ORDER BY grps.antigen_grp_disp_order, grps.mol_test_disp_order;
+
+                hist_conf_ag_list := ser_ag_list MULTISET UNION mol_ag_list;
+                hist_conf_ag_formatted_list := format_list_nt(hist_conf_ag_list, 3);
+            END load_hist_conf_ag;
+            
+            PROCEDURE load_current_ag IS
+                ser_ag_list strings_nt := strings_nt();
+                mol_ag_list strings_nt := strings_nt();            
+            BEGIN
+                -- User selected
+                -- Confirmed or Unconfirmed
+                -- Current Donation
+                -- Licensed/Approved only OR unlicensed/unapproved
+
+                SELECT hdr.antigen_code || hdr.result_code val
+                BULK COLLECT INTO ser_ag_list
+                 FROM   ag_donor_tests_hdr hdr,
+                        valid_tests_don tsts,
+                        valid_antigen_groups grps
+                WHERE hdr.antigen_code = tsts.test_id
+                 AND tsts.test_id = grps.ser_ag_test_id
+                 AND tsts.test_group = 'AG'
+                 AND ld_localTime BETWEEN tsts.eff_date AND NVL(tsts.term_Date, ld_localTime+1)
+                 AND (hdr.antigen_code, hdr.donor_id) 
+                    IN (SELECT det.antigen_code, det.donor_id
+                          FROM ag_donor_tests_det det
+                        WHERE det.donor_id = lv_donorId
+                          AND det.unit_id = pUnitId
+                          --AND det.licensed_flag IN ('L', 'A')
+                          AND NVL(det.exclude_flag, 'N') = 'N' 
+                          AND det.antigen_code IN (SELECT  COLUMN_VALUE
+                                       FROM TABLE(agCodes_print_list))  
+                        )
+                 ORDER BY grps.antigen_grp_disp_order, grps.ser_test_disp_order;
+
+                SELECT hdr.antigen_code || hdr.result_code val
+                BULK COLLECT INTO mol_ag_list
+                 FROM   ag_donor_tests_hdr hdr,
+                        valid_tests_don tsts,
+                        valid_antigen_groups grps
+                WHERE hdr.antigen_code = tsts.test_id
+                 AND tsts.test_id = grps.mol_ag_test_id
+                 AND tsts.test_group = 'MAG'
+                 AND ld_localTime BETWEEN tsts.eff_date AND NVL(tsts.term_Date, ld_localTime+1)
+                 AND (hdr.antigen_code, hdr.donor_id) 
+                    IN (SELECT det.antigen_code, det.donor_id
+                          FROM ag_donor_tests_det det
+                        WHERE det.donor_id = lv_donorId
+                          AND det.unit_id = pUnitId
+                          --AND det.licensed_flag IN ('L', 'A')
+                          AND NVL(det.exclude_flag, 'N') = 'N' 
+                          AND det.antigen_code IN (SELECT  COLUMN_VALUE
+                                       FROM TABLE(agCodes_print_list))  
+                        )
+                 ORDER BY grps.antigen_grp_disp_order, grps.mol_test_disp_order;
+
+                current_ag_list := ser_ag_list MULTISET UNION mol_ag_list;
+                current_ag_formatted_list := format_list_nt(current_ag_list, 3);
+                    
+            END load_current_ag;
+    
+            PROCEDURE load_unlicensed_ag IS
+                ser_ag_list strings_nt := strings_nt();
+                mol_ag_list strings_nt := strings_nt();
+            BEGIN
+                
+                -- User Selected
+                -- Confirmed or Unconfirmed
+                -- Current Donation OR historical
+                -- Unlicensed/Unapproved Only
+    
+
+                SELECT hdr.antigen_code || hdr.result_code val
+                BULK COLLECT INTO ser_ag_list
+                 FROM   ag_donor_tests_hdr hdr,
+                        valid_tests_don tsts,
+                        valid_antigen_groups grps
+                WHERE hdr.antigen_code = tsts.test_id
+                 AND tsts.test_id = grps.ser_ag_test_id
+                 AND tsts.test_group = 'AG'
+                 AND ld_localTime BETWEEN tsts.eff_date AND NVL(tsts.term_Date, ld_localTime+1)
+                 AND (hdr.antigen_code, hdr.donor_id) 
+                    IN (SELECT det.antigen_code, det.donor_id
+                          FROM ag_donor_tests_det det
+                        WHERE det.donor_id = lv_donorId
+                          --AND NVL(det.confirm_status,'X') <> 'Y' 
+                          --AND det.unit_id = pUnitId
+                          AND det.licensed_flag NOT IN ('L', 'A')
+                          AND NVL(det.exclude_flag, 'N') = 'N' 
+                          AND det.antigen_code IN (SELECT  COLUMN_VALUE
+                                       FROM TABLE(agCodes_print_list))  
+                        )
+                 ORDER BY grps.antigen_grp_disp_order, grps.ser_test_disp_order;
+                     
+                SELECT hdr.antigen_code || hdr.result_code val
+                BULK COLLECT INTO mol_ag_list
+                 FROM   ag_donor_tests_hdr hdr,
+                        valid_tests_don tsts,
+                        valid_antigen_groups grps
+                WHERE hdr.antigen_code = tsts.test_id
+                 AND tsts.test_id = grps.mol_ag_test_id
+                 AND tsts.test_group = 'MAG'
+                 AND ld_localTime BETWEEN tsts.eff_date AND NVL(tsts.term_Date, ld_localTime+1)
+                 AND (hdr.antigen_code, hdr.donor_id) 
+                    IN (SELECT det.antigen_code, det.donor_id
+                          FROM ag_donor_tests_det det
+                        WHERE det.donor_id = lv_donorId
+                          --AND NVL(det.confirm_status,'X') <> 'Y' 
+                          --AND det.unit_id = pUnitId                
+                          AND det.licensed_flag NOT IN ('L', 'A')
+                          AND NVL(det.exclude_flag, 'N') = 'N' 
+                          AND det.antigen_code IN (SELECT  COLUMN_VALUE
+                                       FROM TABLE(agCodes_print_list))  
+                        )
+                 ORDER BY grps.antigen_grp_disp_order, grps.mol_test_disp_order;
+                 
+                
+                unlicensed_ag_list := ser_ag_list MULTISET UNION mol_ag_list;
+                unlicensed_ag_formatted_list := format_list_nt(unlicensed_ag_list, 3);
+                
+            END load_unlicensed_ag;
+    
+            PROCEDURE load_special_testing_ag IS
+                ser_ag_list     strings_nt := strings_nt();
+                mol_ag_list     strings_nt := strings_nt();
+                adt_ag_list_1   strings_nt := strings_nt();
+                adt_ag_list_2   strings_nt := strings_nt();
+                dnpp_list       strings_nt := strings_nt();
+            BEGIN
+            
+                IF master_codes_list('DNPP') IS NOT NULL THEN
+                    SELECT TRIM(REGEXP_SUBSTR(master_codes_list('DNPP'), '[^,]+', 1, LEVEL)) || '+' val
+                    BULK COLLECT INTO dnpp_list
+                     FROM DUAL
+                    CONNECT BY REGEXP_SUBSTR(master_codes_list('DNPP'), '[^,]+', 1, LEVEL) IS NOT NULL  ;   
+                END IF;
+                
+                
+                -- Confirmed onlysc
+                -- Historical or current donation
+                -- Licensed/Approved or Unlicensed/Unapproved
+                -- ATEST Master code tests only 
+                SELECT hdr.antigen_code || hdr.result_code val
+                BULK COLLECT INTO ser_ag_list
+                 FROM ag_donor_tests_hdr hdr, 
+                      ag_donor_tests_det det, 
+                      valid_tests_don tsts,
+                      valid_antigen_groups grps
+                WHERE hdr.antigen_code = det.antigen_code
+                 AND hdr.donor_id = det.donor_id
+                 AND hdr.antigen_code = tsts.test_id
+                 AND tsts.test_id = grps.ser_ag_test_id
+                 AND tsts.test_group = 'AG'
+                 AND det.donor_id = lv_donorId
+                 AND det.confirm_status = 'Y'
+                 AND NVL(det.exclude_flag, 'N') = 'N'
+                 AND ld_localTime BETWEEN tsts.eff_date AND NVL(tsts.term_Date, ld_localTime+1)
+                 AND det.test_id IN (SELECT TRIM(REGEXP_SUBSTR(master_codes_list('ATEST'), '[^,]+', 1, LEVEL)) seq
+                                     FROM DUAL
+                                    CONNECT BY REGEXP_SUBSTR(master_codes_list('ATEST'), '[^,]+', 1, LEVEL) IS NOT NULL) 
+                 AND (det.test_id, det.test_result) IN (
+                     SELECT rcvs.test_ids, rcvs.result_combination
+                     FROM valid_antigens_rcvs_det rcvs
+                     WHERE rcvs.rc_id = 'RC003'
+                    )
+                ORDER BY grps.antigen_grp_disp_order, grps.ser_test_disp_order;
+
+                IF ser_ag_list.COUNT > 0 AND dnpp_list.COUNT > 0 THEN
+                    ser_ag_list := ser_ag_list MULTISET EXCEPT dnpp_list;                    
+                END IF;
+
+                SELECT hdr.antigen_code || hdr.result_code val
+                BULK COLLECT INTO mol_ag_list
+                 FROM ag_donor_tests_hdr hdr, 
+                      ag_donor_tests_det det, 
+                      valid_tests_don tsts,
+                      valid_antigen_groups grps
+                WHERE hdr.antigen_code = det.antigen_code
+                 AND hdr.donor_id = det.donor_id
+                 AND hdr.antigen_code = tsts.test_id
+                 AND tsts.test_id = grps.mol_ag_test_id
+                 AND tsts.test_group = 'MAG'
+                 AND det.donor_id = lv_donorId
+                 AND det.confirm_status = 'Y'
+                 AND NVL(det.exclude_flag, 'N') = 'N'
+                 AND ld_localTime BETWEEN tsts.eff_date AND NVL(tsts.term_Date, ld_localTime+1)
+                 AND det.test_id IN (SELECT TRIM(REGEXP_SUBSTR(master_codes_list('ATEST'), '[^,]+', 1, LEVEL)) seq
+                                         FROM DUAL
+                                        CONNECT BY REGEXP_SUBSTR(master_codes_list('ATEST'), '[^,]+', 1, LEVEL) IS NOT NULL) 
+                 AND (det.test_id, det.test_result) IN (
+                     SELECT rcvs.test_ids, rcvs.result_combination
+                     FROM valid_antigens_rcvs_det rcvs
+                     WHERE rcvs.rc_id = 'RC003'
+                    )
+                ORDER BY grps.antigen_grp_disp_order, grps.mol_test_disp_order;
+                 
+                IF mol_ag_list.COUNT > 0 AND dnpp_list.COUNT > 0 THEN
+                    mol_ag_list := mol_ag_list MULTISET EXCEPT dnpp_list;                    
+                END IF;
+                
+                 -- Get antigens that match with additional antigens from ISBT second table  
+                 -- match if for test Id and result
+                 -- Converts UTRS test result to + or - before matching the test result.
+                 WITH temp_tbl AS
+                 (
+                    SELECT ut.test_id, DECODE(mc.code_type, 'REAC', '+', '-') test_res
+                     FROM utrs ut,
+                          valid_tests_don tsts,
+                          master_codes mc
+                    WHERE ut.test_id = tsts.test_id
+                     AND ut.result_status_1 = mc.code 
+                     AND mc.code_type IN ('REAC', 'NREAC')
+                     AND ld_localTime BETWEEN mc.eff_date AND NVL(mc.term_date, ld_localTime+1)
+                     AND ut.result_status_1 IS NOT NULL
+                     AND ut.unit_id = pUnitId
+                     AND ut.test_id IN (SELECT TRIM(REGEXP_SUBSTR(master_codes_list('ATEST'), '[^,]+', 1, LEVEL)) seq
+                                         FROM DUAL
+                                        CONNECT BY REGEXP_SUBSTR(master_codes_list('ATEST'), '[^,]+', 1, LEVEL) IS NOT NULL) 
+                     AND ut.cancel_flag IS NULL
+                     AND ld_localTime BETWEEN tsts.eff_date AND NVL(tsts.term_Date, ld_localTime+1)
+                 ) SELECT temp_tbl.test_id || temp_tbl.test_res
+                    BULK COLLECT INTO adt_ag_list_1
+                    FROM temp_tbl
+                    WHERE (temp_tbl.test_id, temp_tbl.test_res) IN
+                        (SELECT rcvs.test_ids, rcvs.result_combination
+                          FROM valid_antigens_rcvs_det rcvs
+                          WHERE rcvs.rc_id= 'RC003');
+
+                IF adt_ag_list_1.COUNT > 0 AND dnpp_list.COUNT > 0 THEN
+                    adt_ag_list_1 := adt_ag_list_1 MULTISET EXCEPT dnpp_list;                    
+                END IF;                
+                
+                
+                -- Get antigens that do not have a match in RCVS det able (second ISBT table)
+                -- Eg: CMV is not in table 2 but is an additional test that does not go 
+                -- through the antigen tables.
+                SELECT ut.test_id || DECODE(mc.code_type, 'REAC', '+', '-') test_res
+                BULK COLLECT INTO adt_ag_list_2
+                 FROM utrs ut,
+                      valid_tests_don tsts,
+                      master_codes mc
+                WHERE ut.test_id = tsts.test_id
+                 AND ut.result_status_1 = mc.code 
+                 AND mc.code_type IN ('REAC', 'NREAC')
+                 AND ld_localTime BETWEEN mc.eff_date AND NVL(mc.term_date, ld_localTime+1)
+                 AND ut.result_status_1 IS NOT NULL
+                 AND ut.unit_id = pUnitId
+                 AND ut.test_id IN (SELECT TRIM(REGEXP_SUBSTR(master_codes_list('ATEST'), '[^,]+', 1, LEVEL)) seq
+                                     FROM DUAL
+                                    CONNECT BY REGEXP_SUBSTR(master_codes_list('ATEST'), '[^,]+', 1, LEVEL) IS NOT NULL) 
+                 AND ut.cancel_flag IS NULL
+                 AND ld_localTime BETWEEN tsts.eff_date AND NVL(tsts.term_Date, ld_localTime+1)
+                 AND ut.test_id NOT IN (SELECT rcvs.test_ids
+                                        FROM valid_antigens_rcvs_det rcvs
+                                        WHERE rcvs.rc_id= 'RC003');
+                
+                IF adt_ag_list_2.COUNT > 0 AND dnpp_list.COUNT > 0 THEN
+                    adt_ag_list_2 := adt_ag_list_2 MULTISET EXCEPT dnpp_list;                    
+                END IF;      
+                
+                special_ag_list := ser_ag_list MULTISET UNION  
+                                   mol_ag_list MULTISET UNION 
+                                   adt_ag_list_1 MULTISET UNION
+                                   adt_ag_list_2 ;
+                
+                special_ag_formatted_list := format_list_nt(special_ag_list, 3);
+                
+            END load_special_testing_ag;
+            
+            PROCEDURE load_phenotype_ag IS
+                ser_ag_list strings_nt := strings_nt();
+                mol_ag_list strings_nt := strings_nt();                
+            BEGIN
+                -- confirmed or unconfirmed
+                -- licensed or unlicensed
+                -- historical or current donation
+                -- PHENO master code.
+                
+                ser_ag_list.DELETE;
+                mol_ag_list.DELETE;
+                phenotype_ag_list.DELETE;
+                phenotype_ag_formatted_list.DELETE;
+                
+                IF master_codes_list('PHENO') NOT IN ('AG', 'MAG', 'ALL') THEN
+                    RETURN;
+                END IF;
+                
+                IF master_codes_list('PHENO') IN ('AG', 'ALL') THEN
+                    WITH tbl AS (
+                    SELECT DISTINCT det.test_id || det.test_result val,
+                                    antigen_grp_disp_order, 
+                                    ser_test_disp_order
+                    --BULK COLLECT INTO ser_ag_list
+                     FROM ag_donor_tests_hdr hdr, ag_donor_tests_det det, valid_antigen_groups grp
+                    WHERE hdr.donor_id =lv_DonorId
+                     AND hdr.antigen_code = det.antigen_code
+                     AND hdr.donor_id = det.donor_id
+                     AND det.test_type = 'SER'
+                     AND det.test_id = grp.ser_ag_test_id
+                     ) SELECT val
+                         BULK COLLECT INTO ser_ag_list 
+                         FROM tbl
+                         ORDER BY antigen_grp_disp_order, ser_test_disp_order;                
+                END IF;
+                
+                IF master_codes_list('PHENO') IN ('MAG', 'ALL') THEN
+                    WITH tbl AS (
+                    SELECT DISTINCT det.test_id || det.test_result val,
+                                    antigen_grp_disp_order,
+                                    mol_test_disp_order
+                    --BULK COLLECT INTO mol_ag_list
+                     FROM ag_donor_tests_hdr hdr, ag_donor_tests_det det, valid_antigen_groups grp
+                    WHERE hdr.donor_id = lv_DonorId
+                     AND hdr.antigen_code = det.antigen_code
+                     AND hdr.donor_id = det.donor_id
+                     AND det.test_type = 'MOL'
+                     AND det.test_id = grp.mol_ag_test_id
+                     ) SELECT val
+                        BULK COLLECT INTO mol_ag_list
+                        FROM tbl
+                        ORDER BY antigen_grp_disp_order, mol_test_disp_order;                
+                END IF;
+                
+                phenotype_ag_list := ser_ag_list MULTISET UNION mol_ag_list;
+                
+                phenotype_ag_formatted_list := format_list_nt(phenotype_ag_list, 9);
+                
+            END load_phenotype_ag;
+
+        BEGIN
+            hist_conf_ag_list.DELETE;
+            hist_conf_ag_formatted_list.DELETE;
+            current_ag_list.DELETE;
+            current_ag_formatted_list.DELETE;
+            unlicensed_ag_list.DELETE;
+            unlicensed_ag_formatted_list.DELETE;
+            special_ag_list.DELETE;
+            special_ag_formatted_list.DELETE;
+            phenotype_ag_list.DELETE;
+            phenotype_ag_formatted_list.DELETE;
+            
+            load_hist_conf_ag;
+            load_current_ag;
+            load_unlicensed_ag;
+            load_special_testing_ag;
+            load_phenotype_ag;
+        END load_antigens_lists;
+
+        
+        -- Initializes the variables used in the routine.
+        PROCEDURE init_vars(status_out OUT VARCHAR2) IS   
+            
+            function directory_path
+                ( p_directory all_directories.directory_name%type )
+                return all_directories.directory_path%type
+            is
+                l_path all_directories.directory_path%type;
+            begin
+                select d.directory_path into l_path
+                from   all_directories d
+                where  d.directory_name = p_directory;
+        
+                return l_path;
+            exception
+                when no_data_found then return null;
+            end directory_path;   
+            
+        BEGIN
+            status_out := 'OK';
+            
+            IF pUserId IS NULL THEN
+                raise_application_error(-20004, 'User Id is required.');
+            END IF;
+            
+            IF pChapterId IS NULL THEN
+                raise_application_error(-20004, 'Chapter Id is required.');
+            END IF;
+            
+            ld_localTime := lifetrack_timezone_convert.get_local_time(pChapterId, SYSDATE);
+            
+            BEGIN
+                SELECT donor_id
+                  INTO lv_donorId
+                  FROM donations
+                 WHERE unit_id = pUnitId;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    raise_application_error(-20004, 'Donor Id: ' || SQLERRM);
+            END;
+            
+            
+            BEGIN
+                SELECT code_desc 
+                  INTO lv_BloodType
+                  FROM master_codes
+                 WHERE code_type = lc_AboMasterCode -- 'ABO'
+                   AND code = pAboCode
+                   AND ld_localTime BETWEEN eff_date AND NVL(term_date, ld_localTime+1);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    raise_application_error(-20005, 'ABO code: ' || SQLERRM);
+            END;
+            
+            BEGIN
+                SELECT TRIM(REGEXP_SUBSTR(pPrintAgCodes, '[^,]+', 1, LEVEL)) seq
+                  BULK COLLECT
+                  INTO agCodes_print_list
+                  FROM DUAL
+                CONNECT BY REGEXP_SUBSTR(pPrintAgCodes, '[^,]+', 1, LEVEL) IS NOT NULL;    
+                
+                IF agCodes_print_list.COUNT = 0 THEN
+                    raise_application_error(-20006, 'AG codes not found');
+                END IF;            
+            END;
+            
+            
+            -- load master codes.
+            BEGIN
+                -- Defaults
+                master_codes_list('ENBLE') := 'N'; -- Enabled or not.
+                
+                master_codes_list('DBDIR') := NULL; -- DB Directory to store print files.
+                
+                master_codes_list('CNFRM') := 'Confirmed Historically:'; -- Confirm historical label.
+                master_codes_list('CURDN') := 'Tested on Current Donation:'; -- Current Donation label.
+                master_codes_list('ADTST') := 'Additional Testing Performed:'; -- Additional Testing Label.
+                master_codes_list('UNAPL') := 'Confirm UnlicensedUnapproved Testing:'; -- Unlicensed and Unapproved Label.
+                
+                master_codes_list('PHENO') := 'N'; -- Print phenotype
+                master_codes_list('PRUNL') := 'Y'; -- Print Unlicensed
+                
+                master_codes_list('FDSEP') := ','; -- Tietag field seperator.
+                master_codes_list('ATEST') := '';
+                master_codes_list('DNPP') := NULL;
+                ----
+                
+                
+                FOR rec IN (
+                    SELECT code, code_desc
+                      FROM master_codes
+                     WHERE code_type = 'AGMGR'
+                       AND code IN ('ENBLE', 'DBDIR',
+                                    'CNFRM', 'CURDN', 'ADTST', 'UNAPL',
+                                    'PHENO', 'PRUNL',
+                                    'FDSEP', 'ATEST',
+                                    'DNPP'
+                                    )
+                       AND ld_localTime BETWEEN eff_date AND NVL(term_date, ld_localTime +1)
+                )
+                LOOP
+                    master_codes_list(rec.code) := rec.code_desc;                
+                END LOOP;  
+                
+                IF master_codes_list('ENBLE') <> 'Y' THEN
+                    raise_application_error(-20006, 'RBC Antigen Manager is turned OFF');
+                END IF;                
+            END;
+            
+            IF master_codes_list('DBDIR') IS NULL THEN
+                raise_application_error(-20007, 'Label Directory - AGMGR, DBDIR is not setup.' );
+            END IF;
+                        
+            lv_dbDirPath := directory_path(master_codes_list('DBDIR'));
+            
+            IF lv_dbDirPath IS NULL THEN
+                 raise_application_error(-20008, 'Directory Object DBDIR is not defined.');
+            END IF;
+            
+            lv_fileName := pUnitID 
+                            || '_' 
+                            || TO_CHAR(pExpDate, 'MMDDYYYY')
+                            || '_'
+                            || TO_CHAR(SYSDATE, 'YYDDDHH24MISS')
+                            || '_'
+                            || pUserId
+                            || '.txt';
+            
+            -- Load Antigens
+            load_antigens_lists;
+
+            -- get check digit
+            SBCLIB.validate_unit_chkdigit(pUnitId, lv_chkDigit);
+            
+            lv_unitWithCheckDigit := pUnitId || '-' || lv_chkDigit;
+            
+            lv_scanUnitId := '=' || pUnitId || '00';
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                status_out := SQLERRM;
+        END init_vars;
+        
+        -- Dumps lines array to a file.
+        PROCEDURE write_lines_to_file(status_out  OUT VARCHAR2) IS
+            l_file utl_file.file_type;   
+            lb_recs_found BOOLEAN;
+        BEGIN
+            status_out := 'OK';
+            
+            BEGIN
+                l_file :=
+                    utl_file.fopen
+                    ( filename => lv_fileName, 
+                      location => master_codes_list('DBDIR'),
+                      open_mode => 'w',
+                      max_linesize => 4000 );
+            EXCEPTION
+                WHEN utl_file.invalid_operation THEN
+                    raise_application_error(-20009, 'File '''||lv_fileName||''' could not be opened in directory '|| master_codes_list('DBDIR') ||' ('||lv_dbDirPath||')', true);
+                WHEN utl_file.invalid_path THEN
+                    raise_application_error(-20010, 'File location '|| master_codes_list('DBDIR') ||' ('||lv_dbDirPath||') is invalid.', true);
+                WHEN utl_file.invalid_filename THEN
+                    raise_application_error(-20011, 'Filename '''||lv_fileName||''' is invalid.', true);
+            END;
+        
+            lb_recs_found := FALSE;
+            
+            FOR indx IN lines_list.FIRST .. lines_list.LAST LOOP
+                BEGIN
+                    UTL_FILE.put_line(l_file, lines_list(indx));  
+                    lb_recs_found := TRUE;
+                EXCEPTION
+                    when utl_file.write_error then
+                        raise_application_error(-20012, 'Operating system error occurred writing to file '''||lv_fileName||'''.');                
+                END;
+            END LOOP;
+            
+            utl_file.fclose(l_file);
+            
+            IF NOT lb_recs_found THEN
+                utl_file.fremove(master_codes_list('DBDIR'), lv_fileName);
+            END IF;  
+            
+        EXCEPTION
+            WHEN OTHERS THEN
+                status_out := SQLERRM;
+        END write_lines_to_file;
+
+
+        PROCEDURE build_lines_list(status_out OUT VARCHAR2) IS
+            PROCEDURE add_lines_list(line_in IN VARCHAR2) IS
+            BEGIN
+                lines_list(NVL(lines_list.LAST, 0) + 1) := line_in;
+            END add_lines_list;        
+        BEGIN
+            status_out := 'OK';
+            
+            SELECT start_code, stop_code
+              BULK COLLECT INTO start_codes_list, stop_codes_list
+             FROM bc_ttstartstop
+             WHERE label_type = 'AGTTAG';
+
+            
+            add_lines_list(start_codes_list(1) || stop_codes_list(1));
+            
+            -- Barcode
+            add_lines_list(start_codes_list(2) || lv_scanUnitId || stop_codes_list(2)); 
+            
+            add_lines_list(start_codes_list(3) || lv_BloodType || '  ' || 'Exp ' || TO_CHAR(pExpDate, 'MM/DD/YY HH24:MI') || stop_codes_list(3));
+            
+            add_lines_list(start_codes_list(4) || '    ' || lv_unitWithCheckDigit  || stop_codes_list(4));
+            
+            -- SECTION Confirmed Historically --
+            
+            -- Line
+            add_lines_list(start_codes_list(5) || stop_codes_list(5)); 
+            -- Title
+            add_lines_list(start_codes_list(6) || master_codes_list('CNFRM') || stop_codes_list(6));            
+            -- Antigens
+            add_lines_list(start_codes_list(7) || hist_conf_ag_formatted_list(1) || stop_codes_list(7));
+            add_lines_list(start_codes_list(8) || hist_conf_ag_formatted_list(2) || stop_codes_list(8));
+            add_lines_list(start_codes_list(9) || hist_conf_ag_formatted_list(3) || stop_codes_list(9));
+            
+            -- SECTION Current Donation --
+            
+            -- Line
+            add_lines_list(start_codes_list(10) || stop_codes_list(10)); 
+            -- Title
+            add_lines_list(start_codes_list(11) || master_codes_list('CURDN') || stop_codes_list(11));            
+            -- Antigens
+            add_lines_list(start_codes_list(12) || current_ag_formatted_list(1) || stop_codes_list(12));
+            add_lines_list(start_codes_list(13) || current_ag_formatted_list(2) || stop_codes_list(13));
+            add_lines_list(start_codes_list(14) || current_ag_formatted_list(3) || stop_codes_list(14));            
+            
+            -- SECTION Unlicensed/Unapproved Testing --
+            IF master_codes_list('PRUNL') = 'Y' THEN
+                -- Line
+                add_lines_list(start_codes_list(15) || stop_codes_list(15)); 
+                -- Title
+                add_lines_list(start_codes_list(16) || master_codes_list('UNAPL') || stop_codes_list(16));            
+                -- Antigens
+                add_lines_list(start_codes_list(17) || unlicensed_ag_formatted_list(1) || stop_codes_list(17));
+                add_lines_list(start_codes_list(18) || unlicensed_ag_formatted_list(2) || stop_codes_list(18));
+            END IF;
+
+            -- SECTION Additional Testing Performed --
+            
+            -- Line
+            add_lines_list(start_codes_list(19) || stop_codes_list(19)); 
+            -- Title
+            add_lines_list(start_codes_list(20) || master_codes_list('ADTST') || stop_codes_list(20));            
+            -- Antigens
+            add_lines_list(start_codes_list(21) || special_ag_formatted_list(1) || stop_codes_list(21));
+            add_lines_list(start_codes_list(22) || special_ag_formatted_list(2) || stop_codes_list(22));
+            
+            add_lines_list(start_codes_list(23) || 'Initials/Date: ___________________' || stop_codes_list(23));  
+            add_lines_list(start_codes_list(24) || '--------------------------' || stop_codes_list(24));  
+            
+            add_lines_list(start_codes_list(25) || lv_scanUnitId || stop_codes_list(25));  
+            add_lines_list(start_codes_list(26) || lv_BloodType || '  ' || 'Exp ' || TO_CHAR(pExpDate, 'MM/DD/YY HH24:MI') || stop_codes_list(26));  
+            add_lines_list(start_codes_list(27) || '    ' || lv_unitWithCheckDigit  || stop_codes_list(27));  
+                
+            IF master_codes_list('PHENO') IN ('AG', 'MAG', 'ALL') AND phenotype_ag_formatted_list(1) IS NOT NULL THEN
+                -- phenotype
+                add_lines_list(start_codes_list(28) || phenotype_ag_formatted_list(1) || stop_codes_list(28));  
+                add_lines_list(start_codes_list(29) || phenotype_ag_formatted_list(2) || stop_codes_list(29));  
+                add_lines_list(start_codes_list(30) || phenotype_ag_formatted_list(3) || stop_codes_list(30));  
+                add_lines_list(start_codes_list(31) || phenotype_ag_formatted_list(4) || stop_codes_list(31));  
+                add_lines_list(start_codes_list(32) || phenotype_ag_formatted_list(5) || stop_codes_list(32));  
+                add_lines_list(start_codes_list(33) || phenotype_ag_formatted_list(6) || stop_codes_list(33));  
+                add_lines_list(start_codes_list(34) || phenotype_ag_formatted_list(7) || stop_codes_list(34));  
+                add_lines_list(start_codes_list(35) || phenotype_ag_formatted_list(8) || stop_codes_list(35));  
+                add_lines_list(start_codes_list(36) || phenotype_ag_formatted_list(9) || stop_codes_list(36));  
+            
+            END IF;
+            
+            add_lines_list(start_codes_list(37) || stop_codes_list(37)); 
+            
+                                                
+        EXCEPTION
+            WHEN OTHERS THEN
+                status_out := SQLERRM;
+        END build_lines_list;
+         
+        -- Inserts print job.
+        PROCEDURE insert_print_job_queue(status_out OUT VARCHAR2) IS
+        BEGIN
+            status_out := 'OK';
+            
+            INSERT INTO BC_PRNT_JOB_LIST
+                (file_name, print_id, no_copies, chapter_id, insert_user, insert_dats, program_id)
+            VALUES
+                (lv_fileName, pPrinterId, pNoLabels, pChapterId, pUserId, SYSDATE, 'AGLBL');
+                
+        EXCEPTION
+            WHEN OTHERS THEN
+                status_out := SQLERRM;            
+        END insert_print_job_queue;
+        
+        -- raises error for any error status.
+        PROCEDURE check_status_failure IS
+        BEGIN
+            IF pStatus <> 'OK' THEN
+                RAISE error_status;
+            END IF;
+        END check_status_failure;
+    BEGIN
+        pStatus := 'OK';
+        
+        IF NOT AG_UTIL.IS_LICENSED THEN
+            pStatus := 'Not licensed to use.';
+            RAISE error_status;
+        END IF;
+        
+        -- Validate inputs and initialize.
+        validate_inputs(pStatus);
+        check_status_failure;
+        
+        init_vars(pStatus);
+        check_status_failure; 
+        --
+        
+        -- Build lines array for text file
+        build_lines_list(pStatus);
+        check_status_failure;
+        ---        
+        
+        -- Dump all lines to a text file.
+        write_lines_to_file(pStatus);
+        check_status_failure;
+        ---
+        
+        -- Insert into print job queue table for cron job processing.
+        insert_print_job_queue(status_out => pStatus);
+        check_status_failure;        
+        --
+        
+        COMMIT;
+    EXCEPTION
+        WHEN error_status THEN
+            log_err('ATAG', pStatus);
+            RETURN;
+    END gen_tietag_file;
+     
+    
+    PROCEDURE sort_test_string( pTestString_in          IN VARCHAR2, 
+                                pSortedTestString_out   OUT VARCHAR2,
+                                pStatus_out             OUT VARCHAR2) IS
+        
+        TYPE tests_aat IS TABLE OF VARCHAR2(10) INDEX BY PLS_INTEGER;
+        tests_no_seq_aa tests_aat;
+        test_results_aa tests_aat;
+        
+        test_results_nt     AG_LBL.strings_ntt := ag_lbl.strings_ntt();         
+
+        lv_row VARCHAR2(10);
+        ln_seq_no NUMBER;
+        lv_test_id  VARCHAR2(10);
+        lv_ordered_string VARCHAR2(2000);
+
+        -- returns
+            -- null if tests are not found in the table.
+            -- seq no if a test is found.
+            -- raises error if multiple rows are found.
+        FUNCTION get_test_seq_no(test_id_in IN VARCHAR2) RETURN NUMBER IS
+            ln_return   NUMBER;
+            nCnt        NUMBER;
+        BEGIN
+            ln_return := NULL;
+            
+            BEGIN
+                SELECT seq_no 
+                  INTO ln_return
+                  FROM valid_antigens_order 
+                 WHERE antigen_name = test_id_in;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    ln_return := NULL;
+                WHEN OTHERS THEN
+                    raise_application_error(-20001, 'Antigens Order ' || SQLERRM);
+            END;
+            
+            IF ln_return IS NULL THEN
+                FOR rec IN (SELECT antigen_alias, seq_no
+                              FROM valid_antigens_order
+                             WHERE INSTR(antigen_alias, test_id_in) > 0 
+                             ORDER BY seq_no)
+                LOOP
+                    BEGIN
+                        SELECT
+                            COUNT(1)
+                         INTO nCnt                    
+                        FROM
+                            dual
+                        WHERE
+                            TRIM(regexp_substr(rec.antigen_alias, '[^,]+', 1, level)) = test_id_in
+                        CONNECT BY
+                            regexp_substr(rec.antigen_alias, '[^,]+', 1, level) IS NOT NULL;             
+                        
+                        IF nCnt > 0 THEN
+                            ln_return := rec.seq_no;
+                            EXIT;
+                        END IF;
+                    END;
+                END LOOP;
+            END IF;
+    
+            RETURN ln_return;
+        END get_test_seq_no;
+        
+        -- stores a list of tests that are not in the table.
+        PROCEDURE add_tests_no_seq(test_in IN VARCHAR2) IS
+        BEGIN
+            tests_no_seq_aa(NVL(tests_no_seq_aa.LAST, 0) + 1) := test_in;
+        END add_tests_no_seq;
+    BEGIN
+        IF NOT AG_UTIL.IS_LICENSED THEN
+            raise_application_error(-20001,'Not licensed to use.');
+        END IF;
+    
+        tests_no_seq_aa.DELETE;
+        
+        IF pTestString_in IS NULL THEN
+            raise_application_error(-20002, 'Input test string is required.');
+        END IF;
+        
+        -- Convert string to list.
+        test_results_nt := ag_lbl.csv_to_list(pTestString_in);
+
+        IF test_results_nt.COUNT = 0 THEN
+            raise_application_error(-20003, 'Input test string is required.');
+        END IF;
+        
+        FOR indx IN test_results_nt.FIRST .. test_results_nt.LAST LOOP
+            lv_test_id := test_results_nt(indx); 
+            IF lv_test_id IS NOT NULL THEN
+                ln_seq_no := get_test_seq_no(SUBSTR(lv_test_id, 0, length(lv_test_id)-1));
+                
+                -- tests not in the table are stored in a temp list and added to the end of order.
+                IF ln_seq_no IS NULL THEN
+                    add_tests_no_seq(lv_test_id); 
+                ELSE
+                    test_results_aa(ln_seq_no) := lv_test_id;
+                END IF;
+            END IF;                        
+        END LOOP;
+        
+        IF test_results_aa.COUNT = 0 AND tests_no_seq_aa.COUNT = 0 THEN
+            raise_application_error(-20004, 'No tests in input string to sort.');
+        END IF;
+        
+        lv_row := test_results_aa.FIRST;
+        
+        WHILE(lv_row IS NOT NULL)
+        LOOP
+            lv_ordered_string   := lv_ordered_string || ',' || test_results_aa(lv_row);
+            lv_row := test_results_aa.NEXT(lv_row);            
+        END LOOP;
+        
+        -- add the tests not in the table to the end of the ordered string.
+        IF tests_no_seq_aa.COUNT > 0 THEN
+            FOR indx IN tests_no_seq_aa.FIRST .. tests_no_seq_aa.LAST 
+            LOOP
+                lv_ordered_string := lv_ordered_string || ',' || tests_no_seq_aa(indx);
+            END LOOP;            
+        END IF;
+
+        pSortedTestString_out := LTRIM(lv_ordered_string, ',');
+        pStatus_out := 'OK';
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            pSortedTestString_out   := NULL;
+            pStatus_out             := SQLERRM;            
+    END sort_test_string;
+    
+END AG_TIETAG_LBL;
+/

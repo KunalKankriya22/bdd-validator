@@ -1,0 +1,296 @@
+<div class="side-panel-wrapper" role="region" [attr.aria-labelledby]="elementId('panel-title')">
+
+  <!-- Header -->
+  <div class="panel-header">
+    <div class="header-content">
+      <h2 class="panel-title" [id]="elementId('panel-title')">Release Quarantine</h2>
+    </div>
+
+    <button type="button" mat-icon-button class="close-btn" (click)="onCancel()" aria-label="Close panel">
+      <mat-icon>close</mat-icon>
+    </button>
+  </div>
+
+  <!-- Body -->
+  <div class="panel-body">
+    <form [formGroup]="form" class="release-form">
+
+      <!-- Unit ID and Product Code (Read-only) -->
+      <div class="header-fields">
+        <div class="field-group">
+          <label class="field-label">Unit ID <span class="required-asterisk">*</span></label>
+          <div class="field-value">{{ productInfo?.unitId || '-' }}</div>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label">Product Code <span class="required-asterisk">*</span></label>
+          <div class="field-value">{{ productInfo?.productCode || '-' }}</div>
+        </div>
+      </div>
+
+      <!-- Reasons Section -->
+      <div class="reasons-section">
+        <app-data-table
+          [config]="reasonsTableConfig"
+          [data]="reasonsTableData()"
+          [externalSelectedIds]="selectedReasonCodes()"
+          (selectionChange)="onReasonsSelectionChange($event)">
+        </app-data-table>
+        @if (submitted() && !allReasonsSelected() && !hasPartialSelection()) {
+          <div class="error-text">
+            Please select all reasons
+          </div>
+        }
+      </div>
+
+      <!-- Restock Dropdown — always visible, disabled until all reasons selected -->
+      <div class="restock-field-wrapper">
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label>Restock ?</mat-label>
+          <mat-select
+            [id]="elementId('restockFlag')"
+            formControlName="restockFlag"
+            [attr.aria-required]="true"
+            [attr.aria-invalid]="f['restockFlag']?.invalid && (f['restockFlag']?.touched || submitted())"
+            [attr.aria-describedby]="f['restockFlag']?.invalid && (f['restockFlag']?.touched || submitted()) ? errorId('restockFlag') : null">
+            <mat-option value="Y">Yes</mat-option>
+            <mat-option value="N">No</mat-option>
+          </mat-select>
+          @if (f['restockFlag']?.invalid && (f['restockFlag']?.touched || submitted())) {
+            <mat-error [id]="errorId('restockFlag')" role="alert">
+              @if (f['restockFlag']?.errors?.['required']) {
+                Restock is required
+              }
+            </mat-error>
+          }
+        </mat-form-field>
+      </div>
+
+      <!-- Reject Code - Only visible when Restock is No -->
+      @if (f['restockFlag']?.value === 'N') {
+        <div class="reject-code-field-wrapper">
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Reject Code</mat-label>
+            <mat-select
+              [id]="elementId('rejectCode')"
+              formControlName="rejectCode"
+              [attr.aria-required]="true"
+              [attr.aria-invalid]="f['rejectCode'].invalid && f['rejectCode'].touched"
+              [attr.aria-describedby]="f['rejectCode'].invalid && f['rejectCode'].touched ? errorId('rejectCode') : null">
+              @if (rejectCodeOptions().length === 0) {
+                <mat-option [value]="selectPanelEmptyValue" disabled class="panel-option--status">
+                  No data available
+                </mat-option>
+              } @else if (rejectCodeOptions().length <= 3) {
+                @for (code of rejectCodeOptions(); track code.code) {
+                  <mat-option [value]="code.code">{{ code.code }} - {{ code.description }}</mat-option>
+                }
+              } @else {
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="rejectCodeSearchControl"
+                    placeholderLabel="Search..." noEntriesFoundLabel="">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (code of filteredRejectCodes(); track code.code) {
+                  <mat-option [value]="code.code">{{ code.code }} - {{ code.description }}</mat-option>
+                }
+                @if (filteredRejectCodes().length === 0) {
+                  <mat-option disabled class="panel-option--status">No data available</mat-option>
+                }
+              }
+            </mat-select>
+            @if (f['rejectCode'].invalid && f['rejectCode'].touched) {
+              <mat-error [id]="errorId('rejectCode')" role="alert">
+                @if (f['rejectCode'].errors?.['required']) {
+                  Reject Code is required
+                }
+              </mat-error>
+            }
+          </mat-form-field>
+        </div>
+      }
+
+      <!-- Storage Location Fields - Only visible when Restock is Yes and deviceType != 'N' -->
+      @if (f['restockFlag']?.value === 'Y' && !hideStorageFields()) {
+        <div class="storage-fields-section">
+          <div class="storage-fields-grid">
+            <!-- Warehouse (Read-only) -->
+            <div class="field-group">
+              <label class="field-label">Warehouse</label>
+              <div class="field-value">{{ warehouseDisplay() }}</div>
+            </div>
+
+            <!-- Device # -->
+            <mat-form-field appearance="fill" class="form-field">
+              <mat-label>Device #</mat-label>
+              <mat-select
+                [id]="elementId('deviceNumber')"
+                formControlName="deviceNumber"
+                [attr.aria-required]="true"
+                [attr.aria-invalid]="f['deviceNumber'].invalid && f['deviceNumber'].touched"
+                [attr.aria-describedby]="f['deviceNumber'].invalid && f['deviceNumber'].touched ? errorId('deviceNumber') : null">
+                @if (isLoadingDevices()) {
+                  <mat-option [value]="selectPanelLoadingValue" disabled class="panel-option--status">
+                    <span class="panel-loading">
+                      <mat-spinner diameter="20" class="panel-field-spinner" aria-hidden="true"></mat-spinner>
+                      <span>Loading...</span>
+                    </span>
+                  </mat-option>
+                } @else if (storageDevices().length === 0) {
+                  <mat-option [value]="selectPanelEmptyValue" disabled class="panel-option--status">
+                    No data available
+                  </mat-option>
+                } @else if (storageDevices().length <= 3) {
+                  @for (device of storageDevices(); track device.deviceNumber) {
+                    <mat-option [value]="device.deviceNumber">{{ device.deviceNumber }} - {{ device.description }}</mat-option>
+                  }
+                } @else {
+                  <mat-option>
+                    <ngx-mat-select-search [formControl]="deviceSearchControl"
+                      placeholderLabel="Search..." noEntriesFoundLabel="">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @for (device of filteredDevices(); track device.deviceNumber) {
+                    <mat-option [value]="device.deviceNumber">{{ device.deviceNumber }} - {{ device.description }}</mat-option>
+                  }
+                  @if (filteredDevices().length === 0) {
+                    <mat-option disabled class="panel-option--status">No data available</mat-option>
+                  }
+                }
+              </mat-select>
+              @if (f['deviceNumber'].invalid && f['deviceNumber'].touched) {
+                <mat-error [id]="errorId('deviceNumber')" role="alert">
+                  @if (f['deviceNumber'].errors?.['required']) {
+                    Device # is required
+                  }
+                </mat-error>
+              }
+            </mat-form-field>
+
+            <!-- Rack # -->
+            <mat-form-field appearance="fill" class="form-field">
+              <mat-label>Rack #</mat-label>
+              <mat-select
+                [id]="elementId('rackNumber')"
+                formControlName="rackNumber"
+                [attr.aria-required]="true"
+                [attr.aria-invalid]="f['rackNumber'].invalid && f['rackNumber'].touched"
+                [attr.aria-describedby]="f['rackNumber'].invalid && f['rackNumber'].touched ? errorId('rackNumber') : null">
+                @if (isLoadingRacks()) {
+                  <mat-option [value]="selectPanelLoadingValue" disabled class="panel-option--status">
+                    <span class="panel-loading">
+                      <mat-spinner diameter="20" class="panel-field-spinner" aria-hidden="true"></mat-spinner>
+                      <span>Loading...</span>
+                    </span>
+                  </mat-option>
+                } @else if (storageRacks().length === 0) {
+                  <mat-option [value]="selectPanelEmptyValue" disabled class="panel-option--status">
+                    No data available
+                  </mat-option>
+                } @else if (storageRacks().length <= 3) {
+                  @for (rack of storageRacks(); track rack.rackNumber) {
+                    <mat-option [value]="rack.rackNumber">{{ rack.rackNumber }} - {{ rack.description }}</mat-option>
+                  }
+                } @else {
+                  <mat-option>
+                    <ngx-mat-select-search [formControl]="rackSearchControl"
+                      placeholderLabel="Search..." noEntriesFoundLabel="">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @for (rack of filteredRacks(); track rack.rackNumber) {
+                    <mat-option [value]="rack.rackNumber">{{ rack.rackNumber }} - {{ rack.description }}</mat-option>
+                  }
+                  @if (filteredRacks().length === 0) {
+                    <mat-option disabled class="panel-option--status">No data available</mat-option>
+                  }
+                }
+              </mat-select>
+              @if (f['rackNumber'].invalid && f['rackNumber'].touched) {
+                <mat-error [id]="errorId('rackNumber')" role="alert">
+                  @if (f['rackNumber'].errors?.['required']) {
+                    Rack # is required
+                  }
+                </mat-error>
+              }
+            </mat-form-field>
+
+            <!-- Tray # -->
+            <mat-form-field appearance="fill" class="form-field">
+              <mat-label>Tray #</mat-label>
+              <mat-select
+                [id]="elementId('trayNumber')"
+                formControlName="trayNumber"
+                [attr.aria-required]="true"
+                [attr.aria-invalid]="f['trayNumber'].invalid && f['trayNumber'].touched"
+                [attr.aria-describedby]="f['trayNumber'].invalid && f['trayNumber'].touched ? errorId('trayNumber') : null">
+                @if (isLoadingTrays()) {
+                  <mat-option [value]="selectPanelLoadingValue" disabled class="panel-option--status">
+                    <span class="panel-loading">
+                      <mat-spinner diameter="20" class="panel-field-spinner" aria-hidden="true"></mat-spinner>
+                      <span>Loading...</span>
+                    </span>
+                  </mat-option>
+                } @else if (storageTrays().length === 0) {
+                  <mat-option [value]="selectPanelEmptyValue" disabled class="panel-option--status">
+                    No data available
+                  </mat-option>
+                } @else if (storageTrays().length <= 3) {
+                  @for (tray of storageTrays(); track tray.trayNumber) {
+                    <mat-option [value]="tray.trayNumber">
+                      {{ tray.trayNumber }} - {{ tray.description }}{{ tray.isFull === 'Y' ? ' (FULL)' : '' }}
+                    </mat-option>
+                  }
+                } @else {
+                  <mat-option>
+                    <ngx-mat-select-search [formControl]="traySearchControl"
+                      placeholderLabel="Search..." noEntriesFoundLabel="">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @for (tray of filteredTrays(); track tray.trayNumber) {
+                    <mat-option [value]="tray.trayNumber">
+                      {{ tray.trayNumber }} - {{ tray.description }}{{ tray.isFull === 'Y' ? ' (FULL)' : '' }}
+                    </mat-option>
+                  }
+                  @if (filteredTrays().length === 0) {
+                    <mat-option disabled class="panel-option--status">No data available</mat-option>
+                  }
+                }
+              </mat-select>
+              @if (f['trayNumber'].invalid && f['trayNumber'].touched) {
+                <mat-error [id]="errorId('trayNumber')" role="alert">
+                  @if (f['trayNumber'].errors?.['required']) {
+                    Tray # is required
+                  }
+                </mat-error>
+              }
+            </mat-form-field>
+          </div>
+
+          <!-- Description Field (Read-only) -->
+          <div class="field-group description-field">
+            <label class="field-label">Description</label>
+            <div class="field-value">{{ f['description']?.value || '-' }}</div>
+          </div>
+        </div>
+      }
+
+    </form>
+  </div>
+
+  <!-- Footer -->
+  <div class="panel-footer">
+    <div class="footer-actions">
+      <button type="button" mat-button (click)="onCancel()" class="cancel-btn" [disabled]="loading()">
+        CANCEL
+      </button>
+      <button type="submit"
+              mat-raised-button
+              (click)="onSubmit()"
+              [disabled]="isSaveDisabled() || loading()"
+              class="primary-btn">
+        <mat-spinner *ngIf="loading()" diameter="20" class="button-spinner"></mat-spinner>
+        <span *ngIf="!loading()">{{ saveButtonLabel() }}</span>
+      </button>
+    </div>
+  </div>
+</div>

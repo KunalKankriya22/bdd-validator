@@ -1,0 +1,851 @@
+/*------------------------------------------------------------------------
+PROCEDURE : IMPBCHKN
+PURPOSE   : Batch Checkin Prepared Lab Components Into Distribution
+PARAMETERS: Warehouse_id 
+ROUTINES  : Calls PRODUCT_CHECKIN.get_inventory_class
+DEVELOPER : Kamlesh Thalor
+DEV. DATE : AUGUST 2000
+NOTES     : Originally a stored procedure - Converted to package for consistency
+            with the application.
+Modified  : 03/20/2008
+Ver       : 02    (SCR# 2337)
+Ver       : 03 IM 1743
+Ver       : 04
+Ver       : 05  IM# 3178 (05/04/2010)
+Ver       : 06 Added p_chapter_id parameter
+Ver       : 07 Replaced the code for checking product licenses with
+               LT_LICENSURE_CHECK.is_product_licensed Packaged function
+Ver	      : 08 Variable to hold error - 'err_text' is defined as 32 chars. Modified it to 500 chars.
+***  Resetting to 01 in LT 2018****
+
+Ver       : 01 valid_interdictions table to valid_interdictions_lab table - LT2018
+Ver       : 02  MLT-1585
+-----------------------------------------------------------------------*/
+CREATE OR REPLACE PACKAGE impbchkn 
+AS
+   PROCEDURE impbchkn(
+   						warehouse 		CHAR
+   						,p_chapter_id 	VARCHAR2
+   					 )
+   ;
+END impbchkn;
+/
+
+create or replace PACKAGE BODY IMPBCHKN
+AS
+	PROCEDURE impbchkn(
+						warehouse 		CHAR
+						,p_chapter_id 	VARCHAR2
+					  )
+	IS
+   --MAIN CURSOR TO GET PRODUCTS FROM LAB
+		CURSOR	comp
+		IS
+		SELECT	c.unit_id unit_id
+				,c.chapter_id chapter_id
+				,c.component_prefix aliquot
+				,c.product_code product_code
+				,c.expiry_date expiry_date
+				,c.system_label_decision blood_type
+				,c.warehouse_id warehouse_id
+				,c.label_dats label_dats
+				,u.drive_id drive_id
+				,u.coll_date coll_date
+				,u.group_site_id group_site_id
+				,u.contract_id contract_id
+				,NVL(u.unit_scheme_type,DECODE(LENGTH(u.unit_id),13,'I','C')) code_scheme
+				,u.chk_digit chk_digit
+		FROM	components c
+				,units u
+		WHERE	c.unit_id			= u.unit_id
+			AND	c.coll_date			= u.coll_date
+			AND	c.chapter_id		= p_chapter_id
+			AND	c.chapter_id		= u.chapter_id
+			AND	c.warehouse_id		= u.warehouse_id
+			AND	c.warehouse_id		= warehouse
+			AND	c.component_status	= 'L'
+			AND	c.system_label_decision IS NOT NULL
+			AND	expiry_date IS NOT NULL
+			AND	expiry_date  > SYSDATE
+			AND	SUBSTR(c.product_code,1,5) NOT IN
+												(
+													SELECT	product_code
+													FROM 	valid_products
+													WHERE	pool_product_code='Y'
+												)
+			AND	NOT EXISTS
+							(
+								SELECT	'x'
+								FROM	active_products
+								WHERE	chapter_id 	= 	c.chapter_id
+									AND	unit_id 	= 	c.unit_id
+									AND	product_code= 	c.product_code
+									AND	coll_date 	= 	u.coll_date
+							)
+			AND NOT EXISTS	(
+								SELECT	'x'
+								FROM	shipped_products
+								WHERE	chapter_id	= 	c.chapter_id
+									AND	unit_id		= 	c.unit_id
+									AND	product_code= 	c.product_code
+									AND	coll_date 	= 	u.coll_date)
+			AND NOT EXISTS	(
+								SELECT	'x'
+								FROM 	quarantine_products
+								WHERE	chapter_id   = 	c.chapter_id
+									AND	unit_id      = 	c.unit_id
+									AND	product_code = 	c.product_code
+									AND	aliquot      = 	c.component_prefix
+							)
+			AND NOT EXISTS	(
+								SELECT 'x'
+								FROM	discard_products
+								WHERE	chapter_id   = 	c.chapter_id
+									AND	unit_id      = 	c.unit_id
+									AND	product_code = 	c.product_code
+									AND	aliquot      = 	c.component_prefix
+							)
+			AND (
+					(NVL(u.unit_scheme_type,DECODE(LENGTH(u.unit_id),13,'I','C')) = 'I'
+						AND c.system_label_decision NOT IN ('Mb','Mq','Mx','Md','Mf')
+				)
+			OR	(NVL(u.unit_scheme_type,DECODE(LENGTH(u.unit_id),13,'I','C')) 	= 'C'
+					AND	c.system_label_decision NOT IN ('21','39','47','49','58'))
+				)
+			AND NOT EXISTS	(
+								SELECT 'x'
+								FROM	component_attributes
+								WHERE	unit_id 	=	c.unit_id
+									AND	chapter_id 	= c.chapter_id
+									AND	coll_date 	= c.coll_date
+                                                                        AND     product_code    = c.product_code
+									AND	attrib_code =	'CP6I'
+							)
+			AND c.system_label_decision NOT IN ('71')
+			AND NOT EXISTS	(
+								SELECT 'x'
+								FROM 	valid_abo_values
+								WHERE 	unit_scheme_type=	DECODE(LENGTH(c.product_code),5,'C','I')
+									AND	abo_label 		=	c.system_label_decision
+									AND	identifier_code =	'EM'
+							)
+		ORDER BY	c.product_code
+					,c.unit_id
+		;
+
+		c_rec		comp%rowtype;
+		prd_type	VARCHAR2(5);
+
+		CURSOR C_dev
+		IS
+		SELECT	p.device_type dev_type
+				,p.device_NUMBER dev_no
+		FROM 	product_storage p
+				,storage_devices d
+		WHERE	p.chapter_id	= c_rec.chapter_id
+			AND	p.warehouse_id	= warehouse
+			AND	p.product_type 	= prd_type
+			AND	SYSDATE BETWEEN	p.effective_date
+							AND NVL(p.term_date,SYSDATE)
+			AND	d.chapter_id 	= p.chapter_id
+			AND	d.warehouse_id	= p.warehouse_id
+			AND	d.device_type 	= p.device_type
+			AND	d.device_NUMBER	= p.device_NUMBER
+			AND	SYSDATE  BETWEEN d.effective_date
+							AND NVL(d.term_date, SYSDATE);
+
+		base_blood_type	VARCHAR2(2);
+		osok_flag 		CHAR(1);
+		x				CHAR(1);
+		storage_class	VARCHAR2(2);
+		inventory_class	VARCHAR2(2);
+		mix_abo			CHAR(1);
+		mix_product		CHAR(1);
+		row_count		NUMBER(3):= 0;
+		location		VARCHAR2(12);
+		log_file		UTL_FILE.file_type;
+		chkin_log		VARCHAR2(30)	:=	'IMPBCHKN_ERR_'||TO_CHAR(SYSDATE,'MMDDYYHH24MI')||'.log';
+		log_loc 		VARCHAR2(50);
+		succ_log		UTL_FILE.file_type;
+		succ_chkn		VARCHAR2(30)	:= 	'IMPBCHKN_SUC_'||TO_CHAR(sysdate,'MMDDYYHH24MI')||'.log';
+		import_flag		CHAR(1);
+		rack_no			VARCHAR2(2);
+		shelf_no		VARCHAR2(2);
+		tray_id			VARCHAR2(4);
+		ship_any_rh		CHAR(1);
+		Error			EXCEPTION;
+		err_event		NUMBER;
+		succ_row 		NUMBER := 0;
+		err_row 		NUMBER := 0;
+		err_text		VARCHAR2(500);
+		ctr				NUMBER := 0;
+		abo 			VARCHAR2(6);
+		interdiction	VARCHAR2(4);
+		v_timezone_active CHAR(1);
+		v_local_time	DATE;
+		v_local_date	DATE;
+	BEGIN
+
+		BEGIN
+
+		SELECT	code_desc
+		INTO 	log_loc
+		FROM	vserv_master
+		WHERE	code_type	= 'MISC'
+		AND	code 		= 'LOGDR'
+		AND	SYSDATE BETWEEN eff_date
+			AND NVL(term_date,SYSDATE) ;
+		EXCEPTION
+		 WHEN NO_DATA_FOUND THEN
+		        DBMS_OUTPUT.PUT_LINE('Log Dir not maintained');
+		        RETURN;
+	          WHEN OTHERS THEN
+		  DBMS_OUTPUT.PUT_LINE('Error in fetching Log Dir :'|| SQLERRM);
+                      RETURN;
+		 END;
+
+	   -- Get timezone flag
+		BEGIN
+
+			SELECT nvl(TIME_ZONE_ENABLED,'N')
+			INTO 	v_timezone_active
+			FROM 	LT_APPLICATION_CONFIG ;
+		EXCEPTION
+			WHEN NO_DATA_FOUND
+			THEN
+                           DBMS_OUTPUT.PUT_LINE('No records found in timezone');
+			         RETURN;
+			WHEN OTHERS
+			THEN
+		       	       DBMS_OUTPUT.PUT_LINE('when others :'|| SQLERRM);
+			       	RETURN;
+		END ;
+
+		IF v_timezone_active = 'Y'
+		THEN
+
+		Lifetrack_timezone_convert.get_local_time(p_chapter_id,sysdate,
+                                                   v_local_time);
+			v_local_date := v_local_time;
+		ELSE
+			v_local_date := SYSDATE;
+		END IF;
+
+
+		OPEN	comp;
+
+		IF	UTL_FILE.is_open(log_file)
+		THEN
+		  UTL_FILE.fclose(log_file);
+		END IF;
+
+		log_file	:= UTL_FILE.fopen(log_loc,chkin_log,'w');
+		succ_log 	:= UTL_FILE.fopen(log_loc,succ_chkn,'w');
+
+		UTL_FILE.put_line(log_file,'Errors in Batch Checkin from Lab('||warehouse||') - dated '||
+							TO_CHAR(v_local_date,'MM-DD-YY HH24:MI'));
+		UTL_FILE.put_line(log_file,'(These units are still in LAB)');
+		UTL_FILE.put_line(log_file,'--------------------------------------------------------------------------------');
+		UTL_FILE.put_line(log_file,' #     Unit Id         Product  ABO     Error');
+		UTL_FILE.put_line(log_file,'--------------------------------------------------------------------------------');
+		UTL_FILE.put_line(succ_log,'Successful Batch Checkin from Lab('||warehouse||') - dated '||
+							TO_CHAR(v_local_date,'MM-DD-YY HH24:MI'));
+		UTL_FILE.put_line(succ_log,'(These units have been moved to Distribution)');
+		UTL_FILE.put_line(succ_log,'----------------------------------------------------');
+		UTL_FILE.put_line(succ_log,' #     Unit Id         Product  ABO   Inv Class');
+		UTL_FILE.put_line(succ_log,'----------------------------------------------------');
+
+		LOOP
+			BEGIN
+
+			osok_flag	:=	NULL; /* Added by Sobha */
+
+			FETCH	comp
+			INTO 	c_rec
+			;
+			EXIT WHEN comp%notfound;
+
+			row_count	:=	row_count + 1;
+
+			DBMS_OUTPUT.PUT_LINE(c_rec.unit_id);
+
+			IF SUBSTR(c_rec.contract_id,4,2) = 'IM'
+			THEN
+				import_flag	:=	'Y';
+			ELSE
+				import_flag	:=	' ';
+			END IF;
+
+			BEGIN
+				SELECT	SUBSTR(abo_desc,1,6)
+				INTO   	abo
+				FROM   	vserv_abo
+				WHERE  	abo_code 		=	c_rec.blood_type
+					AND	unit_scheme_type=	c_rec.code_scheme
+				;
+			EXCEPTION
+				WHEN NO_DATA_FOUND
+				THEN
+					err_text := 'Blood type not found in VSERV_ABO';
+					RAISE Error;
+			END;
+		 -------------------------------------------------
+		 -- GET INV PRODUCT TYPE FOR SELECTED PRODUCT
+			 -------------------------------------------------
+			BEGIN
+				SELECT	inv_product_type
+				INTO	prd_type
+				FROM	vserv_products
+				WHERE	product_code = SUBSTR(c_rec.product_code,1,5)
+					AND	unit_scheme_type = c_rec.code_scheme
+					AND	SYSDATE BETWEEN eff_date
+									AND NVL(term_date,SYSDATE)
+				;
+			EXCEPTION
+				WHEN NO_DATA_FOUND
+				THEN
+					err_text := 'Product Type not found';
+					RAISE Error;
+				WHEN OTHERS
+				THEN
+					err_text := SUBSTR(SQLERRM,1,100);
+					RAISE Error;
+			END;
+
+			SELECT	COUNT(*)
+			INTO	ctr
+			FROM	UNITS
+			WHERE	unit_id 	= 	c_rec.unit_id
+				AND	coll_date 	= 	c_rec.coll_date
+				AND	chapter_id 	= 	c_rec.chapter_id
+				AND	warehouse_id= 	c_rec.warehouse_id
+				AND	NVL(qc_checkin_flag,'N')	= 'N'
+				AND	import_flag	= 	'Y'
+			;
+
+			IF ctr > 0
+			THEN
+				err_text := 'QC not done for Imported Unit';
+				RAISE Error;
+			END IF;
+
+			--------------------------------------------------
+		---- Checking for Component and Unit Interdictions
+		--------------------------------------------------
+			BEGIN
+
+				SELECT 	inter_code
+				INTO   	interdiction
+				FROM   	component_interdictions
+				WHERE  	chapter_id	= c_rec.chapter_id
+					AND	unit_id   	= c_rec.unit_id
+					AND	product_code= c_rec.product_code
+					AND	coll_date	= c_rec.coll_date
+					AND	insert_dats	>	NVL(c_rec.label_dats,SYSDATE - 1000000)
+				;
+
+				err_text := 'Component Interdiction '||interdiction;
+				RAISE Error;
+			EXCEPTION
+				WHEN NO_DATA_FOUND
+				THEN
+					NULL;
+				WHEN TOO_MANY_ROWS
+				THEN
+					err_text	:= 'Component Interdiction '||interdiction;
+					RAISE Error;
+				WHEN OTHERS
+				THEN
+					err_text := 'Component Interdiction '||interdiction;
+					RAISE Error;
+			END;
+
+			BEGIN
+				SELECT 	ui.inter_code
+				INTO   	interdiction
+				FROM   	unit_interdictions ui, valid_interdictions_lab vi
+				WHERE  	chapter_id     =  c_rec.chapter_id
+					AND	unit_id        =  c_rec.unit_id
+					AND	coll_date      =  c_rec.coll_date
+					AND	ui.inter_code  =  vi.inter_code
+					AND	vi.inter_type  != 'I'
+					AND	(
+							vi.inter_type != 'B'
+							OR	c_rec.blood_type NOT IN ('40','71')
+						)
+					AND	SYSDATE BETWEEN  vi.eff_date
+									AND NVL(vi.term_date,SYSDATE)
+					AND	insert_dats > NVL(c_rec.label_dats,SYSDATE - 1000000)
+				;
+
+				err_text := 'Unit Interdiction '||interdiction;
+
+				RAISE Error;
+			EXCEPTION
+				WHEN NO_DATA_FOUND
+				THEN
+					NULL;
+				WHEN TOO_MANY_ROWS
+				THEN
+					err_text := 'Unit Interdiction '||interdiction;
+					RAISE Error;
+				WHEN OTHERS
+				THEN
+					err_text := 'Unit Interdiction '||interdiction;
+					RAISE Error;
+			END;
+
+	-------------------------------------------------------------------
+	-- SET LICENCE (OSOK) FLAG FOR PRODUCT
+	-- As the system cannot trace if an imported product is licensed or
+	-- or not hence it is always marked 'N' to be on the safe side.
+	-------------------------------------------------------------------
+
+
+			IF lt_licensure_check.is_product_licensed(
+														c_rec.chapter_id
+														,c_rec.group_site_id
+														,c_rec.drive_id
+														,substr(c_rec.product_code,1,5)
+														,c_rec.unit_id
+														,c_rec.code_scheme
+													 )
+			THEN
+
+				osok_flag	:=	'Y';
+			ELSE
+				osok_flag	:=	'N';
+			END IF;
+
+			 /* Commented by Sobha PR 001.030701
+		   if c_rec.contract_id != 'INTERNAL' then
+				osok_flag := 'N';
+			 else*/
+
+
+	/*@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+	Below code commented to use the packaged function LT_LICENSURE_CHECK.IS_PRODUCT_LICENSED
+
+				if c_rec.group_site_id is not null then
+				   begin
+					  select osok_flag
+					  into   osok_flag
+					  from   group_sites
+					  where  group_site_id = c_rec.group_site_id
+					  and    chapter_id  =  c_rec.chapter_id;
+				  exception
+					 when NO_DATA_FOUND then
+						err_text := 'Not found in GROUP_SITES';
+						raise Error;
+					 when OTHERS then
+						err_text := sqlerrm||' GROUP_SITES';
+						raise Error;
+				  end;
+			   end if;
+			   if c_rec.drive_id is not null AND nvl(osok_flag,'Y') = 'Y' then
+				  begin
+					 select osok_flag
+					 into   osok_flag
+					 from   drives
+					 where  drive_id   =  c_rec.drive_id
+					 and    chapter_id =  c_rec.chapter_id;
+				  exception
+					 when OTHERS then
+						err_text := sqlerrm;
+						raise Error;
+				  end;
+			   end if;
+			   if nvl(osok_flag,'Y') = 'Y' then
+				  begin
+					 select distinct out_of_state_flag
+					 into   osok_flag
+					 from   vserv_products
+					 where   ---out_of_state_flag = 'N'
+						  product_code      = substr(c_rec.product_code,1,5)
+					 and    unit_scheme_type  = c_rec.code_scheme;
+				 exception
+					 when NO_DATA_FOUND then
+						null;
+					 when OTHERS then
+						err_text := sqlerrm;
+						raise Error;
+				 end;
+				 if nvl(osok_flag,'Y') = 'N' then
+					begin
+					   select nvl(osok_flag,'N')
+					   into   osok_flag
+					   from   equipment
+					   where nvl(osok_flag,'N') = 'Y' and
+				  equip_reference in (select equip_reference
+											from   component_cgmp
+											where  unit_id = c_rec.unit_id
+										   and    parm_code = 'PHER')
+					   and   equip_type in (select equip_type
+							 from   valid_prodequip_cgmp
+							 where  product_code =substr(c_rec.product_code,1,5)
+							   and  parm_code    = 'OSOK'
+							   and proc in (select attrib_code from unit_attributes
+											where unit_id=c_rec.unit_id and
+											attrib_group='PHER')
+				   and sysdate between eff_date and
+				   nvl(term_date, sysdate+1));
+					  -- osok_flag := null;
+					exception
+					   when NO_DATA_FOUND then
+						  null;
+					   when OTHERS then
+						  err_text := sqlerrm;
+						  raise Error;
+					end;
+				 end if;
+			  end if;
+
+			  /* Commented by sobha
+			 if nvl(osok_flag,'Y') = 'Y' then
+				 osok_flag := 'Y';
+			  else*/
+		   /*end if;*/
+
+
+
+		   ------------------------------------------------------------------------
+		   -- GET BASE BLOOD TYPE
+		   ------------------------------------------------------------------------
+		   /* Commented by Sobha to remove too many rows exception
+		   if (c_rec.blood_type = '71' and c_rec.code_scheme = 'C')
+			  OR (c_rec.blood_type in
+				 ('92','48','03','59','14','70','25','81','P3','A3','B3','C3')
+				  AND c_rec.code_scheme = 'I')
+			  OR c_rec.blood_type = 'PO'
+		   then
+			  base_blood_type := c_rec.blood_type;
+		   else
+			  Begin
+				 Select tested_abo_code
+				 into   base_blood_type
+				 from   valid_abo_values
+				 where  abo_label   = c_rec.blood_type
+				 and    unit_scheme_type = c_rec.code_scheme;
+			  Exception
+				 when NO_DATA_FOUND then
+					err_text := 'not found in VALID_ABO_VALUES';
+					raise Error;
+			  End;
+		   end if;
+		   */
+			base_blood_type	:=	c_rec.blood_type;
+
+	------------------------------------------------------------------------
+	-- GET INVENTORY CLASS, STORAGE_CLASS
+	------------------------------------------------------------------------
+			BEGIN
+				product_checkin.get_inventory_class	(
+														c_rec.unit_id
+														,c_rec.coll_date
+														,c_rec.chapter_id
+														,c_rec.product_code
+														,c_rec.aliquot
+														,'Y'
+														,c_rec.blood_type
+														,c_rec.code_scheme
+														,inventory_class
+														,storage_class
+													)
+				;
+			EXCEPTION
+				WHEN NO_DATA_FOUND
+				THEN
+					err_text := 'Inventory class not found';
+					RAISE Error;
+				WHEN OTHERS
+				THEN
+					err_text := 'Product_checkin:'||SUBSTR(SQLERRM,10,30);
+					RAISE Error;
+			END;
+
+	------------------------------------------------------------------------
+	-- GENERATE LOCATION ID
+	------------------------------------------------------------------------
+			IF	(
+					(
+						(
+							base_blood_type = 'PO'
+						)
+							OR	(
+									base_blood_type = '71'
+										AND c_rec.code_scheme = 'C'
+								)
+							OR	(
+									base_blood_type IN ('92','48','03','59','14','70','25','81','P3','A3','B3','C3')
+										AND c_rec.code_scheme = 'I'
+								)
+					)
+				)
+			THEN
+				location := 'NONE';
+			ELSE
+
+				BEGIN
+					SELECT 	NVL(order_abo_group, abo_code)
+					INTO	base_blood_type
+					FROM   	vserv_abo va
+					WHERE  	EXISTS
+						(
+							SELECT	'x'
+							FROM	vserv_product_types vp
+							WHERE	vp.product_type = prd_type
+								AND	(
+										NVL(vp.ship_any_rh,'N') = 'Y'
+											OR NVL(vp.abo_only,'N') = 'Y'
+									)
+								AND	sysdate between eff_date and nvl(term_date,sysdate)
+						)
+						AND	va.abo_code = base_blood_type
+						AND	rownum < 2
+						AND	sysdate between eff_date and nvl(term_date,sysdate)
+					;
+
+					ship_any_rh := 'Y';
+
+				EXCEPTION
+					WHEN NO_DATA_FOUND
+					THEN
+						ship_any_rh	:= 'N';
+					WHEN OTHERS THEN
+						err_text := SUBSTR(SQLERRM,1,100);
+						RAISE Error;
+				END;
+
+				location := NULL;
+				shelf_no := '00';
+
+				FOR rec IN C_dev
+				LOOP
+					ctr := ctr + 1;
+
+					IF rec.dev_type = 'N'
+					THEN
+
+						location := 'NONE';
+						exit;
+					END IF;
+
+					BEGIN
+						SELECT 	rack_NUMBER
+								,NVL(mix_abo,'N')
+								,NVL(mix_product,'N')
+						INTO	rack_no, mix_abo, mix_product
+						FROM	rack_details
+						WHERE	chapter_id    = c_rec.chapter_id
+							AND	warehouse_id  = c_rec.warehouse_id
+							AND	device_type   = rec.dev_type
+							AND	device_NUMBER = rec.dev_no
+							AND	storage_class = storage_class
+							AND	product_type  = prd_type
+							AND	NVL(blood_type, base_blood_type) = base_blood_type
+							AND	SYSDATE BETWEEN effective_date AND NVL(term_date,SYSDATE)
+							AND	ROWNUM = 1;
+
+						SELECT	MIN(tray_NUMBER)
+						INTO	tray_id
+						FROM	trays t, vserv_abo a
+						WHERE  	t.chapter_id    = c_rec.chapter_id
+							AND	t.warehouse_id  = c_rec.warehouse_id
+							AND	t.device_type   = rec.dev_type
+							AND	t.device_NUMBER = rec.dev_no
+							AND	t.rack_NUMBER   = rack_no
+							AND	t.shelf_NUMBER  = shelf_no
+							AND	t.product_type  = DECODE(mix_product,'N',prd_type,t.product_type)
+							AND	a.abo_code      = t.blood_type
+							AND	a.unit_scheme_type = c_rec.code_scheme
+							AND	(
+									base_blood_type = t.blood_type
+										OR mix_abo 	= 'Y'
+										OR (
+											ship_any_rh = 'Y'
+												AND blood_type = a.order_abo_group
+											)
+								)
+							AND	SYSDATE BETWEEN t.effective_date
+							AND	NVL(t.term_date, SYSDATE)
+						;
+
+						location	:= c_rec.warehouse_id||rec.dev_type||rec.dev_no||rack_no||shelf_no||tray_id;
+						EXIT;
+
+					EXCEPTION
+						WHEN NO_DATA_FOUND
+						THEN
+							tray_id := NULL;
+						WHEN OTHERS
+						THEN
+							err_text := 'Location Err '|| SUBSTR(SQLERRM,1,100);
+							RAISE Error;
+					END;
+				END LOOP;
+
+				IF location IS NULL
+					AND ctr = 0
+				THEN
+					err_text := 'Device type and NUMBER not found';
+					RAISE Error;
+				ELSIF location IS NULL
+					AND ctr >0
+				THEN
+					err_text := 'Rack not defined';
+					RAISE Error;
+				END IF;
+			END IF;
+		   -------------------------------------------------------------------------
+		   -- INSERT DATA INTO INVENTORY
+		   -------------------------------------------------------------------------
+			BEGIN
+				DBMS_OUTPUT.PUT_LINE('Before Insert in Active Products');
+
+				INSERT INTO ACTIVE_PRODUCTS
+					(
+						unit_id
+						,coll_date
+						,chapter_id
+						,product_code
+						,aliquot
+						,blood_type
+						,exp_date
+						,product_type
+						,insert_date
+						,appl_custody
+						,stock_state
+						,location_id
+						,import_flag
+						,inventory_class
+						,osok_flag
+						,program_id
+						,warehouse_id
+					)
+				VALUES
+					(
+						c_rec.unit_id
+						,c_rec.coll_date
+						,c_rec.chapter_id
+						,c_rec.product_code
+						,c_rec.aliquot
+						,c_rec.blood_type
+						,c_rec.expiry_date
+						,prd_type
+						,sysdate
+						,'SV'
+						,'AV'
+						,location
+						,import_flag
+						,inventory_class
+						,osok_flag
+						,'IMIBATCH'
+						,warehouse
+					)
+				;
+
+				DBMS_OUTPUT.PUT_LINE('After Insert');
+
+			EXCEPTION
+				WHEN OTHERS
+				THEN
+					err_text := SUBSTR(SQLERRM,1,100);
+					RAISE Error;
+			END;
+
+			BEGIN
+				UPDATE	components
+				SET 	component_status	= 	'S',
+						program_id         	= 	'IMIBATCH',
+						out_of_system_dats 	=	SYSDATE
+				WHERE  unit_id          	=  c_rec.unit_id
+					AND	coll_date        	=  c_rec.coll_date
+					AND	chapter_id       	=  c_rec.chapter_id
+					AND	product_code     	=  c_rec.product_code
+					AND	component_prefix 	=  c_rec.aliquot
+				;
+			EXCEPTION
+				WHEN OTHERS
+				THEN
+					err_text := SUBSTR(SQLERRM,1,100);
+					RAISE Error;
+			END;
+
+			succ_row := succ_row + 1;
+
+			IF c_rec.chk_digit IS NOT NULL
+			THEN
+				UTL_FILE.putf(
+								succ_log,'\n'||LPAD(succ_row,4)||' | '||RPAD(c_rec.unit_id||'-'||c_rec.chk_digit,15)||
+									' | '||RPAD( prd_type,5)||' |'||RPAD(abo,6) ||'| '||inventory_class
+							 )
+				;
+			ELSE
+				UTL_FILE.putf(
+								succ_log,'\n'||LPAD(succ_row,4)||' | '||RPAD(c_rec.unit_id,15)||' | '||
+									RPAD( prd_type,5)||' |'||RPAD(abo,6)||'| '||inventory_class
+							 )
+							 ;
+			END IF;
+
+			IF row_count = 100
+			THEN
+				COMMIT;
+				row_count	:=	0;
+			END IF;
+
+			EXCEPTION
+				WHEN UTL_FILE.invalid_filehandle
+				THEN
+					DBMS_OUTPUT.PUT_LINE('Invalid Filehandle');
+				WHEN UTL_FILE.invalid_path
+				THEN
+					DBMS_OUTPUT.PUT_LINE('Invalid Path');
+				WHEN UTL_FILE.invalid_mode
+				THEN
+					DBMS_OUTPUT.PUT_LINE('Invalid Mode');
+				WHEN UTL_FILE.invalid_operation
+				THEN
+					DBMS_OUTPUT.PUT_LINE('Invalid Operation');
+				WHEN Error
+				THEN
+					err_row := err_row + 1;
+
+				IF c_rec.chk_digit IS NOT NULL
+				THEN
+					UTL_FILE.putf(
+									log_file,'\n'||LPAD(err_row,4)||' | '||RPAD(c_rec.unit_id||'-'||c_rec.chk_digit,15)||' | '||
+										RPAD( prd_type,5) ||'| '||RPAD(abo,6)||'| '||err_text
+								 )
+					;
+				ELSE
+					UTL_FILE.putf(
+									log_file,'\n'||LPAD(err_row,4)||' | '||RPAD(c_rec.unit_id,15)||' | '||
+										RPAD(prd_type,5) ||'| '||RPAD(abo,6)||'| '||err_text
+								 )
+					;
+				END IF;
+			END;
+		END LOOP;
+
+		CLOSE comp;
+
+		UTL_FILE.new_line(log_file);
+		UTL_FILE.put_line(log_file,'--------------------------------------------------------------------------------');
+		UTL_FILE.putf(log_file,'\nEnd of Check in '||TO_CHAR(SYSDATE,'MM-DD-YY HH24:MI'));
+		UTL_FILE.new_line(succ_log);
+		UTL_FILE.put_line(succ_log,'----------------------------------------------------');
+		UTL_FILE.putf(succ_log,'\nEnd of Check in '||TO_CHAR(SYSDATE,'MM-DD-YY HH24:MI'));
+		UTL_FILE.fclose(log_file);
+		UTL_FILE.fclose(succ_log);
+
+		COMMIT;
+	END impbchkn;
+
+END impbchkn;
+/
+
+CREATE OR REPLACE PUBLIC SYNONYM impbchkn FOR impbchkn;
+
+--GRANT EXECUTE ON impbchkn TO LT_LAB,UTIL,OPS$SRVSYS;
+

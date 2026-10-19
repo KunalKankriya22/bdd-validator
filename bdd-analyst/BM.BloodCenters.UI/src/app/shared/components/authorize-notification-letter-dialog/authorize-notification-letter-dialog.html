@@ -1,0 +1,257 @@
+<section
+  class="authorize-letter-dialog"
+  aria-labelledby="dialog-title">
+
+  <!-- Dialog Header -->
+  <div class="dialog-header">
+    <h2 id="dialog-title" class="dialog-title">{{ isUserMode() ? 'Generate Notification Letter' : 'Authorize Notification Letter' }}</h2>
+    <button
+      mat-icon-button
+      class="close-button"
+      (click)="onClose()"
+      aria-label="Close dialog">
+      <mat-icon>close</mat-icon>
+    </button>
+  </div>
+
+  <!-- Loading State -->
+  @if (loading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading"></mat-spinner>
+      <span class="sr-only">Loading, please wait...</span>
+    </div>
+  }
+
+  <!-- Error State -->
+  @if (error()) {
+    <div class="error-container" role="alert" aria-live="assertive">
+      <mat-icon aria-hidden="true">error</mat-icon>
+      <p>{{ error() }}</p>
+      <button mat-button color="primary" (click)="loadLetterData()">
+        Retry
+      </button>
+    </div>
+  }
+
+  <!-- Dialog Content -->
+  @if (!loading() && !error()) {
+    <div class="dialog-content">
+
+      <!-- Donor Info Section (Read-only as labels) -->
+      <section class="donor-info-section" role="region" aria-label="Donor Information">
+        <div class="info-row">
+          <div class="info-field">
+            <span class="field-label">Name</span>
+            <span class="field-value">{{ donorInfo()?.name || '---' }}</span>
+          </div>
+
+          <div class="info-field">
+            <span class="field-label">Date of Birth</span>
+            <span class="field-value">{{ formatDateUpperMonth(donorInfo()?.dateOfBirth) }}</span>
+          </div>
+
+          <div class="info-field">
+            <span class="field-label">Sex</span>
+            <span class="field-value">{{ formatSex(donorInfo()?.sex) }}</span>
+          </div>
+
+          <div class="info-field">
+            <span class="field-label">ABO Type</span>
+            <span class="field-value">{{ donorInfo()?.aboType || '---' }}</span>
+          </div>
+        </div>
+
+        <div class="info-row">
+          <div class="info-field address-field"
+               [matTooltip]="donorInfo()?.address || ''"
+               [matTooltipDisabled]="!isAddressOverflowing"
+               matTooltipPosition="below"
+               matTooltipClass="address-tooltip">
+            <span class="field-label">Address</span>
+            <span class="field-value address-value" #addressValue>{{ donorInfo()?.address || '---' }}</span>
+          </div>
+
+          <div class="info-field">
+            <span class="field-label">Home Phone Number</span>
+            <span class="field-value">{{ donorInfo()?.homePhone || '---' }}</span>
+          </div>
+
+          <div class="info-field">
+            <span class="field-label">Business Phone Number</span>
+            <span class="field-value">{{ donorInfo()?.workPhone || '---' }}</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Letter Details Section -->
+      <form [formGroup]="form" class="letter-details-section">
+        <div class="details-row">
+          <mat-form-field appearance="fill" class="letter-code-field">
+            <mat-label>Letter Code</mat-label>
+            <mat-select
+              id="letterCode"
+              formControlName="letterCode"
+              [disabled]="isSuperMode()"
+              [attr.aria-invalid]="f['letterCode'].invalid && f['letterCode'].touched"
+              [attr.aria-describedby]="f['letterCode'].invalid && f['letterCode'].touched ? 'letterCode-error' : null">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="letterSearchControl"
+                  placeholderLabel="Search letter codes..."
+                  noEntriesFoundLabel="No letters found">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (letter of filteredLetters(); track getLetterOptionKey(letter)) {
+                <mat-option [value]="getLetterOptionKey(letter)">
+                  {{ letter.letterCode }} - {{ letter.letterTitle }}@if (letter.donationType) { ({{ letter.donationType }}@if (letter.interCode) {/{{ letter.interCode }}})}
+                </mat-option>
+              }
+            </mat-select>
+            @if (f['letterCode'].invalid && f['letterCode'].touched) {
+              <mat-error id="letterCode-error" role="alert">
+                @if (f['letterCode'].errors?.['required']) {
+                  Letter Code is required
+                }
+              </mat-error>
+            }
+          </mat-form-field>
+
+          <div class="info-field">
+            <span class="field-label">Description</span>
+            <span class="field-value">{{ selectedLetterTitle }}</span>
+          </div>
+
+          <div class="info-field">
+            <span class="field-label">Donation Type</span>
+            <span class="field-value">{{ selectedLetterItem()?.donationType || data.donationType || donorInfo()?.donationType || '---' }}</span>
+          </div>
+        </div>
+
+        <div class="details-row">
+          <div class="info-field">
+            <span class="field-label">Procedure Code</span>
+            <span class="field-value">{{ data.procedureCode || donorInfo()?.procedureCode || '---' }}</span>
+          </div>
+        </div>
+
+       
+
+        <!-- Letter Text Area -->
+        <div class="letter-text-section">
+          <mat-form-field appearance="fill" class="letter-text-field">
+            <mat-label>Letter Text</mat-label>
+            <textarea
+              matInput
+              id="letterText"
+              formControlName="letterText"
+              rows="10"
+              maxlength="30000"
+              (input)="onLetterTextChange($event)"
+              [attr.aria-invalid]="f['letterText'].invalid && f['letterText'].touched"
+              [attr.aria-describedby]="f['letterText'].invalid && f['letterText'].touched ? 'letterText-error' : null">
+            </textarea>
+            <mat-hint align="end">{{ f['letterText'].value?.length || 0 }}/30,000</mat-hint>
+            @if (f['letterText'].invalid && f['letterText'].touched) {
+              <mat-error id="letterText-error" role="alert">
+                @if (f['letterText'].errors?.['maxlength']) {
+                  Letter text cannot exceed 30,000 characters
+                }
+              </mat-error>
+            }
+          </mat-form-field>
+        </div>
+      </form>
+    </div>
+
+    <!-- Dialog Footer Actions -->
+    <div class="dialog-footer" role="group" aria-label="Dialog actions">
+      <div class="action-buttons">
+        @if (isUserMode()) {
+          <button mat-raised-button type="button" (click)="onGenerate()" [disabled]="!canGenerate()">GENERATE</button>
+        }
+
+        @if (isSuperMode()) {
+          <button mat-raised-button type="button" (click)="onRetrieve()" [disabled]="loading() || letterRetrieved()">RETRIEVE</button>
+        }
+
+        <button mat-raised-button type="button" (click)="onViewDonations()" [disabled]="!canViewDonationsInterdictions() || donationsViewed()">DONATIONS</button>
+
+        <button mat-raised-button type="button" (click)="onViewInterdictions()" [disabled]="!canViewDonationsInterdictions() || interdictionsViewed()">INTERDICTIONS</button>
+
+        @if (isSuperMode()) {
+          <button mat-raised-button type="button" (click)="onAuthorize()" [disabled]="!canAuthorize()">AUTHORIZE</button>
+        }
+
+        @if (isUserMode()) {
+          <button mat-raised-button type="button" (click)="onSave()" [disabled]="!canSave()">SAVE</button>
+        }
+
+        <button mat-raised-button type="button" (click)="onReject()" [disabled]="!canReject()">REJECT</button>
+
+        <button mat-raised-button type="button" (click)="onClose()" [disabled]="loading()">CLOSE</button>
+      </div>
+    </div>
+  }
+
+  <!-- Sub-Panel Overlay for Interdictions / Donations / Notification Logs -->
+  @if (currentSubPanel()) {
+    <div class="sub-panel-overlay" [class.full-overlay]="currentSubPanel() === 'notification-logs'" cdkTrapFocus cdkTrapFocusAutoCapture>
+      @switch (currentSubPanel()) {
+        @case ('interdictions') {
+          <app-donor-interdictions-content
+            [donorId]="data.donorId"
+            (closePanel)="onSubPanelClose()">
+          </app-donor-interdictions-content>
+        }
+        @case ('test-results') {
+          <app-donor-within-test-dialog
+            [donorId]="data.donorId"
+            [donorName]="donorInfo()?.name ?? ''"
+            [dob]="donorInfo()?.dateOfBirth ?? ''"
+            [sex]="donorInfo()?.sex ?? ''"
+            [abo]="donorInfo()?.aboType ?? ''"
+            (closePanel)="onSubPanelClose()">
+          </app-donor-within-test-dialog>
+        }
+        @case ('notification-logs') {
+          <div class="notification-logs-panel">
+            <div class="nl-header">
+              <h3 class="nl-title">Notification Logs</h3>
+              <button mat-icon-button class="nl-close-button" (click)="onNotificationLogsCancel()" aria-label="Close">
+                <mat-icon>close</mat-icon>
+              </button>
+            </div>
+
+            <div class="nl-body">
+              <div class="nl-search-row">
+                <app-search-bar
+                  [config]="nlSearchConfig"
+                  (search)="onNotificationLogsSearch($event)">
+                </app-search-bar>
+                <button mat-raised-button class="nl-search-btn">SEARCH</button>
+              </div>
+
+              <div class="nl-comments-wrapper">
+                <label class="nl-comments-label" for="nl-comments">Comments</label>
+                <textarea
+                  id="nl-comments"
+                  class="nl-comments-textarea"
+                  [ngModel]="authorizationComments()"
+                  (ngModelChange)="authorizationComments.set($event)"
+                  [maxlength]="1850"
+                  aria-describedby="nl-comments-hint">
+                </textarea>
+              </div>
+              <div id="nl-comments-hint" class="nl-char-count">{{ authorizationComments().length }}/1850</div>
+            </div>
+
+            <div class="nl-footer">
+              <button mat-button class="nl-cancel-btn" (click)="onNotificationLogsCancel()">CANCEL</button>
+              <button mat-raised-button class="nl-ok-btn" (click)="onNotificationLogsOk()">OK</button>
+            </div>
+          </div>
+        }
+      }
+    </div>
+  }
+</section>

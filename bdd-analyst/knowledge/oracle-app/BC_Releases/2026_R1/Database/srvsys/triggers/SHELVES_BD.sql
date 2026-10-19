@@ -1,0 +1,42 @@
+--------------------------------------------------------
+--  DDL for Trigger SHELVES_BD
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "SHELVES_BD" before delete on SHELVES for each row
+begin
+insert into SHELVES_AUDIT
+  (	CHAPTER_ID,
+	WAREHOUSE_ID,
+	DEVICE_TYPE,
+	DEVICE_NUMBER,
+	RACK_NUMBER,
+	SHELF_NUMBER,
+	SHELF_DESCRIPTION,
+	SHELF_TRAY_COUNT,
+	EFFECTIVE_DATE,
+	LAST_MODIFIED_DATE,
+	TERM_DATE,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  (	:old.CHAPTER_ID,
+	:old.WAREHOUSE_ID,
+	:old.DEVICE_TYPE,
+	:old.DEVICE_NUMBER,
+	:old.RACK_NUMBER,
+	:old.SHELF_NUMBER,
+	:old.SHELF_DESCRIPTION,
+	:old.SHELF_TRAY_COUNT,
+	:old.EFFECTIVE_DATE,
+	:old.LAST_MODIFIED_DATE,
+	:old.TERM_DATE,
+	:old.AUDIT_KEY,
+	'DELETE',LT_USER_SESSION.GET_USERID,
+    sysdate
+  ) ;
+  end ;
+/
+ALTER TRIGGER "SHELVES_BD" ENABLE;

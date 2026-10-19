@@ -1,0 +1,257 @@
+CREATE OR REPLACE PACKAGE DON_LAPTOP_UPDT IS
+
+/*
+**
+** VER   DATE   BY       COMMENTS
+** ---------------------------------------------------------------------
+** 1.0  060298  Mukesh   Initial version
+**
+** 1.1  063098  Mukesh  Initialized local variables. Not Null unit ID
+**                      check removed. select stmt made on coll_date
+**                      plus insert_date
+**
+*/
+/*
+** this function calculates various lifetime counts on donations
+*/
+
+/*
+** This procedure is the main function which will be called to update
+** Donor records
+*/
+
+/*
+** this function calculates various YTD counts on donations
+*/
+
+PROCEDURE DONOR_LAPTOP_UPDATE
+ (P_FROM_DATE IN date
+ ,P_TO_DATE IN date
+ ,P_CHAPTER_ID IN varchar2
+ );
+FUNCTION DONOR_LIFE_COUNTS
+ (P_WHAT IN varchar2
+ ,SZDONORID IN donors.donor_id%type
+ ,SZCHAPTERID IN donors.chapter_id%type
+ )
+ RETURN NUMBER;
+FUNCTION DONOR_YTD_COUNT
+ (P_WHAT IN varchar2
+ ,SZDONORID IN donors.donor_id%type
+ ,SZCHAPTERID IN donors.chapter_id%type
+ )
+ RETURN NUMBER;
+END DON_LAPTOP_UPDT;
+/
+
+CREATE OR REPLACE PACKAGE BODY don_laptop_updt IS
+  PACKAGE_NAME   CONSTANT varchar2(10)   := 'DON_LAPTOP'; -- identify package
+PROCEDURE donor_laptop_update
+         (p_from_date  IN date,
+          p_to_date    IN date,
+          p_chapter_id IN varchar2) IS
+     UNIT_NAME         varchar2(32)   := null;
+     l_life_cnt        number := 0;
+     l_ytd_cnt         number := 0;
+     l_life_credit     number:=0;     --Added by Edwin on 01/11/99
+     l_ytd_credit      number:=0;
+     l_unit_id         donations.unit_id%type;
+     l_coll_date       donations.coll_date%type;
+     l_don_type        donations.donation_type%type;
+     l_proc_code       donations.procedure_code%type;
+     cursor c1 (p_from_date date, p_to_date date, p_chapter_id varchar2) is
+     select donor_id
+       from donations
+      where coll_date between nvl(to_date(p_from_date), sysdate-2) - 21
+                          and nvl(p_to_date, sysdate)
+        -- and unit_id is not null
+        and trunc(insert_date) between nvl(p_from_date, sysdate-2)
+                            and nvl(p_to_date, sysdate)
+        and donor_id is not null
+        and chapter_id = nvl(p_chapter_id,'WAD')
+      order by coll_date, donor_id;
+BEGIN
+  UNIT_NAME := 'donor laptop update';
+  for c1_rec in c1(p_from_date, p_to_date, p_chapter_id)
+    LOOP
+    begin
+     l_life_cnt := donor_life_counts('UNIT', c1_rec.donor_id, p_chapter_id);
+     l_ytd_cnt  := donor_ytd_count('UNIT', c1_rec.donor_id, p_chapter_id);
+      --- The following two lines are added by Edwin on 01/14/99
+    l_life_credit := donor_life_counts('CREDIT', c1_rec.donor_id, p_chapter_id);
+    l_ytd_credit  := donor_ytd_count('CREDIT',c1_rec.donor_id,p_chapter_id);
+      begin
+      l_unit_id := null;
+      l_coll_date := null;
+      l_don_type := null;
+      l_proc_code := null;
+      select unit_id,
+             coll_date,
+             donation_type,
+             procedure_code
+        into l_unit_id,
+             l_coll_date,
+             l_don_type,
+             l_proc_code
+        from donations
+       where donor_id = c1_rec.donor_id
+         and chapter_id = nvl(p_chapter_id,'WAD')
+         -- and unit_id is not null
+         and coll_date = ( select max(coll_date) from donations
+                            where donor_id = c1_rec.donor_id
+                              and chapter_id = nvl(p_chapter_id,'WAD'));
+      exception
+        when others then null;
+      end;
+      /** Now update donor record **/
+      update donors
+         set life_donations = l_life_cnt,
+             ytd_donations  = l_ytd_cnt,
+             life_credit    = l_life_credit,
+             ytd_credit     = l_ytd_credit,
+             last_unit_id   = l_unit_id,
+             last_coll_date = l_coll_date,
+             last_don_type  = l_don_type,
+             last_proc_code = l_proc_code
+       where donor_id = c1_rec.donor_id
+         and chapter_id = nvl(p_chapter_id,'WAD');
+      commit;
+    exception
+      when others then null;
+    end;
+    END LOOP;
+exception
+  when others then null;
+END;    /* Procedure */
+/*
+** Donors lifetime counts are calculated and returned.
+**
+** parameter    Description
+** --------------------------------------------------
+** 'CREDIT'             Lifetime credit counts
+** 'GALLON'             Lifetime gallon count
+** 'UNIT'               LifeTime unit count
+**
+*/
+   FUNCTION donor_life_counts
+            (p_what      IN varchar2,
+             szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type)
+             RETURN NUMBER IS
+      UNIT_NAME         varchar2(32)   := null;
+      szErrorMsg        varchar2(500)  := null;
+      nDonorCount       NUMBER;
+      nUnitCount        NUMBER;
+      nCreditCount      NUMBER;
+      nClaimedDons      NUMBER;
+      szdonor           varchar2(10);
+      cursor cur_donation (p_donor_id varchar2, p_chapter_id varchar2) is
+             select donor_id, count(unit_id), nvl(sum(donations.credit_count),0)
+               from donations
+              where donor_id   = p_donor_id
+                and chapter_id = nvl(p_chapter_id,'WAD')
+                and unit_id    is not null
+                and donation_type!='SM'
+              group by donor_id;
+      cursor cur_claimed (p_donor_id varchar2, p_chapter_id varchar2) is
+             select nvl(donors.claimed_donation, 0)
+               from donors
+              where donor_id      = p_donor_id
+                and chapter_id    = nvl(p_chapter_id, 'WAD');
+   BEGIN
+      UNIT_NAME := 'donor_life_count';
+      open cur_donation(szDonorID, szChapterID);
+      fetch cur_donation
+       into szdonor, nUnitCount, nCreditCount;
+      if cur_donation%NOTFOUND then
+         nUnitCount   := 0;
+         nCreditCount := 0;
+      end if;
+      if cur_donation%ISOPEN then
+         close cur_donation;
+      end if;
+      open cur_claimed(szDonorID, szChapterID);
+      fetch cur_claimed
+       into nClaimedDons;
+      if cur_claimed%NOTFOUND then
+         nClaimedDons := 0;
+      end if;
+      if cur_claimed%ISOPEN then
+         close cur_claimed;
+      end if;
+      if p_what = 'CREDIT' then
+         nDonorCount := nCreditCount + nClaimedDons;
+      elsif p_what = 'GALLON' then
+         nDonorCount := FLOOR((nCreditCount + nClaimedDons)/8);
+      elsif p_what = 'UNIT' then
+         nDonorCount := nUnitCount;
+      end if;
+      return nDonorCount;
+      -- exception handing
+      exception
+         when others then
+            null;
+   END;
+/*
+** Donors ytd counts are calculated and returned.
+**
+** parameter    Description
+** --------------------------------------------------
+** 'CREDIT'             Lifetime credit counts
+** 'GALLON'             Lifetime gallon count
+** 'UNIT'               LifeTime unit count
+**
+*/
+   FUNCTION donor_ytd_count
+            (p_what      IN varchar2,
+             szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type)
+             RETURN NUMBER IS
+      UNIT_NAME             varchar2(32)   := null;
+      szErrorMsg            varchar2(500)  := null;
+      nDonorCount           NUMBER;
+      nUnitCount            NUMBER;
+      nCreditCount          NUMBER;
+      nClaimedDons          NUMBER;
+      cursor cur_donation (p_donor_id varchar2, p_chapter_id varchar2) is
+             select count(unit_id), sum(donations.credit_count),
+                    nvl(donors.claimed_donation, 0)
+               from donations, donors
+              where donors.donor_id      = p_donor_id
+                and donations.donor_id   = donors.donor_id
+                and donations.coll_date between trunc(sysdate, 'YYYY')
+                                            and trunc(sysdate)
+                and donations.unit_id    is not null
+                and donations.donation_type!='SM'
+                and donors.chapter_id    = nvl(p_chapter_id,'WAD')
+                and donations.chapter_id = nvl(p_chapter_id,'WAD')
+              group by donors.claimed_donation;
+   BEGIN
+      UNIT_NAME  := 'donor_ytd_count';
+      open cur_donation(szDonorID, szChapterID);
+      fetch cur_donation
+       into nUnitCount, nCreditCount, nClaimedDons;
+      if cur_donation%NOTFOUND then
+         nUnitCount   := 0;
+         nCreditCount := 0;
+         nClaimedDons := 0;
+      end if;
+      if cur_donation%ISOPEN then
+         close cur_donation;
+      end if;
+      if p_what = 'CREDIT' then
+         nDonorCount := nCreditCount ;
+      elsif p_what = 'GALLON' then
+         nDonorCount := FLOOR((nCreditCount + nClaimedDons)/8);
+      elsif p_what = 'UNIT' then
+         nDonorCount := nUnitCount;
+      end if;
+      return nDonorCount;
+      -- exception handing
+      exception
+         when others then
+            null;
+   END;
+END don_laptop_updt;
+/
+

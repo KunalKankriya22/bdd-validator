@@ -1,0 +1,260 @@
+<div class="void-cancel-test-results-container">
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Action Bar -->
+  <div class="filter-card">
+    <form [formGroup]="filterForm">
+      <div class="filter-row">
+        <!-- Action Dropdown -->
+        <mat-form-field appearance="fill" class="filter-field action-field">
+          <mat-label>Action</mat-label>
+          <mat-select formControlName="action">
+            <mat-option>
+              <ngx-mat-select-search [formControl]="actionSearchCtrl"
+                placeholderLabel="Search..." noEntriesFoundLabel="No results found" />
+            </mat-option>
+            @for (action of filteredActions(); track action.code) {
+              <mat-option [value]="action.code">{{ action.code }} - {{ action.description }}</mat-option>
+            }
+          </mat-select>
+          @if (f['action'].invalid && f['action'].touched) {
+            <mat-error>Action is required</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Test ID Dropdown -->
+        <mat-form-field appearance="fill" class="filter-field test-field">
+          <mat-label>Test ID</mat-label>
+          <mat-select formControlName="testId" (selectionChange)="onTestSelected($event.value)">
+            <mat-option>
+              <ngx-mat-select-search [formControl]="testSearchCtrl"
+                placeholderLabel="Search..." noEntriesFoundLabel="No results found" />
+            </mat-option>
+            @for (test of filteredTests(); track test.testId) {
+              <mat-option [value]="test.testId">{{ test.testId }} - {{ test.testDesc }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Select Tests Button -->
+        <div class="select-tests-action">
+          <button mat-stroked-button type="button" class="select-tests-button"
+            (click)="openSelectTestsPanel()">
+            SELECT TESTS
+          </button>
+        </div>
+
+        <!-- Selected Test Chips (inline) -->
+        @if (selectedTests().length > 0) {
+          <div class="selected-tests-chips-inline">
+            @for (test of selectedTests(); track test.testId) {
+              <mat-chip-row (removed)="removeSelectedTest(test.testId)">
+                {{ test.testId }}
+                <button matChipRemove aria-label="Remove {{ test.testId }}">
+                  <mat-icon>cancel</mat-icon>
+                </button>
+              </mat-chip-row>
+            }
+          </div>
+        }
+
+        <!-- Reason Dropdown -->
+        <mat-form-field appearance="fill" class="filter-field reason-field">
+          <mat-label>Reason</mat-label>
+          <mat-select formControlName="reasonCode">
+            <mat-option>
+              <ngx-mat-select-search [formControl]="reasonSearchCtrl"
+                placeholderLabel="Search..." noEntriesFoundLabel="No results found" />
+            </mat-option>
+            @for (code of filteredReasonCodes(); track code.code) {
+              <mat-option [value]="code.code">{{ code.code }} - {{ code.codeDesc }}</mat-option>
+            }
+          </mat-select>
+          @if (f['reasonCode'].invalid && f['reasonCode'].touched) {
+            <mat-error>Reason is required</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Clear All Button -->
+        <div class="filter-actions">
+          <button mat-button type="button" class="clear-all-button"
+            (click)="onClearAll()" [disabled]="loading()">
+            CLEAR ALL
+          </button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <!-- Main Content with Right-Side Select Test Panel -->
+  <mat-sidenav-container class="main-sidenav-container">
+    <!-- Select Test Side Panel (right overlay) -->
+    <mat-sidenav #selectTestPanel mode="over" position="end"
+      [opened]="selectTestPanelOpen()"
+      (closed)="onSidenavClosed()"
+      class="select-test-sidenav">
+      <app-select-tests-dialog
+        [testGroups]="testGroups()"
+        [availableTests]="availableTests()"
+        [selectedTestIds]="selectedTestIds()"
+        (close)="onSelectTestsPanelClose(null)"
+        (proceed)="onSelectTestsPanelClose($event)" />
+    </mat-sidenav>
+
+    <mat-sidenav-content>
+      <div class="content-area">
+        <!-- Left Panel - Scan Units -->
+        <div class="left-panel">
+          <div class="panel-header">
+            <h3 class="panel-title">Scan Units</h3>
+          </div>
+
+          <div class="unit-scan-field">
+            <app-unit-id-field
+              [label]="'Unit ID'"
+              [required]="false"
+              [validateFfValue]="'N'"
+              [hintDefault]="'Scan or type a unit ID'"
+              (validated)="onUnitIdValidated($event)"
+            />
+          </div>
+
+          <app-data-table
+            [config]="scannedUnitsTableConfig"
+            [data]="scannedUnits()"
+            [highlightedRow]="selectedScannedUnit()"
+            (rowClick)="onScannedUnitClick($event)"
+            (rowAction)="onScannedUnitAction($event)" />
+        </div>
+
+        <!-- Right Panel - Test Results -->
+        <div class="right-panel">
+          @if (!selectedUnitId()) {
+            <div class="empty-results-message">
+              <mat-icon class="search-icon">search</mat-icon>
+              <p>No Results to Display</p>
+              <p class="sub-message">Scan or enter a Unit ID to begin.</p>
+            </div>
+          } @else {
+            <div class="results-header">
+              <div class="results-header-left">
+                <h3 class="results-title">{{ selectedUnitId() }}</h3>
+                <span class="test-count">{{ testResultCount() }} Tests</span>
+              </div>
+              <div class="results-header-right">
+                @if (selectedResultCount() > 0) {
+                  <button mat-stroked-button color="primary" type="button"
+                    (click)="onVoidCancel()" [disabled]="loading()">
+                    {{ actionLabel() }}({{ selectedResultCount() }})
+                  </button>
+                }
+                <button mat-stroked-button type="button" (click)="onViewFullDetails()">
+                  VIEW FULL DETAILS
+                </button>
+              </div>
+            </div>
+
+            @if (loading()) {
+              <div class="loading-indicator">
+                <p>Loading test results...</p>
+              </div>
+            } @else {
+              <!-- Scheduled Tests Section -->
+              <div class="test-section">
+                <div class="section-header">
+                  <span class="section-indicator scheduled-indicator"></span>
+                  <h4 class="section-title">Scheduled Tests</h4>
+                </div>
+                <app-data-table
+                  [config]="scheduledTableConfig"
+                  [data]="scheduledTests()"
+                  [loading]="loading()"
+                  (selectionChange)="onScheduledSelectionChange($event)" />
+              </div>
+
+              <!-- Unscheduled Tests Section -->
+              <div class="test-section">
+                <div class="section-header">
+                  <span class="section-indicator unscheduled-indicator"></span>
+                  <h4 class="section-title">Unscheduled Tests</h4>
+                </div>
+                @if (!isCancel()) {
+                  <app-data-table
+                    [config]="unscheduledTableConfig"
+                    [data]="unscheduledTests()"
+                    [loading]="loading()"
+                    (selectionChange)="onUnscheduledSelectionChange($event)" />
+                }
+              </div>
+
+              @if (testResults().length === 0) {
+                <div class="empty-results-message">
+                  <p>No test results found</p>
+                  <p class="sub-message">No voidable test results for this unit.</p>
+                </div>
+              }
+
+              <!-- Bottom Action Buttons -->
+              <div class="results-action-container">
+                <button mat-stroked-button color="primary" type="button"
+                  (click)="onMoveToUnitScan()">
+                  MOVE TO UNIT SCAN
+                </button>
+                <button mat-stroked-button color="primary" type="button"
+                  (click)="onVoidCancel()"
+                  [disabled]="loading() || selectedResultCount() === 0">
+                  VOID/CANCEL
+                </button>
+                <button mat-stroked-button type="button" (click)="onViewFullDetails()">
+                  VIEW FULL DETAILS
+                </button>
+              </div>
+            }
+          }
+        </div>
+      </div>
+    </mat-sidenav-content>
+  </mat-sidenav-container>
+
+  <!-- View Full Details Overlay Panel -->
+  @if (detailPanelOpen()) {
+    <div class="detail-panel-backdrop" (click)="onDetailPanelClose()"></div>
+    <div class="detail-panel">
+      <div class="detail-panel-header">
+        <h3>Test Details — {{ selectedUnitId() }}</h3>
+        <button mat-icon-button (click)="onDetailPanelClose()" aria-label="Close details">
+          <mat-icon>close</mat-icon>
+        </button>
+      </div>
+
+      <div class="detail-panel-content">
+        @if (detailLoading()) {
+          <div class="loading-indicator"><p>Loading details...</p></div>
+        } @else {
+          <div class="test-section">
+            <div class="section-header">
+              <span class="section-indicator scheduled-indicator"></span>
+              <h4 class="section-title">Scheduled Tests</h4>
+            </div>
+            <app-data-table
+              [config]="detailTableConfig"
+              [data]="detailScheduled()" />
+          </div>
+
+          @if (!isCancel()) {
+            <div class="test-section">
+              <div class="section-header">
+                <span class="section-indicator unscheduled-indicator"></span>
+                <h4 class="section-title">Unscheduled Tests</h4>
+              </div>
+              <app-data-table
+                [config]="detailTableConfig"
+                [data]="detailUnscheduled()" />
+            </div>
+          }
+        }
+      </div>
+    </div>
+  }
+</div>

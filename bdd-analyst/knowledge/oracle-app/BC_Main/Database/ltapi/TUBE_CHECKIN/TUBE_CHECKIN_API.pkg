@@ -1,0 +1,2371 @@
+CREATE OR REPLACE PACKAGE LTAPI.TUBE_CHECKIN_API IS
+
+/* ************************************************************
+  This is Tube checkin interface: The API_TUBE_CHECKIN table is populated. This
+  interface reads the data from the API table and uploads into the LT tables.
+  After the data has been processed they are archived into the
+   API_TUBE_CHECKIN_ARCH table
+
+   Note: The profile set ID is stored in the contract ID field in the
+         API table, so we take the value and finding out the contract ID
+         field - as per LT 2018 R2 changes 
+
+  Created By        : Basker Edwin 
+  Date Of Creation  : 09/20/2011
+  Version           : 01
+                      02 [10/17/11] IM: 5983
+                      03 [10/20/11] IM : 5995, 5996, 5997 [Edwin]
+                      04 [10/24/11] scheduling profile tests 
+                      05 [10/31/11] not logging all the batches
+                      06 [02/03/12] remove validation from Isbt start date
+                      07 [02/28/12] Time zone changes
+                      08 [03/02/12] IM: 7207  [Edwin]
+                      09 [03/13/12] IM: 7566  [Edwin]
+                      10 [03/19/12] IM: 7637  [Edwin]
+                      11 [07/30/15] SCR# 20274, 20358 [Edwin]
+                      12 [08/13/15] IM:67   Edwin 
+                      13 [09/01/15] IM: 94 (same logic as RGITUBES)
+                      14 [09/09/15] rolling back the ver 13 (same as ver 12)
+                      15 [10/19/15] IM: 146 (strip off codabar start/stop codes
+                                    IM: 145 - populating chapter_id to 
+                                              lifetrak_api_log table
+ 		      
+
+                    ----  Resetting the Version number for 2018---
+  
+                     01  [10/10/2017]
+                     02  LT_2018_R2    Edwin 
+                     03  LT_2018_R2  -MLT360
+                     04  LT_2018_R2  - For adding 4th tube checkin logic
+                                       under R2 flag
+                     05  LT_2018_R2  - adding the test_chapter_id MLT-596
+                     06  LT_2018_R2  - update_holding_data MLT-623  
+                     07  LT_2018_R2_SP5_hotfix   MLT 3337     [06012020]
+                     08  LT_2018_R2_SP5_hotfix [090220] - continuation of ver 07 (fine tuning )
+                     09  2022_R2      - Auto QC MLT -5088
+                     10  2022_R2 System testing issue (MLT-5143)
+  
+  *****************************************   */
+
+
+
+
+ procedure main_proc(inp_file_name in varchar2,v_inst_id in varchar2);
+ Procedure insert_units (pl_contract_id in varchar2,
+                        pl_os_unit_id in varchar2,
+                        pl_unit_id    in varchar2 ,
+                        pl_red_tube   in varchar2,
+                        pl_p1_tube    in varchar2,
+                        pl_p2_tube    in varchar2,
+                        pl_red_tube_2 in varchar2,
+                        pl_coll_date in date,
+                        pl_status out varchar2) ;
+ 
+ Procedure insert_tubes (pl_int_unit_id  in varchar2,
+                        pl_os_unit_id   in varchar2,
+                        pl_unit_red     in varchar2,
+                        pl_unit_p1      in varchar2,
+                        pl_unit_p2      in varchar2,
+                        pl_unit_red_2   in varchar2,
+                        pl_status       out varchar2);
+
+ Procedure update_holding_data (pl_int_unit_id in varchar2,
+                                pl_coll_date in date,
+                                pl_out_status out varchar2);
+
+ Procedure insert_utrs (pl_int_unit_id in varchar2,
+                        pl_out_unit_id in varchar2,
+                        pl_coll_date   in date,
+                        pl_status out varchar2);
+Procedure insert_batch(pl_recv_date   in date,
+                       pl_prof_seq_no in varchar2,
+                       pl_status      out varchar2) ;
+  procedure init_variables(pl_contract_id in varchar2,pl_message out varchar2);
+  procedure gen_batch_id (pl_batch_id out varchar2);
+  PROCEDURE VALIDATE_UNIT_CHKDIGIT (P_unit_id IN Varchar2,
+                                    p_chk_digit OUT Varchar2 );
+  Procedure validate_ext_unit(pl_os_tube        in varchar2,
+                              pl_final_os_unit  out varchar2,
+                              pl_out_status     out varchar2);
+
+Procedure validate_int_unit_format(pl_in_unit     in   varchar2,
+                                   pl_tube_type   in   varchar2,
+                                   pl_out_unit_id out  varchar2,
+                                   pl_status      out varchar2);
+
+  procedure rollback_and_exit (p_msg in varchar2) ;
+  PROCEDURE add_log_entry(p_log_text  in  varchar2,
+                          p_ext_batch in  varchar2,
+                          p_int_batch in  varchar2); 
+
+  Procedure verify_tube_consistency(pl_r in varchar2,
+                                  pl_p1 in varchar2,
+                                  pl_P2 in varchar2,
+                                  pl_r2 in varchar2,
+                                  pl_out_status out varchar2);
+
+ procedure populate_archive ( pl_out_status out varchar2 );
+
+
+  contCount              NUMBER:=0;
+  p_message              VARCHAR2(150);
+  g_contract_id          VARCHAR2(15);
+  g_profile_set_id       VARCHAR2(20);
+  g_chapter_id           VARCHAR2(4);
+  g_batch_id             VARCHAR2(15);
+  g_local_sysdate        DATE;
+  g_con_bar_code         varchar2(1);
+  g_copy_flag            varchar2(1);
+  g_center_id            varchar2(10);
+  g_profile_seq_no       number(6);
+  g_company              varchar2(100);
+  p_coll_date            DATE;
+  p_recv_date            DATE;
+  g_copy_isbt            varchar2(1);
+  g_ext_batch_id         VARCHAR2(30);
+end TUBE_CHECKIN_API;
+/
+create or replace package body ltapi.TUBE_CHECKIN_API is
+
+PROCEDURE add_log_entry(p_log_text  in  varchar2,
+                        p_ext_batch in  varchar2,
+                        p_int_batch in  varchar2) is
+BEGIN
+         insert into lifetrak_api_log(EXTERNAL_ID,INTERNAL_ID,
+                                      LOG_TEXT,SOURCE_ID,
+                                      INSERT_DATE,PROGRAM_ID,chapter_id)
+                           values    (p_ext_batch,p_int_batch,p_log_text,
+                                      'TUBE',
+                                      sysdate,'LTAPI',g_chapter_id);
+END add_log_entry;
+
+Procedure gen_batch_id (pl_batch_id out varchar2) is
+  batchExists   NUMBER:=0;
+BEGIN
+
+  -- check if the batch is already used or not
+
+     select nvl(count(*),0) into batchExists from api_lt_conversion
+     where source_value=g_ext_batch_id and source_appl_id='CTS' and
+     source_value_type='BATCH';
+
+   If batchExists = 0 then 
+
+     select to_char(g_local_sysdate,'mmddyy')||'-RG'||
+                                  to_char(nvl(batch_seq,1000)+1)
+     into pl_batch_id
+     from chapters where chapter_id = g_chapter_id;
+     Begin
+         update chapters
+          set batch_seq = nvl(batch_seq,1000) + 1
+          where chapter_id = g_chapter_id;
+    Exception
+        when OTHERS then
+          p_message:='Gen_batch_id-'||sqlerrm;
+          rollback_and_exit(p_message);   
+    End;
+
+     -- dbms_output.put_line('pl_batch_id='||pl_batch_id);
+
+    begin
+     insert into api_lt_conversion(SOURCE_APPL_ID ,SOURCE_VALUE_TYPE,
+                                  SOURCE_VALUE,TARGET_APPL_ID,TARGET_VALUE_TYPE,
+                                  TARGET_VALUE, EFF_DATE ,TERM_DATE,INSERT_DATE, 
+                                  LAST_MOD_DATE,PROGRAM_ID)
+                      values('CTS','BATCH',g_ext_batch_id,'LFTRK','BATCH',
+                             pl_batch_id, sysdate,null,sysdate,sysdate,
+                            'LTAPI');       
+        exception when others then 
+        rollback_and_exit(sqlerrm);
+    end;
+ Else
+   null;
+ End If;
+
+
+EXCEPTION
+   when OTHERS then
+      rollback_and_exit(p_message);
+END gen_batch_id;
+
+Procedure insert_batch(pl_recv_date   in date,
+                       pl_prof_seq_no in varchar2,
+                       pl_status      out varchar2) is
+ dummy_x  VARCHAR2(1);
+
+Begin
+     select distinct 'x' into dummy_x
+        from batch_inputs where
+                  chapter_id = g_chapter_id and
+                  contract_id = g_contract_id and
+                  batch_id = g_batch_id;
+ EXCEPTION
+   when NO_DATA_FOUND then
+     Declare
+    v_recvd_date_gmt date; -- timezone conversion
+    Begin
+    /*
+       if is_timezone_enabled and nvl(pl_recv_date,sysdate) is not null then
+           Lifetrack_timezone_convert.get_gmt_time(g_chapter_id,
+                                                   pl_recv_date, 
+                                                   v_recvd_date_gmt);
+        insert into batch_inputs
+                  (batch_id,
+                   chapter_id,
+                   contract_id,
+                   received_date,
+                   min_temp,
+                   max_temp,
+                   profile_seq_no,
+                   checkin_user_id,
+                   insert_dats,
+                   profile_set_id,
+                   QC_DATE    --- added later as CTS will not do QC through the screen anymore (V:10, 05/10/22)
+                  )
+        values
+                  (g_batch_id,
+                   g_chapter_id,
+                   g_contract_id,
+                   v_recvd_date_gmt,
+                   0,
+                   0,
+                   g_profile_seq_no,
+                  decode(substr(LT_USER_SESSION.get_userid,1,4),'OPS$',
+                  substr(LT_USER_SESSION.get_userid,5,6),
+                  LT_USER_SESSION.get_userid),
+                   sysdate,
+                   g_profile_set_id,
+                   sysdate); 
+       else 
+          ---- timezone conversion ends
+       */
+             insert into batch_inputs
+                   ( batch_id,
+                     chapter_id,
+                     contract_id,
+                     received_date,
+                     min_temp,
+                     max_temp,
+                     profile_seq_no,
+                     checkin_user_id,
+                     insert_dats,
+                     profile_set_id,
+                     QC_DATE    --- added later as CTS will not do QC through the screen anymore (V:10, 05/10/22)
+                   )
+            values
+                   (g_batch_id,
+                    g_chapter_id,
+                    g_contract_id,
+                    trunc(pl_recv_date),
+                    0,
+                    0,
+                    g_profile_seq_no,
+                  decode(substr(user,1,4),'OPS$',substr(user,5,6),user),
+                   --LT_USER_SESSION.get_userid),
+                   sysdate,
+                   g_profile_set_id,
+                   sysdate);
+        --end if;-- timezone conversion
+      Exception
+       when OTHERS then
+            pl_status:='insert-batch1:'||sqlerrm;
+            return;
+      End; 
+     when OTHERS then
+        pl_status:='insert-batch:'||sqlerrm;
+        return;
+
+END insert_batch;
+
+Procedure verify_tube_consistency(pl_r in varchar2,
+                                  pl_p1 in varchar2,
+                                  pl_P2 in varchar2,
+                                  pl_r2 in varchar2,
+                                  pl_out_status out varchar2)
+is
+
+Begin
+
+  pl_out_status:='OK';
+ If pl_r is not null and pl_p1 is not null then 
+    if pl_r!=Pl_p1 then
+      pl_out_status:='Inconsistent tube numbers';
+      return;
+   end if;
+ End If;
+
+ If pl_r is not null and pl_p2 is not null then 
+    if pl_r!=Pl_p2 then
+      pl_out_status:='Inconsistent tube numbers';
+      return;
+   end if;
+ End If;
+
+ If pl_p2 is not null and pl_p1 is not null then 
+    if pl_p2!=Pl_p1 then
+      pl_out_status:='Inconsistent tube numbers';
+      return;
+   end if;
+ End if;
+
+ If pl_r2 is not null and pl_p1 is not null then 
+    if pl_r2!=pl_p1 then
+      pl_out_status:='Inconsistent tube numbers';
+      return;
+   end if;
+ End if;
+
+
+End verify_tube_consistency;
+
+FUNCTION GET_COLL_DATE(pl_unit_id in varchar2,
+                       pl_contract_id in varchar2 ) RETURN DATE IS
+    temp_coll_date date;
+BEGIN
+     BEGIN
+          SELECT collection_date INTO temp_coll_date
+          FROM RGT_UNITS
+          WHERE unit_id = pl_unit_id
+          AND chapter_id = g_chapter_id
+          AND contract_id = pl_contract_id;
+    EXCEPTION
+        WHEN others then 
+            null;
+    END;
+    return trunc(temp_coll_date);
+END;
+
+
+procedure populate_archive ( pl_out_status out varchar2 ) is
+Begin
+
+pl_out_status:='OK';
+
+INSERT INTO API_TUBE_CHECKIN_ARCH (
+    CONTRACT_ID, CHAPTER_ID ,EXTERNAL_BATCH_ID,RECEIVED_DATE, OS_RED_TUBE,  
+    INT_RED_TUBE, OS_PURPLE_1 , INT_PURPLE_1 , OS_PURPLE_2 ,  INT_PURPLE_2,  
+    OS_RED_TUBE_2, INT_RED_TUBE_2,COLL_DATE,    INSERT_DATE,  PROCESS_FLAG,
+   PROCESSED_DATE)
+    select CONTRACT_ID, CHAPTER_ID ,EXTERNAL_BATCH_ID,RECEIVED_DATE,
+          OS_RED_TUBE, INT_RED_TUBE, OS_PURPLE_1 , INT_PURPLE_1 , OS_PURPLE_2 ,  
+         INT_PURPLE_2, OS_RED_TUBE_2, INT_RED_TUBE_2,
+        COLL_DATE,    INSERT_DATE,  'C', sysdate  from 
+          API_TUBE_CHECKIN where process_flag='C';
+
+     delete from api_tube_checkin where process_flag='C';
+    
+
+Exception when others then 
+  pl_out_status:='Unable to Arch-'||SQLERRM;
+  return;
+End populate_archive;
+
+
+PROCEDURE MAIN_PROC(inp_file_name in varchar2, v_inst_id in varchar2) is
+ start_time   VARCHAR2(30);
+ end_time     VARCHAR2(30);
+ contCount    NUMBER:=0;
+ batchCount      NUMBER:=0;
+ batch_status    VARCHAR2(10);
+ p_batch_id      VARCHAR2(14);
+ final_int_red   VARCHAR2(16);
+ final_int_p1    VARCHAR2(16);
+ final_int_p2    VARCHAR2(16);
+ final_int_red_2 VARCHAR2(16);
+ p_int_red       VARCHAR2(16);
+ p_os_red        VARCHAR2(16);
+ p_os_red_2      VARCHAR2(16);
+ p_os_p1         VARCHAR2(16);
+ p_os_p2         VARCHAR2(16);
+ P_INT_UNIT      VARCHAR2(16);
+ P_OS_UNIT       VARCHAR2(16);
+ p_unit_scheme   VARCHAR2(1);
+ nCount          number:=0;
+ pCount          number:=0;
+ p_unit_status   varchar2(500);
+ p_utrs_status   varchar2(500);
+ p_temp_int_red  varchar2(16);
+ p_temp_int_red_2  varchar2(16);
+ p_temp_int_p1   varchar2(16);
+ p_temp_int_p2   varchar2(16);
+ p_coll_count     number:=0;
+ skip_record      exception;
+ BATCH_SKIP       exception;
+ p_status         varchar2(500);
+ p_tube_status    varchar2(500);
+ p_prof_seq_no    number(6);
+ p_profile_set_id varchar2(14);
+ iDate            date;
+ qcCount          NUMBER:=0;
+ nExtract         NUMBER:=0;
+ nBatchInp        NUMBER:=0;
+ v_disp_unit      VARCHAR2(20);
+
+ temp_codabar_unit VARCHAR2(20);
+
+ cursor batch_cur is select distinct external_batch_id from api_tube_checkin;
+
+ cursor units_cur (p_ext_batch_no in varchar2) is select
+       CONTRACT_ID, CHAPTER_ID,EXTERNAL_BATCH_ID,RECEIVED_DATE,OS_RED_TUBE,
+            INT_RED_TUBE,OS_PURPLE_1,INT_PURPLE_1,OS_PURPLE_2,INT_PURPLE_2 ,
+           OS_RED_TUBE_2,INT_RED_TUBE_2,COLL_DATE from api_tube_checkin where
+           external_batch_id=p_ext_batch_no;
+
+Begin
+      dbms_output.enable(50000000);
+
+    -- initialise variables
+  FOR Z in batch_cur loop
+ 
+  BEGIN
+     g_ext_batch_id:=Z.external_batch_id;
+
+     -- get the chapter ID
+     select distinct chapter_id into g_chapter_id from api_tube_checkin where
+     external_batch_id=g_ext_batch_id and rownum =1;
+
+     --dbms_output.put_line('Chapter='||g_chapter_id);
+
+    g_local_sysdate:=lifetrack_timezone_convert.get_local_time(g_chapter_id, 
+                                                               sysdate); 
+
+     -- check if the batch is already used or new batch
+     select nvl(count(*),0) into batchCount from api_lt_conversion
+     where source_value=g_ext_batch_id and source_appl_id='CTS' and
+     source_value_type='BATCH';
+
+     --dbms_output.put_line('batchcount='||to_char(batchCount));
+
+     If batchCount = 0 then 
+       batch_status:='NEW';
+       -- Generate the new batch ID
+       gen_batch_id (g_batch_id);
+     Else
+      batch_status:='OLD';
+      -- get the old batch ID
+      --  dbms_output.put_line('Batch already exisits');
+        
+         select target_value into g_batch_id from api_lt_conversion
+         where source_value=g_ext_batch_id and source_appl_id='CTS' and
+         source_value_type='BATCH' and rownum =1;
+
+          --dbms_output.put_line('Batch from conversion:'||g_batch_id);
+
+          select count(*) into qcCount from batch_inputs where
+          batch_id=g_batch_id and qc_date is not null and rownum =1;
+
+          --dbms_output.put_line('QC Count:'||to_char(qcCount));
+
+          If qcCount > 0 then --batch is QCed so we cannot use the batch
+
+             -- Check if the batch is already extracted
+
+             select nvl(count(*),0) into nExtract from rgt_result_parms where
+             batch_id=g_batch_id;
+
+             if nExtract > 0 then 
+                 p_message:='The batch '||g_batch_id||' is already extracted';
+                 --dbms_output.put_line(p_message);
+                 raise BATCH_SKIP;
+             else
+               --gen_batch_id (g_batch_id);
+                p_message:='The batch '||g_batch_id||' has been QCd';
+                raise BATCH_SKIP;
+             end if;
+
+          Else
+            null;
+          End If;
+     End If;
+
+ 
+     --dbms_output.put_line('Ext Batch ID:'||g_ext_batch_id);
+     --dbms_output.put_line('LT Batch ID:'||g_batch_id);
+
+       --- Modification added for LT2018R2
+
+   /* The below check is not required for the 2018 R2 changes
+
+       -- Check if more than one contract in the same batch
+          select count(distinct contract_id) into contCount from 
+          api_tube_checkin where external_batch_id=g_ext_batch_id;
+   
+          If contCount > 1 then
+             p_message:='Batch has multiple contracts - Aborted';
+             raise BATCH_SKIP;
+          Else
+
+   */
+       
+     /*  -- Get the contract ID
+      select distinct contract_id into g_contract_id from 
+      api_tube_checkin where external_batch_id=g_ext_batch_id and 
+      rownum = 1;
+    */
+   
+      -- Get the profile set ID (profile set ID is stored in the contract fld)
+      
+      select distinct contract_id into g_profile_set_id from
+      api_tube_checkin where external_batch_id=g_ext_batch_id and
+      rownum = 1;
+  
+      --- Get the contract ID from the profile
+      begin
+        select distinct contract_id into g_contract_id from
+        rgt_contract_profile where profile_set_id=g_profile_set_id and
+        g_local_sysdate between eff_date and nvl(term_date,g_local_sysdate+1)
+        and rownum = 1;
+      exception when no_data_found then 
+        p_message:='Invalid contract ID for the profile-'||g_profile_set_id; 
+        raise BATCH_SKIP;
+      end;
+    
+      -- Check if the contract is valid/active
+     begin
+       select contract_id into g_contract_id from contracts where
+       contract_id=g_contract_id and
+       g_local_sysdate between eff_date and nvl(term_date,g_local_sysdate+10)
+       and rownum = 1;
+    exception when others then
+        p_message:='Contract not valid or future effective date..';
+        raise BATCH_SKIP;
+    end;
+ 
+ 
+      -- Get the profile seq no
+      begin
+       select profile_seq into g_profile_seq_no from 
+       rgt_contract_profile where contract_id=g_contract_id and
+       profile_set_id=g_profile_set_id and 
+       g_local_sysdate between eff_date and nvl(term_date,g_local_sysdate+1)
+       and rownum = 1;
+      exception when others then
+       p_message:=sqlerrm||' could not get progfile seq no-'||g_profile_set_id;
+       raise BATCH_SKIP;
+      end;            
+
+    --End If;   if statement commented as part of 2018 changes
+
+ 
+   --dbms_output.put_line('Contract ID='||g_contract_id||' Chap='||g_chapter_id);
+
+   -- check if the same internal batch id is linked with other contract id 
+   -- in the batch input table
+
+   select nvl(count(*),0) into nBatchInp from batch_inputs where
+   batch_id=g_batch_id and contract_id!=g_contract_id;
+
+   If nBatchInp > 0 then 
+     p_message:='LT batch ID '||g_batch_id|| 'was linked with other contract';
+     raise BATCH_SKIP;
+   End If;
+ 
+
+   -- check if more than one collection date is present in the batch
+
+  begin
+   select min(insert_date) into iDate from api_tube_checkin where
+   external_batch_id=g_ext_batch_id;
+
+   select coll_date into p_coll_date from api_tube_checkin where
+   insert_date=iDate and external_batch_id=g_ext_batch_id and rownum = 1;
+
+  --dbms_output.put_line('Coll='||to_char(p_coll_date,'mm-dd-yyyy'));
+
+  exception when others then 
+    p_message:='Could not get coll date :'||sqlerrm;
+    raise BATCH_SKIP;
+  end;
+
+
+/*
+    select count(distinct coll_date) into p_coll_count from api_tube_checkin
+    where external_batch_id=g_ext_batch_id;
+
+    If p_coll_Count > 1 then 
+      p_message:='Multiple collection date in the batch - Aborted';
+      raise BATCH_SKIP;
+    Elsif p_coll_Count = 1 then 
+      select distinct coll_date into p_coll_date from api_tube_checkin
+      where external_batch_id=g_ext_batch_id;
+    End If;
+
+*/
+
+   -- validate the collection date
+    
+    /*  If p_coll_date > g_local_sysdate then 
+           p_message:='Future collection date - Aborted';
+           raise BATCH_SKIP;
+        End If;
+   */
+
+ 
+    init_variables(g_contract_id,p_message);
+
+    if p_message!='OK' then 
+       raise BATCH_SKIP;
+    end if;
+
+  -- process individual units
+
+    --dbms_output.put_line('Batch validation is over...');
+ 
+    For Z1 in units_cur (g_ext_batch_id) loop
+    
+    Begin 
+       -- get the recived date
+       p_recv_date:=Z1.RECEIVED_DATE;
+
+
+      -- Get the profile seq no for the corresponding profile set id
+      -- contract id field in the API table has teh profile set id
+
+      begin
+       select profile_seq into g_profile_seq_no from
+       rgt_contract_profile where contract_id=g_contract_id and
+       profile_set_id=Z1.contract_id and
+       g_local_sysdate between eff_date and nvl(term_date,g_local_sysdate+1)
+       and rownum = 1;
+      exception when others then
+       p_message:=sqlerrm||' could not get profile seq no for '||Z1.contract_id;
+       raise skip_record;
+      end;
+
+      ---dbms_output.put_line('Prof seq no='||g_profile_seq_no);
+
+      --- reassign the profile set id 
+      g_profile_set_id:=Z1.contract_id;
+
+
+       If Z1.os_red_tube is not null then 
+          v_disp_unit:=Z1.os_red_tube;
+       Elsif Z1.os_purple_1 is not null then 
+         v_disp_unit:=Z1.os_purple_1;
+       Elsif Z1.os_purple_2 is not null then 
+         v_disp_unit:=Z1.os_purple_2;
+       Elsif Z1.os_red_tube_2 is not null then
+         v_disp_unit:=Z1.os_red_tube_2;   -- This is for the 4th tube checkin
+       End If;
+ 
+
+       /* If time_zone_enabled then       
+              Lifetrack_timezone_convert.get_gmt_time(g_chapter_id,
+               p_recv_date,v_recvd_date_gmt);
+          p_recv_date:=v_recvd_date_gmt;
+       End If;
+      */
+
+      If Z1.coll_date is null then 
+         p_message:='Collection date is null: '||v_disp_unit;
+         raise skip_record;
+      End If;
+     
+      If Z1.coll_date > g_local_sysdate then 
+         p_message:='Collection date is in the future: '||v_disp_unit;
+         raise skip_record;
+       End if;
+
+   
+      If Z1.coll_date!=p_coll_date then
+         p_message:='Collection Date does not match-'||v_disp_unit;
+         raise skip_record;
+      End If;
+ 
+      If p_coll_date > p_recv_date then
+         p_message:='Receive date is less than the collection date-'||
+           v_disp_unit;
+         raise skip_record;
+      End If;
+
+      If p_recv_date > g_local_sysdate  then   ---sysdate then 
+         p_message:='Receive date is in the future';
+         raise skip_record;
+      End If;
+
+
+      ------ validate red tubes start here --------
+     
+     final_int_p1:=null;
+     final_int_p2:=null;
+     final_int_red:=null;
+     final_int_red_2:=null;   --- for the 4th tube checkin
+     p_os_red:=null;
+     p_os_p1:=null;
+     p_os_p2:=null;
+     p_os_red_2:=null;         --- for the 4th tube checkin
+
+
+ IF Z1.int_red_tube is null and Z1.os_red_tube is null then 
+    NULL;
+ ELSE
+    If Z1.int_red_tube is not null and Z1.os_red_tube is null then 
+       p_message:='OS Red tube is null';
+       raise skip_record;
+    End If;   
+ 
+    If Z1.os_red_tube is not null then 
+        validate_ext_unit(RTrim(Z1.os_red_tube),p_os_red,p_status);
+       
+        If p_status!='OK' then 
+           p_message:=p_status||'-'||Z1.os_red_tube;
+           raise skip_record;
+        End If;
+    End If;
+
+   --dbms_output.put_line('Ext Red validation is over:'||p_os_red);
+
+   If g_con_bar_code='I' and g_copy_isbt='Y' then
+       if Z1.int_red_tube is not null then 
+            if Z1.os_red_tube!=Z1.int_red_tube then
+                 p_message:='Invalid external and internal unit combination';
+                 raise skip_record;
+            else
+                  p_temp_int_red:=Z1.os_red_tube;
+            end if;
+       else
+           p_temp_int_red:=Z1.os_red_tube;
+       end if;
+       /* 
+        validate_int_unit_format(p_temp_int_red,'R',final_int_red, p_status);
+        if p_status!='OK' then
+            p_message:=p_status||'-'||p_temp_int_red;
+            raise skip_record;
+        end if;
+       */
+
+       final_int_red:=p_os_red;
+       --dbms_output.put_line('Red tube is validated:'||final_int_red);
+   Elsif g_con_bar_code='I' and nvl(g_copy_isbt,'N')='N' then 
+       if Z1.int_red_tube is null then 
+            p_message:='Internal Red tube number is missing-'||
+                         Z1.os_red_tube;
+            raise skip_record;
+       else
+           validate_int_unit_format(Z1.int_red_tube,'R',final_int_red,p_status);
+           if p_status!='OK' then 
+               p_message:=p_status||'-'||Z1.int_red_tube;
+               raise skip_record;
+           end if;
+       end if;
+
+      --dbms_output.put_line('Red tube is validated:'||final_int_red);
+
+  Else     ---- g_con_bar_code in ('N','A')  then  -- MLT 3337
+
+      temp_codabar_unit:=null; 
+
+      IF nvl(g_copy_flag,'N')='N' then  -- must have value
+         temp_codabar_unit:=Z1.int_red_tube;
+         if Z1.int_red_tube is null then
+            p_message:='Internal Red tube number is missing-'|| Z1.os_red_tube;
+            raise skip_record;
+         end if;
+
+        validate_int_unit_format(temp_codabar_unit,'R',final_int_red,p_status);
+        if p_status!='OK' then
+           p_message:=p_status||'-'||Z1.int_red_tube;
+           raise skip_record;
+        end if;
+      ELSE
+         if Z1.int_red_tube is not null then
+              if Z1.os_red_tube!=Z1.int_red_tube then
+                   p_message:='Invalid external and internal unit combination';
+                   raise skip_record;
+              end if;
+            final_int_red:=Z1.os_red_tube;
+         end if;
+
+      END IF;
+  End If;
+
+ END IF;
+
+    
+   --dbms_output.put_line('OS Red: '||p_os_red||' Int Red: '||final_int_red);
+   --dbms_output.put_line('========Red End=========');
+
+    --********** validation for red tubes end here ***********--- 
+
+    
+      ------ validate purple 1 start here --------
+
+ IF Z1.int_purple_1 is null and Z1.os_purple_1 is null then 
+    Null;  -- no need to do anything
+ ELSE 
+
+    If Z1.int_purple_1 is not null and Z1.os_purple_1 is null then 
+       p_message:='OS Purple 1 is null';
+       raise skip_record;
+    End If;   
+ 
+    If Z1.os_purple_1 is not null then 
+        validate_ext_unit(RTrim(Z1.os_purple_1),p_os_p1,p_status);
+       
+        If p_status!='OK' then 
+           p_message:=p_status||'-'||Z1.os_purple_1;
+           raise skip_record;
+        End If;
+    End If;
+
+
+   If g_con_bar_code='I' and g_copy_isbt='Y' then
+       if Z1.int_purple_1 is not null then 
+            if Z1.os_purple_1!=Z1.int_purple_1 then
+                 p_message:='Invalid external and internal unit combination';
+                 raise skip_record;
+            else
+                  p_temp_int_p1:=Z1.os_purple_1;
+            end if;
+       else
+           p_temp_int_p1:=Z1.os_purple_1;
+       end if;
+      /*
+       validate_int_unit_format(p_temp_int_p1,'P1',final_int_p1,p_status);
+        if p_status!='OK' then
+                p_message:=p_status||'-'||p_temp_int_p1;
+                raise skip_record;
+        end if;
+       */
+       final_int_p1:=p_os_p1;
+      --dbms_output.put_line('Purple 1 is validated:'||final_int_p1);
+
+   Elsif g_con_bar_code='I' and nvl(g_copy_isbt,'N')='N' then 
+       if Z1.int_purple_1 is null then 
+            p_message:='Internal Red tube number is missing-'||
+                         Z1.os_purple_1;
+            raise skip_record;
+       else
+           validate_int_unit_format(Z1.int_purple_1,'P1',final_int_p1,p_status);
+            if p_status!='OK' then 
+               p_message:=p_status||'-'||Z1.int_purple_1;
+              raise skip_record;
+           end if;
+      end if;
+
+   Else     ---- g_con_bar_code in ('N','A')  then  -- MLT 3337 
+    
+     temp_codabar_unit:=null;
+     IF nvl(g_copy_flag,'N')='N' then  -- must have value
+        temp_codabar_unit:=Z1.int_purple_1;
+       if Z1.int_purple_1 is null then
+          p_message:='Internal Purple tube 1 is missing-'|| Z1.os_purple_1;
+          raise skip_record;
+       end if;
+
+      validate_int_unit_format(temp_codabar_unit,'P1',final_int_p1,p_status);
+       if p_status!='OK' then
+          p_message:=p_status||'-'||Z1.int_purple_1;
+          raise skip_record;
+       end if;
+
+     ELSE
+        If Z1.int_purple_1 is not null then
+          if Z1.os_purple_1!=Z1.int_purple_1 then
+             p_message:='Invalid external and internal P1 unit combination';
+             raise skip_record;
+          end if;
+         final_int_p1:=Z1.os_purple_1;
+       End If;
+     END IF;
+
+  End If;
+ END IF;
+
+     --dbms_output.put_line('OS P1: '||p_os_p1||' Int P1: '||final_int_p1);
+    --dbms_output.put_line('======Purple 1 End========');
+
+
+     --***************validation for purple 1 tubes end here *******-----
+
+     ------ validate purple 2 start here --------
+
+
+ IF Z1.int_purple_2 is null and Z1.os_purple_2 is null then 
+   NULL;  -- no need to do anything
+ ELSE
+    If Z1.int_purple_2 is not null and Z1.os_purple_2 is null then 
+       p_message:='OS Purple 2 is null';
+       raise skip_record;
+    End If;   
+ 
+    If Z1.os_purple_2 is not null then 
+        validate_ext_unit(RTrim(Z1.os_purple_2),p_os_p2,p_status);
+       
+        If p_status!='OK' then 
+           p_message:=p_status||'-'||Z1.os_purple_2;
+           raise skip_record;
+        End If;
+    End If;
+
+
+   If g_con_bar_code='I' and g_copy_isbt='Y' then
+       if Z1.int_purple_2 is not null then 
+            if Z1.os_purple_2!=Z1.int_purple_2 then
+                 p_message:='Invalid external and internal unit combination';
+                 raise skip_record;
+            else
+                  p_temp_int_p2:=Z1.os_purple_2;
+            end if;
+       else
+           p_temp_int_p2:=Z1.os_purple_2;
+       end if;
+     
+      /*
+       validate_int_unit_format(p_temp_int_p2,'P2', final_int_p2,p_status);
+        if p_status!='OK' then
+                p_message:=p_status||'-'||p_temp_int_p2;
+                raise skip_record;
+        end if;
+
+      */
+
+      final_int_p2:=p_os_p2;
+       --dbms_output.put_line('Purple 2 tube is validated:'||final_int_p2);
+   Elsif g_con_bar_code='I' and nvl(g_copy_isbt,'N')='N' then 
+       if Z1.int_purple_2 is null then 
+            p_message:='Internal purple 2 tube number is missing-'||
+                         Z1.os_purple_2;
+            raise skip_record;
+       else
+           validate_int_unit_format(Z1.int_purple_2,'P2',final_int_p2,p_status);
+           if p_status!='OK' then 
+               p_message:=p_status||'-'||Z1.int_purple_2;
+              raise skip_record;
+           end if;
+       end if;
+
+   Else     ---- g_con_bar_code in ('N','A')  then  -- MLT 3337
+
+      temp_codabar_unit:=null;
+      IF nvl(g_copy_flag,'N')='N' then  -- must have value
+         temp_codabar_unit:=Z1.int_purple_2;
+         if Z1.int_purple_2 is null then
+            p_message:='Internal Purple tube 2 is missing-'|| Z1.os_purple_2;
+            raise skip_record;
+         end if;
+          
+        validate_int_unit_format(temp_codabar_unit,'P2',final_int_p2,p_status);
+        if p_status!='OK' then
+           p_message:=p_status||'-'||Z1.int_purple_2;
+           raise skip_record;
+        end if;
+      ELSE
+        If Z1.int_purple_2 is not null then
+           if Z1.os_purple_2!=Z1.int_purple_2 then
+              p_message:='Invalid external and internal P2 unit combination';
+              raise skip_record;
+           end if;
+          final_int_p2:=Z1.os_purple_2;
+        End If;
+     END IF;
+
+  End If;
+ END IF;
+
+    --dbms_output.put_line('OS P2: '||p_os_p2||' Int Red: '||final_int_p2);
+    --dbms_output.put_line('=======Purple 2 End=======');
+
+
+    --*********--  validation for purple 2 tubes end here --**********---
+
+   ---- validation of red tube 2 (4th tube checkin) starts here -------
+
+
+ IF Z1.int_red_tube_2 is null and Z1.os_red_tube_2 is null then 
+    NULL;
+ ELSE
+    If Z1.int_red_tube_2 is not null and Z1.os_red_tube_2 is null then 
+       p_message:='OS Red tube 2 is null';
+       raise skip_record;
+    End If;   
+ 
+    If Z1.os_red_tube_2 is not null then 
+        validate_ext_unit(RTrim(Z1.os_red_tube_2),p_os_red_2,p_status);
+       
+        If p_status!='OK' then 
+           p_message:=p_status||'-'||Z1.os_red_tube_2;
+           raise skip_record;
+        End If;
+    End If;
+
+   --dbms_output.put_line('Ext Red tube 2 validation is over:'||p_os_red_2);
+
+   If g_con_bar_code='I' and g_copy_isbt='Y' then
+       if Z1.int_red_tube_2 is not null then 
+            if Z1.os_red_tube_2!=Z1.int_red_tube_2 then
+                 p_message:='Invalid external and internal unit combination for red tube 2';
+                 raise skip_record;
+            else
+                  p_temp_int_red_2:=Z1.os_red_tube_2;
+            end if;
+       else
+           p_temp_int_red_2:=Z1.os_red_tube_2;
+       end if;
+
+       /* 
+        validate_int_unit_format(p_temp_int_red_2,'R',final_int_red_2, p_status);
+        if p_status!='OK' then
+            p_message:=p_status||'-'||p_temp_int_red_2;
+            raise skip_record;
+        end if;
+       */
+
+       final_int_red_2:=p_os_red_2;
+       --dbms_output.put_line('Red tube 2 is validated:'||final_int_red_2);
+   Elsif g_con_bar_code='I' and nvl(g_copy_isbt,'N')='N' then 
+       if Z1.int_red_tube_2 is null then 
+            p_message:='Internal Red tube 2 number is missing-'||
+                         Z1.os_red_tube_2;
+            raise skip_record;
+       else
+           validate_int_unit_format(Z1.int_red_tube_2,'R',final_int_red_2,p_status);
+           if p_status!='OK' then 
+               p_message:=p_status||'-'||Z1.int_red_tube_2;
+               raise skip_record;
+           end if;
+       end if;
+
+      --dbms_output.put_line('Red tube 2 is validated:'||final_int_red_2);
+
+   Else     ---- g_con_bar_code in ('N','A')  then  -- MLT 3337
+
+      temp_codabar_unit:=null; 
+
+      IF nvl(g_copy_flag,'N')='N' then  -- must have value
+         temp_codabar_unit:=Z1.int_red_tube_2;
+         if Z1.int_red_tube_2 is null then
+            p_message:='Internal Red tube number 2 is missing-'|| Z1.os_red_tube_2;
+            raise skip_record;
+         end if;
+
+        validate_int_unit_format(temp_codabar_unit,'R',final_int_red_2,p_status);
+        if p_status!='OK' then
+           p_message:=p_status||'-'||Z1.int_red_tube_2;
+           raise skip_record;
+        end if;
+      ELSE
+         if Z1.int_red_tube_2 is not null then
+              if Z1.os_red_tube_2!=Z1.int_red_tube_2 then
+                   p_message:='Invalid external and internal unit combination for red tube 2';
+                   raise skip_record;
+              end if;
+            final_int_red_2:=Z1.os_red_tube_2;
+         end if;
+
+      END IF;
+  End If;
+
+ END IF;
+
+    
+   --dbms_output.put_line('OS Red 2: '||p_os_red_2||' Int Red: '||final_int_red_2);
+   --dbms_output.put_line('========Red End=========');
+
+
+    ---- ********* validation of red tube 2 (4th tube checkin) Ends here 
+
+
+    -- Verify all the tubes values are the same
+
+    verify_tube_consistency(final_int_red,final_int_p1,final_int_p2,final_int_red_2,
+                                                     p_tube_status);
+
+    if p_tube_status!='OK' then 
+       p_message:=p_tube_status;
+       raise skip_record;
+    end if;
+
+   --dbms_output.put_line('Consistency is over');
+
+   If final_int_red is not null then
+
+      ---dbms_output.put_line('Final int red='||final_int_red); 
+      P_INT_UNIT:=final_int_red;
+      P_OS_UNIT:=p_os_red;
+      
+
+   ElsIf final_int_p1 is not null then
+     ---dbms_output.put_line('Final_int_p1='||final_int_p1);
+      P_INT_UNIT:=final_int_p1;
+      P_OS_UNIT:=p_os_p1;
+
+   Elsif final_int_p2 is not null then
+      ---dbms_output.put_line('Final_int_p2='||final_int_p2);
+      P_INT_UNIT:=final_int_p2;
+      P_OS_UNIT:=p_os_p2;
+  Elsif final_int_red_2 is not null then
+  ---dbms_output.put_line('Final_int_red_2='||final_int_red_2);
+      P_INT_UNIT:=final_int_red_2;
+      P_OS_UNIT:=p_os_red_2;
+   End If;
+
+    -- Check for duplicates
+    -- if the red and P1 and p2 got splitted into 2 records then make
+    --    sure the OS red or p1 and p2 are not repeated in both the records
+   
+    If p_os_red is not null then 
+
+        select nvl(count(*),0) into nCount from rgt_tubes where
+        cbc_unit_id=P_OS_UNIT and contract_id=g_contract_id and
+        red1_flag is not null; 
+
+        if nCount > 0 then
+           p_message:='Duplicate OS (Red)unit ID for this contract';
+           raise skip_record;
+        end if;
+   End If;
+
+   If p_os_p1 is not null then
+
+     select nvl(count(*),0) into nCount from rgt_tubes where
+     cbc_unit_id=P_OS_UNIT and contract_id=g_contract_id and
+     purple1_flag is not null; 
+
+     if nCount > 0 then
+        p_message:='Duplicate OS (P1)unit ID for this contract';
+        raise skip_record;
+     end if;
+
+   End If;
+
+   If p_os_p2 is not null then
+
+     select nvl(count(*),0) into nCount from rgt_tubes where
+     cbc_unit_id=P_OS_UNIT and contract_id=g_contract_id and
+     purple2_flag is not null; 
+
+     if nCount > 0 then
+        p_message:='Duplicate OS (P2)unit ID for this contract';
+        raise skip_record;
+     end if;
+   
+   End If;
+
+   If p_os_red_2 is not null then   -- for the 4th tube checkin 
+
+     select nvl(count(*),0) into nCount from rgt_tubes where
+     cbc_unit_id=P_OS_UNIT and contract_id=g_contract_id and
+     red2_flag is not null; 
+
+     if nCount > 0 then
+        p_message:='Duplicate OS (R2 )unit ID for this contract';
+        raise skip_record;
+     end if;
+   
+   End If;
+
+
+ 
+   -- Check if the same OS unit is used in differnt contract
+ 
+   select nvl(count(*),0) into nCount from rgt_tubes where
+   cbc_unit_id=P_OS_UNIT and contract_id!=g_contract_id;
+
+   if nCount > 0 then
+      p_message:='The OS unit was used in another contract';
+      raise skip_record;
+   end if;
+
+
+    select nvl(count(*),0) into nCount from units where
+    unit_id=P_INT_UNIT and contract_id=g_contract_id;
+
+    If nCount> 0 then
+       select nvl(count(*),0) into pCount from rgt_tubes where
+       cbc_unit_id=P_OS_UNIT and unit_id=P_INT_UNIT and 
+       contract_id=g_contract_id;
+      
+       -- this is coverup if the Red , P1 and P2 and R2 is splitted into two records 
+       if pCount = 0 then 
+          p_message:='Duplicate unit ID for this contract';
+          raise skip_record;
+       End If;
+    End If;
+
+    select nvl(count(*),0) into nCount from units where
+    unit_id=P_INT_UNIT and contract_id!=g_contract_id;
+
+    If nCount > 0 then 
+       p_message:='The interanl unit id is used in another contract';
+       raise skip_record;
+    End If;
+
+
+    -- inserting into all the tables
+
+    insert_batch(Z1.RECEIVED_DATE,g_profile_seq_no,p_message);
+
+     --dbms_output.put_line('Batch is inserted..');
+    if p_message!='OK' then 
+      raise skip_record;
+    end if;
+
+     --dbms_output.put_line('Unit INT='||P_INT_UNIT||'Unit OS='||P_OS_UNIT); 
+
+    
+    insert_units (g_contract_id, P_OS_UNIT , P_INT_UNIT  , final_int_red ,
+                  final_int_p1, final_int_p2 , final_int_red_2,p_coll_date ,
+                  p_unit_status);
+  
+    --dbms_output.put_line('Unit='||P_INT_UNIT||' insert='||p_unit_status); 
+
+    If p_unit_status = 'OK' then 
+    
+             insert_utrs (P_INT_UNIT, P_OS_UNIT, p_coll_date ,
+                           p_utrs_status );
+
+              --dbms_output.put_line('UTRS='||final_int_red||' insert='||
+              --                    p_utrs_status);
+            If p_utrs_status='OK' then
+               
+                insert_tubes (P_INT_UNIT, P_OS_UNIT , final_int_red, 
+                              final_int_p1, final_int_p2, final_int_red_2,
+                              p_tube_status); 
+                      
+                 --         dbms_output.put_line('Tube='||final_int_red||
+                 --             ' insert='||p_tube_status);
+         
+                  If p_tube_status='OK' then 
+                     null;
+                  Else
+                    delete units where unit_id=P_INT_UNIT and 
+                     program_id='LTAPI';
+
+                     delete UTRS where unit_id=P_OS_UNIT and 
+                     program_id='LTAPI'; 
+
+                     p_message:=p_tube_status;
+                     raise skip_record;
+                  End If;
+            Else
+              delete units where unit_id=P_INT_UNIT and program_id='LTAPI';
+              p_message:=p_utrs_status;
+              raise skip_record;
+            End If;
+    Else
+      p_message:=p_unit_status;
+      raise skip_record;
+    End If;
+
+     add_log_entry('Successfully Interfaced',substr(P_OS_UNIT,1,13),
+                   substr(P_INT_UNIT,1,13));
+
+  Exception
+     when skip_record then 
+       add_log_entry(p_message,g_ext_batch_id,g_batch_id);
+  End;
+  End loop;
+
+   -- update the procesed flag as C
+   
+   --populate_archive (g_ext_batch_id,p_message);
+   --If p_message!='OK' then 
+   --  add_log_entry(p_message,g_ext_batch_id,g_batch_id);
+   --End if;
+
+  Update api_tube_checkin set process_flag='C' where
+  external_batch_id=g_ext_batch_id;
+
+  --dbms_output.put_line('*****Done for ='||g_ext_batch_id);
+
+  EXCEPTION WHEN BATCH_SKIP THEN
+
+       ---dbms_output.put_line('Skip batch='||g_ext_batch_id);
+       add_log_entry(p_message,g_ext_batch_id,g_batch_id);
+
+       --populate_archive (g_ext_batch_id,p_message);
+       --If p_message!='OK' then
+       --   add_log_entry(p_message,g_ext_batch_id,g_batch_id);
+       --End if;
+      Update api_tube_checkin set process_flag='C' where
+      external_batch_id=g_ext_batch_id;
+ 
+  END;
+  commit;
+  END LOOP;  
+
+  populate_archive(p_message);
+  COMMIT; 
+End MAIN_PROC;
+
+PROCEDURE VALIDATE_UNIT_CHKDIGIT (P_unit_id IN Varchar2,
+                p_chk_digit OUT Varchar2 )
+      
+IS
+   temp_v_len number :=0;
+   temp_v_chr varchar2(1);
+   temp_n_A   Number :=0;
+   temp_n_check_value Number:=0;
+   temp_n_Si    Number:=0;
+   temp_v_unit_id  varchar2(16) := P_unit_id;  
+BEGIN
+   temp_v_len := NVL(LENGTH ( p_unit_id ), 0) ;    
+   FOR I in 1 .. temp_v_len 
+   LOOP
+      temp_v_chr := SUBSTR(temp_v_unit_id,I,1);
+      IF( LTRIM(temp_v_chr,'0987654321') IS  NULL)  THEN
+         temp_n_A := ASCII( temp_v_chr) - 48;
+      ELSIF ( temp_v_chr = '*' ) THEN
+         temp_n_A := 36;
+      ELSE
+         temp_n_A := ASCII(temp_v_chr) - 55;
+      END IF;
+      temp_n_Si := MOD(((temp_n_Si+temp_n_A)*2),37);
+   END LOOP;
+   temp_n_check_value :=MOD((38-temp_n_Si),37);
+  -- based on the check_value get the decoded value from the
+   p_chk_digit := SUBSTR('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ*',
+                         temp_n_check_value+1,1);
+   p_chk_digit := '-' || p_chk_digit;
+END VALIDATE_UNIT_CHKDIGIT;
+
+Procedure validate_int_unit_format(pl_in_unit     in   varchar2,
+                                   pl_tube_type   in   varchar2, 
+                                   pl_out_unit_id out  varchar2,
+                                   pl_status      out varchar2) is
+p_temp_unit   varchar2(20);
+p_temp_chk_dgt  varchar2(5);
+pl_unit_scheme  varchar2(1);
+nScount         number:=0;
+p_center_id     varchar2(10);
+p_label_year    varchar2(2);
+p_serial_no     varchar2(8);
+p_codabar_scheme varchar2(1);
+p_isbt_date      date;
+bCount           number:=0;
+mCode            varchar2(2);
+
+Begin
+
+  pl_status:='OK';
+
+    select isbt_start_date into p_isbt_date from chapters where
+    chapter_id=g_chapter_id and g_local_sysdate between eff_date and
+    nvl(term_date,sysdate+10);
+
+   
+
+ IF p_isbt_date is not null then  -- for ISBT/code128
+
+  
+   If Length(pl_in_unit) not in (13,14,16,15) then 
+      pl_status:='Invalid Unit Length for ISBT/Code 128 standard';
+      return;
+   End if;
+
+
+   If Length(pl_in_unit) in (15,16) and substr(pl_in_unit,-2)!='00' then
+      pl_status:='Invalid ISBT unit-last 2 digits are not 00';
+      return;
+   End If; 
+ 
+    if Length(pl_in_unit) in (14,16) then
+       p_temp_unit:=substr(pl_in_unit,2,13);
+    elsif Length(pl_in_unit) = 15 then 
+       p_temp_unit:=substr(pl_in_unit,1,13);
+    else
+       p_temp_unit:=pl_in_unit;
+    end if;
+
+      p_center_id := SUBSTR( p_temp_unit,1,5 );
+      p_label_year  := SUBSTR( p_temp_unit,6,2 ); 
+      p_serial_no := SUBSTR( p_temp_unit,8,6 ); 
+
+
+      --dbms_output.put_line('Fac='||p_center_id||' Yr='||p_label_year);
+
+      select nvl(count(*),0) into nSCount from valid_collection_agencies where
+      contract_id=g_contract_id and coll_id=p_center_id and 
+      --chapter_id=g_chapter_id and  for LT_2018 R2
+      chapter_id in (select chapter_id from rgt_contract_chapters
+                     where contract_id=g_contract_id and g_local_sysdate
+                     between eff_date and nvl(term_date,sysdate+10)
+                    )
+      and g_local_sysdate between eff_date and nvl(term_date,sysdate+10);
+
+     If nSCount = 0 then 
+       select nvl(count(*),0) into nSCount from valid_collection_agencies where
+       contract_id='INTERNAL' and coll_id=p_center_id and
+       --chapter_id=g_chapter_id and  For LT_2018_R2
+       g_local_sysdate between eff_date and nvl(term_date,sysdate+10);
+     End If;
+
+
+     If nSCount = 0 then 
+        pl_status:='Invalid Facility ID in the unit';
+        return;
+     Else
+       --verify collection year
+
+       If LTRIM(p_label_year,'0123456789') IS NOT NULL Then
+          pl_status:='Invalid collection year';
+          return;
+       End If;
+
+     End If;
+
+    validate_unit_chkdigit ( SUBSTR(p_temp_unit,2,13) ,p_temp_chk_dgt) ;
+     pl_out_unit_id:=p_temp_unit;
+     pl_unit_scheme:='I';
+   --End If;
+
+ELSE   -- for codabar
+
+   --dbms_output.put_line('P_temp_unit='||p_temp_unit||' IN='||pl_in_unit);
+
+  --get the codabar code scheme
+
+   select codabar_unit_scheme into 
+   p_codabar_scheme from institutions;
+
+  If (NVL(length(pl_in_unit), 0) = 7 and p_codabar_scheme ='N' ) then
+        if ltrim(pl_in_unit,'0123456789') is null then
+           pl_out_unit_id:=pl_in_unit;
+           pl_unit_scheme:='C';
+           return;
+        else
+          pl_status:='Codabar unit does not match with unit scheme(N)';
+          return;
+        end if;
+
+  Elsif (NVL(length(pl_in_unit), 0) = 7 and p_codabar_scheme ='A' ) then
+
+     If ltrim(pl_in_unit,'0123456789') is null then
+
+       begin
+         select eye_read_trns into mCode from bar_code_prefixes where
+         machine_code=substr(pl_in_unit,1,2);
+
+          select lpad(mCode,2,' ') ||substr(pl_in_unit,3) into
+          pl_out_unit_id from dual;
+
+       exception when no_data_found then
+         pl_status:='Could not translate into Alphanumeric';
+         return;
+       end;
+
+      ----
+      ElsIf  ltrim(substr(pl_in_unit,3),'0123456789') is null then
+          
+          select count(*) into bCount from bar_code_prefixes where
+          eye_read_trns=substr(pl_in_unit,1,2);
+          
+          if bCount > 0 then
+             pl_out_unit_id:=pl_in_unit;
+             pl_unit_scheme:='C';
+             return;
+          else
+             pl_status:='Invalid Codabar unit-wrong eye read trns';
+             return;
+          end if;
+
+      Else
+        pl_status:='Codabar unit does not match with unit scheme(A)';
+        return;
+      End If;
+
+  Elsif (NVL(length(pl_in_unit), 0) = 6 and p_codabar_scheme = 'A') then
+       
+      select count(*) into bCount from bar_code_prefixes where
+       eye_read_trns=' '||substr(pl_in_unit,1,1);
+
+       if bCount > 0 then 
+          pl_out_unit_id:=' '||pl_in_unit;
+          pl_unit_scheme:='C';
+          return;
+       else
+          pl_status:='Invalid codabar unit number';
+          return;
+       end if;
+  Elsif (NVL(length(pl_in_unit), 0) = 9 and p_codabar_scheme ='N' ) then
+        --- ex d0001235d cases IM:146
+
+        If Ltrim(substr(pl_in_unit,2,7),'0123456789') is null then 
+           pl_out_unit_id:=substr(pl_in_unit,2,7);
+           pl_unit_scheme:='C';
+           return;
+        else
+          pl_status:='Codabar unit does not match with unit scheme(N)';
+          return;
+        end if;
+  Else
+      pl_status:='Invalid codabar unit length for the specified scheme';
+      return;
+  End if;
+
+END IF;
+
+
+End validate_int_unit_format;
+
+Procedure validate_ext_unit(pl_os_tube in varchar2,
+                            pl_final_os_unit   out varchar2,
+                            pl_out_status   out varchar2
+              ) is
+
+ temp_unit_scheme    VARCHAR2(1);
+ p_temp_unit_id      VARCHAR2(16);
+ p_center_id         varchar2(20);
+ p_label_year        varchar2(4);
+ p_serial_no         varchar2(8); 
+ nsCount              NUMBER:=0;
+ bCount              number:=0;
+ mCode               varchar2(2);
+ p_temp_chk_dgt      varchar2(5);
+Begin
+
+   pl_out_status:='OK';
+
+  --dbms_output.put_line('g_con_bar_code='||g_con_bar_code ||'Length: '||
+  --      to_char(Length(pl_os_tube)));
+
+  IF g_con_bar_code in ('C','A','N') and length(pl_os_tube) in (6,7,8,9) then
+ 
+      If g_con_bar_code='N' then
+           If nvl(length(pl_os_tube),0)= 7 and 
+             ltrim(pl_os_tube,'0123456789') is null then 
+
+             pl_final_os_unit:=pl_os_tube;
+
+           Elsif nvl(length(pl_os_tube),0)=7 and 
+               ltrim(pl_os_tube,'0123456789') is not null then 
+               
+                pl_out_status:='Invalid External codabar unit-Scheme mismatch';
+                return;
+           Elsif nvl(length(pl_os_tube),0)=9 then
+               if ltrim(substr(pl_os_tube,2,7),'0123456789') is null then
+                  pl_final_os_unit:=substr(pl_os_tube,2,7);
+               else
+                  pl_out_status:='Invalid external codabar unit..';
+                  return;
+               end if;
+           Else
+              pl_out_status:='Invalid External codabar unit-Scheme mismatch';
+              return;
+           End if;
+     Elsif g_con_bar_code='A' then
+       ------------
+
+         If nvl(length(pl_os_tube),0)=7 and
+           ltrim(pl_os_tube,'0123456789') is null then
+
+           begin
+             select eye_read_trns into mCode from bar_code_prefixes where
+             machine_code=substr(pl_os_tube,1,2);
+
+             select lpad(mCode,2,' ') ||substr(pl_os_tube,3) into
+             pl_final_os_unit from dual;
+
+           exception when no_data_found then
+             pl_out_status:='Could not translate into Alphanumeric';
+             return;
+           end;
+
+         Elsif nvl(length(pl_os_tube),0)= 7 and 
+             ltrim(substr(pl_os_tube,3),'0123456789') is null then 
+
+             select nvl(count(*),0) into bCount from bar_code_prefixes where
+             eye_read_trns=substr(pl_os_tube,1,2);
+             If bCount > 0 then 
+                pl_final_os_unit:=pl_os_tube;
+             Else
+                pl_out_status:='Invalid External codabar unit-Scheme mismatch';
+                return;
+             End If;
+
+           Elsif nvl(length(pl_os_tube),0)=6 then 
+               select count(*) into bCount from bar_code_prefixes where
+               eye_read_trns=' '||substr(pl_os_tube,1,1);
+      
+               if bCount > 0 then 
+                  pl_final_os_unit:=' '||substr(pl_os_tube,2);
+               else
+                 pl_out_status:='Invalid external codabar unit id';
+                 return;
+              end if;
+           Else
+              pl_out_status:='Invalid external codabar unit id';
+              return;
+          End If;
+
+       ----------------- 
+     End If; 
+ ELSIF g_con_bar_code='I'   then  -- or Length(pl_os_tube) in (13,16,15) then 
+
+ IF Length(pl_os_tube) in (13,16,14,15) then  -- ISBT unit
+
+
+    If Length(pl_os_tube) in (15,16) and substr(pl_os_tube,-2)!='00' then
+      pl_out_status:='Invalid ISBT unit-last 2 digits are not 00';
+      return;
+    End If;
+ 
+    if Length(pl_os_tube) in (14,16) then
+       p_temp_unit_id:=substr(pl_os_tube,2,13);
+    elsif Length(pl_os_tube) = 15 then
+       p_temp_unit_id:=substr(pl_os_tube,1,13);
+    else
+       p_temp_unit_id:=pl_os_tube;
+    end if;
+
+
+     p_center_id  := SUBSTR( p_temp_unit_id,1,5 );
+     p_label_year := SUBSTR( p_temp_unit_id,6,2 );  
+     p_serial_no  := SUBSTR( p_temp_unit_id,8,6 ); 
+
+
+     select nvl(count(*),0) into nSCount from valid_collection_agencies where
+     contract_id=g_contract_id and coll_id=p_center_id and 
+     ---chapter_id=g_chapter_id and  for LT_2018R2
+     chapter_id in (select chapter_id from rgt_contract_chapters
+                     where contract_id=g_contract_id and g_local_sysdate
+                     between eff_date and nvl(term_date,sysdate+10)
+                    )
+     and g_local_sysdate between eff_date and nvl(term_date,sysdate+10);
+
+     If nSCount = 0 then 
+       pl_out_status:='Invalid Facility ID in the unit for OS unit';
+       return;
+     Else
+      --verify collection year
+
+       If LTRIM(p_label_year,'0123456789') IS NOT NULL Then
+          pl_out_status:='Invalid collection year in the OS unit';
+          return;
+       End If;
+
+     End If;
+
+     validate_unit_chkdigit ( SUBSTR(p_temp_unit_id,2,13) ,p_temp_chk_dgt) ;
+     pl_final_os_unit:=p_temp_unit_id;
+     --pl_unit_scheme:='I';
+   --End If;
+  ELSE
+      pl_out_status:='Unknown ISBT Unit scheme format';
+      return;
+  END IF;  -- if Length
+
+ELSIF g_con_bar_code='X' then 
+
+      --- this logic is for the free format (out side of ISBT/Codabar)
+
+      If Length(pl_os_tube)> 15 then
+          pl_out_status:='The Length of the free format unit is too long';
+          return;
+      ElsIf LTrim (pl_os_tube,'1234567890-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ') is not null then 
+          pl_out_status:='Special characters are not allowed in the free format Unit ID';
+          return;  
+      Else
+        pl_final_os_unit:=pl_os_tube;
+      End If;
+ELSE
+    pl_out_status:='Unknown Format -- should be ISBT, Codabar or Free format (X)';
+    return;
+END IF;
+
+ /*  If g_con_bar_code='X' then 
+     pl_final_os_unit:=p_temp_unit_id;
+   End If;
+*/
+
+End validate_ext_unit;
+
+Procedure insert_units (pl_contract_id in varchar2,
+                        pl_os_unit_id in varchar2,
+                        pl_unit_id    in varchar2 ,
+                        pl_red_tube   in varchar2,
+                        pl_p1_tube    in varchar2,
+                        pl_p2_tube    in varchar2,
+                        pl_red_tube_2 in varchar2, 
+                        pl_coll_date in date,
+                        pl_status out varchar2) is
+    dummy_x  VARCHAR2(1);
+    dummy_chk_digit VARCHAR2(2);
+    dummy_coll_date date;
+Begin
+
+    pl_status:='OK';
+    select distinct 'x' into dummy_x
+    from units where unit_id = pl_unit_id 
+    and  chapter_id = g_chapter_id 
+    and  contract_id =pl_contract_id;
+     Begin
+        update units set 
+          red_tube_flag = decode(pl_red_tube,null,red_tube_flag,'Y'),
+          purple_tube_flag = decode(pl_p1_tube,null,purple_tube_flag,'Y'),
+           serum_plasma_ind = decode(pl_p2_tube,null,serum_plasma_ind,'Y'),
+           red_tube_2_flag = decode(pl_red_tube_2,null,red_tube_2_flag,'Y'),
+           program_id = 'LTAPI'
+           where unit_id = pl_unit_id and
+           chapter_id = g_chapter_id and
+           contract_id = pl_contract_id;
+     Exception
+        when OTHERS then
+           pl_status:='Cannot update units-'||sqlerrm;
+           return;
+     End;
+Exception
+     when NO_DATA_FOUND then
+     BEGIN
+          --dummy_chk_digit := chk_digit_query(pl_unit_id, null, null);
+          validate_unit_chkdigit (pl_unit_id,dummy_chk_digit) ;
+          --dummy_coll_date := get_coll_date(pl_unit_id,g_contract_id); 
+          IF pl_coll_date != dummy_coll_date THEN
+            p_message:='Coll Date should be '||to_char(dummy_coll_date);
+            return;
+          END IF;
+         --
+         insert into units
+                (chapter_id,
+                 contract_id,
+                 unit_id,
+                 coll_date,
+                 chk_digit, 
+                 insert_dats,
+                 batch_id,
+                 received_date,
+                 os_unit_id,
+                 red_tube_flag,
+                 purple_tube_flag,
+                 serum_plasma_ind,
+                 red_tube_2_flag,
+                 QC_CHECKIN_DATE,
+                 QC_CHECKIN_FLAG,
+                 program_id)
+                values
+                  (g_chapter_id,
+                   pl_contract_id,
+                   pl_unit_id,
+                   pl_coll_date, ---dummy_coll_date,
+                   substr(dummy_chk_digit,2),
+                   sysdate,
+                   g_batch_id,
+                   trunc(p_recv_date),
+                   pl_os_unit_id,
+                   decode(pl_red_tube,null,'*','Y'),
+                    decode(pl_p1_tube,null,'*','Y'),
+                    decode(pl_p2_tube,null,'*','Y'),
+                    decode(pl_red_tube_2,null,'*','Y'),
+                    SYSDATE,
+                    'Y',
+                   'LTAPT');
+            
+          EXCEPTION 
+               when OTHERS then
+                     pl_status:=sqlerrm;
+                     return;
+          END;
+   when OTHERS then
+       pl_status:=sqlerrm;
+       return;
+END insert_units;
+
+Procedure insert_tubes (pl_int_unit_id  in varchar2,
+                        pl_os_unit_id   in varchar2,
+                        pl_unit_red     in varchar2,
+                        pl_unit_p1      in varchar2,
+                        pl_unit_p2      in varchar2,
+                        pl_unit_red_2   in varchar2,
+                        pl_status       out varchar2) is
+dummy_x  VARCHAR2(1);
+BEGIN
+
+     pl_status:='OK';
+     select distinct 'x' into dummy_x
+        from rgt_tubes where unit_id = pl_int_unit_id and
+                          chapter_id = g_chapter_id and
+                         contract_id = g_contract_id;
+     BEGIN
+     update rgt_tubes
+        set  red1_flag =
+               decode(pl_unit_red,null,red1_flag,'Y'),
+             purple1_flag =
+               decode(pl_unit_p1,null,purple1_flag,'Y'),
+             purple2_flag =
+               decode(pl_unit_p2,null,purple2_flag,'Y'),
+            red2_flag =
+               decode(pl_unit_red_2,null,red2_flag,'Y'),    --- 4th tube checkin
+             program_id = 'LTAPI'
+        where unit_id = pl_int_unit_id and
+              chapter_id = g_chapter_id and
+              contract_id =g_contract_id;
+     EXCEPTION
+       when OTHERS then 
+          pl_status:='Update rgt tubes-'||sqlerrm;
+          return;
+     END;
+EXCEPTION
+    when NO_DATA_FOUND
+     then
+     BEGIN
+       insert into rgt_tubes
+                  (chapter_id,
+                   contract_id,
+                   batch_id,
+                   unit_id,
+                   tube_check_in_date,
+                   cbc_unit_id,
+                   red1_flag,
+                   red2_flag,
+                   purple1_flag,
+                   purple2_flag,
+                   user_id,
+                   profile_set_id,
+                   program_id)
+        values
+                  (g_chapter_id,
+                   g_contract_id,
+                   g_batch_id,
+                   pl_int_unit_id,
+                   sysdate,
+                   pl_os_unit_id,
+                    decode(pl_unit_red,null,null,'Y'),
+                    decode(pl_unit_red_2,null,null,'Y'),
+                    decode(pl_unit_p1,null,null,'Y'),
+                    decode(pl_unit_p2,null,null,'Y'),
+                   'SBCSYS',
+                   g_profile_set_id,
+                   'LTAPI');
+    EXCEPTION
+      when OTHERS then
+          pl_status:='Insert RGT_TUBES:'||sqlerrm;
+          return;
+    END;
+    when OTHERS then
+          pl_status:='Insert RGT TUBES:'||sqlerrm; 
+         return;
+
+END INSERT_TUBES;
+
+Procedure update_holding_data (pl_int_unit_id in varchar2,
+                               pl_coll_date in date,
+                               pl_out_status out varchar2) is
+
+     temp_test_seq_no       number;
+     temp_max_test_seq_no   number;   
+     pl_test_seq_no         number:=0;
+     nProf                  number:=0;
+     nAuto                  number:=0;
+     lv_profile_set_id      varchar2(20); -- V06, -- MLT 623
+     
+    cursor c1 is
+         select test_id, test_seq_no,
+                test_state, test_mode,
+                result_status_1, result_status_2,
+                tb_id, test_chapter_id, tb_seq_no,
+                well_number, absorbance, ratio, result_dats,
+                result_user_id, testing_lab_code, cancel_flag,
+                profile_set_id
+         from   unit_test_base
+         where  unit_id = pl_int_unit_id and
+                trunc(coll_date) = trunc(pl_coll_date) and
+                nvl(test_chapter_id,chapter_id) = g_chapter_id and
+                tb_id is not null and
+                result_status_1 is not null and
+                result_status_2 is null and
+                cancel_flag is null
+         order by test_id, test_seq_no;
+
+    cursor c3 is
+         select test_id, test_seq_no, insert_Dats,
+                insert_user_id, program_id,profile_set_id
+         from   unit_test_base
+         where  unit_id = pl_int_unit_id and
+                trunc(coll_date) = trunc(pl_coll_date) and
+                nvl(test_chapter_id,chapter_id) = g_chapter_id and
+                tb_id is null
+         order by test_id, test_seq_no;
+
+     -- V06 (MLT 623) -- 08/10/2018
+     -- Added below function to check if test is part of profile;  
+    function is_profile_test(p_test_id in varchar2) return boolean is
+     nCnt NUMBER := 0;
+    begin
+     select count(1) into nCnt
+      from contract_tests_image a
+     where a.contract_id = g_contract_id 
+       and test_id = p_test_id
+        and  a.profile_seq_no = g_profile_seq_no 
+        and  a.profile_set_id = g_profile_set_id 
+       and  g_local_sysdate between eff_date and nvl(term_date,g_local_sysdate+365);
+
+     if nCnt = 0 then
+       RETURN FALSE;
+     else
+       RETURN TRUE;
+     end if;         
+    end is_profile_test;
+    --------------------------
+
+BEGIN
+
+    pl_out_status:='OK';
+
+    Begin
+        --
+        -- it is possible that interdictions were created
+        -- from test results at a time when the unit was not
+        -- checked-in at all. In such cases, the chapter_id and
+        -- coll_date are going to be null in unit_interdictions.
+        -- This is updated the first unit is checked
+        -- in from any source. 
+
+        update unit_interdictions
+        set chapter_id = g_chapter_id,
+            coll_date = pl_coll_date,
+            program_id = 'LTAPI'
+        where  unit_id = pl_int_unit_id and
+               (chapter_id is null or coll_date is null);
+    Exception
+            when OTHERS
+            then
+              pl_out_status:='Inter update failed-'||sqlerrm;
+              return;
+    End;
+
+    Begin
+        --
+        -- it is possible that tests were created in utrs
+        -- at a time when the unit was not checked-in at all,
+        -- specially for antigens. In such cases, the chapter_id and
+        -- coll_date are going to be null in utrs.
+        -- This is updated when the first unit is checked
+        -- in from any source. There is an inherent
+        -- bug here as units from different chapters might
+        -- actually get the same chapter_id.
+        --
+        update utrs
+        set    chapter_id = g_chapter_id,
+               coll_date = pl_coll_date,
+               program_id = 'LTAPI'
+        where  unit_id = pl_int_unit_id and
+               (chapter_id is null or coll_date is null);
+    Exception
+       when OTHERS then
+           pl_out_status:='UTRS update failed-'||sqlerrm;
+           return;
+    End;
+
+    Begin
+        --
+        -- it is possible that attributes were created
+        -- from test results at a time when the unit was not
+        -- checked-in at all. In such cases, the chapter_id and
+        -- coll_date are going to be null in unit_attributes.
+        -- This is updated the first unit is checked
+        -- in from any source. There is an inherent
+        -- bug here as units from different chapters might
+        -- actually get the same chapter_id.
+        --
+        update unit_attributes
+        set    chapter_id = g_chapter_id,
+               coll_date = pl_coll_date,
+               program_id = 'LTAPI'
+        where  unit_id = pl_int_unit_id and
+               (chapter_id is null or coll_date is null);
+    Exception
+       when OTHERS then
+           pl_out_status:='UNIT ATTRIBUTE update failed-'||sqlerrm;
+           return;
+    End;
+    
+    Begin
+        --
+        -- it is possible that transactions were created
+        -- in unit_test_base when the unit was not
+        -- checked-in at all. In such cases, the chapter_id and
+        -- coll_date are going to be null in
+        -- unit_test_base. This is updated when the first unit
+        -- is checked in from any source. There is an inherent
+        -- bug here in case of collision between unit_ids from
+        -- two different chapters.
+        --
+        update unit_test_base
+        set    chapter_id = nvl(test_chapter_id,g_chapter_id),
+               coll_date = pl_coll_date,
+               program_id = 'LTAPI'
+        where  unit_id = pl_int_unit_id and
+               (chapter_id is null or coll_date is null);
+    Exception
+        when OTHERS then
+           pl_out_status:='UTB update failed-'||sqlerrm;
+           return;  
+    End;
+
+     --- cursor processing
+
+     Begin
+      For c3_rec in c3 loop
+
+      /* make sure the test is a profile test
+       select nvl(count(*),0) into nProf from contract_tests_image where
+       contract_id=g_contract_id and test_id=c3_rec.test_id;
+
+       -- if this is not a profile test check if the auto schedule flag is set
+
+       if nProf=0 then
+          select nvl(count(*),0) into nAuto from valid_tests where 
+          test_id=c3_rec.test_id and nvl(auto_schedule,'N')='Y' and
+          sysdate between eff_date and nvl(term_date,sysdate+10);
+       end if;
+     */
+
+       -- V06 (MLT 623) -- 08/10/2018
+       if is_profile_test(c3_rec.test_id) then
+         lv_profile_set_id := g_profile_set_id;
+       else
+         lv_profile_set_id := NULL;
+       end if;
+        -------------
+           
+        begin
+           insert into utrs
+         (unit_id, coll_date, chapter_id,
+         test_seq_no, test_id, insert_dats,
+          insert_user_id, program_id,profile_set_id)
+          select pl_int_unit_id , pl_coll_date,
+                 g_chapter_id, nvl(max(test_seq_no),0)+1,
+                 c3_rec.test_id, c3_rec.insert_dats,
+                 c3_rec.insert_user_id, c3_rec.program_id,
+                 lv_profile_set_id --c3_rec.profile_set_id
+          from   utrs
+          where  unit_id = pl_int_unit_id
+                 and  coll_date = pl_coll_date
+                 and  chapter_id = g_chapter_id and
+                 test_id = c3_rec.test_id;
+        exception
+          when OTHERS then
+            pl_out_status:='Error in inserting into utrs from utb '||
+                            SQLERRM;
+            return;
+        end;
+       
+         begin
+           delete from unit_test_base
+           where  unit_id = pl_int_unit_id
+           and  coll_date = pl_coll_date
+           and  nvl(test_chapter_id,chapter_id) = g_chapter_id and
+           test_id = c3_rec.test_id and
+           test_seq_no = c3_rec.test_seq_no;
+         exception
+           when OTHERS then
+            pl_out_status:='Error in deleting from utb - 1'||SQLERRM;
+           return;
+         end;
+      End loop;
+    End;
+   
+   Begin
+    For c1_rec in c1 loop
+     begin
+
+      -- V06 (MLT 623) -- 08/10/2018
+      if is_profile_test(c1_rec.test_id) then
+       lv_profile_set_id := g_profile_set_id;
+      else
+       lv_profile_set_id := NULL;
+      end if;
+      -------------
+
+      select min(test_seq_no), max(test_seq_no)
+      into   temp_test_seq_no, temp_max_test_seq_no
+      from   utrs
+      where  unit_id = pl_int_unit_id and
+           trunc(coll_date) = trunc(p_coll_date) and
+           chapter_id = g_chapter_id and
+           test_id = c1_rec.test_id and
+           result_status_1 is null and
+           cancel_flag is null;
+      If nvl(temp_test_seq_no,0) >= 1 then
+        begin
+         update utrs
+         set test_state = c1_rec.test_state,
+         test_mode = c1_rec.test_mode,
+         result_status_1 = c1_rec.result_status_1,
+         result_status_2 = c1_rec.result_status_2,
+         tb_id = c1_rec.tb_id,
+         test_chapter_id = c1_rec.test_chapter_id,
+         tb_seq_no = c1_rec.tb_seq_no,
+         well_number = c1_rec.well_number,
+         absorbance = c1_rec.absorbance,
+         ratio = c1_rec.ratio,
+         result_dats = c1_rec.result_dats,
+         result_user_id = c1_rec.result_user_id,
+         testing_lab_code = c1_rec.testing_lab_code,
+         profile_set_id = lv_profile_set_id -- c1_rec.profile_set_id -- V06, MLT 623
+         where 
+         unit_id = pl_int_unit_id and
+         trunc(coll_date) = trunc(pl_coll_date) and
+         chapter_id = g_chapter_id and
+         test_id = c1_rec.test_id and
+         test_seq_no = temp_test_seq_no and
+         cancel_flag is null;
+        exception
+           when OTHERS then
+            pl_out_status:='Error in updating utr '||sqlerrm;
+            return;
+        end;
+     Else
+       /*  -- make sure the test is a profile test
+        select nvl(count(*),0) into nProf from contract_tests_image where
+        contract_id=g_contract_id and test_id=c1_rec.test_id;
+
+        -- if this is not a profile test check if the auto schedule flag is set
+
+       if nProf=0 then
+          select nvl(count(*),0) into nAuto from valid_tests where
+         test_id=c1_rec.test_id and nvl(auto_schedule,'N')='Y' and
+         sysdate between eff_date and nvl(term_date,sysdate+10);
+      end if;
+      */
+     
+       begin
+              -- Added by Edwin for the IM#3055 Rel (4.5.0)
+         select nvl(max(test_seq_no),0)
+         into  pl_test_seq_no
+         from   utrs
+         where  unit_id = pl_int_unit_id and
+                trunc(coll_date) = trunc(pl_coll_date) and
+                chapter_id = g_chapter_id and
+                test_id = c1_rec.test_id and
+                cancel_flag is null;
+                           --addition ends here                     
+         insert into utrs
+               (unit_id, coll_date, chapter_id, test_id,
+                test_seq_no, test_state, test_mode,
+                result_status_1, result_status_2, tb_id,
+                test_chapter_id, tb_seq_no, well_number,
+                absorbance, ratio, result_dats,
+                result_user_id, testing_lab_code,
+                insert_dats, insert_user_id, cancel_flag,
+                program_id,profile_set_id)
+        values  (pl_int_unit_id, pl_coll_date, g_chapter_id,
+                c1_rec.test_id, nvl(pl_test_seq_no,0)+1,
+                c1_rec.test_state, c1_rec.test_mode,
+                c1_rec.result_status_1,
+                c1_rec.result_status_2, c1_rec.tb_id,
+                c1_rec.test_chapter_id,
+                c1_rec.tb_seq_no, c1_rec.well_number,
+                c1_rec.absorbance, c1_rec.ratio,
+                c1_rec.result_dats,
+                c1_rec.result_user_id,
+                c1_rec.testing_lab_code,
+                sysdate, 'LTAPI',
+                c1_rec.cancel_flag,'LTAPI', lv_profile_set_id -- c1_rec.profile_set_id -- V06, MLT 623
+                );
+       exception
+          when OTHERS then
+           pl_out_status:='Error in transferring from UTB to UTR'||
+                            SQLERRM;
+           RETURN;             
+       end;
+     End if;
+
+       begin
+        delete from unit_test_base
+        where unit_id = pl_int_unit_id and
+        trunc(coll_date) = trunc(pl_coll_date) and
+        nvl(test_chapter_id,chapter_id) = g_chapter_id and
+        test_id = c1_rec.test_id and
+        test_seq_no = c1_rec.test_seq_no;
+       exception
+          when OTHERS then
+            pl_out_status:='Error in deleting from utb - 2'||sqlerrm;
+            return;              
+       end;
+   end;
+   end loop;
+ END;
+    
+END update_holding_data;
+
+Procedure insert_utrs (pl_int_unit_id in varchar2,
+                       pl_out_unit_id in varchar2,
+                       pl_coll_date   in date,
+                       pl_status out varchar2) is
+
+    mprofile_tests  VARCHAR2(1);
+    dummy_coll_date date;
+    x_status        varchar2(200);
+BEGIN
+
+    pl_status:='OK';
+    Begin
+        select profile_tests into mprofile_tests
+        from rgt_units where
+        rgt_units.chapter_id  = g_chapter_id and
+        rgt_units.contract_id = g_contract_id and
+        rgt_units.unit_id     = pl_int_unit_id;
+   Exception
+          when NO_DATA_FOUND then 
+             mprofile_tests := 'Y';
+          when OTHERS then 
+             pl_status:='Loc-1:'||sqlerrm;
+             return;
+   End;
+
+   dummy_coll_date := get_coll_date(pl_int_unit_id,g_contract_id);
+    If pl_coll_date != dummy_coll_date THEN
+       pl_status:='Coll Date should be '|| to_char(dummy_coll_date);
+       return;
+   END IF;
+
+   BEGIN     
+        insert into utrs (
+                    unit_id,
+                    coll_date,
+                    chapter_id,
+                    test_id,
+                    test_seq_no,
+                    insert_dats,
+                    insert_user_id,
+                    profile_set_id,
+                    program_id)
+          select   pl_int_unit_id,
+                      pl_coll_date,
+                      g_chapter_id,
+                       a.test_id,
+                      1,
+                      sysdate,
+                      decode(substr(user,1,4),'OPS$',substr(user,5,6),user),
+                      a.profile_set_id,
+                     'LTAPI'
+          from contract_tests_image a
+         where a.contract_id = g_contract_id 
+            and  a.profile_seq_no = g_profile_seq_no 
+            --and  a.chapter_id = g_chapter_id   LT_2018
+            and  a.profile_set_id=g_profile_set_id 
+           and  g_local_sysdate between eff_date and 
+                nvl(term_date,g_local_sysdate+365) 
+            and  mprofile_tests = 'Y' 
+            and  not exists
+                   (select  'x' from utrs where
+                     unit_id = pl_int_unit_id and
+                     test_id = a.test_id and
+                     chapter_id = g_chapter_id and
+                     test_seq_no = 1 and
+                     nvl(cancel_flag,'N') != 'Y')
+           union
+           select pl_int_unit_id,
+                     dummy_coll_date,
+                    g_chapter_id,
+                    test_id,
+                    1,
+                     sysdate,
+                  decode(substr(user,1,4),'OPS$',substr(user,5,6),user),
+                --   decode(substr(LT_USER_SESSION.get_userid,1,4),
+                --                'OPS$',substr(LT_USER_SESSION.get_userid,5),
+                --                   LT_USER_SESSION.get_userid),
+               g_profile_set_id,      
+               'LTAPI'
+           from rgt_tests
+          where chapter_id = g_chapter_id 
+            and contract_id = g_contract_id 
+            and unit_id = pl_int_unit_id
+             and test_schedule_stat is null;
+
+             BEGIN
+               update rgt_tests
+                  set test_schedule_stat = 'Y'
+               where  chapter_id = g_chapter_id 
+                 and contract_id = g_contract_id
+                 and unit_id = pl_int_unit_id
+                 and test_schedule_stat is null;
+            EXCEPTION 
+               when NO_DATA_FOUND then 
+                    null;
+                when OTHERS then 
+                    pl_status:='UTRS1:'||sqlerrm;
+                    return;
+             END;
+   EXCEPTION 
+       when DUP_VAL_ON_INDEX then 
+              null;
+       when OTHERS then
+            pl_status:='UTRS2:'||sqlerrm;
+            return;
+    END;
+
+    update_holding_data (pl_int_unit_id, pl_coll_date,x_status);
+    pl_status:=x_status;
+EXCEPTION
+         when OTHERS then 
+           pl_status:='insert utrs-'||sqlerrm;
+           return;
+END insert_utrs;
+
+Procedure init_variables(pl_contract_id in varchar2,pl_message out varchar2) is
+ v_prism_id    varchar2(10);
+ bc_con_bar_code  varchar2(1);
+ p_plate_capacity  number(5);
+ p_loc_message      varchar2(300);
+Begin
+
+ pl_message:='OK';
+
+  Begin
+   select center_id,substr(company,1,30),
+       nvl(bar_code_protocol,'*'),
+       unit_id_type, copy_isbt_flag, 
+       nvl(plate_capacity,88)  --,profile_seq_no
+       into
+       g_center_id,g_company,g_con_bar_code ,g_copy_flag,
+       g_copy_isbt, p_plate_capacity  --, g_profile_seq_no
+       from contracts where
+        contract_id = pl_contract_id
+        and chapter_id  in (select chapter_id from rgt_contract_chapters
+                        where contract_id=pl_contract_id and
+                        g_local_sysdate between eff_date and
+                        nvl(term_date,g_local_sysdate+10))
+        and contract_type = 'RG' and
+        g_local_sysdate between eff_date and nvl(term_date,sysdate+365);
+
+  Exception when no_data_found then 
+       pl_message:='No Contract details available- Skipping Batch';
+        return;
+  End;
+
+  Begin
+     SELECT codabar_unit_scheme
+     INTO bc_con_bar_code 
+     FROM institutions
+     WHERE g_local_sysdate between eff_date and nvl(term_date, sysdate+10);
+  Exception
+     when OTHERS then
+         pl_message:='Init_var-1 '||sqlerrm||' -Skip Batch';
+         return;
+  End ;
+  
+  IF g_con_bar_code = 'C' THEN 
+      g_con_bar_code := bc_con_bar_code;
+  END IF;        
+
+  /*  Begin
+        select 'x' into dummy_1 from contract_tests_image where
+        contract_id = :control_block.contract_id and
+        chapter_id  = :global.chapter_id  and
+        profile_seq_no = :control_block.profile_seq_no and
+        sysdate between eff_date and nvl(term_date,sysdate+365) and
+        rownum = 1;
+   Exception when no_data_found then NEXT_ITEM;
+              when others then handle_error;
+   End;
+
+ */
+
+End init_variables;
+
+procedure rollback_and_exit(p_msg in varchar2) is
+end_time  varchar2(30);
+Begin
+rollback;
+add_log_entry(p_msg,g_ext_batch_id,g_batch_id);
+commit;
+End rollback_and_exit;
+
+END TUBE_CHECKIN_API;
+/
+create or replace public synonym TUBE_CHECKIN_API for  LTAPI.TUBE_CHECKIN_API;
+
+show errors;

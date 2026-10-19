@@ -1,0 +1,544 @@
+create or replace
+PACKAGE ATUPSURD AS
+
+/*****************************************************************************
+Developed By : Basker Edwin
+Create Date  : 03.15.2008
+Purpose      : This procedure will cconvert the surround file format to the
+               LifeTrak format. A intermediate table RTURLOAD_INTERFACE is used.
+               The data is populated in the table forst then converted into the
+               file
+Date Mod     :03.17.2008
+Version      :01
+Version      :02 Unit ID conversion and result code translation -08/10/08 Edwin
+Version      :03 Modify the code to read from a temp table instead of a file  -04/22/11 ISSA
+                  Add LOAD_SURROUND_from_table procedure
+
+Version      :04  append the file_id to the output file name
+
+version      :05   Add the file id to szRunID.
+
+version      :06   Fix error when file has a blank record.
+
+**************************************************************************** */
+   procedure add_log_entry(p_log_text in varchar2);
+   procedure main_proc(file_name in varchar2,v_inst_id in varchar2);
+   procedure rollback_and_exit;
+   procedure convert_unit(pl_in_unit in  varchar2,pl_out_unit out varchar2);
+   procedure result_translation(pl_surnd_test_id in varchar2,
+                                pl_surnd_res in varchar2,
+                                pl_lt_res out varchar2);
+   PROCEDURE GEN_RTURLOAD_FILE (pl_run_id in varchar2);
+   PROCEDURE LOAD_SURROUND_TO_TEMP(pl_run_id in varchar2);
+   PROCEDURE LOAD_SURROUND_from_table(x_file_id varchar2,pl_run_id in varchar2);
+   FUNCTION gen_parmid return varchar2;
+
+   complete               BOOLEAN:=false;
+   logfile                UTL_FILE.FILE_TYPE;
+   instfile               UTL_FILE.FILE_TYPE;
+   outfile                UTL_FILE.FILE_TYPE;
+   read_record            VARCHAR2(500);
+   szRunID                VARCHAR2(500);
+   v_machine_id           VARCHAR2(10);
+   P_FILE_NAME            VARCHAR2(500);
+   result_file_name       VARCHAR2(100);
+   szRTUFile              VARCHAR2(50);
+   logfilename            VARCHAR2(100);
+   szUnitID              VARCHAR2(50);
+   eExcept                EXCEPTION;
+   szBatchHdr             VARCHAR2(250);
+   szHeader               VARCHAR2(250);
+   nRowCount              NUMBER:=0;
+   szChapter              VARCHAR2(50);
+   szStatus               VARCHAR2(20);
+   szContract             VARCHAR2(10);
+   szBTString             VARCHAR2(20);
+   szFTString             VARCHAR2(20);
+   rowcount               NUMBER:=0;
+   szTestID               VARCHAR2(300);
+   codabar_unit_scheme    VARCHAR2(1);
+   szUnit_ID              VARCHAR2(50);
+   szResParm              VARCHAR2(10);
+   szARCPrefix            VARCHAR2(10);
+   szAlphaConvReq         VARCHAR2(3);
+   v_chapter_id           VARCHAR2(5);
+   v_filesource varchar2(1);
+
+END ATUPSURD;
+
+/
+
+create or replace
+PACKAGE BODY ATUPSURD AS
+PROCEDURE add_log_entry(p_log_text varchar2) is
+ BEGIN
+    UTL_FILE.putf(logfile,'%s\n',p_log_text);
+    UTL_FILE.fflush(logfile);
+ END add_log_entry;
+Procedure main_proc(file_name in varchar2, v_inst_id in varchar2) is
+  start_time   VARCHAR2(30);
+  end_time     VARCHAR2(30);
+  LogDir       varchar2(50);
+Begin
+  dbms_output.enable(50000000);
+  v_machine_id:=v_inst_id;
+  result_file_name:=file_name;
+  begin
+       select code_desc into LogDir from master_codes
+        where code_type='LOGDR' and code='ILOG' and sysdate
+        between eff_date and nvl(term_date,sysdate);
+  exception
+      when others then
+           dbms_output.put_line('Error in prepare_log_filename');
+           raise_application_error('-20000','Log file name');
+           raise;
+ end;
+    dbms_output.put_line('Logdir='||LogDir);
+ begin
+       select code_desc into v_filesource from master_codes
+        where code_type ='SURND'
+        and  code='READ'   
+		and sysdate between eff_date and nvl(term_date,sysdate);
+  exception
+      when no_data_found then
+	    v_filesource :='F';
+      when others then
+           dbms_output.put_line('Error in prepare_filesource ');
+           raise_application_error('-20000','File source');
+           raise;
+ end;
+   begin
+     p_file_name:=substr(result_file_name,1,instr(result_file_name,'.',1)-1);
+	 p_file_name :=replace(p_file_name,' ','_');
+	 p_file_name :=replace(p_file_name,'.','_');
+	 szRTUFile:='R'||p_file_name||to_char(sysdate,'yymmddhh24miss')||'.LAB';
+    select 'ATUPSURD_'||p_file_name||'_'||
+     decode(substr(user,1,4),'OPS$',substr(user,5),user)||'.r'
+       into logfilename from dual;
+   exception
+       when others then
+         dbms_output.put_line('Error in getting logfilename ... Aborting');
+         raise;
+   end;
+   dbms_output.put_line('logfile='||logfilename);
+     begin
+       start_time := to_char(sysdate,'mm-dd-yy hh24:mi:ss');
+       dbms_output.put_line('start time='||start_time);
+       logfile:=UTL_FILE.fopen(LogDir,logfilename, 'w');
+       dbms_output.put_line('file opened');
+	   IF v_filesource ='F' THEN
+       instfile:=UTL_FILE.fopen(LogDir,file_name, 'r');
+       dbms_output.put_line('read file opened');
+       END IF;
+	   outfile := UTL_FILE.FOPEN(LogDir,szRTUFile, 'w');
+	 dbms_output.put_line('outputfile='||szRTUFile);
+	   dbms_output.put_line('R file opened');
+       add_log_entry(' Surround Interface Log');
+       add_log_entry('----------------------------------');
+       add_log_entry(' ');
+       add_log_entry('File Name  : '||result_file_name);
+       add_log_entry('Log Name   : '||logfilename);
+       add_log_entry('----------------------------------------');
+   exception
+      when utl_file.invalid_path then
+           dbms_output.put_line('Invalid path or filename'); raise;
+   end;
+    szRunID:=p_file_name||to_char(sysdate,'yyyymmddhh24miss');
+    --dbms_output.put_line('Before populating the temp table..');
+	IF v_filesource ='F' THEN
+	  LOAD_SURROUND_TO_TEMP(szRunID);
+	ELSIF v_filesource ='T' THEN
+	  dbms_output.put_line('Before load from temp table..'||file_name);
+	  LOAD_SURROUND_from_Table(file_name,szRunID);
+	  dbms_output.put_line('after load from temp table..'||file_name);
+	END IF;  
+--	v_chapter_id:='DAL';
+	--dbms_output.put_line('After temp table is populated');
+	 dbms_output.put_line('Before calling GEN_RTURLOAD_FILE...chapter'||nvl(v_chapter_id,'chapter is null'));
+    GEN_RTURLOAD_FILE(szRunID);
+    --Close all the file pointers
+    UTL_FILE.FCLOSE(logfile);
+    UTL_FILE.FCLOSE(instfile);
+    UTL_FILE.FCLOSE(outfile);
+		 dbms_output.put_line('outfile='||szRTUFile);
+End main_proc;
+PROCEDURE LOAD_SURROUND_from_table(x_file_id varchar2, pl_run_id in varchar2) IS
+   CURSOR  RTUR_TEST IS select sequence_no,header_name,start_pos,end_pos
+                                from RTURLOAD_TESTS order by sequence_no;
+   CURSOR get_data is select record_id,chapter_id,data_string,external_source ,file_id
+                       from TEST_RESULT_STAGING
+					   where PROCESSED_FLAG is null
+					   and file_id =x_file_id;
+   test_id varchar2(10);
+   result_code varchar2(5);
+   lt_result_code varchar2(5);
+   temp_unit_id varchar2(15);
+   nStart NUMBER:=0;
+   nEnd   NUMBER:=0;
+BEGIN
+    --Get the facility ID incorporated in the unit id from the ARC (American
+    --Red Cross) unit Ids
+dbms_output.put_line('100');
+   begin
+     select code_desc into szARCPrefix from master_codes where
+     code_type='SURND' and code='ARC' and sysdate between eff_date and
+     nvl(term_date,sysdate+1);
+   exception when no_data_found then 
+    add_log_entry('SURND type and ARC code is not defined in the master code');
+    rollback_and_exit; 
+    end;
+	dbms_output.put_line('101');
+    --Check if the alpha conversion required 
+   begin
+     select code_desc into szAlphaConvReq from master_codes where
+     code_type='SURND' and code='ALCON' and sysdate between eff_date and
+     nvl(term_date,sysdate+1);
+   exception when no_data_found then 
+      szAlphaConvReq:='N';
+    end;
+		dbms_output.put_line('102');
+   ---Read the record one by one and process 
+   --Loop 
+   for rec in get_data loop
+		Begin 
+--          utl_file.get_line(instfile,read_record);
+         read_record :=rec.data_string;
+		 v_chapter_id :=rec.chapter_id;
+		 dbms_output.put_line('v_chapter_id='||v_chapter_id);
+		 IF v_chapter_id is null then
+		   begin
+		   select CHAPTER_ID INTO v_chapter_id
+           from donations
+           where unit_id =substr(rec.data_string,1,13);
+		   exception
+		     when no_data_found then
+			 add_log_entry('Chapter is not exist:'||sqlerrm);
+              rollback_and_exit;
+			  exit;
+		   end;
+		 END IF;
+		  update TEST_RESULT_STAGING
+		  set PROCESSED_FLAG='C',PROCESSED_DATE =sysdate 		  
+          where		  record_id=rec.record_id
+		  and  PROCESSED_FLAG is null
+		  and  file_id=rec.file_id;
+          szUnit_id:=substr(read_record,1,13);
+          If szARCPrefix!='99' then
+             If substr(szUnit_id,1,3)=szARCPrefix then 
+                szUnit_id:=rtrim(substr(szUnit_id,4));
+                If Length(szUnit_id) in (6,7) and szAlphaConvReq='Y' then  
+                    convert_unit(szUnit_id,temp_unit_id);
+                    szUnit_id:=temp_unit_id;
+                End If;
+             End If;
+           End If;
+         -- read each test from the test configuration table 
+         For Z_REC in RTUR_TEST loop 
+            begin
+               nStart:=Z_REC.start_pos;
+               nEnd  :=Z_REC.end_pos;
+               test_id:=Z_REC.header_name;
+               result_code:=rtrim(substr(read_record,nStart,(nEnd - nStart)+1));
+               dbms_output.put_line(szUnit_id);
+               dbms_output.put_line(test_id);
+               dbms_output.put_line(result_code);
+               lt_result_code:=null;
+               result_translation(test_id,result_code,lt_result_code);  
+               dbms_output.put_line('LT='||lt_result_code);
+               insert into RTURLOAD_INTERFACE values
+                          (pl_run_id,szUnit_ID,szUnit_ID,
+                            test_id,1,lt_result_code,null,null,
+                            null,'N',null);
+            exception when others then 
+              add_log_entry('Insert:'||sqlerrm);
+              rollback_and_exit;
+            end;
+          End Loop;
+     Exception
+           when no_data_found then
+               exit;
+           when UTL_FILE.READ_ERROR then
+               add_log_entry('Error reading file ');
+               rollback_and_exit;
+           when others then 
+              add_log_entry('Load:'||sqlerrm);
+              rollback_and_exit;
+     End;
+	End Loop;
+   COMMIT;
+END LOAD_SURROUND_from_table;
+PROCEDURE LOAD_SURROUND_TO_TEMP(pl_run_id in varchar2) IS
+   CURSOR  RTUR_TEST IS select sequence_no,header_name,start_pos,end_pos
+                                from RTURLOAD_TESTS order by sequence_no;
+   test_id varchar2(10);
+   result_code varchar2(5);
+   lt_result_code varchar2(5);
+   temp_unit_id varchar2(15);
+   nStart NUMBER:=0;
+   nEnd   NUMBER:=0;
+BEGIN
+    --Get the facility ID incorporated in the unit id from the ARC (American
+    --Red Cross) unit Ids
+	v_chapter_id  :='WAD';
+   begin
+     select code_desc into szARCPrefix from master_codes where
+     code_type='SURND' and code='ARC' and sysdate between eff_date and
+     nvl(term_date,sysdate+1);
+   exception when no_data_found then 
+    add_log_entry('SURND type and ARC code is not defined in the master code');
+    rollback_and_exit; 
+    end;
+    --Check if the alpha conversion required
+   begin
+     select code_desc into szAlphaConvReq from master_codes where
+     code_type='SURND' and code='ALCON' and sysdate between eff_date and
+     nvl(term_date,sysdate+1);
+   exception when no_data_found then 
+      szAlphaConvReq:='N';
+    end;
+   ---Read the record one by one and process
+   Loop
+        Begin 
+          utl_file.get_line(instfile,read_record);
+          szUnit_id:=substr(read_record,1,13);
+IF nvl(length(replace (read_record,' ','')),0) >2 THEN
+          If szARCPrefix!='99' then
+             If substr(szUnit_id,1,3)=szARCPrefix then 
+                szUnit_id:=rtrim(substr(szUnit_id,4));
+                If Length(szUnit_id) in (6,7) and szAlphaConvReq='Y' then  
+                    convert_unit(szUnit_id,temp_unit_id);
+                    szUnit_id:=temp_unit_id;
+                End If;
+             End If;
+           End If;
+         -- read each test from the test configuration table
+         For Z_REC in RTUR_TEST loop 
+            begin
+               nStart:=Z_REC.start_pos;
+               nEnd  :=Z_REC.end_pos;
+               test_id:=Z_REC.header_name;
+               result_code:=rtrim(substr(read_record,nStart,(nEnd - nStart)+1));
+               dbms_output.put_line(szUnit_id);
+               dbms_output.put_line(test_id);
+               dbms_output.put_line(result_code);
+               lt_result_code:=null;
+               result_translation(test_id,result_code,lt_result_code);  
+               dbms_output.put_line('LT='||lt_result_code);
+               insert into RTURLOAD_INTERFACE values
+                          (pl_run_id,szUnit_ID,szUnit_ID,
+                            test_id,1,lt_result_code,null,null,
+                            null,'N',null);
+            exception when others then 
+              add_log_entry('Insert:'||sqlerrm);
+              rollback_and_exit;
+            end;
+          End Loop;
+END IF;		  
+     Exception
+           when no_data_found then
+               exit;
+           when UTL_FILE.READ_ERROR then
+               add_log_entry('Error reading file ');
+               rollback_and_exit;
+           when others then 
+              add_log_entry('Load:'||sqlerrm);
+              rollback_and_exit;
+     End;
+    End Loop;
+   COMMIT;
+END LOAD_SURROUND_TO_TEMP;
+Procedure convert_unit(pl_in_unit in varchar2, pl_out_unit out varchar2) is
+a number:=0;
+v_eye_read_trns varchar2(2);
+Begin
+    If substr(pl_in_unit,2,1) = ' ' then
+       v_eye_read_trns := ' '||substr(pl_in_unit,1,1);
+    Else
+       v_eye_read_trns := substr(pl_in_unit,1,2);
+    End if;
+    select machine_code||substr(pl_in_unit,3) into
+        pl_out_unit from bar_code_prefixes where
+        eye_read_trns=v_eye_read_trns and sysdate between
+        eff_date and nvl(term_date,sysdate+1);
+Exception
+   when others then
+    add_log_entry('bar code translation failure-'||pl_in_unit||' '||sqlerrm);
+    rollback_and_exit;
+End convert_unit;
+procedure result_translation(pl_surnd_test_id in varchar2,
+                             pl_surnd_res in varchar2,
+                             pl_lt_res out varchar2) is
+begin
+  select result_status into pl_lt_res 
+  from valid_instrument_test_results
+  where test_id=pl_surnd_test_id 
+  and machine_result_status=pl_surnd_res
+  and chapter_id=v_chapter_id 
+  and machine_id=v_machine_id 
+  and Lifetrack_timezone_convert.get_local_time(chapter_id,sysdate) between eff_date
+  and nvl(term_date,sysdate+1);
+exception 
+    when no_data_found then 
+     pl_lt_res:=pl_surnd_res;
+End result_translation;
+Procedure GEN_RTURLOAD_FILE(pl_run_id in varchar2) Is
+ Cursor unit_cur is Select distinct unit_id 
+ from rturload_interface where run_id=pl_run_id;
+ Cursor test_cur(pl_unit_id in varchar2) is Select test_id,test_seq_no,
+                            result_status,result_status_1,
+                            result_status_2,result_status_3 from
+                            rturload_interface where run_id=pl_run_id and
+                            unit_id=pl_unit_id;
+BEGIN
+    --- Check the Error Log file  
+     begin
+        select nvl(codabar_unit_scheme,'*') into  codabar_unit_scheme
+         from institutions
+         where sysdate between eff_date and nvl(term_date,sysdate);
+     exception
+        when no_data_found then
+           add_log_entry('No institution data available .... Aborting');
+           rollback_and_exit;
+     end;
+    --Get the Chapter name
+    Begin
+      select chapter_name into szChapter 
+	  from chapters 
+	  where chapter_id=v_chapter_id --'WAD' 
+	  and sysdate between eff_date and nvl(term_date,sysdate+1);
+    Exception when others then
+      add_log_entry('No Chapter is Defined-'||v_chapter_id||sqlerrm);
+      rollback_and_exit;
+    End;
+    --Get the Contract ID
+    Begin
+      select code_desc into szContract from master_codes
+      where code_type='SURND' and code='CONTR' and
+      sysdate between eff_date and nvl(term_date,sysdate+1);
+    Exception when no_data_found then 
+       add_log_entry('Master code type SURND is not defined-Aborting');
+       rollback_and_exit;
+     End ;
+    ---Get thr parm ID
+    szResParm:=gen_parmid;
+    If szResParm='ERR' then
+      add_log_entry('Could not generate the Parm ID');
+      rollback_and_exit;
+    End if;
+    szHeader:='FH:'||Rpad(szContract,10,' ')||v_chapter_id||'  '||
+              to_char(sysdate,'mm/dd/rr:hh24:mi:ss')||' F'||' Y '||szChapter;
+    szBatchHdr:='BH:'||szResParm;
+    dbms_output.put_line(szHeader);
+    UTL_FILE.PUT_LINE(outfile, szHeader);
+    UTL_FILE.PUT_LINE(outfile, szBatchHdr);
+   -- Loop for each units
+  FOR Z_UNIT_REC in unit_cur LOOP
+      nrowcount:=rowcount+1;
+       szUnitID:='UI:'||RPad(Z_UNIT_REC.unit_id,15,' ')||' '||
+                 RPAD(Z_UNIT_REC.unit_id,15,' ');
+        UTL_FILE.PUT_LINE(outfile, szUnitID);
+      For Z_Test_Rec in test_cur(Z_UNIT_REC.unit_id) loop
+       nrowcount:=nrowcount+1;
+      szTestId:='TR:'||Rpad(Z_test_rec.test_id,10,' ')||' '||
+                  Z_test_rec.test_seq_no||' '||
+                  Rpad(Z_test_rec.result_status,4,' ')  ||' '||
+                  RPad(Z_test_rec.result_status_1,4,' ') ||
+                  '                     '||
+                  RPad(Z_test_rec.result_status_2,4,' ')||
+                  '                     '||
+                   RPad(Z_test_rec.result_status_3,4,' ');
+         UTL_FILE.PUT_LINE(outfile,szTestID);
+     End Loop;
+ END LOOP;
+   szBTString:='BT:'||lpad(to_char(nrowcount),6,'0');
+   szFTString:='FT:'||lpad(to_char(nrowcount+1),6,'0');
+   UTL_FILE.PUT_LINE(outfile,szBTString);
+   UTL_FILE.PUT_LINE(outfile,szFTString);
+  UTL_FILE.FCLOSE(outfile);
+  add_log_entry('Successful');
+  COMMIT;
+EXCEPTION
+ WHEN UTL_FILE.READ_ERROR THEN
+       add_log_entry('Read Error');
+       rollback_and_exit;
+WHEN OTHERS then
+       add_log_entry(substr(sqlerrm,1,50));
+       rollback_and_exit;
+End GEN_RTURLOAD_FILE;
+--------- This routine was copied from RGIREXTR.fmb
+FUNCTION gen_parmid return varchar2 is 
+   temp_number number;
+   v_temp   varchar2(5);
+   v_date    number;
+   v_mod    number;
+   v_length  number;
+   v_value  varchar2(5);
+   v_quo_value varchar2(5);
+   v_quo_length  number;
+   v_quo     number;
+   szParmID  varchar2(10);
+BEGIN
+   select trunc((sysdate - trunc(sysdate, 'YYYY'))) + 1
+    into v_date from dual;
+    v_quo := trunc(v_date/ 36);
+    v_quo_length := NVL(length(to_char(v_quo)), 0);
+   If  v_quo_length > 1 then
+       select decode( v_quo, 10, 'A', 11, 'B', 12, 'C', 13, 'D', 14, 'E', 15,
+                             'F', 16, 'G', 17, 'H', 18, 'I', 19, 'J', 20, 'K',
+                              21,  'L', 22, 'M', 23, 'N', 24, 'O', 25, 'P', 26,
+                              'Q', 27, 'R', 28, 'S', 29, 'T', 30, 'U', 31, 'V',
+                               32, 'W', 33, 'X', 34, 'Y', 35, 'Z')
+         into v_quo_value from dual;
+   Else
+         v_quo_value := to_char(v_quo);
+   End if;
+   v_mod := mod(v_date, 36);
+   v_length := NVL(length(to_char(v_mod)), 0);
+   If v_length > 1 then
+        select decode(v_mod, 10, 'A', 11, 'B', 12, 'C', 13, 'D', 14, 'E', 15,
+                             'F', 16, 'G', 17, 'H', 18, 'I', 19, 'J', 20, 'K',
+                             21,  'L', 22, 'M', 23, 'N', 24, 'O', 25, 'P', 26,
+                             'Q', 27, 'R', 28, 'S', 29, 'T', 30, 'U', 31, 'V',
+                             32, 'W', 33, 'X', 34, 'Y', 35, 'Z')
+         into v_value from dual;
+    Elsif v_length =1 then
+       v_value := to_char(v_mod);
+    End if;
+     Begin
+           select max_number + 1 into temp_number from number_generation
+           where chapter_id = v_chapter_id--'WAD' 
+		   and number_type = 'RESULT_BATCH_ID'
+           for update of max_number;
+     Exception
+        when no_data_found then
+            insert into number_generation (chapter_id, number_type, max_number,
+            last_reset_date) values
+               (v_chapter_id,'RESULT_BATCH_ID',0,trunc(sysdate));
+            temp_number := 1;
+     End;
+     szParmID:= 'R'||to_char(sysdate,'Y')||v_quo_value||v_value||
+                 lpad(to_char(temp_number),3,'0');
+       update number_generation set max_number = temp_number
+       where chapter_id = v_chapter_id--'WAD' 
+	   and number_type = 'RESULT_BATCH_ID';
+       return (szParmID);
+ EXCEPTION
+     when others then
+      return('ERR');
+ END gen_parmid;
+--------
+procedure rollback_and_exit is
+end_time  varchar2(30);
+Begin
+rollback;
+add_log_entry('Aborting');
+UTL_FILE.fclose(logfile);
+raise_application_error('-20000','Aborting');
+End rollback_and_exit;
+END ATUPSURD;
+
+/
+
+Create or Replace Public Synonym ATUPSURD for ATUPSURD;
+
+Grant execute on ATUPSURD to OPS$SRVSYS,UTIL,OPS$DBADMN,LTAPI;

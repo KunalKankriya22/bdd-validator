@@ -1,0 +1,44 @@
+---
+tags:
+  - trigger
+  - SBCSYS
+---
+# TEST_VOIDS_BD
+
+**Schema**: [[schemas/SBCSYS/SBCSYS|SBCSYS]]
+**Table**: [[schemas/SBCSYS/Tables/TEST_VOIDS|TEST_VOIDS]]
+**Type**: BEFORE EACH ROW
+**Event**: DELETE
+**Status**: ENABLED
+
+## Trigger Body
+
+```plsql
+begin
+
+	insert into TEST_VOIDS_AUDIT
+    (
+	UNIT_ID, COLL_DATE, CHAPTER_ID,
+	TEST_SEQ_NO, TEST_ID, TEST_STATE,
+	TEST_MODE, RESULT_STATUS_1, RESULT_STATUS_2,
+	EDIT_RESULT_FLAG, TB_ID, TEST_CHAPTER_ID,
+	TB_SEQ_NO, WELL_NUMBER, ABSORBANCE,
+	RATIO, RESULT_DATS, RESULT_USER_ID,
+	TESTING_LAB_CODE, INSERT_DATS, INSERT_USER_ID,
+	VOID_TYPE, VOID_REASON_CODE, VOID_DATS, VOID_USER_ID,
+	AUDIT_KEY, AUDIT_INSERT_DATS, AUDIT_INSERT_USER
+    )
+    values
+    (
+	:old.UNIT_ID, :old.COLL_DATE, :old.CHAPTER_ID,
+	:old.TEST_SEQ_NO, :old.TEST_ID, :old.TEST_STATE,
+	:old.TEST_MODE, :old.RESULT_STATUS_1, :old.RESULT_STATUS_2,
+	:old.EDIT_RESULT_FLAG, :old.TB_ID, :old.TEST_CHAPTER_ID,
+	:old.TB_SEQ_NO, :old.WELL_NUMBER, :old.ABSORBANCE,
+	:old.RATIO, :old.RESULT_DATS, :old.RESULT_USER_ID,
+	:old.TESTING_LAB_CODE, :old.INSERT_DATS, :old.INSERT_USER_ID,
+	:old.VOID_TYPE, :old.VOID_REASON_CODE, :old.VOID_DATS, :old.VOID_USER_ID,
+	:old.AUDIT_KEY, sysdate, lt_user_session.get_userid
+    );
+end;
+```

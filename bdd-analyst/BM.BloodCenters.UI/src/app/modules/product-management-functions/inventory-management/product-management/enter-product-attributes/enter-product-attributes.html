@@ -1,0 +1,168 @@
+<div class="layout-wrapper">
+  <main class="enter-product-attributes" role="main">
+
+    <app-page-header-with-breadcrumb [config]="headerConfig()"></app-page-header-with-breadcrumb>
+
+    <!-- Filter / Entry Panel -->
+    <div class="query-panel" [class.query-panel--active]="showEntryForm()" #queryPanel>
+      @if (isSaving()) {
+        <div class="panel-saving-overlay">
+          <mat-spinner diameter="22" aria-label="Saving attribute"></mat-spinner>
+        </div>
+      }
+      <form [formGroup]="attributeForm" novalidate>
+        <div class="query-row">
+
+          <!-- Unit ID Field -->
+          <div class="unit-field-wrapper">
+            <app-unit-id-field
+              (postValidate)="onUnitPostValidate($event)"
+              (validated)="onUnitValidated($event)"
+              (cleared)="onUnitCleared()">
+            </app-unit-id-field>
+
+          </div>
+
+          <div class="vertical-divider" aria-hidden="true"></div>
+
+          <!-- Product Code -->
+          <app-scan-select-field
+            #productCodeField
+            [label]="'Product Code'"
+            [placeholder]="'Scan or select product code'"
+            [showBarcodeIcon]="true"
+            [disabled]="products().length === 0"
+            [scanPatterns]="SCAN_PATTERNS.PRODUCT"
+            [options]="productCodeOptions()"
+            [parseFn]="parseProductCode"
+            (valueChanged)="onProductCodeChanged($event)"
+            (cleared)="onProductCodeCleared()"
+            class="query-field query-field--product">
+          </app-scan-select-field>
+
+          <!-- Attribute Group -->
+          <mat-form-field appearance="fill" class="query-field query-field--group" subscriptSizing="dynamic">
+            <mat-label>Attribute Group</mat-label>
+            <mat-select formControlName="attribGroup">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="attribGroupSearch"
+                  placeholderLabel="Search attribute groups..."
+                  noEntriesFoundLabel="No matching groups">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (group of filteredAttributeGroups(); track group.code) {
+                <mat-option [value]="group.code">
+                  {{ group.code }} - {{ group.description }}
+                </mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <!-- Attribute Code -->
+          <mat-form-field appearance="fill" class="query-field query-field--code" subscriptSizing="dynamic">
+            <mat-label>Attribute Code</mat-label>
+            <mat-select formControlName="attribCode" (selectionChange)="onAttribCodeSelected()">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="attribCodeSearch"
+                  placeholderLabel="Search attribute codes..."
+                  noEntriesFoundLabel="No matching codes">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (code of filteredAttributeCodes(); track code.attribCode) {
+                <mat-option [value]="code.attribCode">
+                  {{ code.attribCode }} - {{ code.attribDescription }}
+                </mat-option>
+              }
+            </mat-select>
+            @if (isLoadingAttributes()) {
+              <mat-spinner diameter="20" matSuffix aria-label="Loading attribute codes"></mat-spinner>
+            }
+          </mat-form-field>
+
+          <!-- Process Date -->
+          <mat-form-field appearance="fill" class="query-field query-field--date" subscriptSizing="dynamic">
+            <mat-label>Process Date</mat-label>
+            <input matInput
+                   [matDatepicker]="procPicker"
+                   formControlName="procDate"
+                   placeholder="DD-MMM-YYYY"
+                   [min]="minProcDate()"
+                   [max]="maxProcDate()"
+                   (blur)="onProcDateBlur()">
+            <mat-datepicker-toggle matSuffix [for]="procPicker"></mat-datepicker-toggle>
+            <mat-datepicker #procPicker></mat-datepicker>
+            @if (f['procDate'].hasError('required') && f['procDate'].touched) {
+              <mat-error>Process Date is required</mat-error>
+            } @else if (f['procDate'].hasError('matDatepickerParse')) {
+              <mat-error>Invalid date — use DD-MMM-YYYY</mat-error>
+            } @else if (f['procDate'].hasError('matDatepickerMin')) {
+              <mat-error>Cannot be before collection date</mat-error>
+            } @else if (f['procDate'].hasError('matDatepickerMax')) {
+              <mat-error>Cannot be in the future</mat-error>
+            }
+          </mat-form-field>
+
+          <!-- Expiration Date (read-only) -->
+          <mat-form-field appearance="fill" class="query-field query-field--date" subscriptSizing="dynamic">
+            <mat-label>Expiration Date</mat-label>
+            <input matInput [value]="expDate" readonly aria-readonly="true">
+          </mat-form-field>
+
+          <!-- Action Buttons -->
+          <div class="query-actions">
+            <button type="button" mat-stroked-button class="clear-button" (click)="clearAll()">
+              CLEAR
+            </button>
+          </div>
+
+        </div>
+
+        <!-- Description row (shown below main row when attribute code is selected) -->
+        @if (f['attribCode'].value) {
+          <div class="query-row-secondary">
+            <div class="plain-info-field">
+              <span class="plain-info-label">Description</span>
+              <span class="plain-info-value">{{ selectedAttributeCode()?.attribDescription || '--' }}</span>
+            </div>
+          </div>
+        }
+
+      </form>
+    </div>
+
+    <!-- Results Section -->
+    <div class="results-section">
+
+      @if (isLoadingGrid()) {
+        <div class="loading-state">
+          <app-loading-spinner size="medium" message="Loading attributes..."></app-loading-spinner>
+        </div>
+      }
+
+      @if (!isLoadingGrid() && showEntryForm()) {
+        <div class="table-fill-wrapper">
+          <app-data-table
+            [config]="tableConfig()"
+            [data]="pagedData()"
+            [loading]="isLoadingGrid()"
+            (pageChange)="onPageChange($event)"
+            (sortChange)="onSortChange($event)"
+            (rowAction)="onRowAction($event)">
+          </app-data-table>
+        </div>
+      }
+
+      @if (!isLoadingGrid() && !showEntryForm()) {
+        <div class="empty-state empty-state--centered">
+          <mat-icon aria-hidden="true">search</mat-icon>
+          <p class="empty-title">No Results to Display</p>
+          <p class="empty-hint">Please scan or enter a Unit ID to view results.</p>
+        </div>
+      }
+
+    </div>
+
+  </main>
+</div>

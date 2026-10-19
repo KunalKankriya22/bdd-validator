@@ -1,0 +1,791 @@
+create or replace package sbcsys.TSRRPTR2_DATA_GEN is
+  --Created By : Kishore
+  --Created On : 06/30/2010
+  --Purpose    : To populate the TSRRPTR2_DATA table so that the TSRRPTR2
+  --	           report will access the data
+
+  --Version    : 01 - Initial version
+  --           : 02 - Modified by Kishore on 04/14/2011. SCR 17983
+  --           : 03 - Modified by Kishore on 04/04/2012. IM 8163
+  --           : 04 - LT2018 -- valid_interdictions to valid_interdictions_lab table.
+  --           : 05 - MLT 542 (queries modified to use profile set ID for regional contracts)
+
+  -- Added "pl_session_id" parameter to below procedure
+  -- Added by Kishore on 04/04/2012. IM 8163
+  procedure POP_TSRRPTR2_DATA_TABLE(pl_parm_id in varchar2,
+                         	    pl_rpt_name in varchar2,
+				    pl_user in varchar2,
+                                    pl_session_id in varchar2,
+				    p_status out varchar2);
+
+End TSRRPTR2_DATA_GEN;
+/
+
+CREATE OR REPLACE PACKAGE BODY SBCSYS.TSRRPTR2_DATA_GEN IS
+  -- Added "pl_session_id" parameter to below procedure
+  -- Added by Kishore on 04/04/2012. IM 8163
+  PROCEDURE POP_TSRRPTR2_DATA_TABLE(pl_parm_id    in varchar2,
+                                    pl_rpt_name   in varchar2,
+                                    pl_user       in varchar2,
+                                    pl_session_id in varchar2,
+                                    p_status      out varchar2) IS
+
+    cursor c1(p_from_coll_date varchar2, p_to_coll_date varchar2) is
+      SELECT DISTINCT VT.TEST_SHORT_ID
+        FROM UNITS        U,
+             UTRS,
+             CHAPTERS,
+             CONTRACTS,
+             MASTER_CODES,
+             VALID_TESTS  VT
+       WHERE U.RECEIVED_DATE BETWEEN
+             TO_DATE(p_from_coll_date, 'MM-DD-YYYY') AND
+             TO_DATE(p_to_coll_date, 'MM-DD-YYYY')
+         AND U.CHAPTER_ID IN -- AND CONTRACTS.CHAPTER_ID IN
+             (SELECT DECODE(PARM_SELECT,
+                            'ALL',
+                            U.CHAPTER_ID, --CONTRACTS.CHAPTER_ID,
+                            PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'CHP')
+         AND CONTRACTS.CONTRACT_ID IN
+             (SELECT DECODE(PARM_SELECT,
+                            'ALL',
+                            CONTRACTS.CONTRACT_ID,
+                            PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'CON')
+         --AND U.CHAPTER_ID = CONTRACTS.CHAPTER_ID
+         AND U.CONTRACT_ID = CONTRACTS.CONTRACT_ID
+         AND UTRS.UNIT_ID = U.UNIT_ID
+         AND UTRS.COLL_DATE = U.COLL_DATE
+         AND UTRS.CHAPTER_ID = U.CHAPTER_ID
+         AND UTRS.CANCEL_FLAG IS NULL
+         AND CHAPTERS.CHAPTER_ID = U.CHAPTER_ID
+         --AND CHAPTERS.CHAPTER_ID = CONTRACTS.CHAPTER_ID
+        AND    (
+                 (CONTRACTS.CONTRACT_TYPE = 'RG')
+                  OR
+                 (CONTRACTS.CONTRACT_TYPE != 'RG' AND CONTRACTS.CHAPTER_ID = U.CHAPTER_ID)
+               )            
+         AND CODE_TYPE(+) = 'RESUL'
+         AND CODE(+) = UTRS.RESULT_STATUS_1
+         AND VT.TEST_ID = UTRS.TEST_ID
+         AND VT.TEST_GROUP IN
+             (SELECT DECODE(PARM_SELECT, 'ALL', VT.TEST_GROUP, PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'TSTGR')
+         AND VT.TEST_ID IN
+             (SELECT DECODE(PARM_SELECT, 'ALL', VT.TEST_ID, PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'TSTID')
+         AND EXISTS
+       (SELECT 'x'
+                FROM UNIT_INTERDICTIONS UI, VALID_INTERDICTIONS_LAB VI
+               WHERE UI.UNIT_ID = UTRS.UNIT_ID
+                 AND UI.COLL_DATE = UTRS.COLL_DATE
+                 AND UI.CHAPTER_ID = UTRS.CHAPTER_ID
+                 AND UI.SOURCE_TEST_ID = UTRS.TEST_ID
+                 AND VI.INTER_CODE = UI.INTER_CODE
+                 AND VI.INTER_TYPE IN ('N', 'B'))
+         AND EXISTS (SELECT 'x'
+                FROM UTRS UT
+               WHERE UT.UNIT_ID = UTRS.UNIT_ID
+                 AND UT.COLL_DATE = UTRS.COLL_DATE
+                 AND UT.CHAPTER_ID = UTRS.CHAPTER_ID
+                 AND UT.TEST_ID = UTRS.TEST_ID
+                 AND UT.CANCEL_FLAG IS NULL
+                 AND UT.RESULT_STATUS_1 != 'NT')
+      UNION
+      SELECT DISTINCT VT.TEST_SHORT_ID
+        FROM UNITS          U,
+             UNIT_TEST_BASE UTB,
+             CHAPTERS,
+             CONTRACTS,
+             MASTER_CODES,
+             VALID_TESTS    VT
+       WHERE U.RECEIVED_DATE BETWEEN
+             TO_DATE(p_from_coll_date, 'MM-DD-YYYY') AND
+             TO_DATE(p_to_coll_date, 'MM-DD-YYYY')
+         --AND CONTRACTS.CHAPTER_ID IN
+         AND U.CHAPTER_ID IN
+             (SELECT DECODE(PARM_SELECT,
+                            'ALL',
+                            U.CHAPTER_ID, --CONTRACTS.CHAPTER_ID,
+                            PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'CHP')
+         AND CONTRACTS.CONTRACT_ID IN
+             (SELECT DECODE(PARM_SELECT,
+                            'ALL',
+                            CONTRACTS.CONTRACT_ID,
+                            PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'CON')
+         --AND U.CHAPTER_ID = CONTRACTS.CHAPTER_ID
+         AND U.CONTRACT_ID = CONTRACTS.CONTRACT_ID
+         AND UTB.UNIT_ID = U.UNIT_ID
+         AND UTB.COLL_DATE = U.COLL_DATE
+         AND UTB.CHAPTER_ID = U.CHAPTER_ID
+         AND UTB.CANCEL_FLAG IS NULL
+         --AND CHAPTERS.CHAPTER_ID = CONTRACTS.CHAPTER_ID
+         AND CHAPTERS.CHAPTER_ID = U.CHAPTER_ID
+        AND    (
+                 (CONTRACTS.CONTRACT_TYPE = 'RG')
+                  OR
+                 (CONTRACTS.CONTRACT_TYPE != 'RG' AND CONTRACTS.CHAPTER_ID = U.CHAPTER_ID)
+               )            
+         AND CODE_TYPE(+) = 'RESUL'
+         AND CODE(+) = UTB.RESULT_STATUS_1
+         AND VT.TEST_ID = UTB.TEST_ID
+         AND VT.TEST_GROUP IN
+             (SELECT DECODE(PARM_SELECT, 'ALL', VT.TEST_GROUP, PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'TSTGR')
+         AND VT.TEST_ID IN
+             (SELECT DECODE(PARM_SELECT, 'ALL', VT.TEST_ID, PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'TSTID')
+         AND EXISTS
+       (SELECT 'x'
+                FROM UNIT_INTERDICTIONS UI, VALID_INTERDICTIONS_LAB VI
+               WHERE UI.UNIT_ID = UTB.UNIT_ID
+                 AND UI.COLL_DATE = UTB.COLL_DATE
+                 AND UI.CHAPTER_ID = UTB.CHAPTER_ID
+                 AND UI.SOURCE_TEST_ID = UTB.TEST_ID
+                 AND VI.INTER_CODE = UI.INTER_CODE
+                 AND VI.INTER_TYPE IN ('N', 'B'))
+         AND EXISTS (SELECT 'x'
+                FROM UTRS UT
+               WHERE UT.UNIT_ID = UTB.UNIT_ID
+                 AND UT.COLL_DATE = UTB.COLL_DATE
+                 AND UT.CHAPTER_ID = UTB.CHAPTER_ID
+                 AND UT.TEST_ID = UTB.TEST_ID
+                 AND UT.CANCEL_FLAG IS NULL
+                 AND UT.RESULT_STATUS_1 != 'NT')
+       order by 1;
+
+    cursor c2(p_from_coll_date varchar2,
+              p_to_coll_date   varchar2,
+              p_test_short_id  varchar2) is
+     SELECT CHAPTERS.CHAPTER_ID,
+             CHAPTER_NAME,
+             CONTRACTS.CONTRACT_ID,
+             CONTRACTS.COMPANY,
+             U.COLL_DATE order_coll_date,
+             TO_CHAR(U.COLL_DATE, 'DD-MON-YYYY') coll_date,
+             U.UNIT_ID,
+             U.OS_UNIT_ID,
+             VT.TEST_SHORT_ID,
+             UTRS.TEST_SEQ_NO,
+             NVL(DECODE(UTRS.TEST_ID,
+                        'ABORH',
+                        SUBSTR(CODE_DESC, 1, 6),
+                        RESULT_STATUS_1),
+                 'X') result
+        FROM UNITS        U,
+             UTRS,
+             CHAPTERS,
+             CONTRACTS,
+             MASTER_CODES,
+             VALID_TESTS  VT
+       WHERE U.RECEIVED_DATE BETWEEN
+             TO_DATE(p_from_coll_date, 'MM-DD-YYYY') AND
+             TO_DATE(p_to_coll_date, 'MM-DD-YYYY')
+         --AND CONTRACTS.CHAPTER_ID IN
+         AND U.CHAPTER_ID IN
+             (SELECT DECODE(PARM_SELECT,
+                            'ALL',
+                            U.CHAPTER_ID, --CONTRACTS.CHAPTER_ID,
+                            PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'CHP')
+         AND CONTRACTS.CONTRACT_ID IN
+             (SELECT DECODE(PARM_SELECT,
+                            'ALL',
+                            CONTRACTS.CONTRACT_ID,
+                            PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'CON')
+         --AND U.CHAPTER_ID = CONTRACTS.CHAPTER_ID
+         AND U.CONTRACT_ID = CONTRACTS.CONTRACT_ID
+         AND UTRS.UNIT_ID = U.UNIT_ID
+         AND UTRS.COLL_DATE = U.COLL_DATE
+         AND UTRS.CHAPTER_ID = U.CHAPTER_ID
+         AND UTRS.CANCEL_FLAG IS NULL
+         --AND CHAPTERS.CHAPTER_ID = CONTRACTS.CHAPTER_ID
+         AND CHAPTERS.CHAPTER_ID = U.CHAPTER_ID   
+        AND    (
+                 (CONTRACTS.CONTRACT_TYPE = 'RG')
+                  OR
+                 (CONTRACTS.CONTRACT_TYPE != 'RG' AND CONTRACTS.CHAPTER_ID = U.CHAPTER_ID)
+               )                        
+         AND CODE_TYPE(+) = 'RESUL'
+         AND CODE(+) = UTRS.RESULT_STATUS_1
+         AND VT.TEST_ID = UTRS.TEST_ID
+         AND VT.TEST_SHORT_ID = p_test_short_id
+         AND VT.TEST_GROUP IN
+             (SELECT DECODE(PARM_SELECT, 'ALL', VT.TEST_GROUP, PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'TSTGR')
+         AND VT.TEST_ID IN
+             (SELECT DECODE(PARM_SELECT, 'ALL', VT.TEST_ID, PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'TSTID')
+         AND EXISTS
+       (SELECT 'x'
+                FROM UNIT_INTERDICTIONS UI, VALID_INTERDICTIONS_LAB VI
+               WHERE UI.UNIT_ID = UTRS.UNIT_ID
+                 AND UI.COLL_DATE = UTRS.COLL_DATE
+                 AND UI.CHAPTER_ID = UTRS.CHAPTER_ID
+                 AND UI.SOURCE_TEST_ID = UTRS.TEST_ID
+                 AND VI.INTER_CODE = UI.INTER_CODE
+                 AND VI.INTER_TYPE IN ('N', 'B'))
+         AND EXISTS (SELECT 'x'
+                FROM UTRS UT
+               WHERE UT.UNIT_ID = UTRS.UNIT_ID
+                 AND UT.COLL_DATE = UTRS.COLL_DATE
+                 AND UT.CHAPTER_ID = UTRS.CHAPTER_ID
+                 AND UT.TEST_ID = UTRS.TEST_ID
+                 AND UT.CANCEL_FLAG IS NULL
+                 AND UT.RESULT_STATUS_1 != 'NT')
+      UNION
+      SELECT CHAPTERS.CHAPTER_ID,
+             CHAPTER_NAME,
+             CONTRACTS.CONTRACT_ID,
+             CONTRACTS.COMPANY,
+             U.COLL_DATE order_coll_date,
+             TO_CHAR(U.COLL_DATE, 'DD-MON-YYYY') coll_date,
+             U.UNIT_ID,
+             U.OS_UNIT_ID,
+             VT.TEST_SHORT_ID,
+             UTB.TEST_SEQ_NO,
+             NVL(DECODE(UTB.TEST_ID,
+                        'ABORH',
+                        SUBSTR(CODE_DESC, 1, 6),
+                        RESULT_STATUS_1),
+                 'X') result
+        FROM UNITS          U,
+             UNIT_TEST_BASE UTB,
+             CHAPTERS,
+             CONTRACTS,
+             MASTER_CODES,
+             VALID_TESTS    VT
+       WHERE U.RECEIVED_DATE BETWEEN
+             TO_DATE(p_from_coll_date, 'MM-DD-YYYY') AND
+             TO_DATE(p_to_coll_date, 'MM-DD-YYYY')
+         --AND CONTRACTS.CHAPTER_ID IN
+         AND U.CHAPTER_ID IN
+             (SELECT DECODE(PARM_SELECT,
+                            'ALL',
+                            U.CHAPTER_ID, --CONTRACTS.CHAPTER_ID,
+                            PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'CHP')
+         AND CONTRACTS.CONTRACT_ID IN
+             (SELECT DECODE(PARM_SELECT,
+                            'ALL',
+                            CONTRACTS.CONTRACT_ID,
+                            PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'CON')
+        -- AND U.CHAPTER_ID = CONTRACTS.CHAPTER_ID
+         AND U.CONTRACT_ID = CONTRACTS.CONTRACT_ID
+         AND UTB.UNIT_ID = U.UNIT_ID
+         AND UTB.COLL_DATE = U.COLL_DATE
+         AND UTB.CHAPTER_ID = U.CHAPTER_ID
+         AND UTB.CANCEL_FLAG IS NULL
+         --AND CHAPTERS.CHAPTER_ID = CONTRACTS.CHAPTER_ID
+         AND CHAPTERS.CHAPTER_ID = U.CHAPTER_ID
+        AND    (
+                 (CONTRACTS.CONTRACT_TYPE = 'RG')
+                  OR
+                 (CONTRACTS.CONTRACT_TYPE != 'RG' AND CONTRACTS.CHAPTER_ID = U.CHAPTER_ID)
+               )            
+         AND CODE_TYPE(+) = 'RESUL'
+         AND CODE(+) = UTB.RESULT_STATUS_1          
+         AND VT.TEST_ID = UTB.TEST_ID
+         AND VT.TEST_SHORT_ID = p_test_short_id
+         AND VT.TEST_GROUP IN
+             (SELECT DECODE(PARM_SELECT, 'ALL', VT.TEST_GROUP, PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'TSTGR')
+         AND VT.TEST_ID IN
+             (SELECT DECODE(PARM_SELECT, 'ALL', VT.TEST_ID, PARM_SELECT)
+                FROM RPT_PARM_SELECT
+               WHERE REPORT_NAME = pl_rpt_name
+                 AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                        'OPS$',
+                                        SUBSTR(pl_user, 5),
+                                        pl_user)
+                 AND PARM_ID = pl_parm_id
+                 AND PARM_CODE = 'TSTID')
+         AND EXISTS
+       (SELECT 'x'
+                FROM UNIT_INTERDICTIONS UI, VALID_INTERDICTIONS_LAB VI
+               WHERE UI.UNIT_ID = UTB.UNIT_ID
+                 AND UI.COLL_DATE = UTB.COLL_DATE
+                 AND UI.CHAPTER_ID = UTB.CHAPTER_ID
+                 AND UI.SOURCE_TEST_ID = UTB.TEST_ID
+                 AND VI.INTER_CODE = UI.INTER_CODE
+                 AND VI.INTER_TYPE IN ('N', 'B'))
+         AND EXISTS (SELECT 'x'
+                FROM UTRS UT
+               WHERE UT.UNIT_ID = UTB.UNIT_ID
+                 AND UT.COLL_DATE = UTB.COLL_DATE
+                 AND UT.CHAPTER_ID = UTB.CHAPTER_ID
+                 AND UT.TEST_ID = UTB.TEST_ID
+                 AND UT.CANCEL_FLAG IS NULL
+                 AND UT.RESULT_STATUS_1 != 'NT')
+       order by 1, 3, 5, 7, 8, 9, 10;
+
+    t_from_date         rpt_parm_select.parm_select%type;
+    t_to_date           rpt_parm_select.parm_select%type;
+    t_counter           number;
+    t_col_test_id       varchar2(30);
+    t_col_result        varchar2(30);
+    t_sql_find_rec      varchar2(1000);
+    t_rec_found_cnt     number := 0;
+    t_insert_clause     varchar2(2000);
+    t_update_clause     varchar2(2000);
+    t_no_recs_processed number := 0;
+    proc_terminate exception;
+    t_temp number := 1;
+
+  BEGIN
+    p_status := 'OK';
+    /* -- Commented by Kishore on 04/04/2012. Added this logic in "AFTER REPORT" trigger
+    BEGIN
+      DELETE FROM TSRRPTR2_DATA
+       WHERE SESSION_ID = pl_session_id; -- Added by Kishore on 04/04/2012. IM 8163
+    END;
+    COMMIT;
+    -- End of commented section */
+
+    BEGIN
+      SELECT PARM_SELECT
+        INTO t_from_date
+        FROM RPT_PARM_SELECT
+       WHERE REPORT_NAME = pl_rpt_name
+         AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                'OPS$',
+                                SUBSTR(pl_user, 5),
+                                pl_user)
+         AND PARM_ID = pl_parm_id
+         AND PARM_CODE = 'FRDT';
+    EXCEPTION
+      WHEN OTHERS THEN
+        t_from_date := null;
+        p_status    := 'Err: From Date parameter is not found';
+        raise proc_terminate;
+    END;
+
+    BEGIN
+      SELECT PARM_SELECT
+        INTO t_to_date
+        FROM RPT_PARM_SELECT
+       WHERE REPORT_NAME = pl_rpt_name
+         AND USER_NAME = DECODE(SUBSTR(pl_user, 1, 4),
+                                'OPS$',
+                                SUBSTR(pl_user, 5),
+                                pl_user)
+         AND PARM_ID = pl_parm_id
+         AND PARM_CODE = 'TRDT';
+    EXCEPTION
+      WHEN OTHERS THEN
+        t_to_date := null;
+        p_status  := 'Err: To Date parameter is not found';
+        raise proc_terminate;
+    END;
+
+    t_counter := 0;
+    for c1rec in c1(t_from_date, t_to_date) loop
+      t_counter := t_counter + 1;
+      if t_counter = 1 then
+        t_col_test_id := 'TEST_ID1';
+        t_col_result  := 'RESULT_STATUS_1';
+      elsif t_counter = 2 then
+        t_col_test_id := 'TEST_ID2';
+        t_col_result  := 'RESULT_STATUS_2';
+      elsif t_counter = 3 then
+        t_col_test_id := 'TEST_ID3';
+        t_col_result  := 'RESULT_STATUS_3';
+      elsif t_counter = 4 then
+        t_col_test_id := 'TEST_ID4';
+        t_col_result  := 'RESULT_STATUS_4';
+      elsif t_counter = 5 then
+        t_col_test_id := 'TEST_ID5';
+        t_col_result  := 'RESULT_STATUS_5';
+      elsif t_counter = 6 then
+        t_col_test_id := 'TEST_ID6';
+        t_col_result  := 'RESULT_STATUS_6';
+      elsif t_counter = 7 then
+        t_col_test_id := 'TEST_ID7';
+        t_col_result  := 'RESULT_STATUS_7';
+      elsif t_counter = 8 then
+        t_col_test_id := 'TEST_ID8';
+        t_col_result  := 'RESULT_STATUS_8';
+      elsif t_counter = 9 then
+        t_col_test_id := 'TEST_ID9';
+        t_col_result  := 'RESULT_STATUS_9';
+      elsif t_counter = 10 then
+        t_col_test_id := 'TEST_ID10';
+        t_col_result  := 'RESULT_STATUS_10';
+      elsif t_counter = 11 then
+        t_col_test_id := 'TEST_ID11';
+        t_col_result  := 'RESULT_STATUS_11';
+      elsif t_counter = 12 then
+        t_col_test_id := 'TEST_ID12';
+        t_col_result  := 'RESULT_STATUS_12';
+      else
+        t_col_test_id := 'OTHER_IDS';
+      end if;
+
+      for c2rec in c2(t_from_date, t_to_date, c1rec.test_short_id) loop
+        --dbms_output.put_line(t_col_test_id || '-' || c2rec.test_short_id);
+        --dbms_output.put_line(t_col_result || '-' || c2rec.result);
+        -- Uncommented the below section by Kishore on 04/14/2011. SCR 17983
+        t_sql_find_rec := 'select count(*) ' || 'from tsrrptr2_data ' ||
+                          'where chapter_id = ''' || c2rec.chapter_id ||
+                          ''' ' || 'and contract_id = ''' ||
+                          c2rec.contract_id || ''' ' || 'and unit_id = ''' ||
+                          c2rec.unit_id || ''' ' ||
+                          'and coll_date = to_date(''' || c2rec.coll_date ||
+                          ''', ''DD-MON-YYYY'') ' || 'and ' ||
+                          t_col_test_id || ' = ''' || c2rec.test_short_id ||
+                          ''' ' || 'and ' || t_col_result || ' = ''' ||
+                          c2rec.result || ''' ' || 'and test_seq_no = ' ||
+                          c2rec.test_seq_no || ' ' || 'and session_id = ''' ||
+                          pl_session_id || ''''; -- Added "session_id" by Kishore on 04/04/2012. IM 8163
+
+        EXECUTE IMMEDIATE t_sql_find_rec
+          into t_rec_found_cnt;
+        --dbms_output.put_line('Unit ID: '|| c2rec.unit_id );
+        --dbms_output.put_line('Rec Count: '|| t_rec_found_cnt);
+        -- End of uncommented section
+
+        -- Commented by Kishore on 04/14/2011. SCR 17983
+        /*begin
+          select count(*)
+            into t_rec_found_cnt
+            from tsrrptr2_data
+           where chapter_id = c2rec.chapter_id
+             and contract_id = c2rec.contract_id
+             and unit_id = c2rec.unit_id
+             and to_char(coll_date, 'DD-MON-YYYY') = c2rec.coll_date
+             and test_seq_no = c2rec.test_seq_no;
+        end; */
+        -- End of commented section
+
+        if t_rec_found_cnt = 0 then
+          -- Added "session_id" to the below "insert" statement
+          -- Added by Kishore on 04/04/2012. IM 8163
+          t_insert_clause := 'insert into tsrrptr2_data ' ||
+                             '(session_id, chapter_id, chapter_name, contract_id, company, ' ||
+                             'coll_date, unit_id, os_unit_id, test_seq_no, test_id1, result_status_1, ' ||
+                             'test_id2, result_status_2, test_id3, result_status_3, test_id4, result_status_4, ' ||
+                             'test_id5, result_status_5, test_id6, result_status_6, test_id7, result_status_7, ' ||
+                             'test_id8, result_status_8, test_id9, result_status_9, test_id10, result_status_10, ' ||
+                             'test_id11, result_status_11, test_id12, result_status_12, other_ids) ' ||
+                             'values (' || '''' || pl_session_id || ''', ' || '''' ||
+                             c2rec.chapter_id || ''', ' || '''' ||
+                             c2rec.chapter_name || ''', ' || '''' ||
+                             c2rec.contract_id || ''', ' || '''' ||
+                             c2rec.company || ''', ' || 'to_date(''' ||
+                             c2rec.coll_date || ''', ''DD-MON-YYYY''), ' || '''' ||
+                             c2rec.unit_id || ''', ' || '''' ||
+                             c2rec.os_unit_id || ''', ' ||
+                             c2rec.test_seq_no || ', ';
+
+          if t_counter = 1 then
+            t_insert_clause := t_insert_clause || '''' ||
+                               c2rec.test_short_id || ''', ';
+            t_insert_clause := t_insert_clause || '''' || c2rec.result ||
+                               ''', ';
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null)';
+          elsif t_counter = 2 then
+            t_insert_clause := t_insert_clause || 'null, null, ';
+            t_insert_clause := t_insert_clause || '''' ||
+                               c2rec.test_short_id || ''', ';
+            t_insert_clause := t_insert_clause || '''' || c2rec.result ||
+                               ''', ';
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null, null, null, null, null, null, null, null, null)';
+          elsif t_counter = 3 then
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, ';
+            t_insert_clause := t_insert_clause || '''' ||
+                               c2rec.test_short_id || ''', ';
+            t_insert_clause := t_insert_clause || '''' || c2rec.result ||
+                               ''', ';
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null, null, null, null, null, null, null)';
+          elsif t_counter = 4 then
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, ';
+            t_insert_clause := t_insert_clause || '''' ||
+                               c2rec.test_short_id || ''', ';
+            t_insert_clause := t_insert_clause || '''' || c2rec.result ||
+                               ''', ';
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null, null, null, null, null)';
+          elsif t_counter = 5 then
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, ';
+            t_insert_clause := t_insert_clause || '''' ||
+                               c2rec.test_short_id || ''', ';
+            t_insert_clause := t_insert_clause || '''' || c2rec.result ||
+                               ''', ';
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null, null, null)';
+          elsif t_counter = 6 then
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ';
+            t_insert_clause := t_insert_clause || '''' ||
+                               c2rec.test_short_id || ''', ';
+            t_insert_clause := t_insert_clause || '''' || c2rec.result ||
+                               ''', ';
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null)';
+          elsif t_counter = 7 then
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, ';
+            t_insert_clause := t_insert_clause || '''' ||
+                               c2rec.test_short_id || ''', ';
+            t_insert_clause := t_insert_clause || '''' || c2rec.result ||
+                               ''', ';
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, null)';
+          elsif t_counter = 8 then
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null, null, ';
+            t_insert_clause := t_insert_clause || '''' ||
+                               c2rec.test_short_id || ''', ';
+            t_insert_clause := t_insert_clause || '''' || c2rec.result ||
+                               ''', ';
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null)';
+          elsif t_counter = 9 then
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null, null, null, null, ';
+            t_insert_clause := t_insert_clause || '''' ||
+                               c2rec.test_short_id || ''', ';
+            t_insert_clause := t_insert_clause || '''' || c2rec.result ||
+                               ''', ';
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null)';
+          elsif t_counter = 10 then
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null, null, null, null, null, null, ';
+            t_insert_clause := t_insert_clause || '''' ||
+                               c2rec.test_short_id || ''', ';
+            t_insert_clause := t_insert_clause || '''' || c2rec.result ||
+                               ''', ';
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null)';
+          elsif t_counter = 11 then
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null, null, null, null, null, null, null, null, ';
+            t_insert_clause := t_insert_clause || '''' ||
+                               c2rec.test_short_id || ''', ';
+            t_insert_clause := t_insert_clause || '''' || c2rec.result ||
+                               ''', ';
+            t_insert_clause := t_insert_clause || 'null, null, null)';
+          elsif t_counter = 12 then
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, ';
+            t_insert_clause := t_insert_clause || '''' ||
+                               c2rec.test_short_id || ''', ';
+            t_insert_clause := t_insert_clause || '''' || c2rec.result ||
+                               ''', ';
+            t_insert_clause := t_insert_clause || 'null)';
+          else
+            t_insert_clause := t_insert_clause ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null, null, null, null, null, null, null, null, ' ||
+                               'null, null, null, null, ';
+            t_insert_clause := t_insert_clause || '''' ||
+                               c2rec.test_short_id || '   ' || c2rec.result ||
+                               ''')';
+          end if;
+
+          begin
+            EXECUTE IMMEDIATE t_insert_clause;
+          exception
+            when others then
+              p_status := 'Err: Insert failed';
+              raise proc_terminate;
+          end;
+        else
+          if t_counter <= 12 then
+            -- Added "session_id" clause to the below "update" statement
+            -- Added by Kishore on 04/04/2012. IM 8163
+            t_update_clause := 'update tsrrptr2_data ' || 'set ' ||
+                               t_col_test_id || ' = ''' ||
+                               c2rec.test_short_id || ''', ' ||
+                               t_col_result || ' = ''' || c2rec.result ||
+                               ''' ' || 'where chapter_id = ''' ||
+                               c2rec.chapter_id || ''' ' ||
+                               'and contract_id = ''' || c2rec.contract_id ||
+                               ''' ' || 'and unit_id = ''' || c2rec.unit_id ||
+                               ''' ' || 'and coll_date = to_date(''' ||
+                               c2rec.coll_date || ''', ''DD-MON-YYYY'') ' ||
+                               'and test_seq_no = ' || c2rec.test_seq_no || ' ' ||
+                               'and session_id = ''' || pl_session_id || '''';
+          else
+            -- Added "session_id" clause to the below "update" statement
+            -- Added by Kishore on 04/04/2012. IM 8163
+            t_update_clause := 'update tsrrptr2 ' || 'set ' ||
+                               t_col_test_id || ' = ''' ||
+                               c2rec.test_short_id || '   ' || c2rec.result ||
+                               ''' ' || 'where chapter_id = ''' ||
+                               c2rec.chapter_id || ''' ' ||
+                               'and contract_id = ''' || c2rec.contract_id ||
+                               ''' ' || 'and unit_id = ''' || c2rec.unit_id ||
+                               ''' ' || 'and coll_date = to_date(''' ||
+                               c2rec.coll_date || ''', ''DD-MON-YYYY'') ' ||
+                               'and test_seq_no = ' || c2rec.test_seq_no || ' ' ||
+                               'and session_id = ''' || pl_session_id || '''';
+          end if;
+
+          if t_temp = 1 then
+            dbms_output.put_line(t_update_clause);
+            t_temp := 2;
+          end if;
+
+          begin
+            EXECUTE IMMEDIATE t_update_clause;
+          exception
+            when others then
+              p_status := 'Err: Update failed';
+              raise proc_terminate;
+          end;
+        end if; -- if t_rec_found_cnt = 0 then
+
+        if t_no_recs_processed >= 100 then
+          t_no_recs_processed := 0;
+          commit;
+        else
+          t_no_recs_processed := t_no_recs_processed + 1;
+        end if;
+      end loop; -- for c2rec in c2 (t_frm_date, t_to_date, c1rec.test_short_id) loop
+    end loop; -- for c1rec in c1 (t_from_date, t_to_date) loop
+
+    commit;
+
+  EXCEPTION
+    when proc_terminate then
+      rollback;
+  END POP_TSRRPTR2_DATA_TABLE;
+END TSRRPTR2_DATA_GEN;
+/
+
+
+Create or Replace Public Synonym TSRRPTR2_DATA_GEN for TSRRPTR2_DATA_GEN;
+
+Grant execute,debug on TSRRPTR2_DATA_GEN to LT_LAB;

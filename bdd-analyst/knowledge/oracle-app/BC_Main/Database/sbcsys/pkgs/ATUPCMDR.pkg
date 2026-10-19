@@ -1,0 +1,598 @@
+create or replace PACKAGE          "ATUPCMDR" is
+/*****************************************************************************
+Developed By : Sobha Damodaran
+Create Date  : 12.03.2003
+Purpose      : Abbott Commander Interfac
+Modified By  : Basker Edwin
+Date [Ver]   : 09.18.06 [02]
+Comments     : This would support both ISBT and Codabar. The important thing
+               to note is, the instrument must be configured to take 20 chars
+               unit length(the unit numbers will be in two lines in the file)
+Date [Ver]  :09/25/08 [ver:03]  : strip off the start and stop code for
+                                   ISBT units
+            :03 [03/19/2012] Time zone and multi chapter changes- Edwin LT2012
+**************************************************************************** */
+procedure add_log_entry(p_log_text in varchar2);
+procedure main_proc(file_name in varchar2,v_inst_id in varchar2,
+                   pl_chapter_id in varchar2);
+procedure process;
+procedure readrecord;
+procedure unit_record;
+procedure test_record;
+procedure init_variables;
+procedure update_batch_information;
+procedure insert_instrument_log;
+procedure convert_unit_id ;
+procedure update_rpt_parm;
+procedure rollback_and_exit ;
+last_unit varchar2(20);
+type LogLineTable is TABLE of VARCHAR2(80) index by binary_integer;
+ LogOP LogLineTable;
+ v_cntr number :=0;
+   logfile UTL_FILE.FILE_TYPE;
+   instfile UTL_FILE.FILE_TYPE;
+   LogDir varchar2(50);
+   logfilename varchar2(50);
+   read_record varchar2(500);
+   complete boolean:=false;
+   samples_started boolean:=false;
+   v_tb_id varchar2(14);
+   inst_test_id varchar2(2);
+   v_test_id varchar2(10);
+   cut_off varchar2(10);
+   kit_lot varchar2(30);
+   v_machine_id varchar2(5);
+   v_unit_id varchar2(20);
+   well_number varchar2(4);
+   result_status varchar2(4);
+   codabar_unit_scheme varchar2(1);
+   testing_lab_code varchar2(2);
+   v_chapter_id varchar2(4);
+   auto_sch_flag  varchar2(1);
+   temp_max_test_seq_no  number:=0;
+   temp_coll_date date;
+   od_value varchar2(12);
+   first_unit boolean:=TRUE;
+   result_file_name varchar2(30);
+   record_count number:=0;
+   pos_res_count number:=0;
+   neg_res_count number:=0;
+   upload_count number:=0;
+   reject_count number:=0;
+   samples_count number:=0;
+   good_unit boolean;
+   line_number  number:=0;
+   start_batch_time  varchar2(20);
+   end_batch_time  varchar2(20);
+   tech_id   varchar2(3);
+   reset_counter NUMBER:=0;
+   first_line_unit  varchar2(20);
+   ppc_serial_no  varchar2(7);
+   g_local_time   DATE;
+   p_chp_sys_date DATE;
+
+end ATUPCMDR;
+/
+
+create or replace PACKAGE BODY          "ATUPCMDR" is
+PROCEDURE add_log_entry(p_log_text varchar2) is
+BEGIN
+         UTL_FILE.putf(logfile,'%s\n',p_log_text);
+         UTL_FILE.fflush(logfile);
+END add_log_entry;
+procedure main_proc(file_name in varchar2, v_inst_id in varchar2,
+                   pl_chapter_id in varchar2) is
+   begin
+      dbms_output.enable(50000000);
+      v_machine_id:=v_inst_id;
+      result_file_name:=file_name;
+
+    v_chapter_id:=pl_chapter_id;
+    p_chp_sys_date:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                              sysdate);
+
+      begin
+      select code_desc into LogDir from master_codes
+      where code_type='LOGDR' and code='ILOG' and
+      p_chp_sys_date between eff_date and nvl(term_date,sysdate+10);
+      exception
+           when utl_file.invalid_path then
+           dbms_output.put_line('Invalid path or filename');raise;
+           when others then
+           dbms_output.put_line('Error in prepare_log_filename');raise;
+      end;
+      begin
+          select 'ATUPCMDR_'||rtrim(result_file_name)||'_'||
+          LT_USER_SESSION.get_userid||'.r'
+          into logfilename from dual;
+      exception
+          when others then
+             dbms_output.put_line('Error in getting logfilename ... Aborting');
+             raise;
+      end;
+      begin
+          logfile:=UTL_FILE.fopen(LogDir,logfilename, 'w');
+          instfile:=UTL_FILE.fopen(LogDir,file_name, 'r');
+          add_log_entry('LOG FILE FOR PPC INTERFACE');
+          add_log_entry(' ');
+          add_log_entry('File Name  : '||result_file_name);
+          add_log_entry('Log Name   : '||logfilename);
+
+          g_local_time:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                                  sysdate);
+          start_batch_time := to_char(g_local_time,'mm-dd-yy hh24:mi:ss');
+          add_log_entry('Start Time : '||start_batch_time);
+          exception
+          when utl_file.invalid_path then
+           dbms_output.put_line('Invalid path or filename'); raise;
+     end;
+          init_variables;
+          loop
+          process;
+          exit when complete;
+          end loop;
+          update_rpt_parm;
+          add_log_entry(' ');
+          add_log_entry('Summary:');
+          add_log_entry('No. of Lines in file      : '||to_char(line_number));
+          add_log_entry('No. of Samples Processed  : '||to_char(samples_count));
+          add_log_entry('No. of results uploaded   : '||to_char(upload_count));
+          add_log_entry('No. of Positive Results read: '||to_char(pos_res_count));
+          add_log_entry('No. of Negative Results read: '||to_char(neg_res_count));
+          add_log_entry('No. of samples_rejected    : '||to_char((samples_count - upload_count)));
+          add_log_entry(' ');
+          add_log_entry('Samples Rejected:');
+          for i in 1..nvl(LogOP.count, 0)
+          loop
+           add_log_entry(LogOP(i));
+          end loop;
+
+          g_local_time:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                        sysdate);
+          end_batch_time := to_char(g_local_time,'mm-dd-yy hh24:mi:ss');
+          add_log_entry(' ');
+          add_log_entry('End Time : '||end_batch_time);
+          UTL_FILE.fclose(logfile);
+          commit;
+end;
+procedure process is
+kit_line   varchar2(100);
+tech_line  varchar2(100);
+begin
+   readrecord;
+   if not complete then
+   begin
+   if (instr(read_record,'------') = 0 and
+       length(rtrim(read_record)) > 2) then
+      record_count:=record_count+1;
+      if instr(read_record, 'ASSAY #') != 0 then
+         test_record;
+      end if;
+      if instr(read_record, 'LOT #') != 0 then
+         kit_line := substr(read_record,instr(read_record,'LOT #'),
+         (instr(read_record,'TEST #')-instr(read_record,'LOT #')));
+         kit_lot := ltrim(rtrim(substr(kit_line,6)));
+      end if;
+      if instr(read_record, 'TECH ID') != 0 then
+         tech_line := substr(read_record,instr(read_record,'TECH ID:'),
+         (instr(read_record,'LOT #')-instr(read_record,'TECH ID:')));
+         tech_id := ltrim(rtrim(substr(tech_line,9)));
+      end if;
+      if instr(read_record, 'PPC SERIAL NUMBER') != 0 then
+         ppc_serial_no := ltrim(rtrim(substr(read_record,19,7)));
+      end if;
+      if instr(read_record,'BATCH ABORTED') != 0
+      then
+        add_log_entry('Batch Aborted .... Aborting');
+        rollback_and_exit;
+      end if;
+      if instr(read_record, 'END OF BATCH') != 0 then
+        complete :=true;
+      end if;
+      if samples_started  and not complete then
+            good_unit:=true;
+            if (instr(read_record,'EMPTY') = 0 and
+                instr(read_record,'TRAY#') = 0 and
+                instr(read_record,'DATE:') = 0 and
+                instr(read_record,'WELL') = 0 and
+                instr(read_record,'I.D.#') = 0 and
+                instr(read_record,'======') = 0)  then
+                -- and substr(read_record,1,2) = '  ') then removed for ISBT
+               reset_counter:=reset_counter+1;
+               unit_record;
+               samples_count :=samples_count+1;
+            end if;
+      end if;
+      if instr(read_record, 'SAMPLES') != 0 then
+         samples_started :=true;
+      end if;
+   else
+      reset_counter:=0;
+   end if;
+   end;
+   end if;
+end process;
+procedure readrecord is
+begin
+utl_file.get_line(instfile,read_record);
+line_number := line_number+1;
+exception
+  when no_data_found then
+  complete:=TRUE;
+  when UTL_FILE.READ_ERROR then
+  add_log_entry('Error reading file '||result_file_name);
+  rollback_and_exit;
+end readrecord;
+procedure test_record is
+test_line varchar2(100);
+begin
+    test_line := substr(read_record,instr(read_record,'ASSAY #'),(instr(read_record,'NAME')-instr(read_record,'ASSAY #')));
+    inst_test_id := ltrim(rtrim(substr(test_line,8)));
+    begin
+    select vit.test_id, nvl(auto_schedule,'N')
+    into v_test_id, auto_sch_flag
+    from valid_instrument_tests vit, valid_tests vt
+        where vit.test_id = vt.test_id
+        and machine_id=rtrim(v_machine_id) and
+        machine_test_id=rtrim(inst_test_id) and
+        vit.chapter_id=v_chapter_id and
+        p_chp_sys_date between vit.eff_date and nvl(vit.term_date,sysdate+10)
+        and p_chp_sys_date between vt.eff_date and nvl(vt.term_date,sysdate+10);
+        exception
+            when no_data_found then
+              auto_sch_flag := 'N';
+              add_log_entry('Invalid test ID '||inst_test_id||' in file for '||v_machine_id || '..Aborting');
+              rollback_and_exit;
+   end;
+   add_log_entry('Test ID    : '||v_test_id);
+end test_record;
+procedure unit_record is
+  unit_line   varchar2(20);
+  well_details varchar2(100);
+  function_result varchar2(200);
+  rescode varchar2(13);
+  temp_x varchar2(1);
+  unit_yes boolean := TRUE;
+Begin
+   unit_line :=ltrim(rtrim(substr(read_record,1,10)));
+   --dbms_output.put_line('Unit Line='||unit_line);
+If reset_counter=1 then
+   first_line_unit:=unit_line;
+
+Elsif reset_counter=2 then
+
+ If length(unit_line) not in (6,7,10) then
+   --dbms_output.put_line('Unit Length='||to_char(length(unit_line)));
+    add_log_entry('Line # '||to_char(line_number)||' : '||
+                   read_record||' - Invalid Unit ID');
+     v_unit_id := unit_line;
+     good_unit:=FALSE;
+ Else
+   If nvl(length(unit_line),0) = 0 then
+      samples_count := samples_count -1;
+      good_unit := FALSE;
+      unit_yes := FALSE;
+   Else
+       If length(unit_line) in (6,7,10) then
+           dbms_output.put_line('first_line_unit='||first_line_unit);
+           If first_line_unit is null or first_line_unit=' ' then
+              v_unit_id := substr(read_record,4,7); --Codabar
+              dbms_output.put_line('Codabar Unit='||v_unit_id);
+          Else
+              v_unit_id:=Ltrim(Rtrim(first_line_unit))||
+              substr(read_record,1,10);        --ISBT
+              if length(v_unit_id)>13 then --added to remove stop and start
+                 v_unit_id:=substr(v_unit_id,2,13);
+              end if;
+
+              dbms_output.put_line('ISBT unit='||v_unit_id);
+           End If;
+
+          well_number := ltrim(rtrim(substr(read_record, 12, 5)));
+           od_value := ltrim(rtrim(substr(read_record, 17, 12)));
+           rescode := ltrim(rtrim(substr(read_record, 28,13)));
+      End If;
+
+   begin
+     select result_status into result_status from valid_instrument_test_results
+     where test_id=v_test_id and machine_id=v_machine_id
+           and chapter_id=v_chapter_id and machine_result_status=rescode and
+           p_chp_sys_date between eff_date and nvl(term_date,sysdate+10);
+     exception when others then
+          add_log_entry('Line # '||to_char(line_number)||' : '
+          ||read_record||' - Invalid Result');
+          good_unit:=FALSE;
+   end;
+   end if;
+end if;
+
+if good_unit then
+   begin
+     if codabar_unit_scheme='A' and length(v_unit_id) in ('6','7') then
+        convert_unit_id;
+     end if;
+     if first_unit then
+        update_batch_information;
+        first_unit:=false;
+     end if;
+     last_unit:=v_unit_id;
+      begin
+       select 'x' into temp_x from master_codes where code_type='REAC'
+                and code=result_status;
+      pos_res_count:=pos_res_count+1;
+      exception when no_data_found then
+      neg_res_count:=neg_res_count+1;
+     end;
+     if auto_sch_flag = 'Y'
+     then
+      begin
+      temp_coll_date := null;
+       select max(coll_date)
+       into temp_coll_date
+       from units
+       where unit_id = v_unit_id
+       and  not exists (select 'x'
+                     from utrs
+                    where unit_id = units.unit_id
+                    and coll_date = units.coll_date
+                    and test_id = v_test_id
+                    and cancel_flag is null);
+      if temp_coll_date is not null then
+         begin
+           temp_max_test_seq_no := 0;
+           begin
+              select nvl(max(nvl(test_seq_no,0)),0)
+                into temp_max_test_seq_no
+                from utrs
+                where unit_id = v_unit_id
+                and coll_date = temp_coll_date
+                and test_id = v_test_id;
+           exception
+             when others then
+               temp_max_test_seq_no :=0;
+           end;
+           begin
+             insert into utrs
+             (unit_id, coll_date, chapter_id,
+             test_id, test_seq_no,
+             program_id, insert_dats,
+             insert_user_id, test_mode,
+             test_chapter_id, tb_id)
+             values
+             (v_unit_id, temp_coll_date, v_chapter_id,
+             v_test_id, temp_max_test_seq_no +1,
+             'ATUPCMDR', sysdate, LT_USER_SESSION.get_userid,
+             'M', v_chapter_id, null);
+          exception
+             when others then
+               add_log_entry('Error in inserting into utrs....Aborting');
+               rollback_and_exit;
+          end;
+       end;
+       end if;
+      exception
+       when others then
+       temp_coll_date := null;
+      end;
+     end if;
+     function_result := sbclib.load_holding_tests
+                                        (v_unit_id,
+                                        v_test_id,
+                                        well_number,
+                                        od_value,
+                                        null,
+                                        result_status,
+                                        v_tb_id,
+                                        v_machine_id,
+                                        null,
+                                        null,
+                                        'ATUPCMDR',
+                                       p_chp_sys_date,
+                                        v_chapter_id);
+                upload_count:=upload_count+1;
+           if rtrim(function_result)!='0' then
+               add_log_entry('Error in load_holding_tests for unit'||v_unit_id);
+               add_log_entry(function_result);
+           end if;
+       end;
+else
+     if unit_yes then
+      v_cntr := nvl(LogOP.count,0)+1;
+      LogOP(v_cntr) := unit_line;
+     end if;
+end if;
+reset_counter:=0;
+End If;
+end unit_record;
+procedure init_variables is
+begin
+   begin
+   SELECT testing_lab_code into testing_lab_code
+   from system_users
+   where user_id = user
+   and sysdate between eff_date and nvl(term_date,sysdate);
+   exception when no_data_found then
+      testing_lab_code:='99';
+      --v_chapter_id:='WAD';
+   end;
+   begin
+ select nvl(codabar_unit_scheme,'*') into  codabar_unit_scheme
+ from institutions where sysdate between eff_date and nvl(term_date,sysdate);
+ exception when no_data_found then
+    add_log_entry('No institution data available .... Aborting');
+    rollback_and_exit;
+    end;
+end init_variables;
+procedure update_batch_information is
+function_result varchar2(100);
+temp_x varchar2(1);
+v_max_no  number;
+begin
+begin
+SELECT to_char(p_chp_sys_date,'MMDDYY')||'-'||inst_test_id||'C'||
+   lpad(decode(sign(nvl(max_number,0)-nvl(starting_number,0)),
+     -1,nvl(starting_number,0),nvl(max_number,0))+1,4,'0'), nvl(max_number,0)+1
+ INTO  v_tb_id , v_max_no
+ FROM   number_generation
+WHERE  chapter_id = v_chapter_id
+ AND    number_type = 'TB_ID'
+ FOR update of max_number ;
+EXCEPTION
+    when others then
+        add_log_entry('Problem in Number Generation ... Aborting');
+        rollback_and_exit;
+END;
+add_log_entry('Test Batch : '||v_tb_id);
+add_log_entry(' ');
+add_log_entry('PPC Serial : '||ppc_serial_no);
+add_log_entry('Tech ID    : '||tech_id);
+add_log_entry(' ');
+add_log_entry('Errors:');
+BEGIN
+UPDATE NUMBER_GENERATION
+SET max_number = v_max_no
+WHERE chapter_id = v_chapter_id
+AND  number_type= 'TB_ID' ;
+EXCEPTION
+   when others then
+      add_log_entry('Update Number Generation Problem ... Aborting');
+      rollback_and_exit;
+END;
+begin
+ select distinct 'x'  into temp_x
+                  from test_batch_hdr
+                  where tb_id = v_tb_id
+                  and test_chapter_id = v_chapter_id
+                  and group_test_id = v_test_id;
+        add_log_entry('Duplicate batch '||v_tb_id||' ... Aborting');
+        rollback_and_exit;
+    exception when no_data_found then
+    begin
+       select 'x'  into temp_x from dual
+                where exists (select 'x' from utrs
+                                  where tb_id = v_tb_id
+                                  and test_id = v_test_id
+                                  and test_chapter_id = v_chapter_id)  or
+                      exists (select 'x' from unit_test_base
+                                  where tb_id = v_tb_id
+                                  and test_id = v_test_id
+                                  and test_chapter_id = v_chapter_id)  or
+                      exists (select 'x' from holding_tests
+                                  where tb_id = v_tb_id
+                                  and test_id = v_test_id
+                                  and test_chapter_id = v_chapter_id)  or
+                      exists (select 'x' from test_voids
+                                  where tb_id = v_tb_id
+                                  and test_id = v_test_id
+                                  and test_chapter_id = v_chapter_id);
+        add_log_entry('Duplicate batch '||v_tb_id||' ...Aborting');
+        rollback_and_exit;
+      exception when no_Data_found then
+      begin
+         begin
+          insert into test_batch_hdr( tb_id, test_chapter_id, group_test_id,
+                          first_unit_id, insert_dats, user_id)
+                   values (v_tb_id, v_chapter_id, v_test_id,
+                                 v_unit_id, sysdate,
+                    LT_USER_SESSION.get_userid);
+              exception when others then
+                     add_log_entry('Problem inserting into test_batch_hdr... Aborting');
+                     rollback_and_exit;
+         end;
+         begin
+          insert into test_batch_det( tb_id, test_chapter_id, testing_lab_code,
+                test_id, test_type, cut_off_value, station_no, kit_lot_number)
+           values (v_tb_id, v_chapter_id, testing_lab_code,
+                          v_test_id, 'A', cut_off, null, kit_lot);
+                 exception when others then
+                    add_log_entry('Problem inserting into test_batch_det.. Aborting');
+                    rollback_and_exit;
+         end;
+         begin
+            function_result := sbclib.insert_test_parms (v_chapter_id,
+                               v_test_id, v_tb_id, v_machine_id, 'ATUPCMDR');
+         end;
+        if rtrim(function_result)!='0' then
+        add_log_entry('Error inserting test parameters ... Aborting');
+        add_log_entry(function_result);
+        rollback_and_exit;
+        end if;
+    end;
+    end;
+    insert_instrument_log;
+end;
+end;
+procedure insert_instrument_log is
+temp_x varchar2(1);
+begin
+begin
+    select 'x' into temp_x from instrument_log where file_name=substr(result_file_name,instr(result_file_name,'/',-1)+1);
+    add_log_entry('File '||substr(result_file_name,instr(result_file_name,'/',-1)+1)||' already uploaded ..Aborting');
+    rollback_and_exit;
+    exception when no_data_found then null;
+    when too_many_rows then
+    begin
+    add_log_entry('File '||substr(result_file_name,instr(result_file_name,'/',-1)+1)||' already uploaded ..Aborting');
+    rollback_and_exit;
+    end;
+    when others then
+    begin
+    add_log_entry('Error verifying instrument_log ...Aborting');
+    rollback_and_exit;
+    end;
+end;
+begin
+ insert into instrument_log ( tb_id, test_chapter_id, test_id, read_dats,
+                          machine_id, station_no, xmt_status, status_dats,
+                          file_name)
+ values (v_tb_id, v_chapter_id,v_test_id, p_chp_sys_date ,v_machine_id, ' ', '70', p_chp_sys_date, substr(result_file_name,instr(result_file_name,'/',-1)+1));
+ exception when others then
+      add_log_entry('Error creating instrument log ... Aborting');
+      add_log_entry(sqlerrm);
+      rollback_and_exit;
+      end;
+end insert_instrument_log;
+procedure convert_unit_id is
+begin
+select eye_read_trns||substr(v_unit_id,3) into v_unit_id from bar_code_prefixes
+where machine_code=substr(v_unit_id,1,2) and sysdate between eff_date and nvl(term_date,sysdate);
+exception
+    when no_data_found then
+    begin
+    select eye_read_trns||substr(v_unit_id,3) into v_unit_id from bar_code_prefixes
+    where eye_read_trns=substr(v_unit_id,1,2) and sysdate between eff_date and nvl(term_date,sysdate);
+    exception
+    when others then
+    add_log_entry('Problem with bar_code translation for '||v_unit_id||' '||sqlerrm);
+    end;
+end;
+procedure rollback_and_exit is
+begin
+rollback;
+add_log_entry('Aborting');
+raise_application_error('-20000','Aborting');
+UTL_FILE.fclose(logfile);
+end rollback_and_exit;
+procedure update_rpt_parm is
+begin
+begin
+update test_batch_hdr set last_unit_id=last_unit where tb_id=v_tb_id;
+exception
+   when others  then
+        add_log_entry('Error updating test_batch_hdr');
+end;
+begin
+   insert into rpt_parm
+(appl_id, user_name, report_name, parm_id, parm_date, submit_date,
+                                        report_status)
+        values ('SBC', LT_USER_SESSION.get_userid,
+    'ATUPCMDR', rtrim(result_file_name), p_chp_sys_date,p_chp_sys_date, 'C');
+    exception
+        when others then
+        add_log_entry('Error inserting into rpt_parm');
+        add_log_entry(sqlerrm);
+end;
+end update_rpt_parm;
+end ATUPCMDR;
+/
+

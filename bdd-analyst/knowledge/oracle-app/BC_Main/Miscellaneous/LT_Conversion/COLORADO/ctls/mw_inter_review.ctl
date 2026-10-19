@@ -1,0 +1,9 @@
+LOAD DATA
+INFILE '/home/donsys/conversion/data/table.420'
+--APPEND
+INTO TABLE MW_INTER_REVIEW
+(
+ DONOR_ID             POSITION(1:10)          CHAR(10)  NULLIF (DONOR_ID = BLANKS),
+ DEF_CODE             POSITION(11:30)         CHAR(20)  NULLIF (DEF_CODE = BLANKS),
+ REVIEW_CODE          POSITION(31:40)         CHAR(10)  NULLIF (REVIEW_CODE = BLANKS)
+)

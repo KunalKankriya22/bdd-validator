@@ -1,0 +1,291 @@
+<div class="layout-wrapper">
+  <main class="samples-query main-content" role="main">
+
+    <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+    <!-- Filter / Retrieve Card -->
+    <div class="samples-query__retrieve-card">
+      <form [formGroup]="filterForm" (ngSubmit)="onRetrieve()" novalidate class="samples-query__form">
+        <div class="samples-query__retrieve-fields">
+
+          <!-- Unit ID -->
+          <div class="samples-query__field-group">
+            <app-unit-id-field
+              #unitIdField
+              [required]="true"
+              [showBarcodeIcon]="true"
+              [validateFfValue]="'N'"
+              [hintDefault]="'Scan or type Unit ID'"
+              [reactive]="unitDetails()?.hasReactiveResults ?? false"
+              (validated)="onUnitValidated($event)"
+              (cleared)="onUnitCleared()"
+              class="samples-query__retrieve-field"
+            />
+          </div>
+
+          <!-- Collection Date -->
+          <div class="samples-query__field-group">
+            <mat-form-field appearance="fill" class="samples-query__retrieve-field samples-query__date-field" subscriptSizing="dynamic">
+              <mat-label>Collection Date</mat-label>
+              <input matInput [matDatepicker]="collDatePicker" formControlName="collDate" autocomplete="off">
+              <mat-datepicker-toggle matIconSuffix [for]="collDatePicker"></mat-datepicker-toggle>
+              <mat-datepicker #collDatePicker></mat-datepicker>
+            </mat-form-field>
+          </div>
+
+          <!-- CBC Unit ID -->
+          <div class="samples-query__field-group">
+            <mat-form-field appearance="fill" class="samples-query__retrieve-field" subscriptSizing="dynamic">
+              <mat-label>CBC Unit ID</mat-label>
+              <input matInput formControlName="osUnitId" maxlength="13" autocomplete="off">
+            </mat-form-field>
+          </div>
+
+          <!-- Received Date -->
+          <div class="samples-query__field-group">
+            <mat-form-field appearance="fill" class="samples-query__retrieve-field samples-query__date-field" subscriptSizing="dynamic">
+              <mat-label>Received Date</mat-label>
+              <input matInput [matDatepicker]="receivedDatePicker" formControlName="receivedDate" autocomplete="off">
+              <mat-datepicker-toggle matIconSuffix [for]="receivedDatePicker"></mat-datepicker-toggle>
+              <mat-datepicker #receivedDatePicker></mat-datepicker>
+            </mat-form-field>
+          </div>
+
+          <!-- Batch ID -->
+          <div class="samples-query__field-group">
+            <app-smart-dropdown
+              label="Batch ID"
+              placeholder="-- Select --"
+              searchPlaceholder="Search batches..."
+              [staticItems]="batchDropdownItems()"
+              [disabled]="isLoadingBatches"
+              [(value)]="selectedBatchId"
+              (selectionChange)="onBatchSelectionChange($event)"
+              class="samples-query__retrieve-field">
+            </app-smart-dropdown>
+          </div>
+
+        </div>
+
+        <div class="samples-query__retrieve-actions">
+          <button type="submit"
+                  class="btn-retrieve"
+                  [disabled]="isLoading || !hasAnyCriteria()"
+                  aria-label="Retrieve samples data">
+            RETRIEVE
+          </button>
+          <button type="button"
+                  mat-button
+                  class="btn-clear"
+                  [disabled]="!hasAnyFieldValue()"
+                  (click)="onClear()"
+                  aria-label="Clear all filters">
+            CLEAR ALL
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Loading State -->
+    @if (isLoading) {
+      <div class="samples-query__loading" role="alert" aria-live="polite">
+        <mat-spinner diameter="40"></mat-spinner>
+      </div>
+    }
+
+    <!-- Empty State (before search) -->
+    @if (!hasSearched && !isLoading) {
+      <div class="samples-query__card samples-query__card--fill" style="margin: 0 16px;">
+        <div class="empty-state-container">
+          <div class="empty-state-icon" aria-hidden="true">
+            <mat-icon>search</mat-icon>
+          </div>
+          <h3 class="empty-state-title">No Results to Display</h3>
+          <p class="empty-state-message">Enter search criteria and click Retrieve to begin.</p>
+        </div>
+      </div>
+    }
+
+    <!-- Main Content: Contract Details + Test Results + Quick Links -->
+    @if (hasSearched && !isLoading && selectedUnit(); as unit) {
+      <div class="samples-query__main-content">
+
+        <!-- Left: Contract Details + Test Results Grid -->
+        <div class="samples-query__data-area">
+
+          <!-- Indicator Banner: Notes / Interdictions Present -->
+          @if (unitDetails()?.hasNotes || interdictions().length > 0) {
+            <div class="samples-query__indicator-banner" role="status" aria-live="polite">
+              @if (unitDetails()?.hasNotes) {
+                <span class="samples-query__indicator-item">! Notes Present</span>
+              }
+              @if (interdictions().length > 0) {
+                <span class="samples-query__indicator-item">! Interdictions Present</span>
+              }
+            </div>
+          }
+
+          <!-- Contract Details Section -->
+          <div class="samples-query__contract-section">
+            <!-- Row 1: Contract info -->
+            <div class="samples-query__contract-row1">
+              <div class="samples-query__contract-toggle"
+                   role="button"
+                   tabindex="0"
+                   [attr.aria-expanded]="contractExpanded"
+                   aria-label="Toggle contract details"
+                   (click)="contractExpanded = !contractExpanded"
+                   (keydown.enter)="contractExpanded = !contractExpanded"
+                   (keydown.space)="contractExpanded = !contractExpanded; $event.preventDefault()">
+                <mat-icon class="samples-query__chevron" [class.expanded]="contractExpanded">
+                  chevron_right
+                </mat-icon>
+              </div>
+              <div class="samples-query__contract-field">
+                <span class="samples-query__contract-label">Contract ID</span>
+                <span class="samples-query__contract-value">{{ unit.contractId ?? '-' }}</span>
+              </div>
+              <div class="samples-query__contract-field samples-query__contract-field--desc">
+                <span class="samples-query__contract-label">Description</span>
+                <span class="samples-query__contract-value">{{ unit.company ?? '-' }}</span>
+              </div>
+              <div class="samples-query__contract-field">
+                <span class="samples-query__contract-label">Check-In Batch</span>
+                <span class="samples-query__contract-value">{{ unit.batchId ?? '-' }}</span>
+              </div>
+              <div class="samples-query__contract-field">
+                <span class="samples-query__contract-label">Results Release</span>
+                <span class="samples-query__contract-value">{{ unit.qcTestFlag === 'Y' ? 'Yes, ' + formatChapterDateTime(unit.qcTestDate) : '-' }}</span>
+              </div>
+              <div class="samples-query__contract-field">
+                <span class="samples-query__contract-label">Skip Reason</span>
+                <span class="samples-query__contract-value">{{ unit.skipReason ?? '-' }}</span>
+              </div>
+              <button class="samples-query__confirmatory-btn" (click)="openSampleCheckinDetails()">
+                CONFIRMATORY RESULTS
+              </button>
+            </div>
+
+            <!-- Row 2: Tube flags + reconcile -->
+            @if (contractExpanded) {
+              <div class="samples-query__contract-row2">
+                <div class="samples-query__contract-field samples-query__contract-field--sm">
+                  <span class="samples-query__contract-label">R1</span>
+                  <span class="samples-query__contract-value">{{ unit.redTubeFlag ?? '-' }}</span>
+                </div>
+                <div class="samples-query__contract-field samples-query__contract-field--sm">
+                  <span class="samples-query__contract-label">R2</span>
+                  <span class="samples-query__contract-value">{{ unit.redTube2Flag ?? '-' }}</span>
+                </div>
+                <div class="samples-query__contract-field samples-query__contract-field--sm">
+                  <span class="samples-query__contract-label">P1</span>
+                  <span class="samples-query__contract-value">{{ unit.purpleTubeFlag ?? '-' }}</span>
+                </div>
+                <div class="samples-query__contract-field samples-query__contract-field--sm">
+                  <span class="samples-query__contract-label">P2</span>
+                  <span class="samples-query__contract-value">{{ unit.serumPlasmaInd ?? '-' }}</span>
+                </div>
+                <div class="samples-query__contract-field">
+                  <span class="samples-query__contract-label">Check-In Reconcile</span>
+                  <span class="samples-query__contract-value">{{ unit.qcCheckinFlag === 'Y' ? 'Yes, ' + formatChapterDateTime(unit.qcCheckinDate) : '-' }}</span>
+                </div>
+                <div class="samples-query__contract-field">
+                  <span class="samples-query__contract-label">Other Results</span>
+                  <span class="samples-query__contract-value">-</span>
+                </div>
+              </div>
+            }
+          </div>
+
+          <!-- Test Results Grid -->
+          <div class="samples-query__test-results">
+            @if (isLoadingDetails) {
+              <div class="samples-query__loading" role="alert" aria-live="polite">
+                <mat-spinner diameter="32"></mat-spinner>
+              </div>
+            } @else if (testResults().length > 0) {
+              <table class="samples-query__test-table" aria-label="Unit test results">
+                <thead>
+                  <tr>
+                    <th scope="col" class="samples-query__sortable-th"
+                        tabindex="0"
+                        [attr.aria-sort]="testSortDir === 'asc' ? 'ascending' : 'descending'"
+                        (click)="toggleTestSort()"
+                        (keydown.enter)="toggleTestSort()"
+                        (keydown.space)="toggleTestSort(); $event.preventDefault()">
+                      Chapter
+                      <mat-icon class="samples-query__sort-icon">{{ testSortDir === 'asc' ? 'arrow_upward' : 'arrow_downward' }}</mat-icon>
+                    </th>
+                    <th scope="col">Test Seq</th>
+                    <th scope="col">Test ID</th>
+                    <th scope="col">Result</th>
+                    <th scope="col">Absorbance</th>
+                    <th scope="col">Ratio</th>
+                    <th scope="col">Test Batch</th>
+                    <th scope="col">Result Date</th>
+                    <th scope="col">Extract Parameter ID</th>
+                    <th scope="col">Confirmatory QC Date</th>
+                    <th scope="col">Confirmatory Extract ID</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (tr of sortedTestResults(); track tr.testId + (tr.testSeqNo ?? 0)) {
+                    <tr tabindex="0"
+                        [attr.aria-selected]="selectedTestResult() === tr"
+                        (click)="onTestResultClick(tr)"
+                        (keydown.enter)="onTestResultClick(tr)"
+                        (keydown.space)="onTestResultClick(tr); $event.preventDefault()"
+                        [class.selected-test-row]="selectedTestResult() === tr">
+                      <td>{{ tr.chapterId ?? '-' }}</td>
+                      <td>{{ tr.testSeqNo ?? '-' }}</td>
+                      <td [class.reactive-value]="isReactive(tr.resultStatus1)">{{ tr.testId }}</td>
+                      <td [class.reactive-value]="isReactive(tr.resultStatus1)">
+                        {{ tr.resultStatus1 ?? '-' }}
+                        @if (isReactive(tr.resultStatus1)) {
+                          <span class="sr-only"> (Reactive)</span>
+                        }
+                      </td>
+                      <td>{{ tr.absorbance ?? '-' }}</td>
+                      <td>{{ tr.ratio ?? '-' }}</td>
+                      <td>{{ tr.tbId ?? '-' }}</td>
+                      <td>{{ formatChapterDateTime(tr.resultDats) }}</td>
+                      <td>{{ tr.resultsBatch ?? '-' }}</td>
+                      <td>{{ formatChapterDateTime(tr.cnfrmQcDate) }}</td>
+                      <td>{{ tr.extractId ?? '-' }}</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            } @else {
+              <div class="samples-query__detail-empty">No test results found for this unit.</div>
+            }
+          </div>
+        </div>
+
+        <!-- Right: Quick Links -->
+        <div class="samples-query__quick-links-panel">
+          <app-quick-links
+            title="QUICK LINKS"
+            [links]="quickLinks"
+            (linkClick)="onQuickLinkClick($event)">
+          </app-quick-links>
+        </div>
+
+      </div>
+    }
+
+    <!-- No results state -->
+    @if (hasSearched && !isLoading && !selectedUnit()) {
+      <div class="samples-query__card samples-query__card--fill" style="margin: 0 16px;">
+        <div class="empty-state-container">
+          <div class="empty-state-icon" aria-hidden="true">
+            <mat-icon>search_off</mat-icon>
+          </div>
+          <h3 class="empty-state-title">No Units Found</h3>
+          <p class="empty-state-message">No units match the specified search criteria.</p>
+        </div>
+      </div>
+    }
+
+  </main>
+</div>

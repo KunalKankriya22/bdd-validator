@@ -1,0 +1,31 @@
+export const MOCK_INSTITUTION_RESPONSE = {
+  header: {
+    institutionName: 'MEDICARE BLOOD BANK PRIVATE LIMITED',
+    lastUpdatedBy: 'Becki Kugler',
+    lastUpdatedAt: new Date('2021-08-08T23:12:00'),
+    timeZone: 'PST',
+  },
+  form: {
+    institutionId: 'MED-BB-THN-001',
+    institutionName: 'MEDICARE BLOOD BANK PRIVATE LIMITED',
+    contractPrefix: 'MED',
+    facilityShortName: 'MEDI R1',
+    printHeader: 'MEDICARE BLOOD BANK PRIVATE LIMITED',
+    systemName: 'MEDI R1',
+    logo: null,
+    registrationNumber: 'MEDI R1',
+    licenseNumber: 'MEDI R1',
+    codabarScheme: 'N (Numeric)',
+    effectiveDate: new Date('2025-08-15'),
+    isInternational: true,
+    street: 'MEDICARE BLOOD BANK PRIVATE LIMITED',
+    city: 'Dallas',
+    state: 'Texas',
+    zipCode: '75001',
+    country: 'United States of America',
+    phoneNumber: '(+1) 234-567-89',
+    internationalPhoneNumber: '(+1) 234-567-89',
+    fax: '(+1) 20 7123 4567',
+    internationalFax: '(+1) 20 7123 4567',
+  }
+};

@@ -1,0 +1,283 @@
+CREATE OR REPLACE PACKAGE DON_DUP_DONORS IS
+   PROCEDURE dup_donors
+      (p_ssn                   IN      NUMBER,
+       p_last_name             IN      VARCHAR2,
+       p_date_of_birth         IN      DATE,
+       p_first_name            IN      VARCHAR2,
+       p_gender                IN      VARCHAR2,
+       p_session_id            IN      VARCHAR2,
+       p_grade                 IN      NUMBER,
+       p_chapter_id            IN      VARCHAR2,
+       p_total                 OUT     NUMBER ) ;
+
+END DON_DUP_DONORS;
+/
+
+CREATE OR REPLACE PACKAGE BODY DON_DUP_DONORS IS                                                        
+/*                                                                              
+||    Program Name                : DUP_DONORS                                  
+||    Date Creation               : 06-03-07                                    
+||    Current Version             : 01                                     
+*/                                                                              
+PROCEDURE dup_donors                                                            
+   (p_ssn                      IN      NUMBER,                                  
+    p_last_name                IN      VARCHAR2,                                
+    p_date_of_birth            IN      DATE,                                    
+    p_first_name               IN      VARCHAR2,                                
+    p_gender                   IN      VARCHAR2,                                
+    p_session_id               IN      VARCHAR2,                                
+    p_grade                    IN      NUMBER,                                  
+    p_chapter_id               IN      VARCHAR2,                                
+    p_total                    OUT     NUMBER )                                 
+IS                                                                              
+   loc_ssn                 NUMBER;                                              
+   loc_last_name           VARCHAR2(50);                                        
+   loc_dob                 DATE;                                                
+   loc_first_name          VARCHAR2(25);                                        
+   loc_gender              VARCHAR2(1);                                         
+   loc_str                 VARCHAR2(1000);                                      
+   loc_fn_match            VARCHAR2(5);                                         
+   c_p_ssn                 VARCHAR2(9);                                         
+   c_loc_ssn               VARCHAR2(9);                                         
+   loc_fname               VARCHAR2(25);                                        
+   p_fname                 VARCHAR2(25);                                        
+   found_donor             NUMBER;                                              
+   no_of_donors            NUMBER;                                              
+   tabcount                NUMBER;                                              
+   call_resolve_flag       VARCHAR2(1);                                         
+   grade1_donor            VARCHAR2(10);                                        
+                                                                                
+   TYPE don_rectyp IS RECORD                                                    
+        (donor_id       varchar2(10),                                           
+         grade          number,                                                 
+         dgm_id         number,                                                 
+         resolved_flag  varchar2(1));                                           
+                                                                                
+   TYPE don_tabtyp IS table OF don_rectyp INDEX BY binary_integer;              
+                                                                                
+   tabdon  don_tabtyp;                                                          
+/*                                                                              
+||    The FETCH_DONORS cursor is used to search the database for donor records  
+||    that have a reasonable probability of being the record requested.         
+*/                                                                              
+   CURSOR FETCH_DONORS IS                                                       
+      SELECT donor_id,nvl(ssn,-1) ssn,last_name,first_name,gender,date_of_birth 
+        FROM donors                                                             
+       WHERE ssn = p_ssn                                                        
+      UNION                                                                     
+      SELECT donor_id,nvl(ssn,-1) ssn,last_name,first_name,gender,date_of_birth 
+        FROM donors                                                             
+       WHERE date_of_birth = p_date_of_birth                                    
+      UNION                                                                     
+      SELECT donor_id,nvl(ssn,-1) ssn,last_name,first_name,gender,date_of_birth 
+        FROM donors                                                             
+       WHERE soundex_key = soundex(p_last_name)                                 
+         AND soundex(first_name) = soundex(nvl(p_first_name,first_name));       
+/*                                                                              
+||    The GRADE_DONORS cursor is used to grade each donor returned by           
+||    FIND_DONORS cursor, to determine whether or not the record is an          
+||    acceptable match to the entry criteria.  See tech specs for logic for     
+||    calculating the dgm_id.                                                   
+*/                                                                              
+   CURSOR GRADE_DONORS IS                                                       
+      SELECT dgm_id, grade                                                      
+        FROM donor_grading_matrix                                               
+       WHERE dgm_id =                                                           
+           (108*(decode (loc_ssn, p_ssn, 0, -1, 2, nvl(p_ssn, loc_ssn), 2,      
+               decode (least(instr(substr(c_p_ssn,1,1), substr(c_loc_ssn,1,1))+ 
+                             instr(substr(c_p_ssn,2,1), substr(c_loc_ssn,2,1))+ 
+                             instr(substr(c_p_ssn,3,1), substr(c_loc_ssn,3,1))+ 
+                             instr(substr(c_p_ssn,4,1), substr(c_loc_ssn,4,1))+ 
+                             instr(substr(c_p_ssn,5,1), substr(c_loc_ssn,5,1))+ 
+                             instr(substr(c_p_ssn,6,1), substr(c_loc_ssn,6,1))+ 
+                             instr(substr(c_p_ssn,7,1), substr(c_loc_ssn,7,1))+ 
+                             instr(substr(c_p_ssn,8,1), substr(c_loc_ssn,8,1))+ 
+                             instr(substr(c_p_ssn,9,1), substr(c_loc_ssn,9,1)), 
+                                7), 7, 1, 3))))+                                
+           (36*(decode (p_last_name, loc_last_name, 0,                          
+                decode (soundex(p_last_name),soundex(loc_last_name), 1,2))))+   
+           (9*(decode(loc_fn_match,'SAME',0,'SIMM',1,'SNDX',2,'DIFF',3)))+      
+           (3*(decode(p_date_of_birth, loc_dob, 0,                              
+                  decode (to_char(p_date_of_birth, 'MMYYYY'),                   
+                          to_char(loc_dob, 'MMYYYY'), 1,                        
+                  decode (to_char(p_date_of_birth, 'DDYYYY'),                   
+                          to_char(loc_dob, 'DDYYYY'), 1,                        
+                  decode (to_char(p_date_of_birth, 'MMDD'),                     
+                          to_char(loc_dob, 'MMDD'), 1,                          
+                  decode (to_char(p_date_of_birth, 'MMDDYYYY'),                 
+                          to_char(loc_dob, 'DDMMYYYY'), 1, 2)))))))+            
+           (1*(decode (loc_gender, nvl(p_gender, loc_gender),                   
+                       decode (loc_gender, 'M', 1, 2), 3)));                    
+                                                                                
+   FUNCTION check_resolve_duplicates                                            
+      (p_first_don     IN      varchar2,                                        
+       p_second_don    IN      varchar2)   RETURN varchar2                      
+   IS                                                                           
+      loc_count      number;                                                    
+   BEGIN                                                                        
+      IF (p_first_don = p_second_don) THEN                                      
+         RETURN 'N';                                                            
+      END IF;                                                                   
+      BEGIN                                                                     
+         SELECT count(*) into loc_count                         
+           FROM mw_resolved_duplicates
+          WHERE (first_donor_id= p_first_don AND second_donor_id= p_second_don)
+         OR (first_donor_id= p_second_don AND second_donor_id= p_first_don);
+                                                                                
+                                                                                
+---                                                                             
+         IF (loc_count > 0) THEN                                                
+            RETURN 'Y';                                                         
+         ELSE                                                                   
+            RETURN 'N';                                                         
+         END IF;                                                                
+      EXCEPTION                                                                 
+        WHEN others THEN                                                        
+           RETURN 'N';                                                          
+      END;                                                                      
+   END;                                                                         
+BEGIN                                                                           
+   found_donor := 0;                                                            
+   no_of_donors := 0;                                                           
+   c_p_ssn := substr(to_char(p_ssn,'099999999'),2,9);                           
+/*                                                                              
+||    Pull out the first part of the first name that was passed to find donor   
+*/                                                                              
+   SELECT substr(p_first_name,1,decode(instr(p_first_name,' '),0,               
+                 length(p_first_name), instr(p_first_name,' ')-1))              
+     INTO p_fname                                                               
+     FROM dual;                                                                 
+/*                                                                              
+||    Calculate the dgm_id and grade for each potential donor returned.         
+*/                                                                              
+   tabcount := 1;                                                               
+   call_resolve_flag := 'N';                                                    
+   FOR c3 IN fetch_donors LOOP                                                  
+       loc_ssn        := c3.ssn;                                                
+       loc_last_name  := c3.last_name;                                          
+       loc_dob        := c3.date_of_birth;                                      
+       loc_first_name := c3.first_name;                                         
+       loc_gender     := c3.gender;                                             
+       c_loc_ssn      := substr(to_char(c3.ssn,'099999999'),2,9);               
+/*                                                                              
+||    Pull out the first part of the first name of each found donor             
+*/                                                                              
+       SELECT substr(loc_first_name,1,decode(instr(loc_first_name,' '),0,       
+                    length(loc_first_name), instr(loc_first_name,' ')-1))       
+         INTO loc_fname                                                         
+         FROM dual;                                                             
+/*                                                                              
+||    Determine match level between first name transferred and found name.      
+||    If first name is not transferred, match is equated to 'SAME'.             
+*/                                                                              
+       loc_fn_match := 'DIFF';                                                  
+       IF ((p_first_name is null) OR (p_first_name = loc_first_name) OR         
+           (p_first_name = loc_fname) OR (p_fname = loc_first_name) OR          
+           (p_fname = loc_fname)) THEN                                          
+          loc_fn_match := 'SAME';                                               
+       ELSE                                                                     
+          IF ((soundex(p_first_name) = soundex(loc_first_name)) OR              
+              (soundex(p_first_name) = soundex(loc_fname)) OR                   
+              (soundex(p_fname) = soundex(loc_first_name)) OR                   
+              (soundex(p_fname) = soundex(loc_fname))) THEN                     
+             loc_fn_match := 'SNDX';                                            
+          ELSE                                                                  
+             loc_fn_match := 'DIFF';                                            
+          END IF;                                                               
+       END IF;                                                                  
+/*                                                                              
+||    The above logic only checks to see if name is the same or soundex match.  
+||    If firstname match is still "DIFF", check to see if the first names       
+||    are similar.                                                              
+*/                                                                              
+       IF (loc_fn_match = 'DIFF') THEN                                          
+          BEGIN                                                                 
+             SELECT 'SIMM' INTO loc_fn_match                                    
+               FROM NAME_MATCH                                                  
+              WHERE (rtrim(first_name) = loc_first_name AND                     
+                     rtrim(nick_name)  = p_first_name)                          
+                 OR (rtrim(first_name) = p_first_name AND                       
+                     rtrim(nick_name)  = loc_first_name)                        
+                 OR (rtrim(first_name) = p_first_name AND                       
+                     rtrim(nick_name)  = loc_fname)                             
+                 OR (rtrim(first_name) = loc_fname AND                          
+                     rtrim(nick_name)  = p_first_name)                          
+                 OR (rtrim(first_name) = p_fname AND                            
+                     rtrim(nick_name)  = loc_first_name)                        
+                 OR (rtrim(first_name) = loc_first_name AND                     
+                     rtrim(nick_name)  = p_fname)                               
+                 OR (rtrim(first_name) = p_fname AND                            
+                     rtrim(nick_name)  = loc_fname)                             
+                 OR (rtrim(first_name) = loc_fname AND                          
+                     rtrim(nick_name)  = p_fname);                              
+             EXCEPTION                                                          
+               WHEN no_data_found THEN                                          
+                  BEGIN                                                         
+                     SELECT 'SIMM' INTO loc_fn_match                            
+                       FROM DUAL                                                
+                      WHERE instr(rtrim(loc_first_name), p_first_name) != 0     
+                         OR instr(rtrim(loc_first_name), p_fname) != 0          
+                         OR instr(rtrim(p_first_name), loc_first_name) != 0     
+                         OR instr(rtrim(p_first_name), loc_fname) != 0          
+                         OR instr(rtrim(loc_fname), p_first_name) != 0          
+                         OR instr(rtrim(loc_fname), p_fname) != 0               
+                         OR instr(rtrim(p_fname), loc_first_name) != 0          
+                         OR instr(rtrim(p_fname), loc_fname) != 0;              
+                  EXCEPTION                                                     
+                    WHEN no_data_found THEN                                     
+                       null;                                                    
+                  END;                                                          
+          END;                                                                  
+       END IF;                                                                  
+/*                                                                              
+||    NOW WE WILL RESUME THE FIND DONOR ROUTINE ALREADY IN PROGRESS             
+*/                                                                              
+       FOR c4 IN grade_donors LOOP                                              
+           IF (c4.grade <= p_grade) THEN                                        
+              found_donor := found_donor +1;                                    
+              tabdon(tabcount).donor_id := c3.donor_id;                         
+              tabdon(tabcount).grade    := c4.grade;                            
+              tabdon(tabcount).dgm_id   := c4.dgm_id;                           
+              tabdon(tabcount).resolved_flag  := 'N';  /*flag = N for insert */ 
+              IF (c4.grade = 1) THEN                                            
+                 grade1_donor      := c3.donor_id;                              
+                 call_resolve_flag := 'Y';                                      
+              END IF;                                                           
+              tabcount := tabcount + 1;                                         
+           END IF;                                                              
+       END LOOP; /* grade donors */                                             
+   END LOOP; /* c3 for loop loop ends */                                        
+---                                                                             
+   IF (found_donor > 0) THEN                                                    
+      IF (call_resolve_flag = 'Y') THEN                                         
+         FOR i IN 1..tabdon.count  LOOP                                         
+             tabdon(i).resolved_flag := check_resolve_duplicates(grade1_donor,  
+                                                         tabdon(i).donor_id);   
+         END LOOP;                                                              
+      END IF; /* resolve flag */                                                
+      no_of_donors := 0;                                                        
+      FOR i IN 1..tabdon.count LOOP                                             
+          IF (tabdon(i).resolved_flag = 'N') THEN                               
+             no_of_donors := no_of_donors + 1;                                  
+             INSERT INTO mw_donor_reel                                                          (session_id,donor_id,grade,dgm_id,program_id,insert_user,       
+                 insert_date,chapter_id)                                        
+             VALUES                                                             
+                (p_session_id,tabdon(i).donor_id,tabdon(i).grade,               
+                 tabdon(i).dgm_id,'FIND_DON','DONSYS',                              
+                 to_date(to_char(sysdate,'MM-DD-YYYY'),'MM-DD-YYYY'),           
+                 p_chapter_id);                                                 
+          END IF;                                                               
+      END LOOP;                                                                 
+   END IF;                                                                      
+   p_total := no_of_donors;                                                     
+   tabdon.delete;                                                               
+END;  /*   END OF FIND DONOR ROUTINE   */                                       
+
+END DON_DUP_DONORS ; /*-- Package body --*/          
+/
+grant execute on DON_DUP_DONORS to public;
+/
+
+Create or Replace public synonym DON_DUP_DONORS for DON_DUP_DONORS;
+
+

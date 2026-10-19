@@ -1,0 +1,1378 @@
+/* ************************************************************
+  Name              : RTURLOAD.pkg
+  Created By        : Basker Edwin 
+  Date Of Creation  : 12/01/09
+  Purpose           : Package loads the test result file in the RTURLOAD format into the LT 
+
+  Version History
+  
+  Date     Version        Description
+  --------------------------------------------------------------------
+  12/01/09   01    Initial development -Edwin
+  04/18/11   02    replace user by lt_user_session.get_userid-  Hussein
+  05/11/11   03    Chapter ID was read from the file  [Edwin]
+  05/24/11   04    SYSDATE to LOCAL SYSDATE logic was added to check
+                   some validations table and batch id creation part [5613]
+  06/01/11   05    upadte the UTRS table the test_chapter_id to the correct ID
+  07/26/11   06    Added "chapter_id" clause to the SQL statement in "f_get_batch_id" function [Kishore]
+ 09/19/11    07   To fix the start and end time of the header file -Edwin
+ 04/16/12    08  not looking at the chapter ID in the valid instrment tests
+                 and the valid instrument results table: Edwin [IM: 8386]
+ 06/26/15    09    Debug messages are displayed based on value in the DEBUG_CONTROLS table - Kishore
+
+  --- version resetting for 2018
+ 06/26/18    01
+ 04/14/20    02   for MLT- 2866/3149 in conjuction with the core routine  
+ 10/21/24    03   MLT-7340  changing the applicatrion ID from SBC to DON (rpt_parm table)
+
+
+   
+ **********************************************************************   */
+
+
+CREATE OR REPLACE PACKAGE RTURLOAD IS
+
+ 
+  procedure rollback_and_exit (pl_err_msg in varchar2);
+  Procedure f_validate_chapter_id(p_chapter_id in varchar2) ;
+  procedure  f_validate_test(p_test_id in varchar2);
+  Procedure f_interpret_results(p_test_id in varchar2);
+  Procedure f_update_batch_info(p_tb_id in varchar2,p_chapter_id in varchar2,
+                              p_test_id in varchar2,p_unit_id in varchar2) ;
+  
+  Procedure f_instr_log(p_tb_id in varchar2, p_test_id in varchar2);
+  Procedure f_reagent_info (p_test_id in varchar2,
+                          p_chapter_id in varchar2);
+  -- Added "p_chapter_id" to the call to the below "f_get_batch_id" function. Added by Kishore on 07/26/2011
+  Function f_get_batch_id(p_chapter_id in varchar2, 
+                          p_test_id in varchar2) return Number;
+  procedure translate_result_code(p_test_id     in  varchar2,
+                                 p_result_code in  varchar2,
+                                 p_lt_code     out varchar2);
+  PROCEDURE MAIN_PROC (p_file_name in varchar2,inp_ppid in varchar2);
+  procedure f_init_variables;
+  procedure f_process;
+  procedure f_copy_results_data;
+  procedure f_get_userid(p_user_id in varchar2); 
+  procedure f_windup;
+  Procedure f_upd_batch_seqno(p_sl_no in number,p_chapter in varchar2);
+  PROCEDURE f_ins_parmid;
+  procedure f_validate_unit(p_unit_id in varchar2);
+  PROCEDURE add_error_log(pl_log_text in varchar2);
+  Procedure f_copy_test_results(p_test_id in varchar2);
+  Procedure f_detail(p_file_name in varchar2,p_chapter_id in varchar2);
+  Procedure f_update_hdr_tables(p_tb_id in varchar2,p_chapter_id in varchar2,
+                              p_test_id in varchar2);
+  Procedure schedule_test(p_test_id in varchar2,p_unit_id in varchar2,
+                          p_out_status out varchar2);
+
+  g_rowid               VARCHAR2(18);
+  logptr                UTL_FILE.FILE_TYPE;
+  inpptr                UTL_FILE.FILE_TYPE;
+  xmt_status            VARCHAR2(20);
+  log_file_name         VARCHAR2(100);
+  curr_time             VARCHAR2(50);
+  act_file_name         VARCHAR2(100);
+  g_file_name           VARCHAR2(100);
+  g_parm_id             VARCHAR2(20);
+  load_user_id          VARCHAR2(30);
+  first_unit            NUMBER:= 1;
+  slno                  VARCHAR2(5);
+  unit_id               VARCHAR2(15);
+  result_status         VARCHAR2(5);
+  skip_cnt              NUMBER:= 0;
+  prob_cnt              NUMBER:= 0;
+  test_recs_read        NUMBER:= 0;
+  user_id               VARCHAR2(30);  
+  testing_lab_code      VARCHAR2(2);
+  rec_type1             VARCHAR2(4);
+  g_chapter_id          VARCHAR2(5);
+  od_rep_flag           VARCHAR2(2);
+  chapter_name          VARCHAR2(50);
+  logDir                VARCHAR2(100);
+  gContract             VARCHAR2(15);
+  g_file_type           VARCHAR2(1);          
+  end_aborh_batch_id    VARCHAR2(15);
+  start_aborh_batch_id  VARCHAR2(15);
+  start_batch_id        VARCHAR2(15);
+  end_batch_id          VARCHAR2(15);
+  curr_slno             NUMBER:=0;
+  abs_value             VARCHAR2(10); 
+  test_batch_id         VARCHAR2(15);
+  aborh_batch_size      INTEGER;
+  alt_e_level           NUMBER:=0.0;
+  alt_se_level          NUMBER:=0.0;
+  recs_read_cnt         NUMBER:=0;
+  test_id               VARCHAR2(15);
+  test_seq              VARCHAR2(1);
+  final_result_code     VARCHAR2(5);
+  test_result_code1     VARCHAR2(5);
+  od_value_1            VARCHAR2(15);
+  od_value_2            VARCHAR2(15);
+  od_value_3            VARCHAR2(15);
+  FINAL_RESULT          NUMBER:=0;
+  TEST_INVALID          NUMBER:=0;
+  first_aborh_unit      NUMBER:=1;
+  aborh_batch_count     NUMBER:=0;
+  TRAILOR_NOTFOUND      BOOLEAN:=FALSE;
+  p_status              VARCHAR2(240);
+  time_stamp            VARCHAR2(25);
+  SKIP_TEST_RECS        NUMBER:=0;
+  batch_id              VARCHAR2(15);
+  skip_record           EXCEPTION;
+  batch_count           VARCHAR2(7);
+  load_cnt              NUMBER:=0;
+  last_unit_id          VARCHAR2(15);
+  test_batch_count      NUMBER:=0;
+  file_count            VARCHAR2(7);
+  g_test_kit_id         VARCHAR2(15);
+  muser_id              VARCHAR2(18);
+  remote_test_id        VARCHAR2(10);
+  lt_test_id            VARCHAR2(10);
+  nTestCount            NUMBER:=0;
+  lt_result             VARCHAR2(10);
+  temp_string           VARCHAR2(200);
+  v_local_sysdate       DATE;
+  t_is_debug_msg_displayed BOOLEAN; -- Added by Kishore on 06/26/2015
+END RTURLOAD;
+/
+
+CREATE OR REPLACE PACKAGE BODY RTURLOAD IS
+
+PROCEDURE add_error_log(pl_log_text in varchar2) is
+Begin
+         UTL_FILE.putf(logptr,'%s\n',pl_log_text);
+         UTL_FILE.fflush(logptr);
+END add_error_log;
+
+PROCEDURE F_INIT_VARIABLES  is
+ nReq   NUMBER:=0;
+Begin
+  curr_time:=null;
+  first_unit:= 1;
+  slno:=null;
+  skip_cnt:= 0;
+  prob_cnt:= 0;
+  test_recs_read:= 0;
+
+Exception
+   when others then 
+    null;
+End F_INIT_VARIABLES;
+
+procedure translate_result_code(p_test_id     in  varchar2,
+                               p_result_code  in  varchar2,
+                               p_lt_code      out varchar2) is
+nResCount NUMBER:=0;
+Begin
+
+ select nvl(count(*),0) into nResCount from
+ valid_instrument_test_results where machine_id='REMOT' and
+ test_id=p_test_id and machine_result_status=p_result_code and
+ chapter_id=g_chapter_id 
+ and v_local_sysdate between eff_date and
+ nvl(term_date,v_local_sysdate+1) and rownum=1;
+
+ If nResCount = 0 then 
+    p_lt_code:='NOMAP';
+ Else
+   select result_status into p_lt_code from 
+   valid_instrument_test_results where machine_id='REMOT' and
+   test_id=p_test_id and machine_result_status=p_result_code
+   and chapter_id=g_chapter_id 
+   and v_local_sysdate between eff_date and 
+   nvl(term_date,v_local_sysdate+1) and rownum=1;
+ End If;
+
+End translate_result_code;
+
+PROCEDURE f_get_userid (p_user_id in varchar2) IS
+Begin
+
+ select LT_USER_SESSION.get_userid,
+               testing_lab_code
+       into    user_id,
+               testing_lab_code
+         from  system_users
+         where  user_id = p_user_id
+        and sysdate between eff_date and nvl(term_date,sysdate);
+Exception 
+  When no_data_found then 
+   user_id:=load_user_id;
+   testing_lab_code:='99';
+END f_get_userid;
+
+Procedure f_get_batch_seqno IS
+Begin
+
+    /*--- The DECODE ensures : if inadvertently the max_number is
+          set to a value below the starting number, the starting
+          number is used to generate the ID  -----*/
+
+    select decode(sign(nvl(max_number,0)-nvl(starting_number,0)),
+                  -1,nvl(starting_number,0),nvl(max_number,0))+1
+    into   curr_slno
+    from   number_generation
+    where  chapter_id = g_chapter_id
+    and    number_type = 'TB_ID'
+    for update of max_number ;
+
+   select (to_char(v_local_sysdate,'mmddyy') || '-RT' ||
+   lpad(to_char(curr_slno),4,'0')),
+   (to_char(v_local_sysdate,'mmddyy') || '-00P' ||
+   lpad(to_char(curr_slno),4,'0')) into start_batch_id, start_aborh_batch_id
+   from dual;
+
+   end_batch_id:=start_batch_id;
+   end_aborh_batch_id:=start_aborh_batch_id;
+END f_get_batch_seqno;
+
+Function f_get_batch_id(p_chapter_id in varchar2, 
+                        p_test_id in varchar2) return Number is -- Added "p_chapter_id" parameter. Added by Kishore on 07/26/2011
+Begin
+    select tb_id into test_batch_id from result_inp_hdr
+          where result_inp_hdr.tb_id  >= start_batch_id and
+                result_inp_hdr.tb_id  <= end_batch_id and
+                result_inp_hdr.chapter_id = p_chapter_id and -- Changed "chapter_id" to "p_chapter_id". Changed by Kishore on 07/26/2011
+                result_inp_hdr.test_id = p_test_id and rownum =1
+                order by tb_id desc;
+    ---dbms_output.put_line('test batch id in f_get_batch_id='||test_batch_id||
+    ---                      ' test id='||p_test_id);
+    return (0);
+Exception
+When no_data_found then 
+      return(1);
+End f_get_batch_id;
+
+Procedure f_validate_chapter_id(p_chapter_id in varchar2)  is
+
+Begin
+      select aborh_batch_size, round(alt_e_level), round(alt_se_level)
+             into aborh_batch_size,alt_e_level,alt_se_level
+             from chapters where chapter_id = Ltrim(rtrim(p_chapter_id));
+Exception when no_data_found then 
+     add_error_log('chapter id in results file is invalid ');
+     add_error_log('chapter id = '||g_chapter_id);
+     --f_rename();
+     rollback_and_exit('Chapter ID '||p_chapter_id||
+                       ' in result file is invalid');--exit(FAILURE);
+End f_validate_chapter_id;
+
+Procedure f_validate_test(p_test_id in varchar2) is
+ test_count number:=0;
+ nQCIRM     number:=0;
+Begin
+
+ select count(*) into test_count
+        from valid_tests where
+        test_id = rtrim(p_test_id)
+        and sysdate between eff_date and nvl(term_date,sysdate);
+
+
+ if test_count=0 then 
+   add_error_log('Invalid test id '||p_test_id||' record skipped');
+   TEST_INVALID:=1;
+   return;
+ end if;
+
+IF FINAL_RESULT = 1 then 
+ test_result_code1:=final_result_code;
+
+ If p_test_id='ALT' then 
+
+    If to_number(od_value_1) > to_number(od_value_2) then 
+       if to_number(od_value_1) > to_number(od_value_3) then 
+          null;                                /* od value1 is final */
+       else
+         od_value_1:=od_value_3;         /* od value3 is final */     
+       end if;
+    Else
+      if to_number(od_value_2) > to_number(od_value_3) then
+         od_value_1:=od_value_2;          /* od value2 is final */
+      else
+         od_value_1:=od_value_3;         /* od value3 is final */
+       end if;
+    End If;
+
+    If to_number(od_value_1)=0 then 
+         add_error_log('Invalid OD value '||od_value_1||' for test id '||
+                      p_test_id || 'unit id '||unit_id||' test record skipped');
+         TEST_INVALID:=1;
+         return;
+    End If;
+ End If;   --ALT
+
+END IF;
+
+-- check if the results are valid
+  select count(*) into nQCIRM from master_codes
+  where code_type = 'QCIRM' and code = rtrim(test_result_code1)
+  and sysdate between eff_date and nvl(term_date,sysdate+365);
+
+  If nQCIRM = 0 then 
+    begin
+       select result_status into result_status
+           from valid_test_results where
+           test_id = rtrim(p_test_id)
+           and result_status = rtrim(test_result_code1)
+           and rownum = 1 and sysdate between eff_date and
+           nvl(term_date,sysdate);
+   exception when no_data_found then 
+         add_error_log('Invalid result value '||test_result_code1||
+                       ' for test id '|| p_test_id||' unit id '||unit_id||
+                       ' test record skipped');
+         TEST_INVALID:=1;
+         return;
+   end;
+ End If;
+End f_validate_test;
+
+Procedure schedule_test(p_test_id in varchar2,p_unit_id in varchar2,
+                        p_out_status out varchar2) as
+ temp_coll_date date;
+ temp_max_test_seq_no number:=0;
+Begin
+    p_out_status:='OK';
+    temp_coll_date := null;
+    select max(coll_date) into temp_coll_date
+    from units where unit_id = p_unit_id
+    and  not exists (select 'x'
+                     from utrs
+                     where unit_id = units.unit_id
+                     and coll_date = units.coll_date
+                     and test_id = p_test_id
+                     and cancel_flag is null);
+
+     If temp_coll_date is not null then
+        Begin
+           temp_max_test_seq_no := 0;
+           begin
+              select nvl(max(nvl(test_seq_no,0)),0)
+                into temp_max_test_seq_no
+                from utrs
+                where unit_id = p_unit_id
+                and coll_date = temp_coll_date
+                and test_id = p_test_id;
+           exception
+             when others then
+               temp_max_test_seq_no :=0;
+           end;
+
+           begin
+             insert into utrs
+             (unit_id, coll_date, chapter_id,
+             test_id, test_seq_no,
+             program_id, insert_dats,
+             insert_user_id, test_mode,
+             test_chapter_id, tb_id)
+             values
+             (p_unit_id, temp_coll_date, g_chapter_id,
+             p_test_id, temp_max_test_seq_no +1,
+             'RTURLOAD', sysdate, LT_USER_SESSION.get_userid,
+             'M', g_chapter_id, null);
+           exception
+             when others then
+               p_out_status:=sqlerrm;
+           end;
+       End;
+     End if;  -- temp_coll_date
+Exception
+    when others then
+    p_out_status:='NO';
+    temp_coll_date := null;
+End schedule_test;
+
+
+Procedure f_interpret_results(p_test_id in varchar2) is
+X Number:=0;
+Begin
+ IF p_test_id='ALT' then
+ 
+    if result_status='NT' then 
+      return;
+    end if;
+  
+  begin 
+   select round(to_number(od_value_1),0) into abs_value from dual;
+  exception when others then 
+      abs_value:=null;
+      return;
+  end;
+
+  If abs_value >= 9999 then
+    test_result_code1:='UND';
+  Elsif abs_value >= alt_se_level then 
+    test_result_code1:='SE';
+  Elsif abs_value >= alt_e_level then 
+    test_result_code1:='E';
+  Else  
+    test_result_code1:='N';
+  End If;
+ END IF;
+
+END f_interpret_results;
+
+Procedure f_copy_test_results(p_test_id in varchar2) is 
+ A   NUMBER:=0;
+begin
+ test_recs_read:=test_recs_read + 1;
+
+ If p_test_id='ABORH' then 
+
+    test_batch_id:=end_aborh_batch_id;
+    if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015 
+      dbms_output.put_line('Aborh test batch id='||test_batch_id);
+      dbms_output.put_line('First_aborh_unit='||to_char(first_aborh_unit));
+    end if; -- Added by Kishore on 06/26/2015
+ 
+    if (first_aborh_unit = 1 or aborh_batch_count = aborh_batch_size) then
+        first_aborh_unit:= 0;
+        curr_slno:=curr_slno+1;
+        aborh_batch_count:= 0;
+
+        if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+          dbms_output.put_line('curr_slno='||to_char(curr_slno));
+        end if; -- Added by Kishore on 06/26/2015
+        test_batch_id:=to_char(v_local_sysdate,'mmddyy') || '-00P' || 
+                       lpad(to_char(curr_slno),4,'0');
+
+        end_aborh_batch_id:=test_batch_id;
+        if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+          dbms_output.put_line('Test batch ID='||test_batch_id);
+        end if; -- Added by Kishore on 06/26/2015 
+        insert into result_inp_hdr (tb_id,
+                                    chapter_id,
+                                    test_id,
+                                    file_name,
+                                    received_date,
+                                    update_flag,
+                                    file_type)
+                              values( test_batch_id,
+                                      g_chapter_id,
+                                      p_test_id,
+                                      g_file_name,
+                                      SYSDATE,
+                                      null,
+                                      g_file_type);
+
+        if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+          dbms_output.put_line('inserted into the result_inp_hdr table-ABORH');
+        end if; -- Added by Kishore on 06/26/2015
+        aborh_batch_count:=aborh_batch_count+1;
+      end if;
+    -- for ABORH
+Else
+   -- Added "g_chapter_id" to the below call to the "f_get_batch_id" function. Added by Kishore on 07/26/2011
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+     dbms_output.put_line('f_get_batch_id='||to_char(f_get_batch_id(g_chapter_id, p_test_id)));
+   end if; -- Added by Kishore on 06/26/2015
+ -- Added "g_chapter_id" to the below call to the "f_get_batch_id" function. Added by Kishore on 07/26/2011 
+ if f_get_batch_id(g_chapter_id, p_test_id) = 1 then 
+      
+      curr_slno:=curr_slno+1;
+      test_batch_id:=to_char(v_local_sysdate,'mmddyy') || '-RT' ||
+                     lpad(to_char(curr_slno),4,'0');
+
+      if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+        dbms_output.put_line('Test Batch ID='||test_batch_id);
+      end if; -- Added by Kishore on 06/26/2015
+      
+      end_batch_id:=test_batch_id;
+      insert into result_inp_hdr
+                         (tb_id,
+                          chapter_id,
+                          test_id,
+                          file_name,
+                          received_date,
+                          update_flag,
+                          file_type)
+                  values (test_batch_id,
+                          g_chapter_id,
+                          p_test_id,
+                          g_file_name,
+                          SYSDATE,
+                          null,
+                          g_file_type);
+  End If;
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+    dbms_output.put_line('inserted into the result_inp_hdr table');
+  end if; -- Added by Kishore on 06/26/2015
+END IF;
+
+ --add_error_log('Test batch ID='||test_batch_id);
+ insert into result_inp_dtl  (tb_id,
+                              unit_id,
+                              chapter_id,
+                              test_id,
+                              result_code,
+                              absorbance,
+                              upload_flag)
+                       values (test_batch_id,
+                               unit_id,
+                               g_chapter_id,
+                               p_test_id,
+                               test_result_code1,
+                                rtrim(od_value_1),
+                                null);
+if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+  dbms_output.put_line('inserted into the result_inp_dtl table');
+end if; -- Added by Kishore on 06/26/2015
+
+End f_copy_test_results;
+
+
+PROCEDURE MAIN_PROC (p_file_name in varchar2,inp_ppid in varchar2) as 
+ i_count NUMBER:=0;
+ nCount  NUMBER:=0;
+BEGIN
+   -- Added by Kishore on 06/26/2015
+   if lab_common.is_debug_msg_displayed('RTURLOAD', 'PKG') then
+     t_is_debug_msg_displayed := TRUE;
+   else
+     t_is_debug_msg_displayed := FALSE;
+   end if;
+   -- End of change
+
+    dbms_output.enable(50000000);
+   log_file_name:='RTURLOAD_err_'||inp_ppid||'_'||LT_USER_SESSION.get_userid||'.r';
+                  --LT_USER_SESSION.get_userid||'.r';
+
+   act_file_name:='RTURLOAD_'||inp_ppid||'_'||LT_USER_SESSION.get_userid||'.r';
+                  --LT_USER_SESSION.get_userid||'.r';
+  
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+     dbms_output.put_line('Log file='||log_file_name);
+     dbms_output.put_line('File='||p_file_name);
+   end if; -- Added by Kishore on 06/26/2015
+ 
+   curr_time:=to_char(v_local_sysdate,'mm-dd-yyyy hh24:mi');
+   g_parm_id:=inp_ppid;
+   load_user_id:=LT_USER_SESSION.get_userid;
+   muser_id:=LT_USER_SESSION.get_userid;
+   g_file_name:=p_file_name;
+  
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+     dbms_output.put_line('pass1');
+   end if; -- Added by Kishore on 06/26/2015
+   begin
+     select code_desc into LogDir from master_codes 
+     where code_type='LOGDR' and code='ILOG';
+   exception when no_data_found then 
+     p_status:='Log Directory is not defined in the master code table-Aborting';
+     if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+       dbms_output.put_line('status='||p_status);
+     end if; -- Added by Kishore on 06/26/2015
+     rollback_and_exit(p_status);
+    when others then 
+        p_status:='Cannot read the logdir';
+        if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+          dbms_output.put_line('status='||p_status);
+        end if; -- Added by Kishore on 06/26/2015
+        rollback_and_exit(p_status);
+   end;
+   
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015 
+    dbms_output.put_line('LogDir='||LogDir); 
+   end if; -- Added by Kishore on 06/26/2015
+
+   Begin 
+     logptr:=UTL_FILE.fopen(LogDir,log_file_name, 'w');
+   Exception
+      when utl_file.invalid_path then
+         p_status:='Log file cannot be opened -Aborted';
+         if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+           dbms_output.put_line('status='||p_status);
+         end if; -- Added by Kishore on 06/26/2015
+         rollback_and_exit(p_status);
+      when others then
+          p_status:='Log file cannot be opened -Aborted';
+          if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+            dbms_output.put_line('status='||p_status);
+          end if; -- Added by Kishore on 06/26/2015
+          rollback_and_exit(p_status);
+   End;
+
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+     dbms_output.put_line('log file opened');
+   end if; -- Added by Kishore on 06/26/2015
+
+   temp_string:=null;   
+   Begin 
+     inpptr:=UTL_FILE.fopen(LogDir,g_file_name, 'r'); 
+     UTL_FILE.get_line(inpptr,temp_string);
+     rec_type1:=substr(temp_string,1,2);
+   
+     If rec_type1='FH' then
+       gContract:=LTrim(RTrim(substr(temp_string,4,9)));
+       g_chapter_id:=LTrim(RTrim(substr(temp_string,14,4)));
+       if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+         dbms_output.put_line('Chapter='||g_chapter_id);
+       end if; -- Added by Kishore on 06/26/2015
+     End If;
+
+     -- close and reopen the file again
+
+    UTL_FILE.fclose(inpptr);
+    inpptr:=UTL_FILE.fopen(LogDir,g_file_name, 'r');
+ 
+   Exception
+     when utl_file.invalid_path then 
+        p_status:='Input file cannot be opened -Aborted';
+        if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+          dbms_output.put_line('status='||p_status);
+        end if; -- Added by Kishore on 06/26/2015
+        rollback_and_exit(p_status);
+     when others then 
+        p_status:='Input file cannot be opened -Aborted';
+        if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+          dbms_output.put_line('status='||sqlerrm);
+        end if; -- Added by Kishore on 06/26/2015
+        rollback_and_exit(p_status);
+    End;
+   
+      v_local_sysdate:=lifetrack_timezone_convert.get_local_time(g_chapter_id,
+                                                                 sysdate);
+      curr_time:=to_char(v_local_sysdate,'mm-dd-yyyy hh24:mi');
+
+    if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+      dbms_output.put_line('test result file is opened for reading');
+    end if; -- Added by Kishore on 06/26/2015
+
+    add_error_log('********************************************************');
+    add_error_log('       Remote test results upload log [RTURLOAD]        ');
+    add_error_log('********************************************************');
+    add_error_log('     Upload Start time :-'||curr_time);
+    add_error_log('     Results file name = '||g_file_name);
+
+  --Check if the file is already uploaded or not
+  select count(*) into nCount from result_inp_hdr where file_name=p_file_name
+  and rownum <2;
+
+  If nCount > 0 then 
+    p_status:='File-'||p_file_name ||' has been loaded already-Aborting';
+    rollback_and_exit(p_status);
+  End If;
+
+  f_init_variables;
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+    dbms_output.put_line('variable is initialised');
+  end if; -- Added by Kishore on 06/26/2015
+  f_get_userid(muser_id);
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+    dbms_output.put_line('user id is retrieved');
+  end if; -- Added by Kishore on 06/26/2015
+  f_get_batch_seqno;
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+    dbms_output.put_line('batch sequence is completed');
+  end if; -- Added by Kishore on 06/26/2015
+  f_process;
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+    dbms_output.put_line('process is completed');
+  end if; -- Added by Kishore on 06/26/2015
+  f_windup;
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+    dbms_output.put_line('windup is over');
+  end if; -- Added by Kishore on 06/26/2015
+
+  utl_file.fclose(logptr);
+  utl_file.fclose(inpptr);
+
+EXCEPTION WHEN OTHERS THEN
+ null;
+END MAIN_PROC; 
+
+PROCEDURE f_process is
+Begin
+   f_copy_results_data;
+   If not TRAILOR_NOTFOUND then
+     p_status:='FT - file trailor record not found in results file';
+     rollback_and_exit(p_status);
+   End if;
+  f_upd_batch_seqno(curr_slno,g_chapter_id);
+
+  --COMMIT;
+ add_error_log('Uploading to temp tables completed ');
+ add_error_log('No of TR records skipped ='||to_char(skip_cnt));
+ 
+ f_detail(g_file_name,g_chapter_id);
+ unit_id:=null;
+ result_status:=null;
+END f_process;
+
+Procedure f_upd_batch_seqno(p_sl_no in number,p_chapter in varchar2) is
+ A number:=0;
+Begin
+   update number_generation
+   set max_number = p_sl_no
+   where chapter_id = p_chapter
+   and  number_type= 'TB_ID' ;
+Exception when others then 
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+    dbms_output.put_line('Unable to update number generation-'||sqlerrm);
+  end if; -- Added by Kishore on 06/26/2015
+  add_error_log('Unable to update the number generation');
+End f_upd_batch_seqno;
+
+PROCEDURE f_copy_results_data is
+ data_string        VARCHAR2(240);
+ rec_type           VARCHAR2(5);
+BEGIN
+
+ Loop
+ Begin
+   data_string:=null;
+   UTL_FILE.get_line(inpptr,data_string);
+   recs_read_cnt:=recs_read_cnt+1;
+   rec_type:=substr(data_string,1,2);
+      
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+    dbms_output.put_line('Data='||data_string);
+  end if; -- Added by Kishore on 06/26/2015
+  
+  IF rec_type='FH' then
+      --get the contract ID
+       gContract:=LTrim(RTrim(substr(data_string,4,9)));
+       g_chapter_id:=LTrim(RTrim(substr(data_string,14,4)));
+       time_stamp:=LTrim(RTrim(substr(data_string,19,17)));
+       g_file_type:=LTrim(RTrim(substr(data_string,37,1)));
+       od_rep_flag:=LTrim(RTrim(substr(data_string,39,1)));
+       chapter_name:=LTrim(RTrim(substr(data_string,41,40)));
+               
+       If g_file_type in ('I','R') then 
+            FINAL_RESULT:=0;
+       Else
+           If g_file_type='F' then 
+                FINAL_RESULT:=1;
+           else
+              rollback_and_exit('Invalid file type in file-'||g_file_name);
+            end if;
+       End If;
+       f_validate_chapter_id(g_chapter_id);
+       if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+         dbms_output.put_line('FH is validated');
+       end if; -- Added by Kishore on 06/26/2015
+  ElsIf rec_type='BH' then 
+        batch_id:=LTrim(RTrim(substr(data_string,4,14)));
+  Elsif rec_type='UI' then 
+     SKIP_TEST_RECS:=0;
+     unit_id:=Ltrim(RTrim(substr(data_string,4,15)));
+     if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+       dbms_output.put_line('Unit='||unit_id);
+     end if; -- Added by Kishore on 06/26/2015
+     f_validate_unit(unit_id);
+  ElsIf rec_type='TR' then
+ 
+      remote_test_id:=LTrim(RTrim(substr(data_string,4,10)));
+      -- get LT test ID
+        
+        select nvl(count(*),0) into nTestCount from valid_instrument_tests
+        where machine_id='REMOT' and machine_test_id=remote_test_id and 
+        chapter_id=g_chapter_id and 
+        v_local_sysdate between eff_date and nvl(term_date,v_local_sysdate+1);
+
+        If nTestCount = 0 then
+          test_id:=remote_test_id;
+            --rollback_and_exit('LifeTrak Test ID is not defined for '||
+            --                  remote_test_id||' - Aborting');
+        Else
+           select test_id into lt_test_id from valid_instrument_tests
+           where machine_id='REMOT' and machine_test_id=remote_test_id and 
+           chapter_id=g_chapter_id and v_local_sysdate between eff_date and 
+           nvl(term_date,v_local_sysdate+1) and rownum=1;
+
+           test_id:=lt_test_id;
+        End If;
+      
+
+      test_seq:=Ltrim(RTrim(substr(data_string,15,1)));
+
+      final_result_code:=LTrim(RTrim(substr(data_string,17,4)));
+      translate_result_code(test_id,final_result_code,lt_result);
+      If lt_result='NOMAP' then
+       null; 
+      Else
+        final_result_code:=lt_result;
+      End If;
+
+      test_result_code1:=LTrim(RTrim(substr(data_string,22,4)));
+       translate_result_code(test_id,test_result_code1,lt_result);
+
+      If lt_result='NOMAP' then
+        null;
+      Else
+        test_result_code1:=lt_result;
+     End If;
+
+      od_value_1:=LTrim(RTrim(substr(data_string,26,12)));
+      od_value_2:=LTrim(RTrim(substr(data_string,50,12)));
+      od_value_3:=LTrim(RTrim(substr(data_string,74,12)));
+
+      If od_value_1 is null or od_value_1 =' ' then 
+        od_value_1:='0.0';
+      End If;
+
+      If od_value_2 is null or od_value_2=' ' then
+         od_value_2:='0.0';
+      End If;
+
+     If od_value_3 is null or od_value_3 =' ' then
+        od_value_3:='0.0';
+     End If;
+
+     if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+       dbms_output.put_line('test_id='||test_id);
+       dbms_output.put_line('test_seq='||test_seq);
+       dbms_output.put_line('final result code='||final_result_code);
+       dbms_output.put_line('test_result_code='||test_result_code1);
+       dbms_output.put_line('od_value1='||od_value_1);
+       dbms_output.put_line('od_value2='||od_value_2);
+     end if; -- Added by Kishore on 06/26/2015
+
+      TEST_INVALID:=0;
+      f_validate_test(test_id);
+     
+       If TEST_INVALID = 1 then 
+          skip_cnt:=skip_cnt+1;
+          raise skip_record;
+       Else
+         f_interpret_results(test_id);
+         if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+           dbms_output.put_line('Test ID='|| test_id);
+         end if; -- Added by Kishore on 06/26/2015
+         f_copy_test_results(test_id);
+         raise skip_record;
+       End if;
+
+   ElsIf rec_type='BT' then 
+        batch_count:=LTrim(RTrim(substr(data_string,4,6)));
+        if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+          dbms_output.put_line('batch count='||batch_count);
+        end if; -- Added by Kishore on 06/26/2015
+        raise skip_record;
+   ElsIf Rec_type='FT' then 
+     file_count:=LTrim(RTrim(substr(data_string,4,6)));
+     if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+       dbms_output.put_line('file count='||file_count);
+     end if; -- Added by Kishore on 06/26/2015
+      --f_validate_rec_count;
+      If to_number(file_count)!=recs_read_cnt then 
+        add_error_log('No of records in the file do not match with the '||
+                       ' footer record');
+      End If;
+
+     TRAILOR_NOTFOUND:= TRUE;
+     raise skip_record;
+   Else           
+     add_error_log('invalid record type type = '||rec_type);
+      rollback_and_exit('job terminated');
+      --f_rename();
+   End If;
+
+  Exception 
+    when skip_record then 
+     null;
+  End;
+ End Loop;
+
+EXCEPTION 
+   when no_data_found then 
+       null; --always this exception will be raised at the last record
+   WHEN OTHERS THEN 
+     add_error_log('copy result data-'||sqlerrm);
+     if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+       dbms_output.put_line('Copy results date-'||sqlerrm);
+     end if; -- Added by Kishore on 06/26/2015
+END f_copy_results_data;
+
+procedure f_validate_unit(p_unit_id in varchar2) is
+ nUCount NUMBER:=0;
+Begin
+
+  select nvl(count(*),0) into nUCount from units where
+  unit_id = p_unit_id;
+
+ if nUCount = 0 then 
+  add_error_log('Unit id '||p_unit_id||' is not found in units table ');
+ end if;
+End f_validate_unit;
+
+Procedure f_detail(p_file_name in varchar2,p_chapter_id in varchar2) is 
+
+ cursor c1 is select tb_id,test_id
+              from result_inp_hdr
+              where (update_flag = ' ' or update_flag is null) and
+              chapter_id = p_chapter_id and
+              file_name = p_file_name;
+
+ cursor c2 (t_test_id in varchar2, t_tb_id in varchar2) is
+         select unit_id,result_code,absorbance
+              from  result_inp_dtl
+              where tb_id = t_tb_id and
+              chapter_id = p_chapter_id  and
+              test_id = t_test_id  and
+              not exists
+              (select 'x' from
+              master_codes where code_type = 'QCIRM'
+              and code = result_code
+              and sysdate between eff_date and
+              nvl(term_date,sysdate+1))
+              order by unit_id;
+
+ function_result  varchar2(300);
+ p_out_schedule  varchar2(200);
+ p_auto_schedule varchar2(1);
+ utbCount    NUMBER:=0; 
+ InterCount  NUMBER:=0;
+BEGIN
+
+ FOR C1_REC in C1 loop
+
+   test_batch_count:= 0;
+
+   --get the auto schedule flag
+   --exception is not required becuase the test is validated at the top
+ 
+    select nvl(auto_schedule,'N') into p_auto_schedule from valid_tests where
+    test_id=C1_rec.test_id and sysdate between eff_date and
+    nvl(term_date,sysdate+1); 
+  
+  For C2_rec in C2(c1_rec.test_id,c1_rec.tb_id) loop
+
+       test_batch_count:=test_batch_count+1;
+       f_update_batch_info(C1_rec.tb_id,g_chapter_id,
+                           C1_rec.test_id,C2_rec.unit_id);
+
+      If p_auto_schedule='Y' then 
+         schedule_test(c1_rec.test_id,c2_rec.unit_id,p_out_schedule);
+         if p_out_schedule!='OK' then 
+           rollback_and_exit('Unable to schedule test-'||c1_rec.test_id||'-'||
+                             p_out_schedule);
+         end if;
+     End If;
+
+      function_result:='not executed core routine';
+       begin
+          --dbms_output.put_line('Core routine calling for -'||c1_rec.test_id);
+          function_result := test_results.update_auto_test
+                           (c2_rec.unit_id,
+                            c1_rec.test_id,
+                            null,
+                            c2_rec.absorbance,
+                            null,
+                            c2_rec.result_code,
+                            c1_rec.tb_id,
+                            'RTURLOAD',
+                            SYSDATE);
+               load_cnt:=load_cnt+1;
+          --Added on 06/01/11 as the core routine is putting the wrong 
+          --- chapter ID in the test_chapter_id column
+
+          update utrs set test_chapter_id=g_chapter_id where
+                          unit_id=c2_rec.unit_id and 
+                          test_id=c1_rec.test_id and
+                           tb_id=c1_rec.tb_id and
+                           program_id='RTURLOAD';
+
+         
+      exception 
+         when others then 
+           prob_cnt:=prob_cnt+1;
+           add_error_log('oracle error occured in core routine '||
+                         c2_rec.unit_id|| ' '||c1_rec.test_id);         
+      end;
+
+      last_unit_id:=c2_rec.unit_id;
+      update remote_test_units
+      set first_result_date = decode(first_result_date,null,
+                                  sysdate,first_result_date),
+        last_result_date = sysdate
+        where unit_id = c2_rec.unit_id;
+
+      -- Added on 06/01/11
+        select nvl(count(*),0) into utbCount from unit_test_base where
+        unit_id=c2_rec.unit_id and test_id=c1_rec.test_id and
+        tb_id=c1_rec.tb_id and program_id='RTURLOAD';
+        
+         If utbCount > 0 then 
+             update unit_test_base set test_chapter_id=g_chapter_id where
+                    unit_id=c2_rec.unit_id and test_id=c1_rec.test_id and
+                   tb_id=c1_rec.tb_id and program_id='RTURLOAD';
+         End If;
+
+         --- Added on 04/14/2020   -- MLT 2866  (MLT-3149)
+
+        -- this logic is, if the core routine scheduled any additional tests then 
+        -- we are updating the chapter IDs of those test as well here, we cannot
+        -- handle this in the core routine .
+
+         utbCount:=0;
+        select nvl(count(*),0) into utbCount from unit_test_base where
+        unit_id=c2_rec.unit_id and test_id=c1_rec.test_id and
+        tb_id is null and test_seq_no > 1 and program_id='RTURLOAD';
+        
+         If utbCount > 0 then 
+             update unit_test_base set chapter_id=g_chapter_id,
+                    test_chapter_id=g_chapter_id where
+                    unit_id=c2_rec.unit_id and test_id=c1_rec.test_id and
+                    tb_id is null and test_seq_no > 1 and program_id='RTURLOAD';
+         End If;
+  
+
+         InterCount:=0;
+        select nvl(count(*),0) into InterCount from unit_interdictions where
+        unit_id=c2_rec.unit_id and source_test_id=c1_rec.test_id and
+        program_id='RTURLOAD';
+        
+         If InterCount > 0 then 
+             update unit_interdictions set chapter_id=g_chapter_id
+                     where unit_id=c2_rec.unit_id and source_test_id=c1_rec.test_id and
+                      program_id='RTURLOAD';
+         End If;
+
+
+  
+   End Loop; -- for the C2_rec
+
+   f_update_hdr_tables(C1_rec.tb_id,g_chapter_id,C1_rec.test_id);
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+     dbms_output.put_line(c1_rec.test_id||' is processed');
+   end if; -- Added by Kishore on 06/26/2015
+ End Loop;  --for c1_rec
+
+End f_detail;
+
+Procedure f_update_batch_info(p_tb_id in varchar2,p_chapter_id in varchar2,
+                              p_test_id in varchar2,p_unit_id in varchar2) is
+
+nTBID  Number:=0;
+Begin
+
+/*
+Look for the tb_id in test_batch_hdr. If it does not exist then create a
+record. If it exists then look for existence of records in unit_tst_base
+ utrs under this tb_id. If utr/utb  records present then this is a
+duplicate transmission.
+*/
+
+
+   select nvl(count(*),0) into nTBID from test_batch_hdr
+   where tb_id = p_tb_id
+   and test_chapter_id = p_chapter_id
+   and group_test_id = p_test_id;
+
+
+If nTBID = 0 then 
+  --first_unit_id:=p_unit_id;
+  begin
+    insert into test_batch_hdr(
+                        tb_id,
+                        test_chapter_id,
+                        group_test_id,
+                        first_unit_id,
+                        insert_dats,
+                        user_id)
+                   values
+                        (p_tb_id,
+                         p_chapter_id,
+                         p_test_id,
+                         p_unit_id,
+                         sysdate,
+                         user_id);
+  exception when others then 
+    p_status:='Unable to insert test_batch_hdr-'||sqlerrm;
+    if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+      dbms_output.put_line('Unable to insert test_batch_hdr-'||sqlerrm);
+    end if; -- Added by Kishore on 06/26/2015
+    rollback_and_exit(p_status);
+  end;
+
+ f_instr_log(p_tb_id,p_test_id);
+ f_reagent_info(p_test_id,g_chapter_id);
+
+ begin
+
+   insert into test_batch_det(
+                             tb_id,
+                             test_chapter_id,
+                             testing_lab_code,
+                             test_id,
+                             test_kit_id,
+                             test_type,
+                             cut_off_value,
+                             reconcile_flag,
+                             reconcile_date,
+                             reconcile_user_id)
+                    values
+                              (p_tb_id,
+                               p_chapter_id,
+                               testing_lab_code,
+                               p_test_id,
+                               g_test_kit_id,
+                               'R',
+                               null, --rtv,
+                               'Y',
+                               sysdate,
+                               user_id);
+  
+ exception when others then 
+    p_status:='Unable to insert test_batch_det-'||sqlerrm;
+    if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+      dbms_output.put_line('Unable to insert test_batch_det-'||sqlerrm);
+    end if; --Added by Kishore on 06/26/2015
+    rollback_and_exit(p_status);
+ end;
+End If;
+ 
+End f_update_batch_info;
+
+Procedure f_instr_log(p_tb_id in varchar2, p_test_id in varchar2) IS
+  currtime1 varchar2(30);
+Begin
+
+ v_local_sysdate:=lifetrack_timezone_convert.get_local_time(g_chapter_id,
+                                                          sysdate);
+
+ select to_char(v_local_sysdate,'mm/dd/yyyy hh24:mi:ss') into currtime1 
+ from dual;
+
+ xmt_status:='70';
+
+  begin
+     insert into instrument_log (
+                              tb_id,
+                              test_chapter_id,
+                              test_id,
+                              read_dats,
+                              machine_id,
+                              station_no,
+                              xmt_status,
+                              status_dats,
+                              file_name)
+     values                   (p_tb_id,
+                              g_chapter_id,
+                              p_test_id,
+                              to_date(currtime1,'mm/dd/yy:hh24:mi:ss'),
+                             'REMOT',
+                             '000',
+                              xmt_status,
+                              to_date(currtime1,'mm/dd/yy:hh24:mi:ss'),
+                   substr(g_file_name,instr(g_file_name,'/',-1)+1));
+   exception when others then 
+     p_status:='Unable to insert into the INSTRUMENT_LOG table';
+     if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+       dbms_output.put_line('Unable to insert into the INSTRUMENT_LOG table');
+     end if; -- Added by Kishore on 06/26/2015
+     rollback_and_exit(p_status);
+   end;
+ 
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+     dbms_output.put_line('inserted into the INSTRUMENT_LOG table');
+   end if; -- Added by Kishore on 06/26/2015
+
+ begin
+     select rowid into g_rowid
+              from instrument_log
+              where tb_id = p_tb_id
+              and test_chapter_id = g_chapter_id
+              and test_id = p_test_id
+              and status_dats = to_date(currtime1,'mm/dd/yy:hh24:mi:ss');
+ exception 
+   when no_data_found then
+       p_status:='Unable to get the rowid from instrument log';
+       if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+         dbms_output.put_line('Unable to get the rowid from instrument log');
+       end if; -- Added by Kishore on 06/26/2015
+       rollback_and_exit(p_status);
+  when too_many_rows then 
+     p_status:='Too many rows to get the rowid from instrument log';
+     if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+       dbms_output.put_line('Too many rows to get the rowid from instrument log');
+     end if; -- Added by Kishore on 06/26/2015
+     rollback_and_exit(p_status);
+ end;
+
+End f_instr_log;
+
+Procedure f_reagent_info (p_test_id in varchar2,
+                          p_chapter_id in varchar2) IS
+
+  test_kit_id  varchar2 (5);
+  exp_date     varchar2(20);
+
+Begin
+
+ Begin
+   select max(test_kit_id) into g_test_kit_id from
+                  test_kits where
+                  test_id = p_test_id and
+                  to_char(insert_dats,'YYYYMM') = to_char(sysdate,'YYYYMM');
+ Exception when no_data_found then
+    Begin
+        select  to_char((add_months(last_day(sysdate),1)),'MON-DD-YY') into
+                   exp_date from dual;
+
+        select to_char(test_kit_seq+1)
+                         into g_test_kit_id
+                         from chapters
+                         where chapter_id = p_chapter_id
+                         for update of test_kit_seq;
+
+         update chapters set test_kit_seq = test_kit_seq+1
+                         where chapter_id = p_chapter_id;
+
+            insert into test_kits
+                               (test_kit_id,
+                                test_chapter_id,
+                                test_id,
+                                test_kit_class,
+                                insert_dats)
+                          values
+                                (g_test_kit_id,
+                                 p_chapter_id,
+                                 test_id,
+                                  NULL,
+                                  sysdate);
+             add_error_log('Inserted into TEST_KITS');
+ 
+        insert into test_kit_reagents (test_kit_id,
+                                      test_chapter_id,
+                                      reagent_type,
+                                      reagent_name,
+                                      expiry_date,
+                                      channel,
+                                      manufacturer,
+                                      lot_number)
+                           values
+                                      (g_test_kit_id,
+                                       p_chapter_id,
+                                      'K',
+                                      p_test_id||'GULF',
+                                      to_date(exp_date,'MON-DD-YY'),
+                                      null,
+                                     'GULF',
+                                     'GULF'||exp_date);
+           add_error_log('Inserted into TEST_KITS_REAGENTS');
+    Exception when others then
+     p_status:='Unable to insert test kit/test_kit_reagent able';
+     rollback_and_exit(p_status);
+    End;
+  
+ End;
+End f_reagent_info;
+
+
+Procedure f_update_hdr_tables(p_tb_id in varchar2,p_chapter_id in varchar2,
+                              p_test_id in varchar2) is
+Begin
+ update result_inp_hdr
+ set update_flag = 'U'
+ where tb_id = p_tb_id and
+               chapter_id = p_chapter_id and
+               test_id = p_test_id;
+
+update test_batch_hdr
+      set last_unit_id = unit_id
+      where tb_id = p_tb_id and
+        test_chapter_id = p_chapter_id and
+        group_test_id = p_test_id;
+
+ update instrument_log
+         set xmt_status = '99',
+               ok_count = test_batch_count
+         where rowid = g_rowid;
+End f_update_hdr_tables;
+
+procedure f_windup is
+begin
+ f_ins_parmid;
+ commit;
+
+ v_local_sysdate:=lifetrack_timezone_convert.get_local_time(g_chapter_id,
+                                                                 sysdate);
+ curr_time:=to_char(v_local_sysdate,'mm-dd-yyyy hh24:mi');
+
+
+ add_error_log('  - Program End Time :-'||curr_time);
+ add_error_log('                                   ');
+ add_error_log('                                   ');
+ add_error_log('  Upload statistics:               ');
+ add_error_log('                                   ');
+ add_error_log(' Number of records in results file ='||to_char(recs_read_cnt));
+ add_error_log(' Number of test result records in result file ='||
+                   to_char(test_recs_read));
+ add_error_log(' Number of records skipped due to errors ='||to_char(skip_cnt));
+ add_error_log(' Number of records rejected by core routine='||
+               to_char(prob_cnt));
+
+add_error_log('************************************************************');
+End f_windup;
+
+PROCEDURE f_ins_parmid is
+ npCount Number:=0;
+BEGIN
+
+ select count(*) into npCount from rpt_parm
+ where appl_id = 'DON'
+ and report_name = 'RTURLOAD'
+ and user_name = load_user_id
+ and parm_id = g_parm_id;
+
+ If npCount = 0 then 
+
+  insert into rpt_parm  (
+                        appl_id,
+                        user_name,
+                        report_name,
+                        parm_id,
+                        parm_date,
+                        submit_date,
+                        report_status,
+                        output_file,
+                        chapter_id)
+                values
+                        (
+                         'DON',
+                         load_user_id,
+                         'RTURLOAD',
+                         g_parm_id,
+                          sysdate,
+                          sysdate,
+                         'C',
+                         log_file_name,
+                         g_chapter_id);
+ Else
+      update rpt_parm set submit_date = sysdate,
+                       report_status = 'C'
+                       where appl_id = 'DON'
+                       and report_name = 'RTURLOAD'
+                       and user_name = load_user_id
+                       and parm_id = g_parm_id;
+End If;
+Exception when others then 
+ add_error_log('Unable to unser/update RPT_PARM-'||sqlerrm);
+End f_ins_parmid;
+
+
+procedure rollback_and_exit(pl_err_msg in varchar2) is
+  end_time  varchar2(30);
+Begin
+ if t_is_debug_msg_displayed then -- Added by Kishore on 06/26/2015
+   dbms_output.put_line(pl_err_msg);
+ end if; -- Added by Kishore on 06/26/2015
+ add_error_log(pl_err_msg);
+rollback;
+utl_file.fclose(inpptr);
+utl_file.fclose(logptr);
+   	  
+raise_application_error('-20000','Aborting');
+End rollback_and_exit;
+
+END RTURLOAD;
+/
+
+create or Replace public synonym RTURLOAD for SBCSYS.RTURLOAD;
+
+
+show errors
+
+

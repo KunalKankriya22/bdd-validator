@@ -1,0 +1,1446 @@
+/******************************************
+Created By   : Edwin
+Created On   : 01/01/2009
+Purpose      : This routine process the packlist
+Modified Date: 03/07/09
+Version      : 02 [09/03/10] to expand the field variable
+Version      : 03 [12/23/10] to add teh unit number part pf the attribut desc
+Modified By  : Edwin
+Modified By  : 04 Arun   on 21 May 2011
+               IM5433  (Added chapter_id to queries)
+               05 Ashok  on 02 Jun 2011
+                populate_packlist_tables - modified ConsContactPhone
+                to be 15 chars instead of 19 chars.
+
+               06 Edwin (IM 8598)
+               07 Ashok (IM:8586, 8605 - reset RecPlasmaFlag)
+               08 Ashok (packlist.lv_chapter pkg variable is populated in packlist_generator routine instead of package main body.
+               09 Ashok (scr 20753 - populate_packlist_tables -> cursor pack_hdr modified )
+               10 Ashok 01/21/2015 - IM 10342 - populate_packlist_tables -> cursor pack_hdr modified.
+               11 Kishore (06/29/2015) - Display debug messages based on value in the DEBUG_CONTROLS table.
+               12 Ashok 03/04/2016 -- IM 207
+               13 Seshu 05/11/2016 --	Renamed Below tables for merging database work
+               					ADDRESSES	as	ADDRESSES_LAB 	 
+               14 Ashok 10/20/2016 -- system_users: user_id query modified.
+               15 Ashok 02/09/2018 -- IM 731 --vserv_contracts in pack_hdr cursor - tz function added.
+               16 Edwin 08/09/2022  -- MLT 5382 accessing the chapter ID from the incoming paramter rather than from the system users.
+**************************************** */
+
+create or replace PACKAGE PACKLIST IS
+
+
+  PROCEDURE POPULATE_ORDER_SUMMARY (in_order_no in varchar2,
+	                              pl_out  out VARCHAR2) ;
+
+  PROCEDURE POPULATE_ORDER_DETAILS (in_order_no in varchar2,
+	                             pl_out     out varchar2);
+
+  PROCEDURE PRODUCTS_IN_SHIPMENT(in_ship_no in varchar2,
+				 pl_out  out varchar2) ;
+
+  PROCEDURE POPULATE_PACKLIST_TABLES (in_session_id IN  VARCHAR2,
+                             in_ship_no    IN   VARCHAR2,
+			     in_chapter IN   VARCHAR2,
+                             pl_out        OUT  VARCHAR2);
+
+
+  PROCEDURE PACKLIST_GENERATOR(in_session_id varchar2,
+                               in_ship_no in varchar,
+			       in_chapter in varchar2,
+                               out_message out varchar2);
+
+PROCEDURE POPULATE_SHIP_TOTALS (p_session_id in varchar2,
+                                p_ship_no in varchar2,
+                                pl_out out varchar2) ;
+
+ThisFiCompanyNo  VARCHAR2(2);
+ThisFiPriceSchNo VARCHAR2(2);
+ThisOrderDate    VARCHAR2(20);
+ThisArAccount    VARCHAR2(20);
+RecPlasmaFlag    VARCHAR2(1);
+g_ins_date       VARCHAR2(23);
+--OrderSubTotal    NUMBER:=0;
+p_msg            VARCHAR2(200);
+g_shipment_no    VARCHAR2(20);
+ShipmentDate     DATE;
+status_flag      VARCHAR2(1);
+g_invoice_flag   VARCHAR2(5);
+g_session_id     VARCHAR2(50);
+ThisCODFlag      VARCHAR2(1);
+ShipmentTot      NUMBER:=0;
+ShipTotBuf       VARCHAR2(20);
+TotMfgProductVolume    NUMBER:=0.0;
+TotMfgProductVolumeBuf  VARCHAR2(20);
+bagcnt                 NUMBER:=0;
+boxcnt                 NUMBER:=0;
+MfgWeightBuf            VARCHAR2(25);
+MfgWeight                NUMBER:=0.0;
+MfgStdPriceBuf          VARCHAR2(20);
+MfgStdPrice             NUMBER:=0.0;
+Boxwt                  NUMBER:=0;
+ Bagwt                  NUMBER:=0;
+WeighMeasure          varchar2(25);
+
+lv_chapter				VARCHAR2(4);
+t_is_debug_msg_displayed 		BOOLEAN; -- Added by Kishore on 06/29/2015
+
+END PACKLIST;
+/
+create or replace PACKAGE BODY PACKLIST IS
+--
+   global_err_num                   number;
+   global_err_msg                   varchar2(50);
+   global_error_code                varchar2(30);
+
+PROCEDURE POPULATE_PACKLIST_TABLES
+                          (in_session_id       IN      VARCHAR2,
+                           in_ship_no          IN      VARCHAR2,
+                           in_chapter       IN      VARCHAR2,
+	                   pl_out              OUT     VARCHAR2) 
+IS
+   session_id              date;
+   c1_unit_id              varchar2(15);
+   c1_coll_date            date;
+   user_excpt              exception;
+   p_status                varchar2(350);
+   chp_sysdate             date; -- IM 731
+CURSOR pack_hdr IS SELECT  distinct vc.chapter_id ChapterId,
+       substr(vc.chapter_name,1,24) ChapterName,
+       vc.fi_company_no FiCompanyNo,
+       substr(con.name,1,28) ConsName,
+       substr(cu.name,1,22) PayeeName,
+       substr(ad.addr_1,1,24) InstAddress1,
+       substr(con.address_1,1,28) ConsAddress1,
+       substr(cu.address_1,1,22) PayeeAddress1,
+       substr(ad.addr_2,1,24) InstAddress2,
+       substr(con.address_2,1,28) ConsAddress2,
+       substr(cu.address_2,1,22) PayeeAddress2,
+       substr(ad.city||' '||ad.state_code||' '||ad.zip,1,24) InstCityStateZip,
+       substr(con.city||' '||con.state||' '||con.zip,1,28) ConsCityStateZip,
+       substr(cu.city||' '||cu.state||' '||cu.zip,1,22) PayeeCityStateZip,
+       substr(i_ctc.last_name||', '||i_ctc.first_name,1,15) InstContact,
+       substr(c_ctc.last_name||', '||c_ctc.first_name,1,19) ConsContact,
+       substr(p_ctc.last_name||', '||p_ctc.first_name,1,13) PayeeContact,
+       substr(i_ctc.day_phone_no,1,15) InstContactPhone,
+       substr(c_ctc.day_phone_no,1,15) ConsContactPhone,
+       substr(p_ctc.day_phone_no,1,13) PayeeContactPhone,
+       vctr.po_number PoNumber,
+       substr(cu.ar_account,1,19) ArAccount,
+       nvl(cu.fi_price_sch_no,'0') FiPriceSchNo,
+       sh.carrier Carrier,
+       sh.track_no TrackNo,
+       sh.flight_no FlightNo,
+       ord.order_no OrderNo,
+       ord.insert_user_id InsertUserId,
+       substr(to_char(ord.insert_date,'DD-MON-YYYY HH24:MI'),1,17) InsertDate,
+       substr(ord.ordered_by,1,15)  OrderedBy,
+       substr(otype.code_desc,1,20) OrderedType,
+       substr(opri.class_desc,1,20) OrderedPriority,
+       nvl(cu.COD_flag,'Y') CODFlag
+  FROM
+      shipments sh,
+      orders ord, consignee con, vserv_contacts i_ctc,
+      vserv_contacts c_ctc, vserv_contacts p_ctc,
+      customers cu, vserv_chapters vc, addresses_lab ad,
+      vserv_contracts vctr, vserv_order_types otype,
+      vserv_order_classes opri
+  WHERE
+     sh.chapter_id = packlist.lv_chapter and
+     exists (select 'x'
+	     from boxes bx, pick_slip_products psp, pick_slips ps
+             where
+	      bx.shipment_no = in_ship_no and
+               bx.chapter_id = packlist.lv_chapter and
+               bx.box_id = psp.box_id and
+	       psp.chapter_id = packlist.lv_chapter and
+	       psp.pick_slip_id = ps.pick_slip_id and
+	       ps.chapter_id = packlist.lv_chapter and
+	       ps.order_no = ord.order_no
+	   ) and
+    ord.chapter_id = packlist.lv_chapter and
+    con.consignee_id = sh.consignee_id and
+    con.chapter_id = packlist.lv_chapter and
+    otype.code = ord.order_type and
+    opri.order_class = ord.order_class and
+    sysdate between otype.eff_date and
+    nvl(otype.term_date, sysdate + 365) and
+    i_ctc.chapter_id(+) = packlist.lv_chapter and
+    c_ctc.chapter_id(+) = packlist.lv_chapter and
+    p_ctc.chapter_id(+) = packlist.lv_chapter and
+    i_ctc.customer_id(+) = 'STANDARD' and
+    c_ctc.customer_id(+) = con.customer_id and
+    p_ctc.customer_id(+) = cu.customer_id and
+    i_ctc.contact_type(+) = 'D' and
+    c_ctc.contact_type(+) = 'D' and
+    p_ctc.contact_type(+) = 'F' and
+   sysdate between i_ctc.eff_date(+) and nvl(i_ctc.term_date(+),
+                                               sysdate + 365) and
+   sysdate between c_ctc.eff_date(+) and nvl(c_ctc.term_date(+),
+                                                 sysdate + 365) and
+   sysdate between p_ctc.eff_date(+) and nvl(p_ctc.term_date(+),
+                                              sysdate + 365) and
+   vctr.contract_id (+) = ord.contract_id and
+   NVL(vctr.chapter_id, packlist.lv_chapter) = packlist.lv_chapter and -- IM 10342
+   chp_sysdate between vctr.eff_date (+) and nvl(vctr.term_date (+),chp_sysdate + 365) and -- IM 731 (chp_sysdate)
+   cu.customer_id = con.customer_id and
+   cu.chapter_id = packlist.lv_chapter and
+   ad.address_id(+) = vc.address_id and
+   vc.chapter_id = packlist.lv_chapter and
+   opri.chapter_id = packlist.lv_chapter and
+   sh.shipment_no = in_ship_no --and rownum=1 -- SCR 20753
+    ORDER BY  1, 25 ;
+
+BEGIN
+   dbms_output.enable(300000);
+   ShipmentTot:=0;
+   ShipTotBuf:=null;
+   TotMfgProductVolume:=0.0;
+   TotMfgProductVolumeBuf:=null;
+   bagcnt:=0;
+   boxcnt:=0;        
+   MfgWeightBuf:=null;
+   MfgWeight:=0.0;     
+   MfgStdPriceBuf:=null;
+   MfgStdPrice:=0.0;
+   Boxwt:=0;        
+   Bagwt:=0;         
+   WeighMeasure:=null;
+   RecPlasmaFlag:=null; -- IM:8586, 8605
+   --
+   chp_sysdate := Lifetrack_timezone_convert.get_local_time(packlist.lv_chapter, SYSDATE); -- IM 731
+   
+   FOR Z in pack_hdr Loop
+   Begin
+    pl_out:='OK';
+
+    ThisFiCompanyNo:=Z.FiCompanyNo;
+    ThisFiPriceSchNo:=Z.FiPriceSchNo;
+    ThisOrderDate:=Z.InsertDate;
+    ThisArAccount:=Z.ArAccount;
+    ThisCODFlag:=Z.CODFlag;
+  begin
+    INSERT INTO PACKLIST_HEADER(
+                                session_id,
+                                shipment_no,
+                                ChapterId,
+			        ChapterName,
+				FiCompanyNo,
+				ConsName,
+				PayeeName,
+				InstAddress1,
+				ConsAddress1,
+				PayeeAddress1,
+				InstAddress2,
+				ConsAddress2,
+				PayeeAddress2,
+				InstCityStateZip,
+				ConsCityStateZip,
+				PayeeCityStateZip,
+				InstContact,
+				ConsContact,
+				PayeeContact,
+				InstContactPhone,
+				ConsContactPhone,
+				PayeeContactPhone,
+				PoNumber,
+				ArAccount,
+				FiPriceSchNo,
+				Carrier,
+				TrackNo,
+				FlightNo,
+				OrderNo,
+				InsertUserId,
+				InsertDate,
+				OrderedBy,
+				OrderedType,
+				OrderedPriority,
+				CODFlag)
+          VALUES (
+                  in_session_id,
+                  in_ship_no,
+                  Z.ChapterId,
+                  Z.ChapterName,
+		  Z.FiCompanyNo,
+		  Z.ConsName,
+		  Z.PayeeName,
+		  Z.InstAddress1,
+		  Z.ConsAddress1,
+		  Z.PayeeAddress1,
+		  Z.InstAddress2,
+		  Z.ConsAddress2,
+		  Z.PayeeAddress2,
+		  Z.InstCityStateZip,
+		  Z.ConsCityStateZip,
+		  Z.PayeeCityStateZip,
+		  Z.InstContact,
+		  Z.ConsContact,
+		  Z.PayeeContact,
+		  Z.InstContactPhone,
+		  Z.ConsContactPhone,
+		  Z.PayeeContactPhone,
+		  Z.PoNumber,
+		  Z.ArAccount,
+		  Z.FiPriceSchNo,
+		  Z.Carrier,
+		  Z.TrackNo,
+		  Z.FlightNo,
+		  Z.OrderNo,
+		  Z.InsertUserId,
+		  Z.InsertDate,
+		  Z.OrderedBy,
+		  Z.OrderedType,
+		  Z.OrderedPriority,
+		  Z.CODFlag);
+
+
+   exception when others then 
+     p_msg:='Error: 1 '||sqlerrm;
+     raise user_excpt;
+   end;
+  
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+     dbms_output.put_line('populated in the PACKLIST_HEADER table:'||Z.OrderNo);
+   end if; -- Added by Kishore on 06/29/2015
+ 
+ If g_invoice_flag=1 then 
+  begin
+
+        billing_interface.insert_header
+		(ThisFiCompanyNo,
+		Z.OrderNo,
+		ThisArAccount,
+		g_shipment_no, 
+		ShipmentDate, 
+	        to_date(ThisOrderDate,'DD-MON-YYYY HH24:MI'),
+                to_date(g_ins_date,'DD-MON-YYYY HH24:MI:SS'),
+        	status_flag);
+       
+     if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+       dbms_output.put_line('Packlist header billing interface done');
+     end if; -- Added by Kishore on 06/29/2015
+   exception when others then 
+    p_msg:='Error: 2 '||Sqlerrm;
+    raise user_excpt;
+   end;
+ End If;
+ 
+   --Populate the order summary for the order
+   p_status:=null;
+   POPULATE_ORDER_SUMMARY(Z.OrderNo,p_status);
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+     dbms_output.put_line('POPULATE_ORDER_SUMMARY='||p_status);
+   end if; -- Added by Kishore on 06/29/2015
+
+   If p_status!='OK' then 
+      p_msg:=p_status;
+      raise user_excpt;
+   End If;
+  
+--Populate the order details for the order
+   p_status:=null;
+   POPULATE_ORDER_DETAILS(Z.OrderNo,p_status);
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+     dbms_output.put_line('POPULATE_ORDER_DETAILS='||p_status);
+   end if; -- Added by Kishore on 06/29/2015
+   If p_status!='OK' then 
+      p_msg:=p_status;
+      raise user_excpt;
+   End If;
+ END;
+
+ End Loop;
+ 
+ pl_out:='OK';
+
+EXCEPTION 
+ when user_excpt then 
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+    dbms_output.put_line(p_msg);
+  end if; -- Added by Kishore on 06/29/2015
+  pl_out:=p_msg;
+END POPULATE_PACKLIST_TABLES;
+
+PROCEDURE POPULATE_ORDER_SUMMARY (in_order_no in varchar2,
+			          pl_out  out VARCHAR2) is
+p_order_no varchar2(10);
+user_excpt exception;
+
+cursor order_smry is 
+    select product_type ProductType,
+	  substr(abo_desc,1,8) codeDesc,
+	  nvl(required_qty,0) - nvl(canceled_qty,0)
+		  - nvl(system_cancel_qty,0) RequiredQtyCnt,
+	  substr(decode(sign(nvl(shipped_qty,0) - nvl(sub_qty,0)),-1,0,
+          nvl(shipped_qty,0) - nvl(sub_qty,0)),1,5) FilledQtyCnt,
+	  nvl(sub_qty,0) SubQtyCnt,
+          nvl(shipped_qty,0) ShippedQtyCnt,
+          nvl(required_qty,0) - nvl(shipped_qty,0)
+	 - nvl(canceled_qty,0) - nvl(system_cancel_qty,0) BackOrderedQtyCnt
+    from order_items, vserv_abo
+	where order_no = in_order_no and
+        abo_code = blood_type
+        and unit_scheme_type in ('I')  /* SCR  2339 */
+        and chapter_id = packlist.lv_chapter   
+	order by item_no;
+
+
+Begin
+
+   pl_out:='OK';
+   FOR Z in order_smry Loop
+    --if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+      --dbms_output.put_line('Ord smmary='||Z.ProductType||' '||Z.CodeDesc);
+    --end if; -- Added by Kishore on 06/29/2015
+    begin
+	insert into PACKLIST_ORD_SUMMARY(SESSION_ID,
+					 SHIPMENT_NO,
+                                         ORDER_NO,
+					 PRODUCT_TYPE,
+					 CODE_DESC,
+					 REQUIRED_QTY,
+					 FILLED_QTY,
+					 SUB_QTY,
+					 SHIPPED_QTY,
+					 BACK_ORD_QTY)
+          VALUES(g_session_id,g_shipment_no,in_order_no,
+                 Z.ProductType,
+		 Z.CodeDesc,Z.RequiredQtyCnt,
+		 Z.FilledQtyCnt,Z.SubQtyCnt,
+		 Z.ShippedQtyCnt,Z.BackOrderedQtyCnt);
+     exception when others then 
+       p_msg:='Unable to populate the order summary-'||sqlerrm;
+       raise user_excpt;
+     end;
+    End Loop;
+    if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+      dbms_output.put_line('Order summary is populated');
+    end if; --Added by Kishore on 06/29/2015
+Exception when user_excpt then
+ pl_out:=p_msg;
+End POPULATE_ORDER_SUMMARY;
+
+PROCEDURE POPULATE_ORDER_DETAILS (in_order_no in varchar2,
+		                  pl_out     out varchar2) is
+ p_order_no             VARCHAR2(10);
+ AttrPrc                NUMBER(6,2);
+ cnt1                   NUMBER:=0;
+ user_excpt             EXCEPTION;
+ --WeighMeasure           VARCHAR2(20);
+ SubTotalBuf             VARCHAR2(20);
+ MfgProductDesc          VARCHAR2(200);
+ MfgSpGravity            NUMBER:=0.0;
+ThisMfgAmount            NUMBER:=0.0;
+ProdPriceBuf             VARCHAR2(30);
+ProdAliq                 VARCHAR2(20);
+ExpCollDate              DATE;
+--ThisCODFlag            VARCHAR2(1);
+ThisUnitId               VARCHAR2(20);
+ThisProductCode          VARCHAR2(10);
+ThisAliquot              VARCHAR2(2);
+ThisOrdTier              VARCHAR2(20);
+ThisTier                 VARCHAR2(2);
+ThisBloodType            VARCHAR2(10);
+ThisProdAliquotAborh     VARCHAR2(100);
+ThisServiceCode          VARCHAR2(10);
+ThisOrdProductType       VARCHAR2(10);
+ThisSubFlg               VARCHAR2(1);
+ThisMfgProductType       VARCHAR2(10);
+ThisBoxID                VARCHAR2(10);
+ThisProductPrice         NUMBER:=0;
+ThisFiPriceSchNo         VARCHAR2(20);
+nAntCnt                  NUMBER:=0;
+AntigenId                VARCHAR2(10);
+AntgnDesc                VARCHAR2(50);
+AntgnStdPrice            NUMBER:=0;
+AntgnServiceCode         VARCHAR2(20);
+AntPrice                 NUMBER:=0;
+ThisAntigenServiceCode   VARCHAR2(20);
+ThisAntigenPrice         NUMBER:=0;
+ThisAntgnDesc            VARCHAR2(50);
+ThisUnitAntgnDesc        VARCHAR2(100);
+ThisAttrServiceCode      VARCHAR2(20);
+ThisUnitAttrDesc         VARCHAR2(60);
+ThisAttrPrice            NUMBER:=0.0;
+ThisAttrDesc             VARCHAR2(120);
+MfgProductVolumeBuf      VARCHAR2(20);
+MfgServiceCode           VARCHAR2(50);
+ThisCrDbInd              VARCHAR2(2);
+pAmount                  NUMBER(9,2);
+tAmount                  NUMBER(9,2):=0.0;
+ThisChargeServiceCode    VARCHAR2(20);
+ThisChargePrice          NUMBER(9,2);
+ThisChargeDesc           VARCHAR2(100);
+OrderSubTotal            NUMBER:=0;
+cursor box_cur is 
+    select distinct bx.box_id BoxId ,
+		   bx.packed_by PackedBy,
+                   to_char(bx.packed_date,'DD-MON-YYYY HH24:MI') PackedDate,
+                   mfg_product_type MfgProductType,
+                   mfg_product_volume/1000 MfgProductVolume
+  from boxes bx
+  where
+     bx.shipment_no = g_shipment_no and
+     chapter_id = packlist.lv_chapter and     -- IM5433
+	exists (select 'x'
+                from pick_slip_products psp, pick_slips ps
+	        where
+                  bx.box_id = psp.box_id and
+                  bx.chapter_id = psp.chapter_id and
+                  psp.pick_slip_id = ps.pick_slip_id and
+                  psp.chapter_id = ps.chapter_id and
+                  ps.order_no = in_order_no);
+
+
+CURSOR unit_cur (p_box_id in varchar2) is
+   select psp.unit_id UnitId,
+      psp.ord_product_type OrdProductType,
+      lpad(nvl(psp.ord_tier,99),2,0) OrdTier,
+      lpad(psp.tier,2,0) Tier,
+      decode(psp.ord_product_type,'',' ','*') SubFlg,
+      substr(vabo.abo_desc,1,6) BloodType,
+      to_char(psp.exp_date,'DD-MON-YYYY HH24:MI') ExpDate,
+      to_char(psp.coll_date,'DD-MON-YYYY') CollDate,
+      psp.product_code ProductCode,
+      decode(length(psp.product_code),8,psp.product_code,5,
+      psp.product_code||'-'||psp.aliquot) ProductAlqCode,
+      psp.aliquot Aliquot,
+      vp.product_short_name ProductDesc,
+      vp.service_code||'-'||lpad(psp.tier,2,0) ServiceCode,
+      substr(psp.inspected_by,1,6) InsBy,
+      nvl(psp.product_price,0) ProductPrice,
+      substr(psp.product_code || '-' || psp.aliquot ||' '||
+      substr(vabo.abo_desc ,1,10),1, 21) ProdAliquotAborh
+ from pick_slip_products psp,
+      valid_products vp,
+      vserv_abo vabo
+ where
+    vp.product_code = substr(psp.product_code,1,5) and
+    psp.chapter_id = packlist.lv_chapter and
+    vp.unit_scheme_type = decode(length(psp.product_code),5,'C','I') and
+    box_id = p_box_id and
+    psp.product_status in ('SH', 'DL', 'RT', 'XR') and
+    vabo.abo_code = psp.blood_type
+    and vabo.unit_scheme_type = decode(length(psp.product_code),5,'C','I')
+    and exists (select 'x' from pick_slips ps where
+                ps.order_no = in_order_no and
+                ps.chapter_id = packlist.lv_chapter and  -- IM5433
+	        ps.pick_slip_id = psp.pick_slip_id )
+  order by psp.unit_id, psp.product_code, psp.aliquot;
+
+Cursor anti_cur (p_unit_id      in varchar2,
+                 p_product_code in varchar2,
+                 p_aliquot      in varchar2,
+                 p_order_no     in varchar2) is 
+  select pspa.antigen_id AntigenId,
+	 substr(va.antigen_desc,1,24) AntigenDesc,
+	  nvl(pspa.price,0) AntgnPrice 
+  from
+     pick_slip_product_antgns pspa,
+     pick_slips ps,
+     vserv_antigens va
+  where
+    ps.order_no = p_order_no and
+    ps.pick_slip_id = pspa.pick_slip_id and
+    unit_id = p_unit_id and
+    product_code = p_product_code and
+    aliquot = p_aliquot and
+    pspa.chapter_id = packlist.lv_chapter and     -- IM5433
+    pspa.chapter_id = ps.chapter_id and  -- IM5433
+    va.antigen_id = pspa.antigen_id and
+    sysdate between va.eff_date and nvl(va.term_date, sysdate + 365) and
+   (pspa.pick_slip_id, pspa.chapter_id, unit_id, coll_date,product_code, 
+   aliquot) not in (select pick_slip_id, chapter_id, unit_id, coll_date,
+		   product_code, aliquot from pick_slip_products where
+		   pick_slip_id=ps.pick_slip_id and chapter_id = packlist.lv_chapter and 
+		   product_status in ('CA','OD','RP','RS','UN'));
+
+   cursor attrib_cur (p_order_no in varchar2,
+		      p_unit_id  in varchar2,
+		      p_product_code in varchar2,
+		      p_aliquot  in varchar2) is
+       select pattr.attrib_group AttrGroup,
+	      pattr.attrib_code AttrCode, 
+	      va.service_code AttrServiceCode,
+	      substr(va.attrib_desc,1,24) AttrDesc,
+	      nvl(pattr.price,0) AttrPrice
+       from pick_slip_product_attr pattr,
+	    pick_slips ps,
+            vserv_attributes va
+	where
+	   ps.order_no = p_order_no and
+	   ps.pick_slip_id = pattr.pick_slip_id and
+	   unit_id = p_unit_id and
+	   pattr.chapter_id = packlist.lv_chapter and    -- IM5433
+       pattr.chapter_id = ps.chapter_id and  -- IM5433
+	   product_code = p_product_code and
+           aliquot = p_aliquot and
+	   va.attrib_group = pattr.attrib_group and
+           va.attrib_code = pattr.attrib_code and
+	   va.unit_scheme_type =decode(length(product_code),5,'C','I') and
+	   sysdate between va.eff_date and nvl(va.term_date, sysdate + 365)
+           and (pattr.pick_slip_id, pattr.chapter_id, unit_id, coll_date,
+	        product_code, aliquot)
+	    not in (select pick_slip_id, chapter_id, unit_id, coll_date,
+	            product_code, aliquot from pick_slip_products where
+	            chapter_id = packlist.lv_chapter and     -- I5433
+	            pick_slip_id=ps.pick_slip_id and product_status
+                    in ('CA','OD','RP','RS','UN'));
+
+ CURSOR ord_charges(p_ord_no in varchar2) is
+   select oc.charge_code ChargeCode, oc.cr_db_ind CrDbInd,
+	  vc.service_code ChargeServiceCode,
+          substr(vc.charge_code_desc,1,30) ChargeDesc,
+	  oc.amount Amount
+          from order_charges oc, vserv_charge_codes vc
+	   where
+	     order_no = p_ord_no and
+	     shipment_no = g_shipment_no and
+	     vc.charge_code = oc.charge_code
+	     and vc.chapter_id = oc.chapter_id	-- IM5433
+		 and vc.chapter_id = packlist.lv_chapter;	-- IM5433
+
+BEGIN
+  --get the measurement unit
+
+  pl_out:='OK';
+
+   begin
+        SELECT ltrim(rtrim(upper(code_desc)))
+        INTO  WeighMeasure
+        FROM vserv_master
+        WHERE code_type = 'PPLST'
+        AND  code = 'WUNIT'
+        AND  sysdate between eff_date and nvl(term_date, sysdate+1);
+   exception when no_data_found then 
+     WeighMeasure:='POUNDS';
+   end;
+
+  --get box weight
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+    dbms_output.put_line('Weight='||WeighMeasure);
+  end if; -- Added by Kishore on 06/29/2015
+
+  begin
+     SELECT to_number(ltrim(rtrim(code_desc)))
+     INTO   Boxwt
+     FROM  vserv_master
+     WHERE code_type = 'PPLST'
+     AND   code = 'BOXWT'
+     AND sysdate between eff_date and nvl(term_date, sysdate+1);
+  exception when no_data_found then 
+   Boxwt:=0;
+  end;
+
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+    dbms_output.put_line('BoxWt='||Boxwt);
+  end if; -- Added by Kishore on 06/29/2015
+  --get bag weight
+
+ begin
+   SELECT to_number(ltrim(rtrim(code_desc)))
+   INTO   Bagwt
+   FROM  vserv_master
+   WHERE code_type = 'PPLST'
+   AND   code = 'BAGWT'
+   AND   sysdate between eff_date and nvl(term_date, sysdate+1);
+ exception when no_data_found then 
+   Bagwt:=0;
+ end;
+
+ if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+   dbms_output.put_line('Bagwt='||Bagwt);
+ end if; -- Added by Kishore on 06/29/2015
+
+   FOR Z_BOX IN BOX_CUR LOOP
+   Begin
+     boxcnt:=boxcnt+1;
+
+     begin
+       insert into PACKLIST_BOXES  (SESSION_ID,SHIPMENT_NO,BOX_ID,
+                                    ORDER_NO, PACKED_BY,PACKED_DATE,
+                                    MFG_PROD_VOL,MFG_STD_PRICE)
+       values(g_session_id,g_shipment_no,Z_BOX.BoxId,in_order_no,
+              Z_BOX.PackedBy, to_date(Z_BOX.PackedDate,'DD-MON-YYYY HH24:MI'),
+              null,null);
+     exception when others then 
+        p_msg:='Error 12 '||sqlerrm;
+        raise user_excpt;
+     end;
+
+     if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+       dbms_output.put_line('Packlist boxes inserted '||Z_BOX.BoxId);
+     end if; -- Added by Kishore on 06/29/2015 
+      
+      ThisMfgProductType:=Z_BOX.MfgProductType;
+      ThisBoxID         :=Z_BOX.boxId;
+
+    If Z_box.MfgProductVolume > 0 then 
+      RecPlasmaFlag:='Y';
+      select distinct nvl(std_price,0), service_code,
+        product_short_name, specific_gravity
+        into MfgStdPrice, MfgServiceCode, MfgProductDesc,
+	MfgSpGravity
+        from vserv_products where
+	product_code in (select substr(product_code,1,5) from
+        pick_slip_products where box_id =Z_box.boxid and
+        chapter_id = packlist.lv_chapter    -- IM5433
+        ) and rownum=1 and              -- Added by Edwin IM 8598
+        sysdate between eff_date and nvl(term_date, sysdate + 365);
+
+       ThisMfgAmount:= Z_box.MfgProductVolume * MfgStdPrice;
+       MfgWeight:=MfgWeight + (z_box.MfgProductVolume * 1000.00 * MfgSpGravity);
+     End If;
+ 
+     if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+       dbms_output.put_line('Before Unit cursor');
+     end if; -- Added by Kishore on 06/29/2015
+     
+    For Z_UNIT  in unit_cur (Z_BOX.BoxId) loop
+     Begin
+
+       ProdPriceBuf:=to_char(Z_UNIT.ProductPrice,'9999999.99');
+       ProdAliq:=Z_UNIT.ProductCode||'-'||Z_UNIT.Aliquot;
+
+      If Z_UNIT.ProductPrice = 0 then
+	ProdPriceBuf:=null;
+      End If;
+      If RecPlasmaFlag = 'Y' then
+	ProdPriceBuf:=null;
+        ExpCollDate:=to_date(Z_UNIT.CollDate,'DD-MON-YYYY');
+      Else
+        ExpCollDate:=to_date(Z_UNIT.ExpDate,'DD-MON-YYYY HH24:MI');      
+      End If ;
+     
+      if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+        dbms_output.put_line(to_char(ExpCollDate,'dd-mon-yyyy'));
+        dbms_output.put_line('COD Flag='||ThisCODFlag);
+      end if; -- Added by Kishore on 06/29/2015
+      
+      If ThisCODFlag='N' then
+        ProdPriceBuf:=null;
+      End If;
+      --ThisCODFlag:=Z_UNIT.CODFlag;  
+
+      INSERT INTO PACKLIST_DETAILS (session_id,
+				    shipment_no,
+                                    order_no,box_id,packed_by,packed_date,
+				    mfg_prod_type,mfg_prod_vol,unit_id,subflag,
+				    blood_type,exp_coll_date,prod_aliq,
+				    product_code,aliquot,prod_desc,
+                                    inspected_by,prod_price)
+                 VALUES       (g_session_id,g_shipment_no,in_order_no,
+                               Z_BOX.BoxId,
+			       Z_BOX.PackedBy,
+		               to_date(Z_BOX.PackedDate,'DD-MON-YYYY HH24:MI'),
+                               Z_BOX.MfgProductType,
+		               Z_BOX.MfgProductVolume,
+		               Z_UNIT.unitid,
+			       Z_UNIT.subflg,Z_UNIT.BloodType,
+			       ExpCollDate,Z_UNIT.ProductAlqCode,
+		               Z_UNIT.ProductCode,Z_UNIT.aliquot,
+                               Z_UNIT.ProductDesc,Z_UNIT.InsBy,
+		               ProdPriceBuf);
+
+
+     --getting values for billing interface
+     if nvl(RecPlasmaFlag,' ')!='Y' then 
+        OrderSubTotal:=OrderSubTotal + Z_UNIT.ProductPrice;
+        if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+          dbms_output.put_line('Order Total='||to_char(OrderSubTotal,'99999.99'));
+        end if; -- Added by Kishore on 06/29/2015
+     end if;
+
+     ThisUnitId:=Z_UNIT.UnitId ;
+     ThisProductCode:=Z_UNIT.ProductCode;
+     ThisAliquot:=Z_UNIT.Aliquot;
+
+
+   If g_invoice_flag=1 then
+     ThisOrdTier:=Z_UNIT.OrdTier;
+     ThisTier:=Z_UNIT.Tier;
+     ThisBloodType:=Z_UNIT.BloodType;
+     ThisProdAliquotAborh:=Z_UNIT.ProdAliquotAborh;
+     ThisServiceCode:=Z_UNIT.ServiceCode;
+     ThisOrdProductType:=Z_UNIT.OrdProductType;
+     ThisSubFlg:=Z_UNIT.SubFlg;
+
+     Begin
+     If nvl(ThisSubFlg,' ')='*' then 
+        select max(decode(sign(nvl(ord.std_price,0) - 
+        nvl(sub.std_price,0)), 1,(sub.service_code),
+	-1,(ord.service_code), sub.service_code))  || '-' ||
+       lpad(decode(Z_UNIT.OrdTier,'99',Z_UNIT.Tier,Z_UNIT.OrdTier),2,0)
+       into ThisServiceCode
+       from valid_products sub,
+       valid_products ord
+       where ord.inv_product_type =Z_UNIT.OrdProductType and
+       sysdate between ord.eff_date and
+       nvl(ord.term_date, sysdate + 365) and
+       sub.product_code = substr(ThisProductCode,1,5) and
+       sub.unit_scheme_type = decode(length(Z_UNIT.ProductCode),5,'C','I')
+       and sysdate between sub.eff_date and nvl(sub.term_date, sysdate + 365);
+    End If;
+    ThisProductPrice:=Z_UNIT.ProductPrice;
+
+    Exception when no_data_found then 
+      p_msg:='Error:24 '||sqlerrm;
+      raise user_excpt;
+    End;
+
+    if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+      dbms_output.put_line('Before billing interface-order details');
+    end if; -- Added by Kishore on 06/29/2015
+    ---call unit level billing interface
+    Begin
+       If RecPlasmaFlag='Y' then 
+	 ThisProductPrice:=0;
+	 ThisFiPriceSchNo:=null;
+       Else
+	 ThisProductPrice:=Z_UNIT.ProductPrice;
+       End If;
+
+       BILLING_INTERFACE.INSERT_INVOICE_DETAILS
+	   (ThisFiCompanyNo, in_order_no, ThisArAccount,
+            ThisServiceCode,
+	    ShipmentDate,  --to_date(ShipmentDate,'DD-MON-YYYY HH24:MI'),
+	   ThisProductPrice,
+	   to_date(g_ins_date,'DD-MON-YYYY HH24:MI:SS'),
+	   null,   --:ThisPatientName,
+           ThisProdAliquotAborh,
+	   ThisUnitId,
+           ThisFiPriceSchNo,'',1,1,'DB','',
+	   status_flag);
+	   If status_flag='E' then 
+	     p_msg:='Error: 25A '||g_shipment_no||' '||ThisUnitId||' '||
+	     ThisProdAliquotAborh;
+             raise user_excpt;
+           End If;
+
+    Exception when others then 
+      p_msg:='Error: 25 '||sqlerrm;
+      raise user_excpt;
+    End;
+   End If;    --for g_invoice_flag
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+     dbms_output.put_line('Before Antigen cursor='||Z_UNIT.UnitId);
+   end if; -- Added by Kishore on 06/29/2015
+
+   nAntCnt:=0;
+   For Z_ANT in anti_cur (Z_UNIT.UnitId, Z_UNIT.ProductCode,
+                          Z_UNIT.aliquot,in_order_no) Loop
+    if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+      dbms_output.put_line('U='||Z_UNIT.UnitId||' P='||Z_UNIT.ProductCode||
+                        ' Al='||Z_UNIT.aliquot||' O='||in_order_no);
+    end if; -- Added by Kishore on 06/29/2015
+    Begin
+    nAntCnt:=nAntCnt+1;
+    insert into PACKLIST_ANT_ATTR_CHARGE(
+                                         SESSION_ID,
+                                         SHIPMENT_NO,
+					 UNIT_ID,
+                                         PRODUCT_CODE,
+                                         ALIQUOT,
+					 ORDER_NO,
+					 CATEGORY,
+					 CATEGORY_ID,
+					 CATEGORY_DESC1,
+					 CATEGORY_DESC2,
+					 CATEGORY_PRICE)
+                                      values(g_session_id,
+                                             g_shipment_no,
+			                     Z_UNIT.UnitId,
+                                             Z_UNIT.ProductCode,
+                                             Z_UNIT.aliquot,
+				             in_order_no,
+                                            'ANT',
+                                            Z_ANT.AntigenId,
+		      	                    Z_ANT.AntigenDesc,
+					    null,
+					    null);
+   
+    Exception when others then
+      p_msg:='Error:26 '||sqlerrm;
+     raise user_excpt;
+    End; --anti_cur end;
+   End Loop;  --anti cur loop
+
+
+   -- get the antigen price
+  If nAntCnt > 0 then 
+
+    begin
+      select '  ', antigen_desc, nvl(std_price,0),
+         service_code, to_char(nvl(std_price,0),'9999.99')
+         into AntigenId, AntgnDesc, AntgnStdPrice,
+         AntgnServiceCode, AntPrice
+         from antigen_pricing_matrix
+       where
+         antigen_qty = nAntCnt and
+         sysdate between eff_date and nvl(term_date, sysdate + 365);
+      exception when no_data_found then 
+         p_msg:='Cannot get the antigen price';
+         raise user_excpt;
+      end;
+
+       If ThisCODFlag='N' then 
+          AntPrice:=null;
+       End If;
+   
+    Begin
+    insert into PACKLIST_ANT_ATTR_CHARGE(SESSION_ID,
+					SHIPMENT_NO,
+					UNIT_ID,
+                                        PRODUCT_CODE,
+                                        ALIQUOT,
+					ORDER_NO,
+					CATEGORY,
+					CATEGORY_ID,
+					CATEGORY_DESC1,
+					CATEGORY_DESC2,
+					CATEGORY_PRICE)
+                          values(g_session_id,g_shipment_no,
+				 Z_UNIT.UnitId,
+                                 Z_UNIT.ProductCode,
+                                 Z_UNIT.aliquot,
+				 in_order_no,
+                                 'ANT',
+				 AntigenId,
+				 null,
+				 AntgnDesc,
+                                  AntPrice);
+   
+    Exception when others then
+      p_msg:='Error:28 '||sqlerrm;
+      raise user_excpt;
+    End;
+     OrderSubTotal:= OrderSubTotal + AntPrice;
+     if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+       dbms_output.put_line('Total Anti='||to_char(OrderSubTotal,'99999.99'));
+     end if; -- Added by Kishore on 06/29/2015
+    If g_invoice_flag=1 then
+      ThisAntigenServiceCode:=AntgnServiceCode;
+      ThisAntigenPrice:=AntgnStdPrice;
+      ThisAntgnDesc:=AntgnDesc;
+
+       ThisUnitAntgnDesc:=Z_UNIT.UnitId||' '||substr(ThisAntgnDesc,1,44);
+       begin
+           billing_interface.insert_invoice_details
+		 (ThisFiCompanyNo, in_order_no, ThisArAccount,
+		 ThisAntigenServiceCode,
+		 ShipmentDate,  --to_date(ShipmentDate,'DD-MON-YYYY HH24:MI'),
+		 ThisAntigenPrice,
+		 to_date(g_ins_date,'DD-MON-YYYY HH24:MI:SS'),
+		 null, --:ThisPatientName,
+		 ThisProdAliquotAborh,
+		 ThisUnitAntgnDesc,
+		 '0', '',1,1,'DB','', status_flag);
+		 If status_flag='E' then
+		   p_msg:='Order Antigens-'||Z_unit.UnitId||' '||
+		   ThisUnitAntgnDesc;
+                  raise user_excpt;
+		 End If;
+
+       exception when others then 
+	  p_msg:='Error:27 '||g_shipment_no||' '||in_order_no||' '
+                  ||Z_UNIT.UnitId||' '||ThisProdAliquotAborh||' '
+                  ||ThisUnitAntgnDesc;
+          raise user_excpt;
+       end;
+    end if; -- for g_invice_flag
+  end if ; --for n_antCnt > 0
+ 
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+    dbms_output.put_line('Antigen proce='||to_char(ThisAntigenPrice));
+  end if; -- Added by Kishore on 06/29/2015
+ 
+     For Z_attrib in attrib_cur(in_order_no,Z_UNIT.UnitId,
+                          Z_UNIT.ProductCode,
+                          Z_UNIT.aliquot) Loop
+      Begin
+       AttrPrc:=to_number(to_char(Z_attrib.AttrPrice,'999999.99'));
+
+       If ThisCODFlag='N' then 
+	  AttrPrc:=null;
+       End If;
+       If Z_attrib.AttrPrice = 0 then 
+	  AttrPrc:=null;
+       End If;
+       begin
+         insert into PACKLIST_ANT_ATTR_CHARGE(SESSION_ID,
+		        		SHIPMENT_NO,
+					UNIT_ID,
+                                        PRODUCT_CODE,
+                                        ALIQUOT,  
+					ORDER_NO,
+					CATEGORY,
+					CATEGORY_ID,
+					CATEGORY_DESC1,
+					CATEGORY_DESC2,
+					CATEGORY_PRICE)
+                          values(g_session_id,
+                                 g_shipment_no,
+                                 Z_UNIT.UnitId,
+                                 Z_UNIT.ProductCode,
+                                 Z_UNIT.aliquot,
+				 in_order_no,
+                                 'ATTR',
+				 Z_attrib.AttrGroup,
+				 Z_attrib.AttrCode,
+				 Z_attrib.AttrDesc,
+				 AttrPrc);
+   
+      exception when others then
+        p_msg:='Error:29 '||sqlerrm;
+        raise user_excpt;
+      end;
+
+      OrderSubTotal:= OrderSubTotal +  Z_attrib.AttrPrice;
+      if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+        dbms_output.put_line('Order Total 2='||to_char(OrderSubTotal,'99999.99'));
+      end if; -- Added by Kishore on 06/29/2015
+
+      If g_invoice_flag=1 then
+	 ThisAttrServiceCode:=Z_attrib.AttrServiceCode;
+	  ThisAttrPrice:= Z_attrib.AttrPrice ;
+	  ThisAttrDesc:=Z_attrib.AttrDesc;
+          ThisUnitAttrDesc:=Z_UNIT.UnitId||'  '||ThisAttrDesc; --Added for 4.6.1
+         begin
+           billing_interface.insert_invoice_details
+		 (ThisFiCompanyNo, in_order_no, ThisArAccount,
+		 ThisAttrServiceCode,
+		 ShipmentDate,  --to_date(ShipmentDate,'DD-MON-YYYY HH24:MI'),
+		 ThisAttrPrice,
+		 to_date(g_ins_date,'DD-MON-YYYY HH24:MI:SS'),
+		 null, --:ThisPatientName,
+		 ThisProdAliquotAborh,
+		 ThisUnitAttrDesc,
+		 '0', '',1,1,'DB','', status_flag);
+            if status_flag='E' then 
+	      p_msg:=g_shipment_no||' '||in_order_no||' '||Z_UNIT.UnitId||' '
+	      ||ThisProdAliquotAborh||' '||ThisAttrServiceCode;
+              raise user_excpt;
+	   end if;
+	  exception when others then 
+	    p_msg:='Error:30 '||g_shipment_no||' '||in_order_no||' '||
+	    Z_UNIT.UnitId|| ' '||ThisProdAliquotAborh||' '||
+	    ThisAttrDesc;
+            raise user_excpt;
+	  end;
+       end if;
+      End; -- For attrib end
+     End Loop;  --For attrib loop
+      cnt1:=cnt1+1;     --total unit count
+     End;      --For unit begin
+    End Loop;  --For unit cursor
+
+    if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+      dbms_output.put_line('After unit loop-RecPlasmaFlag='||RecPlasmaFlag);
+    end if; -- Added by Kishore on 06/29/2015
+    
+    If RecPlasmaFlag = 'Y' then 
+	MfgProductVolumeBuf:=to_char(Z_BOX.MfgProductVolume,'99999999.99');
+	TotMfgProductVolume:= TotMfgProductVolume+Z_BOX.MfgProductVolume;
+        bagcnt:= bagcnt + cnt1;
+	MfgStdPriceBuf:=to_char(MfgStdPrice,'99999999.99');
+
+	 If ThisCODFlag='N' then 
+	    update PACKLIST_BOXES set mfg_prod_vol=MfgProductVolumeBuf where
+	    shipment_no=g_shipment_no and session_id=g_session_id;
+         Else
+	       update PACKLIST_BOXES set mfg_prod_vol=MfgProductVolumeBuf,
+	                       mfg_Std_price=MfgStdPriceBuf where
+	                       shipment_no=g_shipment_no and 
+			       session_id=g_session_id;
+         End If;
+	 OrderSubTotal:= OrderSubTotal + ThisMfgAmount;
+         if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+           dbms_output.put_line('Total 4='||to_char(OrderSubTotal,'99999.99'));
+         end if; -- Added by Kishore on 06/29/2015
+
+      If g_invoice_flag=1 then
+         begin
+           billing_interface.insert_invoice_details
+		 (ThisFiCompanyNo, in_order_no, ThisArAccount,
+		 MfgServiceCode,
+		 ShipmentDate,  --to_date(ShipmentDate,'DD-MON-YYYY HH24:MI'),
+		 ThisMfgAmount, 
+		 to_date(g_ins_date,'DD-MON-YYYY HH24:MI:SS'),
+		 null, --:ThisPatientName,
+		 ThisMfgProductType,
+		 MfgProductDesc,
+		 '0', '',1,1,'DB','', status_flag);
+            if status_flag='E' then 
+	      p_msg:='Error: 31 '||g_shipment_no||' '||MfgServiceCode;
+	      return; 
+           end if;
+	  exception when others then 
+	    p_msg:='Error:30 '||g_shipment_no||' '||in_order_no||' '||
+	    MfgServiceCode;
+            raise user_excpt;
+	  end;
+     End If;
+  End If;   --for Rec plasma flag=1
+   END;  --End for BOX 
+   END LOOP;  --For box cursor
+
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+    dbms_output.put_line('After box cursor');
+  end if; -- Added by Kishore on 06/29/2015
+  
+  FOR Z_CHG in  ord_charges(in_order_no) loop
+  begin
+   ThisCrDbInd:=Z_CHG.CrDbInd;
+    --pAmount:=to_number(to_char(Z_CHG.Amount,'9999.09')); 
+    pAmount:=to_number(to_char(Z_CHG.Amount,'9999999.09'));   -- IM 207
+    If ThisCrDbInd='CR' then 
+       pAmount:=Z_CHG.Amount * (-1);
+   End If;
+   tAmount:=pAmount;
+
+  If ThisCODFlag='N' then
+   pAmount:=null;
+  End If;
+
+   begin
+     insert into PACKLIST_ANT_ATTR_CHARGE(SESSION_ID,
+					     SHIPMENT_NO,
+                                             UNIT_ID,
+					     ORDER_NO,
+					     CATEGORY,
+		                             CATEGORY_ID,
+					     CATEGORY_DESC1,
+					     CATEGORY_DESC2,
+					     CATEGORY_PRICE)
+                          values(g_session_id,g_shipment_no,null,
+				 in_order_no,
+                                 'CHG',
+				 Z_CHG.Chargecode,
+				 null,
+				 Z_CHG.ChargeDesc,
+				 pAmount);
+   
+      exception when others then
+        p_msg:='Error:29 '||sqlerrm;
+        raise user_excpt;
+     end;
+
+   OrderSubTotal:= OrderSubTotal + Z_CHG.Amount;
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+     dbms_output.put_line('Total 6='||to_char(OrderSubTotal,'99999.99'));
+   end if; -- Added by Kishore on 06/29/2015
+   If g_invoice_flag=1 then
+      ThisChargeServiceCode:=Z_CHG.ChargeServiceCode;
+      ThisChargePrice:=tAmount;
+      ThisChargeDesc:=Z_CHG.ChargeDesc;
+
+      if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+        dbms_output.put_line('charge price='||to_char(ThisChargePrice));
+      end if; -- Added by Kishore on 06/29/2015
+      begin
+        status_flag:=null;
+        billing_interface.insert_invoice_details
+                (ThisFiCompanyNo, in_order_no, ThisArAccount,
+		 ThisChargeServiceCode,
+		 ShipmentDate, --to_date(ShipmentDate,'DD-MON-YYYY HH24:MI'),
+		 ThisChargePrice, 
+		 to_date(g_ins_date,'DD-MON-YYYY HH24:MI:SS'),
+		 null, --:ThisPatientName,
+		 null,
+		 ThisChargeDesc,
+		 '0', '',1,1,'DB','', status_flag);
+
+            if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+              dbms_output.put_line('Status flag for order charges='||status_flag);
+            end if; -- Added by Kishore on 06/29/2015
+            if status_flag='E' then 
+	      p_msg:='Error: 32 '||g_shipment_no||' '||ThisChargeServiceCode;
+              raise user_excpt;
+	    end if;
+	  exception when others then
+             If nvl(status_flag,'X')='E' then 
+	       p_msg:='Error at billing interface : '
+               ||g_shipment_no||' '||ThisChargeServiceCode||
+               ' '||substr(sqlerrm,1,50);
+               raise user_excpt;
+	     Else
+	        p_msg:='Error:33 '||g_shipment_no||' '||in_order_no||' '||
+	        ThisChargeServiceCode||' - '||sqlerrm;
+                raise user_excpt;
+             End If;
+
+	  end;
+   end if;
+ End;  --for loop charge
+End Loop; --ord_Charge loop
+
+if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+  dbms_output.put_line('Order sub total='||to_char(OrderSubTotal,'999999.99'));
+  dbms_output.put_line('Ship='||to_char(ShipmentTot,'999999.99'));
+end if; -- Added by Kishore on 06/29/2015
+
+   SubTotalBuf:=to_char(OrderSubTotal,'999999.99');
+   ShipmentTot:= ShipmentTot + OrderSubTotal;
+   ShipTotBuf:=to_char(ShipmentTot,'9999999.99');  
+ 
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+     dbms_output.put_line('Final Ship='||to_char(ShipmentTot,'999999.99'));
+   end if; -- Added by Kishore on 06/29/2015
+
+   If ThisCODFlag='N' then 
+     MfgStdPriceBuf:=null;
+     SubTotalBuf:=null;
+     ShipTotBuf:=null;
+   End IF;
+   
+   if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+     dbms_output.put_line('Sub='||SubTotalBuf);
+   end if; -- Added by Kishore on 06/29/2015
+
+   --populate the order totals
+   begin
+    insert into PACKLIST_ORDER_TOTALS(SESSION_ID,
+				    SHIPMENT_NO,
+                                    ORDER_NO,
+                                    MFG_FLAG,
+                                    MFG_PROD_VOL,
+			            MFG_STD_PRICE,
+				    MFG_WEIGHT,
+				    ORDER_SUB_TOTAL)
+           VALUES (g_session_id,g_shipment_no,in_order_no,
+                   RecPlasmaFlag,
+                   MfgProductVolumeBuf,
+		   MfgStdPriceBuf,MfgWeightBuf,SubTotalBuf);
+
+   exception when others then 
+      p_msg:='Error: 34 '||sqlerrm;
+      raise user_excpt;
+   end;
+
+EXCEPTION when user_excpt then 
+ pl_out:=p_msg;
+when others then 
+ pl_out:=sqlerrm;
+END POPULATE_ORDER_DETAILS;
+
+PROCEDURE POPULATE_SHIP_TOTALS (p_session_id in varchar2,
+                                p_ship_no in varchar2,
+                                pl_out out varchar2) is
+BEGIN
+pl_out:='OK';
+
+ If RecPlasmaFlag='Y' then 
+   if WeighMeasure='KILOGRAMS' then 
+     MfgWeight:=(MfgWeight/1000);
+   else
+     MfgWeight:=((MfgWeight/1000) * 2.2026);
+   end if;
+   MfgWeight:=MfgWeight + (Boxwt*boxcnt) + (Bagwt*bagcnt);
+   TotMfgProductVolumeBuf:=to_char(TotMfgProductVolume,'99999999.999');
+   MfgStdPriceBuf:=to_char(MfgStdPrice,'9999999.99');
+   MfgWeightBuf:=to_char(MfgWeight,'99999999.99');
+
+   If WeighMeasure='KILOGRAMS' then 
+     MfgWeightBuf:=MfgWeightBuf||'   Kilograms';
+   Else
+     MfgWeightBuf:=MfgWeightBuf||'  Pounds';
+   End If;
+End If;
+
+   
+  begin
+    insert into PACKLIST_SHIP_TOTALS(SESSION_ID,
+				    SHIPMENT_NO,
+                                    MFG_FLAG,
+                                    TOT_MFG_PROD_VOL,
+			            MFG_STD_PRICE,
+				    MFG_WEIGHT,
+				    SHIPMENT_TOT)
+           VALUES (g_session_id,g_shipment_no,
+                   RecPlasmaFlag,
+                   TotMfgProductVolumeBuf,
+		   MfgStdPriceBuf,MfgWeightBuf,ShipTotBuf);
+   exception when others then 
+      pl_out:='Error: 45 '||sqlerrm;
+   end;
+
+EXCEPTION when others then
+ pl_out :='Error 37';
+END POPULATE_SHIP_TOTALS ;
+
+
+PROCEDURE PRODUCTS_IN_SHIPMENT(in_ship_no in varchar2,
+			       pl_out  out varchar2) is
+p_order_no varchar2(200);
+ cursor prod_ship is 
+    select product_type SumProductType,
+    UPPER(abo_desc) SumBloodType,
+    count(unit_id||product_code||aliquot) SumCount
+     from pick_slip_products, vserv_abo
+     where chapter_id = packlist.lv_chapter and --IM5433
+     box_id in
+	      (select distinct box_id from boxes
+	       where shipment_no = in_ship_no
+	       and chapter_id = packlist.lv_chapter -- IM5433
+	       ) and
+               abo_code = blood_type and
+	       unit_scheme_type = decode(length(product_code),5,'C','I') and
+	       sysdate between eff_date and nvl(term_date, sysdate + 365) and
+	       product_status in ('SH', 'DL', 'RT', 'XR')
+     group by
+     product_type,UPPER(abo_desc);
+
+begin
+ pl_out:='OK';
+  FOR Z in prod_ship Loop
+  begin
+    INSERT INTO PACKLIST_PROD_IN_SHIPMENT(SESSION_ID,
+					  SHIPMENT_NO,
+					  PRODUCT_TYPE,
+					  BLOOD_TYPE,
+					  PROD_COUNT)
+                           VALUES       (g_session_id,
+					 g_shipment_no,
+					 Z.SumProductType,
+					 Z.SumBloodType,
+					 Z.SumCount);
+  end;
+  End Loop;
+Exception when others then 
+ pl_out:='Error:31 '||sqlerrm;
+END PRODUCTS_IN_SHIPMENT;
+/****************************** */
+/*  MAIN Begin begins here */
+/**************************** */
+PROCEDURE PACKLIST_GENERATOR(in_session_id varchar2,
+                             in_ship_no in varchar,
+			     in_chapter in varchar2,
+			     out_message out varchar2) IS
+p_status  varchar2(350);
+BEGIN   
+-- Added by Kishore on 06/29/2015
+if lab_common.is_debug_msg_displayed ('PACKLIST', 'PKG') then
+  t_is_debug_msg_displayed := TRUE;
+else
+  t_is_debug_msg_displayed := FALSE;
+end if;
+-- End of change
+
+if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+  dbms_output.put_line('main');
+end if; -- Added by Kishore on 06/29/2015
+
+g_ins_date:=to_char(sysdate,'DD-MON-YYYY HH24:MI:SS');
+if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+  dbms_output.put_line('OK');
+end if; -- Added by Kishore on 06/29/2015
+
+g_shipment_no:=in_ship_no;
+g_session_id:=in_session_id;
+
+/* --- MLT 5382---
+-- Moved this query from Package main body to here. 09/21/2012
+SELECT chapter_id INTO packlist.lv_chapter
+  FROM system_users
+ WHERE user_id = lt_user_session.get_userid;
+
+*/
+
+packlist.lv_chapter:=in_chapter;    --- MLT 5382
+
+
+---------
+if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+  dbms_output.put_line('entering'||packlist.lv_chapter);
+end if; -- Added by Kishore on 06/29/2015
+
+ select shipment_date,decode(invoice_printed_date,null,1,0)
+ into   ShipmentDate,g_invoice_flag
+ from shipments
+ where shipment_no =in_ship_no
+ and chapter_id = packlist.lv_chapter
+ for update of shipment_status, invoice_printed_date;
+
+ --Call the routine to populate the header
+  p_status:=null;
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+    dbms_output.put_line('Before Populate header');
+  end if; -- Added by Kishore on 06/29/2015
+  POPULATE_PACKLIST_TABLES(in_session_id,in_ship_no,packlist.lv_chapter,p_status);
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+    dbms_output.put_line('After Populate header-'||p_status);
+  end if; -- Added by Kishore on 06/29/2015
+
+ /*
+  If p_status='OK' then
+    p_status:=null;
+    POPULATE_ORDER_SUMMARY(g_order_no,p_status);
+  End If;
+
+  if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+    dbms_output.put_line('POPULATE_ORDER_SUMMARY='||p_status);
+  end if; -- Added by Kishore on 06/29/2015
+
+ If p_status='OK' then
+   p_status:=null;
+   POPULATE_ORDER_DETAILS(g_order_no,p_status);
+ End If;
+ if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+   dbms_output.put_line('POPULATE_ORDER_DETAILS='||p_status);
+ end if; -- Added by Kishore on 06/29/2015
+
+ */
+
+ If p_status='OK' then 
+    p_status:=null;
+   POPULATE_SHIP_TOTALS(in_session_id,in_ship_no,p_status);
+ End If;
+ if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+   dbms_output.put_line('POPULATE_SHIP_DETAILS='||p_status);
+ end if; -- Added by Kishore on 06/29/2015
+
+ If p_status='OK' then 
+   PRODUCTS_IN_SHIPMENT(g_shipment_no,p_status);
+ End If;
+ if t_is_debug_msg_displayed then -- Added by Kishore on 06/29/2015
+   dbms_output.put_line('PRODUCTS_IN_SHIPMENTS='||p_status);
+ end if; -- Added by Kishore on 06/29/2015
+
+ If p_status='OK' then  --update the final status
+   if g_invoice_flag=1 then 
+	update shipments
+	set shipment_status = 'SH',
+	invoice_printed_date = sysdate
+	where shipment_no =in_ship_no 
+        and chapter_id =packlist.lv_chapter;
+   End if;
+ End If;
+
+ out_message:=p_status;  --This message will be sent to the Shipment forms
+
+End PACKLIST_GENERATOR;
+--BEGIN
+-- Commented on 09/21/2012; Moved below query to packlist_generator routine
+/*
+SELECT	chapter_id
+ INTO	packlist.lv_chapter
+ FROM	system_users
+ WHERE	DECODE(
+		SUBSTR(user_id,1,3)
+	        ,'OPS'
+		,SUBSTR(user_id,5)
+		,user_id
+	  )	= DECODE(
+		SUBSTR(lt_user_session.get_userid,1,3)
+			,'OPS'
+			,SUBSTR(lt_user_session.get_userid,5)
+			,user_id
+		  ) 
+	AND rownum = 1;
+
+--packlist.lv_chapter:='DAL';
+*/
+END PACKLIST;
+/
+create or replace public synonym PACKLIST for  SRVSYS.PACKLIST;
+
+show errors;

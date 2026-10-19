@@ -1,0 +1,401 @@
+<div class="bag-tube-check-in-layout" role="main">
+
+  <!-- Page Header with Breadcrumb -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Global loading overlay — covers entire page during retrieve, bag check-in, and tube check-in -->
+  @if (isLoading() || isCheckingIn() || isSubmittingTube()) {
+    <div class="global-loading-overlay" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="36" [attr.aria-label]="isCheckingIn() ? 'Checking in...' : isSubmittingTube() ? 'Submitting tube check-in...' : 'Loading'"></mat-spinner>
+      <span class="sr-only">{{ isCheckingIn() ? 'Checking in, please wait...' : isSubmittingTube() ? 'Submitting tube check-in, please wait...' : 'Loading, please wait...' }}</span>
+    </div>
+  }
+
+  <!-- Tab container -->
+  <div class="tab-container">
+    <mat-tab-group
+      [selectedIndex]="activeTabIndex()"
+      (selectedIndexChange)="onTabChange($event)"
+      animationDuration="250ms"
+      class="check-in-tabs"
+      aria-label="Bag and Tube Check-In tabs">
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           TAB 1: Bag Check-In
+           ═══════════════════════════════════════════════════════════════ -->
+      <mat-tab label="Bag Check-In">
+        <div class="tab-content" (click)="onTabContentClick($event)">
+
+          <!-- Filter Row 1: Batch + Temps + Buttons -->
+          <div class="filter-panel" role="search" aria-label="Batch filter panel">
+            <form [formGroup]="bagFilterForm" class="filter-row">
+
+              <!-- Batch ID dropdown -->
+              <mat-form-field appearance="fill" floatLabel="always" class="filter-field filter-field--md" subscriptSizing="dynamic">
+                <mat-label>Batch ID</mat-label>
+                <mat-select formControlName="batchId"
+                  (selectionChange)="onBatchSelected($event.value)">
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="batchSearchControl"
+                      placeholderLabel="Search batch..."
+                      noEntriesFoundLabel="No matching batches"
+                      ariaLabel="Search batch options">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @for (batch of filteredBatchOptions(); track batch.batchId) {
+                    <mat-option [value]="batch.batchId">{{ batch.displayLabel }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+
+              <!-- Min Temp — editable for new batch, read-only when existing batch loaded -->
+              @if (isNewBatch()) {
+                <mat-form-field appearance="fill" floatLabel="always" class="filter-field filter-field--sm" subscriptSizing="dynamic">
+                  <mat-label>Min Temp (°C)</mat-label>
+                  <input matInput formControlName="minTemp" type="number" step="0.01"
+                    placeholder=""
+                    (keydown.tab)="onMinTempTab()" />
+                  @if (bagFilterF['minTemp']?.hasError('required') && bagFilterF['minTemp']?.touched) {
+                    <mat-error>Min Temp is required</mat-error>
+                  }
+                  @if (bagFilterF['minTemp']?.hasError('tempExceedsRange')) {
+                    <mat-error>Min Temp cannot exceed Max Temp</mat-error>
+                  }
+                </mat-form-field>
+              } @else {
+                <mat-form-field appearance="fill" floatLabel="always" class="filter-field filter-field--sm readonly-field" subscriptSizing="dynamic">
+                  <mat-label>Min Temp</mat-label>
+                  <input matInput [value]="formatTemp(bagFilterForm.get('minTemp')?.value)" placeholder="—" readonly tabindex="-1" />
+                </mat-form-field>
+              }
+
+              <!-- Max Temp — editable for new batch, read-only when existing batch loaded -->
+              @if (isNewBatch()) {
+                <mat-form-field appearance="fill" floatLabel="always" class="filter-field filter-field--sm" subscriptSizing="dynamic">
+                  <mat-label>Max Temp (°C)</mat-label>
+                  <input matInput formControlName="maxTemp" type="number" step="0.01"
+                    placeholder="" />
+                  @if (bagFilterF['maxTemp']?.hasError('required') && bagFilterF['maxTemp']?.touched) {
+                    <mat-error>Max Temp is required</mat-error>
+                  }
+                  @if (bagFilterF['maxTemp']?.hasError('tempExceedsRange')) {
+                    <mat-error>Max Temp cannot be less than Min Temp</mat-error>
+                  }
+                </mat-form-field>
+              } @else {
+                <mat-form-field appearance="fill" floatLabel="always" class="filter-field filter-field--sm readonly-field" subscriptSizing="dynamic">
+                  <mat-label>Max Temp</mat-label>
+                  <input matInput [value]="formatTemp(bagFilterForm.get('maxTemp')?.value)" placeholder="—" readonly tabindex="-1" />
+                </mat-form-field>
+              }
+
+              <!-- Buttons -->
+              <div class="filter-actions">
+                <button
+                  mat-stroked-button
+                  type="button"
+                  class="retrieve-button"
+                  (click)="onBagRetrieve()"
+                  [disabled]="isLoading() || !bagFilterForm.get('batchId')?.value"
+                  aria-label="Retrieve batch data">
+                  RETRIEVE
+                </button>
+
+                <button
+                  mat-stroked-button
+                  type="button"
+                  class="retrieve-button"
+                  (click)="onCheckUnitsInBatch()"
+                  [disabled]="isLoading() || !bagFilterForm.get('batchId')?.value"
+                  aria-label="Check all units in selected batch">
+                  CHECK UNITS IN BATCH
+                </button>
+              </div>
+            </form>
+          </div>
+
+          <!-- Filter Row 2: Unit entry + read-only fields -->
+          <div class="filter-panel filter-panel--entry" role="region" aria-label="Unit ID entry panel">
+            <form [formGroup]="bagEntryForm" class="filter-row filter-row--wrap">
+
+              <!-- Unit ID (shared field component — handles barcode format, double-entry, postValidate) -->
+              <app-unit-id-field
+                [validateFfValue]="'DONOR'"
+                [required]="true"
+                [placeholder]="'W123418051501'"
+                (postValidate)="onUnitPostValidate($event)"
+                (validated)="onUnitValidated($event)"
+                (cleared)="onUnitCleared()"
+                class="filter-field filter-field--unit-id">
+              </app-unit-id-field>
+
+              <!-- Catalog Number — scan barcode OR select from list (ISBT: =)catalog / =)catalog&)lot) -->
+              <app-scan-select-field
+                #catalogField
+                label="Catalog Number"
+                placeholder="Scan or select..."
+                [showBarcodeIcon]="true"
+                [showDropdown]="true"
+                [options]="catalogScanOptions()"
+                [parseFn]="parseCatalog"
+                (valueChanged)="onCatalogValueChanged($event)"
+                (cleared)="onCatalogValueChanged(null)">
+              </app-scan-select-field>
+
+              <!-- Drive ID (display only) -->
+              <mat-form-field appearance="fill" floatLabel="always" class="filter-field filter-field--sm readonly-field" subscriptSizing="dynamic">
+                <mat-label>Drive ID</mat-label>
+                <input matInput [value]="bagDriveId() || ''" placeholder="—" readonly tabindex="-1" />
+              </mat-form-field>
+
+              <!-- Name (display only) -->
+              <mat-form-field appearance="fill" floatLabel="always" class="filter-field filter-field--name readonly-field" subscriptSizing="dynamic">
+                <mat-label>Name</mat-label>
+                <input matInput [value]="bagName() || ''" placeholder="—" readonly tabindex="-1" />
+              </mat-form-field>
+
+              <!-- Lot Number — scan barcode OR select from list (ISBT only, auto-populated from concatenated catalog scan) -->
+              <app-scan-select-field
+                #lotField
+                label="Lot Number"
+                placeholder="Scan or select..."
+                [showBarcodeIcon]="true"
+                [showDropdown]="true"
+                [disabled]="lotScanOptions().length === 0"
+                [required]="unitCodeScheme() === 'I'"
+                [options]="lotScanOptions()"
+                [parseFn]="parseLot"
+                (valueChanged)="onLotValueChanged($event)"
+                (cleared)="onLotValueChanged(null)">
+              </app-scan-select-field>
+
+              <!-- CUE (display only) -->
+              <mat-form-field appearance="fill" floatLabel="always" class="filter-field filter-field--sm readonly-field" subscriptSizing="dynamic">
+                <mat-label>CUE</mat-label>
+                <input matInput [value]="bagCue() || ''" placeholder="—" readonly tabindex="-1" />
+              </mat-form-field>
+
+
+            </form>
+          </div>
+
+          <!-- Bag check-in data table -->
+          <div class="table-section">
+            <app-data-table
+              [config]="bagTableConfig"
+              [data]="bagTableData()"
+              [loading]="isLoading()"
+              (pageChange)="onBagPageChange($event)"
+              (sortChange)="onBagSortChange($event)"
+              aria-label="Bag check-in entries table">
+            </app-data-table>
+          </div>
+
+        </div>
+      </mat-tab>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           TAB 2: Tube Check-In
+           ═══════════════════════════════════════════════════════════════ -->
+      <mat-tab label="Tube Check-In">
+        <div class="tab-content" (click)="onTubeTabContentClick($event)">
+
+          <!-- Filter Row: Format + Description + Retrieve -->
+          <div class="filter-panel" role="search" aria-label="Tube format filter panel">
+            <form [formGroup]="tubeFilterForm" class="filter-row">
+
+              <!-- Tube Check-In Format -->
+              <mat-form-field appearance="fill" floatLabel="always" class="filter-field filter-field--md" subscriptSizing="dynamic">
+                <mat-label>Tube Check-In Format</mat-label>
+                <mat-select
+                  formControlName="tubeFormat"
+                  (selectionChange)="onTubeFormatChange($event.value)"
+                  (openedChange)="!$event && tubeFormatSearchCtrl.setValue('', {emitEvent: false})">
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="tubeFormatSearchCtrl"
+                      placeholderLabel="Search format..."
+                      noEntriesFoundLabel="No matching formats"
+                      ariaLabel="Search tube format options">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @for (fmt of filteredTubeFormatOptions(); track fmt.formatCode) {
+                    <mat-option [value]="fmt.formatCode">{{ fmt.formatCode }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+
+              <!-- Description (read-only) -->
+              <mat-form-field appearance="fill" floatLabel="always" class="filter-field filter-field--desc readonly-field" subscriptSizing="dynamic">
+                <mat-label>Description</mat-label>
+                <input matInput [value]="tubeFormatDescription() || ''" placeholder="—" readonly tabindex="-1" />
+              </mat-form-field>
+
+              <!-- RETRIEVE button -->
+              <div class="filter-actions">
+                <button
+                  mat-stroked-button
+                  type="button"
+                  class="retrieve-button"
+                  (click)="onTubeRetrieve()"
+                  [disabled]="isLoading()"
+                  aria-label="Retrieve tube format data">
+                  RETRIEVE
+                </button>
+              </div>
+            </form>
+          </div>
+
+          <!-- Tube barcode inputs (dynamic) — shown only after RETRIEVE -->
+          @if (tubeRetrieved() && activeTubeFields().length > 0) {
+            <div class="filter-panel filter-panel--tube-inputs" role="region" aria-label="Tube barcode scan inputs">
+              <div class="filter-row filter-row--tube-inputs">
+                @for (tube of activeTubeFields(); track tube.controlName + '_' + selectedTubeFormat()?.formatCode; let last = $last) {
+                  <app-unit-id-field
+                    #tubeField
+                    [label]="tube.label"
+                    [validateFfValue]="'N'"
+                    [required]="tube.controlName === tubeRequiredControlName()"
+                    [requirePostValidation]="true"
+                    [skipDoubleEntry]="true"
+                    [showBarcodeIcon]="true"
+                    [hintValid]="''"
+                    [hintDefault]="'Scan barcode'"
+                    (postValidate)="onTubePostValidate($event, tube.controlName)"
+                    (validated)="onTubeValidated($event, tube.controlName)"
+                    (cleared)="onTubeCleared(tube.controlName)"
+                    (keydown.enter)="onTubeFieldKeyAction(last)"
+                    (keydown.tab)="onTubeFieldKeyAction(last)"
+                    class="filter-field filter-field--tube-input"
+                  />
+                }
+                @if (isSubmittingTube()) {
+                  <div class="tube-submit-loader" role="status" aria-live="polite" aria-label="Submitting tube check-in, please wait...">
+                    <mat-progress-spinner diameter="24" mode="indeterminate"></mat-progress-spinner>
+                  </div>
+                }
+              </div>
+
+              <!-- Group-level error for PPR/PR/A (no specific required field) — shows after submit attempt -->
+              @if (!hasAnyTubeValue() && tubeSubmitAttempted() && !tubeRequiredControlName()) {
+                <mat-error class="tube-group-error" role="alert">
+                  At least one tube ID must be provided.
+                </mat-error>
+              }
+            </div>
+          }
+
+          <!-- Tube data table — shown only after RETRIEVE -->
+          @if (tubeRetrieved()) {
+            <div class="table-section">
+              <app-data-table
+                [config]="tubeTableConfig()!"
+                [data]="tubeTableData()"
+                [loading]="isLoading()"
+                (pageChange)="onTubePageChange($event)"
+                (sortChange)="onTubeSortChange($event)"
+                aria-label="Tube check-in entries table">
+              </app-data-table>
+            </div>
+          }
+
+        </div>
+      </mat-tab>
+
+    </mat-tab-group>
+  </div>
+
+</div>
+
+<!-- Check Units in Batch — backdrop -->
+@if (showCheckUnitsPanel()) {
+  <div class="side-panel-backdrop" (click)="onCheckUnitsPanelClose()" aria-hidden="true"></div>
+}
+
+<!-- Check Units in Batch — sliding panel container -->
+<div class="side-panel-container" [class.open]="showCheckUnitsPanel()">
+  @if (showCheckUnitsPanel()) {
+    <app-side-panel-base
+      title="Check Units in Batch"
+      width="700px"
+      [footerButtons]="checkUnitsPanelButtons"
+      (closePanel)="onCheckUnitsPanelClose()"
+      (buttonClick)="onCheckUnitsPanelButton($event)">
+
+      <ng-container panelHeaderFields>
+        <div class="check-units-panel__header-fields">
+          <div class="check-units-panel__field">
+            <span class="check-units-panel__label">Batch ID</span>
+            <span class="check-units-panel__value">{{ panelBatchId() }}</span>
+          </div>
+          <div class="check-units-panel__field">
+            <span class="check-units-panel__label">Min Temp</span>
+            <span class="check-units-panel__value">{{ panelMinTemp() || '—' }}</span>
+          </div>
+          <div class="check-units-panel__field">
+            <span class="check-units-panel__label">MaxTemp</span>
+            <span class="check-units-panel__value">{{ panelMaxTemp() || '—' }}</span>
+          </div>
+        </div>
+      </ng-container>
+
+      <ng-container panelContent>
+        @if (isPanelLoading()) {
+          <div class="check-units-panel__loading" role="status" aria-live="polite">
+            <mat-spinner diameter="32" aria-label="Loading units in batch..."></mat-spinner>
+            <span class="sr-only">Loading units, please wait...</span>
+          </div>
+        } @else {
+          <div class="check-units-table-wrapper">
+          <table class="check-units-table" aria-label="Units in selected batch">
+            <thead>
+              <tr>
+                <th scope="col">Unit ID</th>
+                <th scope="col">Collection Date</th>
+                <th scope="col">Drive ID</th>
+                <th scope="col">Name</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (unit of panelUnits(); track unit.unitId) {
+                <tr>
+                  <td>{{ unit.unitId }}</td>
+                  <td>{{ formatCollDate(unit.collDate) }}</td>
+                  <td>{{ unit.driveId || '—' }}</td>
+                  <td>{{ unit.name || '—' }}</td>
+                </tr>
+              } @empty {
+                <tr>
+                  <td colspan="4" class="check-units-table__empty">No units found in this batch.</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+          </div>
+        }
+      </ng-container>
+
+    </app-side-panel-base>
+  }
+</div>
+
+<!-- Protocol badge cell template (referenced from .ts via @ViewChild) -->
+<ng-template #protocolCellTpl let-row>
+  <span
+    class="protocol-badge"
+    [ngClass]="['protocol-badge--' + getProtocolColor(row['protocol']), isWarningCue(row['cue']) ? 'protocol-badge--has-warn' : '']"
+    [attr.aria-label]="isWarningCue(row['cue']) ? 'Protocol: ' + row['protocol'] + ' — click to view CUE warning' : 'Protocol: ' + row['protocol']"
+    [attr.role]="isWarningCue(row['cue']) ? 'button' : null"
+    [attr.tabindex]="isWarningCue(row['cue']) ? '0' : null"
+    [style.cursor]="isWarningCue(row['cue']) ? 'pointer' : 'default'"
+    (click)="isWarningCue(row['cue']) ? onCueWarningClick() : null"
+    (keydown.enter)="isWarningCue(row['cue']) ? onCueWarningClick() : null"
+    (keydown.space)="onProtocolBadgeSpaceKey($event, row['cue'])">
+    <span class="protocol-badge__text">{{ row['protocol'] }}</span>
+    @if (isWarningCue(row['cue'])) {
+      <span class="protocol-badge__divider"></span>
+      <mat-icon class="protocol-badge__warn-icon" aria-hidden="true">warning</mat-icon>
+    }
+  </span>
+</ng-template>

@@ -1,0 +1,1000 @@
+<!-- Layout Wrapper for Side Panel Management -->
+<div class="layout-wrapper" [class.side-panel-active]="isCommentPanelOpen()">
+
+  <!-- Main Content Area -->
+  <main class="audit-donation main-content" [class.side-panel-active]="isCommentPanelOpen()">
+    <!-- Page Header with Breadcrumb -->
+    <app-page-header-with-breadcrumb [config]="headerConfig()" />
+
+  <!-- Search Card -->
+  <div class="search-card">
+    <form [formGroup]="searchForm" class="search-form">
+
+      @if (mode === 'deferral') {
+        <!-- Deferral mode: plain text Deferral ID input -->
+        <mat-form-field appearance="fill" class="search-field unit-id-field deferral-id-field">
+          <mat-label>Deferral ID <span class="required-asterisk">*</span></mat-label>
+          <input matInput formControlName="deferralId"
+                 [placeholder]="deferralAwaitingSecondEntry() ? 'Re-enter Deferral ID' : 'Enter Deferral ID'"
+                 (keyup.enter)="onRetrieve()" />
+          @if (searchForm.get('deferralId')?.hasError('maxlength')) {
+            <mat-error>Maximum 15 characters allowed</mat-error>
+          }
+          @if (searchForm.get('deferralId')?.touched && !searchForm.get('deferralId')?.value?.trim()) {
+            <mat-error>Deferral ID is required</mat-error>
+          }
+          <mat-hint>
+            @if (deferralAwaitingSecondEntry()) {
+              Re-enter deferral ID to confirm.
+            } @else {
+              Scan or type. Double-entry required for verification.
+            }
+          </mat-hint>
+        </mat-form-field>
+
+        @if (multipleRecordsFound()) {
+          <mat-form-field appearance="fill" class="search-field date-field">
+            <mat-label>Collection Date <span class="required-asterisk">*</span></mat-label>
+            <input
+              matInput
+              [matDatepicker]="deferralCollDatePicker"
+              formControlName="collectionDate"
+              placeholder="DD-MMM-YYYY"
+              aria-required="true" />
+            <mat-datepicker-toggle matIconSuffix [for]="deferralCollDatePicker"></mat-datepicker-toggle>
+            <mat-datepicker #deferralCollDatePicker></mat-datepicker>
+          </mat-form-field>
+        }
+      } @else {
+        <!-- Unit mode: barcode-validated shared component -->
+        <app-unit-id-field
+          [validateFfValue]="'DONOR'"
+          (validated)="onUnitValidated($event)"
+          (cleared)="onUnitCleared()"
+          class="search-field unit-id-field">
+        </app-unit-id-field>
+
+        <mat-form-field appearance="fill" class="search-field date-field">
+          <mat-label>Collection Date @if (multipleRecordsFound()) { <span class="required-marker">*</span> }</mat-label>
+          <input
+            matInput
+            #collDateInput
+            [matDatepicker]="collectionDatePicker"
+            formControlName="collectionDate"
+            placeholder="DD-MMM-YYYY"
+            [attr.aria-required]="multipleRecordsFound() ? 'true' : null"
+            [errorStateMatcher]="collectionDateErrorMatcher"
+            (input)="onCollectionDateInput($event)" />
+          <mat-datepicker-toggle matIconSuffix [for]="collectionDatePicker"></mat-datepicker-toggle>
+          <mat-datepicker #collectionDatePicker></mat-datepicker>
+          @if (getCollectionDateError()) {
+            <mat-error>{{ getCollectionDateError() }}</mat-error>
+          }
+        </mat-form-field>
+      }
+
+      <button
+        mat-stroked-button
+        type="button"
+        class="retrieve-btn"
+        [disabled]="isRetrieveDisabled"
+        (click)="onRetrieve()"
+        [attr.aria-label]="'Retrieve donation for audit'">
+        RETRIEVE
+      </button>
+    </form>
+  </div>
+
+  <!-- Alerts — outside search card, full width below it -->
+  @if (multipleRecordsFound()) {
+    <div class="alert-container">
+      <app-alert type="warning" ariaLive="assertive" [dismissible]="true" (dismissed)="multipleRecordsFound.set(false)">
+        @if (mode === 'deferral') {
+          Multiple records found for this Deferral ID. Enter the collection date to continue.
+        } @else {
+          Multiple records found for this Unit ID. Enter the collection date to continue.
+        }
+      </app-alert>
+    </div>
+  }
+  @if (infoMessage()) {
+    <div class="alert-container">
+      <app-alert type="info" ariaLive="polite" [dismissible]="true" (dismissed)="infoMessage.set('')">
+        {{ infoMessage() }}
+      </app-alert>
+    </div>
+  }
+  @if (warningMessage()) {
+    <div class="alert-container">
+      <app-alert type="warning" ariaLive="assertive" [dismissible]="true" (dismissed)="warningMessage.set('')">
+        {{ warningMessage() }}
+      </app-alert>
+    </div>
+  }
+  @if (errorMessage()) {
+    <div class="alert-container">
+      <app-alert type="error" ariaLive="assertive" [dismissible]="true" (dismissed)="errorMessage.set('')">
+        {{ errorMessage() }}
+      </app-alert>
+    </div>
+  }
+
+  <!-- Loading State -->
+  @if (isLoading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <app-loading-spinner></app-loading-spinner>
+      <span class="cdk-visually-hidden">Loading donor information...</span>
+    </div>
+  }
+
+  <!-- Empty State -->
+  @if (showEmptyState() && !isLoading()) {
+    <div class="empty-state-card">
+      <div class="empty-state" role="status">
+        <div class="empty-icon-wrapper">
+          <mat-icon class="empty-icon" aria-hidden="true">search</mat-icon>
+        </div>
+        <h2 class="empty-title">No Search Criteria Selected</h2>
+        <p class="empty-message">
+          @if (mode === 'deferral') {
+            Scan or enter the Deferral ID to load the donation for audit. If duplicates exist, provide the collection date.
+          } @else {
+            Scan the barcode or type the unit ID. You'll need to confirm it once more (double-blind).
+          }
+        </p>
+      </div>
+    </div>
+  }
+
+  <!-- Donor Information Section -->
+  @if (donationData() && !isLoading()) {
+    <div class="donor-info-section">
+      <div class="donor-info-grid">
+        <div class="info-field">
+          <span class="label">Collection date</span>
+          <span class="value">{{ formatDate(donationData()!.collectionDate) || '-' }}</span>
+        </div>
+        @if (donationData()?.driveDate) {
+          <div class="info-field">
+            <span class="label">Drive date</span>
+            <span class="value">{{ formatDate(donationData()!.driveDate!) }}</span>
+          </div>
+        }
+        <div class="info-field">
+          <span class="label">Name</span>
+          <span class="value">{{ donationData()!.donorName || '-' }}</span>
+        </div>
+        <div class="info-field">
+          <span class="label">Date of birth</span>
+          <span class="value">{{ formatDate(donationData()!.dateOfBirth) || '-' }}</span>
+        </div>
+        <div class="info-field">
+          <span class="label">Sex</span>
+          <span class="value">{{ donationData()!.gender || '-' }}</span>
+        </div>
+        <div class="info-field">
+          <span class="label">Address</span>
+          <span class="value">{{ donationData()!.address || '-' }}</span>
+        </div>
+        <div class="info-field">
+          <span class="label">Phone (H)</span>
+          <span class="value">{{ donationData()!.homePhone || '-' }}</span>
+        </div>
+        <div class="info-field">
+          <span class="label">Phone (B)</span>
+          <span class="value">{{ donationData()!.businessPhone || '-' }}<span *ngIf="donationData()?.extension"> x{{ donationData()!.extension }}</span></span>
+        </div>
+      </div>
+      <div class="donor-info-footer">
+        <button *ngIf="mode !== 'deferral'" mat-stroked-button type="button" class="view-alternate-btn" (click)="onViewAlternateDemographics()">
+          VIEW ALTERNATE DEMOGRAPHICS
+        </button>
+      </div>
+    </div>
+
+    <!-- Audit Fields Section: Donor Signature, Donation Type, Procedure Code -->
+    <div class="audit-fields-section">
+        <form [formGroup]="auditForm" class="audit-form">
+          <mat-form-field appearance="fill" class="audit-field" subscriptSizing="dynamic">
+            <mat-label>Donor Signature</mat-label>
+            <mat-select formControlName="donorSignature" required
+              (openedChange)="onDonorSignatureOpenedChange($event)">
+              <mat-option value="Yes">Yes</mat-option>
+              <mat-option value="No">No</mat-option>
+            </mat-select>
+            @if (auditForm.get('donorSignature')?.hasError('required') && auditForm.get('donorSignature')?.touched) {
+              <mat-error>Donor Signature is required</mat-error>
+            }
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="audit-field" subscriptSizing="dynamic">
+            <mat-label>Donation Type</mat-label>
+            <mat-select formControlName="donationType" required
+              (selectionChange)="onDonationTypeChange($event.value)">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="donationTypeSearchCtrl"
+                  placeholderLabel="Search..."
+                  noEntriesFoundLabel="No match">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (option of filteredDonationTypeOptions(); track option.value) {
+                <mat-option [value]="option.value">{{ option.label }}</mat-option>
+              }
+            </mat-select>
+            @if (auditForm.get('donationType')?.hasError('required') && auditForm.get('donationType')?.touched) {
+              <mat-error>Donation Type is required</mat-error>
+            }
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="audit-field" subscriptSizing="dynamic">
+            <mat-label>Procedure Code</mat-label>
+            <mat-select formControlName="procedureCode" required
+              (selectionChange)="onProcedureCodeChange($event.value)">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="procedureCodeSearchCtrl"
+                  placeholderLabel="Search..."
+                  noEntriesFoundLabel="No match">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (option of filteredProcedureCodeOptions(); track option.value) {
+                <mat-option [value]="option.value">{{ option.label }}</mat-option>
+              }
+            </mat-select>
+            @if (auditForm.get('procedureCode')?.hasError('required') && auditForm.get('procedureCode')?.touched) {
+              <mat-error>Procedure Code is required</mat-error>
+            }
+          </mat-form-field>
+        </form>
+      </div>
+
+    <!-- Main Content: Left Panel + Right Panel -->
+    <div class="audit-content-section">
+
+      <!-- Left Panel: Question List -->
+      <div class="question-panel" [class.side-panel-active]="isFilterPanelOpen()">
+
+        <!-- Search + Filter row -->
+        <div class="question-panel__toolbar">
+          <mat-form-field appearance="fill" class="question-panel__search">
+            <input
+              matInput
+              [(ngModel)]="hhSearchTermValue"
+              placeholder="Search questions..."
+              [attr.aria-label]="'Search health history questions'" />
+            <mat-icon matPrefix aria-hidden="true">search</mat-icon>
+          </mat-form-field>
+
+          <button
+            mat-icon-button
+            type="button"
+            class="question-panel__filter-btn"
+            [class.question-panel__filter-btn--active]="activeFilterCodes().size > 0"
+            (click)="openFilterPanel()"
+            [attr.aria-label]="'Filter questions'">
+            <mat-icon aria-hidden="true">filter_list</mat-icon>
+          </button>
+        </div>
+
+        <!-- Filter Chips row — full width, strict limit so actual chips show -->
+        @if (filterChips().length > 0) {
+          <div class="question-panel__chips">
+            <app-filter-chips
+              [chips]="filterChips()"
+              [strictChipLimit]="true"
+              [maxVisible]="3"
+              (removeChip)="removeFilterChip($event)"
+              (clearAll)="clearAllFilterChips()">
+            </app-filter-chips>
+          </div>
+        }
+
+        <!-- Question Cards -->
+        <div class="question-panel__list" #questionList role="listbox" [attr.aria-label]="'Health history questions'">
+          @for (question of filteredHealthHistory(); track question.questionCode) {
+            <div
+              class="question-card"
+              [class.question-card--selected]="selectedQuestionCode() === question.questionCode"
+              (click)="selectHHQuestion(question.questionCode)"
+              role="option"
+              tabindex="0"
+              [attr.aria-selected]="selectedQuestionCode() === question.questionCode"
+              (keydown.enter)="selectHHQuestion(question.questionCode)"
+              (keydown.space)="selectHHQuestion(question.questionCode); $event.preventDefault()">
+              <div class="question-card__body">
+                <div class="question-card__info">
+                  <span class="question-card__text">{{ question.sortSequence }}. {{ question.questionDescription }}</span>
+                </div>
+              </div>
+            </div>
+          } @empty {
+            <div class="question-panel__empty">
+              <mat-icon aria-hidden="true">search_off</mat-icon>
+              <p>No questions found</p>
+            </div>
+          }
+        </div>
+
+      </div>
+
+      <!-- Right Panel: scrollable — HH Responses + Physical Findings on same page -->
+      <div class="response-panel">
+
+        <!-- HH Response Content -->
+        <div class="response-panel__content">
+
+              @if (isAddingTemplateQuestion()) {
+                <!-- Add Question to Template Form -->
+                <div class="inline-form">
+                  <form [formGroup]="addTemplateQuestionForm" class="inline-form__body">
+                    <mat-form-field appearance="fill" class="inline-form__field inline-form__field--auto">
+                      <mat-label>Question Number</mat-label>
+                      <input matInput formControlName="sortSequence" type="number" placeholder="e.g. 1">
+                      @if (addTemplateQuestionForm.get('sortSequence')?.hasError('required') && addTemplateQuestionForm.get('sortSequence')?.touched) {
+                        <mat-error>Question Number is required</mat-error>
+                      }
+                    </mat-form-field>
+
+                    <mat-form-field appearance="fill" class="inline-form__field inline-form__field--full">
+                      <mat-label>Question</mat-label>
+                      <input matInput formControlName="questionCode" placeholder="e.g. SMOKE, Q001" maxlength="10">
+                      <mat-hint align="end">{{ addTemplateQuestionForm.get('questionCode')?.value?.length || 0 }}/10</mat-hint>
+                      @if (addTemplateQuestionForm.get('questionCode')?.hasError('required') && addTemplateQuestionForm.get('questionCode')?.touched) {
+                        <mat-error>Question Code is required</mat-error>
+                      }
+                      @if (addTemplateQuestionForm.get('questionCode')?.hasError('maxlength')) {
+                        <mat-error>Cannot exceed 10 characters</mat-error>
+                      }
+                    </mat-form-field>
+                  </form>
+                  <div class="inline-form__actions">
+                    <button mat-stroked-button type="button" (click)="cancelAddTemplateQuestion()">CANCEL</button>
+                    <button mat-raised-button color="primary" type="button" (click)="submitAddTemplateQuestion()">SAVE</button>
+                  </div>
+                </div>
+
+              } @else if (selectedQuestion(); as question) {
+                <!-- Question Header Row -->
+                <div class="question-header-row">
+                  <div class="question-header-row__info">
+                    <div class="question-header-row__field">
+                      <span class="question-header-row__label">Sequence</span>
+                      <span class="question-header-row__value">{{ question.sortSequence }}</span>
+                    </div>
+                    <div class="question-header-row__field question-header-row__field--question">
+                      <span class="question-header-row__label">Question</span>
+                      <span class="question-header-row__value">{{ question.questionDescription }}</span>
+                    </div>
+                  </div>
+
+                  <mat-form-field appearance="fill" class="question-header-row__answer">
+                    <mat-label>Audit Answer</mat-label>
+                    <mat-select [value]="currentAuditAnswer()" (selectionChange)="onAuditAnswerChange($event.value)">
+                      <mat-option value="Y">Yes</mat-option>
+                      <mat-option value="N">No</mat-option>
+                      <mat-option value="U">Unanswered</mat-option>
+                    </mat-select>
+                  </mat-form-field>
+                </div>
+
+                <!-- Response Table -->
+                <div class="response-table-container" role="table" [attr.aria-label]="'Health history responses'">
+                  @if (isLoadingResponses()) {
+                    <div class="table-loading" role="status" aria-live="polite" aria-busy="true">
+                      <app-loading-spinner [size]="'small'" [color]="'#1a6269'"></app-loading-spinner>
+                      <span>Loading responses...</span>
+                    </div>
+                  } @else {
+                    <!-- Header — * on required columns when adding new row -->
+                    <div class="rtable__header" role="row">
+                      <div class="rtable__cols" role="presentation">
+                        <div class="rtable__cell rtable__cell--group" role="columnheader">Group Code</div>
+                        <div class="rtable__cell rtable__cell--ans" role="columnheader">
+                          Answer Code <span class="required-marker">*</span>
+                        </div>
+                        <div class="rtable__cell rtable__cell--desc" role="columnheader">Description</div>
+                        <div class="rtable__cell rtable__cell--date" role="columnheader">
+                          Incident Date @if (mode === 'unit' || newRowIncidentDateRequired()) { <span class="required-marker">*</span> }
+                        </div>
+                        <div class="rtable__cell rtable__cell--date" role="columnheader">Deferral Through</div>
+                        <div class="rtable__cell rtable__cell--inter" role="columnheader">Interdiction</div>
+                      </div>
+                      <div class="rtable__cell rtable__cell--actions" role="columnheader"><span class="cdk-visually-hidden">Actions</span></div>
+                    </div>
+
+                    <!-- Data rows -->
+                    @for (row of selectedQuestionResponses(); track $index) {
+                      <div class="rtable__row" role="row">
+                        <div class="rtable__cols" role="presentation">
+                          <div class="rtable__cell rtable__cell--group" role="cell">
+                            <mat-select class="rtable__select" [value]="row.groupCode"
+                                        [attr.aria-label]="'Group Code'"
+                                        (selectionChange)="onGroupCodeChange(row, $event.value)">
+                              <mat-option>
+                                <ngx-mat-select-search [formControl]="groupCodeSearchCtrl"
+                                  placeholderLabel="Search..." noEntriesFoundLabel="No match">
+                                </ngx-mat-select-search>
+                              </mat-option>
+                              <mat-option value="">--</mat-option>
+                              @for (opt of filteredGroupCodeOptions(); track opt.value) {
+                                <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                              }
+                            </mat-select>
+                          </div>
+                          <div class="rtable__cell rtable__cell--ans" role="cell">
+                            <mat-select class="rtable__select" [value]="row.answerCode"
+                                        [attr.aria-label]="'Answer Code'"
+                                        panelClass="hh-ans-panel"
+                                        (selectionChange)="onAnswerCodeChange(row, $event.value)">
+                              <mat-option>
+                                <ngx-mat-select-search [formControl]="answerCodeSearchCtrl"
+                                  placeholderLabel="Search..." noEntriesFoundLabel="No match">
+                                </ngx-mat-select-search>
+                              </mat-option>
+                              <mat-option value="">--</mat-option>
+                              @for (opt of getAnswerOptionsForRow(row.questionCode); track opt.value) {
+                                <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                              }
+                            </mat-select>
+                          </div>
+                          <div class="rtable__cell rtable__cell--desc rtable__cell--readonly" role="cell"
+                               [matTooltip]="row.answerDescription ?? ''"
+                               matTooltipShowDelay="400"
+                               matTooltipPosition="above">{{ row.answerDescription || '-' }}</div>
+                          <div class="rtable__cell rtable__cell--date rtable__cell--with-error" role="cell">
+                            <mat-form-field appearance="fill" class="rtable__date-field" subscriptSizing="dynamic">
+                              <input matInput [matDatepicker]="incPicker"
+                                     [(ngModel)]="row.incidentDate"
+                                     #incCtrl="ngModel"
+                                     [max]="maxIncidentDate()"
+                                     (input)="onHhDateInput($event, incCtrl.control, false)"
+                                     (ngModelChange)="onExistingHhFieldChange(row)"
+                                     [attr.aria-label]="'Incident Date'"
+                                     placeholder="DD-MMM-YYYY">
+                              <mat-datepicker-toggle matIconSuffix [for]="incPicker" [attr.aria-label]="'Open calendar for incident date'"></mat-datepicker-toggle>
+                              <mat-datepicker #incPicker [startAt]="maxIncidentDate()"></mat-datepicker>
+                              @if (incCtrl.hasError('invalidDate')) {
+                                <mat-error>Invalid date</mat-error>
+                              } @else if (incCtrl.hasError('matDatepickerMax')) {
+                                <mat-error>Cannot be after collection date</mat-error>
+                              }
+                            </mat-form-field>
+                          </div>
+                          <div class="rtable__cell rtable__cell--date rtable__cell--with-error" role="cell">
+                            <mat-form-field appearance="fill" class="rtable__date-field" subscriptSizing="dynamic">
+                              <input matInput [matDatepicker]="defPicker"
+                                     [(ngModel)]="row.defThruDate"
+                                     #defCtrl="ngModel"
+                                     [min]="toDate(row.incidentDate)"
+                                     [disabled]="row.interPeriodType === 'P'"
+                                     (input)="onHhDateInput($event, defCtrl.control, true)"
+                                     (ngModelChange)="onExistingHhFieldChange(row)"
+                                     [attr.aria-label]="'Deferral Through'"
+                                     placeholder="DD-MMM-YYYY">
+                              <mat-datepicker-toggle matIconSuffix [for]="defPicker" [attr.aria-label]="'Open calendar for deferral through'"></mat-datepicker-toggle>
+                              <mat-datepicker #defPicker [startAt]="toDate(row.incidentDate) ?? maxIncidentDate()"></mat-datepicker>
+                              @if (defCtrl.hasError('invalidDate')) {
+                                <mat-error>Invalid date</mat-error>
+                              } @else if (defCtrl.hasError('matDatepickerMin')) {
+                                <mat-error>Cannot be before incident date</mat-error>
+                              }
+                            </mat-form-field>
+                          </div>
+                          <div class="rtable__cell rtable__cell--inter rtable__cell--readonly" role="cell"
+                               [class.rtable__cell--indefinite]="row.interPeriodType === 'P'">{{ row.interdiction || '-' }}</div>
+                        </div>
+                        <div class="rtable__cell rtable__cell--actions" role="cell">
+                          <button mat-icon-button type="button" class="rtable__action-btn"
+                                  (click)="editResponse(row)" [attr.aria-label]="'Edit comment'">
+                            <mat-icon aria-hidden="true">chat</mat-icon>
+                          </button>
+                          <button mat-icon-button type="button" class="rtable__delete-btn"
+                                  (click)="deleteResponse(row)" [attr.aria-label]="'Delete response'">
+                            <mat-icon aria-hidden="true">delete</mat-icon>
+                          </button>
+                        </div>
+                      </div>
+                    }
+
+                    <!-- Inline new row — same grid as table -->
+                    @if (isAddingResponse()) {
+                      <div #newRowFormEl class="rtable__row rtable__row--editing" role="row" [formGroup]="newRowForm">
+                        <div class="rtable__cols" role="presentation">
+                          <div class="rtable__cell rtable__cell--group rtable__cell--with-error" role="cell">
+                            <mat-form-field appearance="fill" class="rtable__inline-field" subscriptSizing="dynamic">
+                              <mat-select formControlName="groupCode" placeholder="Group"
+                                          [attr.aria-label]="'Group Code'"
+                                          (selectionChange)="onNewRowGroupCodeChange($event.value)">
+                                <mat-option>
+                                  <ngx-mat-select-search [formControl]="newRowGroupCodeSearchCtrl"
+                                    placeholderLabel="Search..." noEntriesFoundLabel="No match">
+                                  </ngx-mat-select-search>
+                                </mat-option>
+                                <mat-option value="">--</mat-option>
+                                @for (opt of filteredNewRowGroupCodeOptions(); track opt.value) {
+                                  <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                                }
+                              </mat-select>
+                            </mat-form-field>
+                          </div>
+                          <div class="rtable__cell rtable__cell--ans rtable__cell--with-error" role="cell">
+                            <mat-form-field appearance="fill" class="rtable__inline-field" subscriptSizing="dynamic">
+                              <mat-select formControlName="answerCode" placeholder="Select"
+                                          [attr.aria-label]="'Answer Code'"
+                                          panelClass="hh-ans-panel">
+                                <mat-option>
+                                  <ngx-mat-select-search [formControl]="newRowAnswerCodeSearchCtrl"
+                                    placeholderLabel="Search..." noEntriesFoundLabel="No match">
+                                  </ngx-mat-select-search>
+                                </mat-option>
+                                <mat-option value="">-- Select --</mat-option>
+                                @for (opt of filteredNewRowAnswerCodeOptions(); track opt.value) {
+                                  <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                                }
+                              </mat-select>
+                              @if (getNewHhControl('answerCode')?.hasError('required') && getNewHhControl('answerCode')?.touched) {
+                                <mat-error>Required</mat-error>
+                              }
+                            </mat-form-field>
+                          </div>
+                          <div class="rtable__cell rtable__cell--desc rtable__cell--readonly" role="cell"
+                               [matTooltip]="getNewRowAnswerDesc()"
+                               matTooltipShowDelay="400"
+                               matTooltipPosition="above">{{ getNewRowAnswerDesc() }}</div>
+                          <div class="rtable__cell rtable__cell--date rtable__cell--with-error" role="cell">
+                            <mat-form-field appearance="fill" class="rtable__inline-field" subscriptSizing="dynamic">
+                              <input matInput [matDatepicker]="newIncPicker"
+                                     formControlName="incidentDate"
+                                     [max]="maxIncidentDate()"
+                                     (input)="onNewHhIncidentDateInput($event)"
+                                     (blur)="onNewRowIncidentDateBlur()"
+                                     [attr.aria-label]="'Incident Date'"
+                                     placeholder="DD-MMM-YYYY">
+                              <mat-datepicker-toggle matIconSuffix [for]="newIncPicker" [attr.aria-label]="'Open calendar for incident date'"></mat-datepicker-toggle>
+                              <mat-datepicker #newIncPicker [startAt]="maxIncidentDate()"></mat-datepicker>
+                              @if (getNewHhControl('incidentDate')?.hasError('invalidDate')) {
+                                <mat-error>Invalid date</mat-error>
+                              } @else if (getNewHhControl('incidentDate')?.hasError('matDatepickerMax')) {
+                                <mat-error>Cannot be after collection date</mat-error>
+                              } @else if (getNewHhControl('incidentDate')?.hasError('required') && getNewHhControl('incidentDate')?.touched) {
+                                <mat-error>Required</mat-error>
+                              }
+                            </mat-form-field>
+                          </div>
+                          <div class="rtable__cell rtable__cell--date rtable__cell--with-error" role="cell">
+                            <mat-form-field appearance="fill" [class.deferral-permanent]="isPermanentDeferral()" class="rtable__inline-field" subscriptSizing="dynamic">
+                              <input matInput [matDatepicker]="newDefPicker"
+                                     formControlName="defThruDate"
+                                     [min]="incidentDateValue"
+                                     (input)="onNewHhDefThruDateInput($event)"
+                                     [attr.aria-label]="'Deferral Through'"
+                                     placeholder="DD-MMM-YYYY">
+                              <mat-datepicker-toggle matIconSuffix [for]="newDefPicker" [attr.aria-label]="'Open calendar for deferral through'"></mat-datepicker-toggle>
+                              <mat-datepicker #newDefPicker [startAt]="incidentDateValue ?? maxIncidentDate()"></mat-datepicker>
+                              @if (isPermanentDeferral()) {
+                                <mat-hint style="color: #d32f2f; font-weight: 600">Permanent</mat-hint>
+                              }
+                              @if (getNewHhControl('defThruDate')?.hasError('invalidDate')) {
+                                <mat-error>Invalid date</mat-error>
+                              } @else if (getNewHhControl('defThruDate')?.hasError('matDatepickerMin') || (newRowForm.hasError('defBeforeInc') && getNewHhControl('defThruDate')?.touched)) {
+                                <mat-error>Cannot be before incident date</mat-error>
+                              }
+                            </mat-form-field>
+                          </div>
+                          <div class="rtable__cell rtable__cell--inter rtable__cell--readonly" role="cell">{{ newRowForm.get('interCode')?.value || '-' }}</div>
+                        </div>
+                        <div class="rtable__cell rtable__cell--actions" role="cell">
+                          <div [class.comment-required-error]="newRowCommentRequired() && !newRowForm.get('comments')?.value && newRowForm.get('comments')?.touched">
+                            <button mat-icon-button type="button" class="rtable__action-btn"
+                                    (click)="openNewRowComment()" [attr.aria-label]="'Add comment'">
+                              <mat-icon aria-hidden="true">chat</mat-icon>
+                            </button>
+                            @if (newRowCommentRequired() && !newRowForm.get('comments')?.value && newRowForm.get('comments')?.touched) {
+                              <span class="comment-required-hint">Required</span>
+                            }
+                          </div>
+                          <button mat-icon-button type="button" class="rtable__delete-btn" (click)="cancelAddResponse()" [attr.aria-label]="'Cancel'">
+                            <mat-icon aria-hidden="true">delete</mat-icon>
+                          </button>
+                        </div>
+                      </div>
+                      <!-- Start / End Date sub-row — shown when answer has additionalDateFlag=Y (mirrors Oracle ANS_DATES stacked canvas) -->
+                      @if (newRowShowDateRange()) {
+                        <div class="rtable__sub-row" [formGroup]="newRowForm">
+                          <span class="rtable__sub-row-label">Date Range:</span>
+                          <mat-form-field appearance="fill" class="rtable__inline-field rtable__sub-row-field" subscriptSizing="dynamic">
+                            <mat-label>Start Date</mat-label>
+                            <input matInput [matDatepicker]="newStartPicker"
+                                   formControlName="startDate"
+                                   [max]="chapterToday()"
+                                   placeholder="DD-MMM-YYYY">
+                            <mat-datepicker-toggle matIconSuffix [for]="newStartPicker" [attr.aria-label]="'Open calendar for start date'"></mat-datepicker-toggle>
+                            <mat-datepicker #newStartPicker></mat-datepicker>
+                            @if (getNewHhControl('startDate')?.hasError('matDatepickerMax')) {
+                              <mat-error>Cannot be after today</mat-error>
+                            } @else if (newRowForm.hasError('startDateFuture') && getNewHhControl('startDate')?.touched) {
+                              <mat-error>Cannot be after today</mat-error>
+                            } @else if (newRowForm.hasError('startAfterEnd') && getNewHhControl('startDate')?.touched) {
+                              <mat-error>Cannot be after end date</mat-error>
+                            }
+                          </mat-form-field>
+                          <mat-form-field appearance="fill" class="rtable__inline-field rtable__sub-row-field" subscriptSizing="dynamic">
+                            <mat-label>End Date</mat-label>
+                            <input matInput [matDatepicker]="newEndPicker"
+                                   formControlName="endDate"
+                                   placeholder="DD-MMM-YYYY">
+                            <mat-datepicker-toggle matIconSuffix [for]="newEndPicker" [attr.aria-label]="'Open calendar for end date'"></mat-datepicker-toggle>
+                            <mat-datepicker #newEndPicker></mat-datepicker>
+                            @if (newRowForm.hasError('startAfterEnd') && getNewHhControl('endDate')?.touched) {
+                              <mat-error>Cannot be before start date</mat-error>
+                            }
+                          </mat-form-field>
+                        </div>
+                      }
+                    }
+
+                    <!-- Add New Response button -->
+                    <div class="rtable__add-row">
+                      <button mat-button type="button" (click)="addNewResponse()">
+                        <mat-icon aria-hidden="true">add</mat-icon>
+                        ADD NEW RESPONSE
+                      </button>
+                    </div>
+                  }
+                </div>
+
+              } @else {
+                <div class="no-selection">
+                  <mat-icon aria-hidden="true">info</mat-icon>
+                  <p>Select a question from the list to view details</p>
+                </div>
+              }
+        </div>
+
+        <!-- Pagination + Action buttons strip inside response-panel -->
+        @if (donationData() && selectedQuestion()) {
+          <div class="hh-nav-strip">
+            <span class="hh-nav-strip__info">
+              Results {{ currentQuestionIndex() + 1 }} of {{ filteredHealthHistory().length }}
+            </span>
+            <button mat-icon-button type="button"
+              (click)="onPrevQuestion()"
+              [disabled]="!hasPrevQuestion()"
+              [attr.aria-label]="'Previous question'">
+              <mat-icon aria-hidden="true">chevron_left</mat-icon>
+            </button>
+            <button mat-icon-button type="button"
+              (click)="onNextQuestion()"
+              [disabled]="!hasNextQuestion()"
+              [attr.aria-label]="'Next question'">
+              <mat-icon aria-hidden="true">chevron_right</mat-icon>
+            </button>
+
+            <div class="hh-nav-strip__actions">
+              <button mat-stroked-button type="button"
+                (click)="clearCurrentQuestionResponses()"
+                class="hh-nav-strip__btn">
+                CLEAR ALL
+              </button>
+              <button mat-stroked-button type="button"
+                (click)="saveAndNextQuestion()"
+                class="hh-nav-strip__btn">
+                SAVE AND NEXT
+              </button>
+              <button mat-flat-button type="button" color="primary"
+                (click)="saveCurrentQuestion()"
+                class="hh-nav-strip__btn hh-nav-strip__btn--primary">
+                SAVE
+              </button>
+            </div>
+          </div>
+        }
+      </div>
+
+    </div>
+
+    <!-- Physical Findings: FULL WIDTH, below the two-column HH section -->
+    @if (pfTableReady()) {
+      <div class="physical-findings-full">
+        <h2 class="physical-findings-full__title">Physical Findings</h2>
+        <div class="physical-findings-scroll">
+          <app-data-table
+            [config]="physicalFindingsTableConfig()"
+            [data]="physicalFindingsForTable()"
+            [loading]="false"
+            (rowAction)="onPhysicalFindingsTableAction($event)">
+          </app-data-table>
+        </div>
+        @if (mode === 'deferral' && donationData()) {
+          <div class="rtable__add-row">
+            <button mat-button type="button" (click)="addNewPhysicalFinding()">
+              <mat-icon aria-hidden="true">add</mat-icon>
+              ADD NEW PHYSICAL FINDING
+            </button>
+          </div>
+        }
+      </div>
+    }
+
+    <!-- Footer: deferral status + place hold + unit ID re-entry -->
+    @if (donationData()) {
+      <div class="tab-actions">
+        <div class="tab-actions__left">
+          <div class="footer-deferral-status">
+            <span class="footer-deferral-status__label">Deferral Status</span>
+            <span class="footer-deferral-status__value" [class.footer-deferral-status__value--indefinite]="deferralStatus() === 'Indefinite'">{{ deferralStatus() }}</span>
+          </div>
+
+          <button mat-stroked-button type="button"
+            (click)="onPlaceHold()"
+            [disabled]="!donationData()">
+            PLACE HOLD
+          </button>
+        </div>
+        <div class="tab-actions__right">
+          <div class="rescan-unit-id-wrapper">
+            <div class="rescan-unit-id-hint">
+              <mat-icon class="rescan-unit-id-hint__icon" aria-hidden="true">info_outline</mat-icon>
+              <span>{{ mode === 'deferral' ? 'Re-enter the same Deferral ID to save the above details' : 'Re-enter the same unit ID to save the above details' }}</span>
+            </div>
+            @if (mode === 'deferral') {
+              <div [formGroup]="searchForm">
+                <mat-form-field appearance="fill" class="footer-unit-id__field" subscriptSizing="dynamic">
+                  <mat-label>Deferral ID *</mat-label>
+                  <input matInput formControlName="rescanUnitId"
+                         [attr.aria-label]="'Re-enter Deferral ID to save'"
+                         maxlength="50"
+                         (keydown.enter)="onRescanEnter()">
+                </mat-form-field>
+              </div>
+            } @else {
+              <app-unit-id-field
+                #rescanUnitIdField
+                [validateFfValue]="'DONOR'"
+                [label]="'Unit ID'"
+                [hintDefault]="'Re-enter the same unit ID to save'"
+                [hintValid]="''"
+                [requirePostValidation]="true"
+                (postValidate)="onRescanPostValidate($event)"
+                class="footer-unit-id__field">
+              </app-unit-id-field>
+            }
+          </div>
+        </div>
+      </div>
+    }
+  }
+  <!-- PF cell templates — must stay outside all @if/@else so @ViewChild always finds them -->
+  <ng-template #pfCodeCellTpl let-row>
+    @if (row.isNewRow) {
+      <div [formGroup]="newPfRowForm">
+        @if (pfTemplate().length > 0) {
+          <mat-form-field appearance="fill" class="pf-value-mat-field" subscriptSizing="dynamic">
+            <mat-select formControlName="physicalCode" placeholder="Select code"
+                        [attr.aria-label]="'Physical code'"
+                        (selectionChange)="onNewPfCodeChange($event.value)">
+              @for (t of pfTemplate(); track t.physicalCode) {
+                <mat-option [value]="t.physicalCode">{{ t.physicalCode }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+        } @else {
+          <input class="pf-code-input" formControlName="physicalCode"
+                 placeholder="Code" maxlength="5" style="text-transform:uppercase"
+                 [attr.aria-label]="'Physical code'">
+        }
+        @if (getNewPfRowControl('physicalCode').invalid && getNewPfRowControl('physicalCode').touched) {
+          <div class="pf-input-error">Required</div>
+        }
+      </div>
+    } @else {
+      {{ row.physicalCode }}
+    }
+  </ng-template>
+
+  <ng-template #pfValueCellTpl let-row>
+    @if (row.isNewRow) {
+      <div [formGroup]="newPfRowForm">
+        @if (getNewPfRowPhysicalCode() && isPfCharType(getNewPfRowPhysicalCode()) && getPfCharValues(getNewPfRowPhysicalCode()).length > 0) {
+          <!-- C-type: pure dropdown (same as existing rows) -->
+          <mat-form-field appearance="fill" class="pf-value-mat-field" subscriptSizing="dynamic">
+            <mat-select formControlName="physicalValue" placeholder="Select value"
+                        [attr.aria-label]="'Physical value'"
+                        (selectionChange)="onNewPfValueSelect($event.value)"
+                        (blur)="onNewPfRowBlur()">
+              @for (v of getPfCharValues(getNewPfRowPhysicalCode()); track v.value) {
+                <mat-option [value]="v.value">{{ v.value }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+        } @else if (getNewPfRowPhysicalCode() && getPfCharValues(getNewPfRowPhysicalCode()).length > 0) {
+          <!-- N/D-type with C-type options (e.g. PULSE with UNANS): text + autocomplete dropdown -->
+          <mat-form-field appearance="fill" class="pf-value-mat-field" subscriptSizing="dynamic">
+            <input matInput
+                   #newPfInput
+                   #newPfTrigger="matAutocompleteTrigger"
+                   formControlName="physicalValue"
+                   [matAutocomplete]="newPfAuto"
+                   placeholder="Value"
+                   maxlength="10"
+                   [attr.aria-label]="'Physical value'"
+                   (click)="$event.stopPropagation()"
+                   (blur)="onNewPfNumericValueBlur($event)">
+            <mat-icon matSuffix class="pf-auto-arrow" aria-hidden="true"
+                      (click)="$event.stopPropagation(); newPfInput.focus(); newPfTrigger.openPanel()">
+              arrow_drop_down
+            </mat-icon>
+            <mat-autocomplete #newPfAuto="matAutocomplete"
+                              [autoSelectActiveOption]="false"
+                              (optionSelected)="onNewPfValueSelect($event.option.value)">
+              @for (v of getPfCharValues(getNewPfRowPhysicalCode()); track v.value) {
+                <mat-option [value]="v.value">{{ v.value }}</mat-option>
+              }
+            </mat-autocomplete>
+          </mat-form-field>
+          @if (newPfValueError()) {
+            <span class="pf-field-error">{{ newPfValueError() }}</span>
+          }
+        } @else {
+          <!-- N/D-type without char options OR no code yet: plain text with validation -->
+          <div class="pf-value-cell">
+            <input class="pf-value-input"
+                   [class.pf-value-input--error]="!!newPfValueError()"
+                   formControlName="physicalValue"
+                   placeholder="Value" maxlength="10"
+                   [attr.aria-label]="'Physical value'"
+                   (blur)="onNewPfNumericValueBlur($event)">
+            @if (newPfValueError()) {
+              <span class="pf-field-error">{{ newPfValueError() }}</span>
+            }
+          </div>
+        }
+      </div>
+    } @else if (isPfCharType(row.physicalCode) && getPfCharValues(row.physicalCode).length > 0) {
+      <!-- C-type: mat-select with search -->
+      <mat-form-field appearance="fill" class="pf-value-mat-field" subscriptSizing="dynamic">
+        <mat-select [value]="getPfValue(row.physicalCode)"
+                    (selectionChange)="onPfCharValueSelect(row.physicalCode, $event.value)"
+                    [attr.aria-label]="'Physical value'">
+          <mat-option>
+            <ngx-mat-select-search [formControl]="getPfValueSearchCtrl(row.physicalCode)"
+              placeholderLabel="Search..." noEntriesFoundLabel="No match">
+            </ngx-mat-select-search>
+          </mat-option>
+          @for (v of getFilteredPfCharValues(row.physicalCode); track v.value) {
+            <mat-option [value]="v.value">{{ v.value }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+    } @else if (getPfCharValues(row.physicalCode).length > 0) {
+      <!-- N/D-type with C-type options: mat-form-field + mat-autocomplete.
+           Same visual style as ARMCK (mat-select) with dropdown arrow icon.
+           User can SELECT a C-type value (e.g. UNANS) OR TYPE a numeric value freely.
+           Uses a per-row FormControl so autocomplete selection works without
+           re-rendering the DataTable (which would disconnect the autocomplete). -->
+      <mat-form-field appearance="fill" class="pf-value-mat-field" subscriptSizing="dynamic">
+        <input matInput
+               #pfInput
+               #pfTrigger="matAutocompleteTrigger"
+               [formControl]="getPfValueFormCtrl(row.physicalCode)"
+               [matAutocomplete]="pfAuto"
+               (click)="$event.stopPropagation()"
+               (blur)="onPfValueBlur(row.physicalCode, $event)"
+               maxlength="10"
+               [attr.aria-label]="'Physical value'">
+        <mat-icon matSuffix class="pf-auto-arrow" aria-hidden="true"
+                  (click)="$event.stopPropagation(); pfInput.focus(); pfTrigger.openPanel()">
+          arrow_drop_down
+        </mat-icon>
+        <mat-autocomplete #pfAuto="matAutocomplete"
+                          (optionSelected)="onPfAutoValueSelect(row.physicalCode, $event.option.value)">
+          @for (v of getPfCharValues(row.physicalCode); track v.value) {
+            <mat-option [value]="v.value">{{ v.value }}</mat-option>
+          }
+        </mat-autocomplete>
+      </mat-form-field>
+      @if (getPfValueError(row.physicalCode)) {
+        <span class="pf-field-error">{{ getPfValueError(row.physicalCode) }}</span>
+      }
+    } @else {
+      <!-- N/D-type with no C-type options (e.g. HGB, HIGHT, TBV after equip filter):
+           plain numeric text input. -->
+      <div class="pf-value-cell">
+        <input class="pf-value-input"
+               [class.pf-value-input--error]="!!getPfValueError(row.physicalCode)"
+               [value]="getPfValue(row.physicalCode)"
+               [attr.aria-label]="'Value for ' + row.physicalCode"
+               (click)="$event.stopPropagation()"
+               (input)="onPfValueChange(row.physicalCode, $event)"
+               (blur)="onPfValueBlur(row.physicalCode, $event)"
+               maxlength="10">
+        @if (getPfValueError(row.physicalCode)) {
+          <span class="pf-field-error">{{ getPfValueError(row.physicalCode) }}</span>
+        }
+      </div>
+    }
+  </ng-template>
+
+  <!-- Interdiction cell — uses cellTemplate so the __new__ row reads newPfInterCode() directly
+       (reactive signal) instead of the cached valueFormatter string that won't update live) -->
+  <ng-template #pfInterdictionCellTpl let-row>
+    @if (row.isNewRow) {
+      <span>{{ newPfInterCode() }}</span>
+    } @else {
+      <span>{{ row.interdiction || '-' }}</span>
+    }
+  </ng-template>
+
+  <ng-template #pfCommentsCellTpl let-row>
+    @if (row.isNewRow) {
+      <div [formGroup]="newPfRowForm">
+        <input class="pf-value-input pf-value-input--comment"
+               [class.pf-value-input--invalid]="newPfCommentsRequired() && !getNewPfRowControl('comments').value?.trim()"
+               formControlName="comments"
+               [placeholder]="newPfCommentsRequired() ? 'Comments (required)' : 'Comments'"
+               [attr.aria-label]="'Comments'"
+               maxlength="240"
+               (blur)="onNewPfRowBlur()">
+        @if (newPfCommentsRequired() && !getNewPfRowControl('comments').value?.trim() && getNewPfRowControl('comments').touched) {
+          <div class="pf-input-error">Required</div>
+        }
+      </div>
+    } @else {
+      <div class="pf-comments-required-cell">
+        <input
+          class="pf-value-input pf-value-input--comment"
+          [class.pf-value-input--invalid]="row._commentsRequired && !getEffectivePfComment(row.physicalCode, row.comments).trim()"
+          [value]="getEffectivePfComment(row.physicalCode, row.comments)"
+          [attr.aria-label]="'Comments for ' + row.physicalCode"
+          (click)="$event.stopPropagation()"
+          maxlength="240"
+          (input)="onPfInlineCommentChange(row.physicalCode, $event)"
+          (blur)="markPfCommentTouched(row.physicalCode, $event)">
+        @if (row._commentsRequired && !getEffectivePfComment(row.physicalCode, row.comments).trim()) {
+          <span class="pf-input-error">Comment is required</span>
+        }
+      </div>
+    }
+  </ng-template>
+
+  </main>
+
+  <!-- HH Filter Side Panel (fixed overlay from right) -->
+  @if (isFilterPanelOpen()) {
+    <div class="hh-filter-overlay">
+      <app-hh-filter-panel
+        [questions]="templateQuestions()"
+        [initialSelected]="activeFilterCodes()"
+        (apply)="onFilterApply($event)"
+        (cancel)="onFilterCancel()">
+      </app-hh-filter-panel>
+    </div>
+  }
+
+  <!-- Side Panel Container -->
+  @if (isCommentPanelOpen()) {
+    <div class="side-panel-container">
+      <app-comment-side-panel
+        [response]="selectedResponseForComment()"
+        (save)="onCommentSave($event)"
+        (cancel)="onCommentCancel()">
+      </app-comment-side-panel>
+    </div>
+  }
+
+  @if (isHoldPanelOpen()) {
+    <div class="side-panel-container">
+      <app-place-hold-side-panel
+        [holdCodes]="holdCodes()"
+        [existingInterdictions]="existingInterdictions()"
+        [initialRows]="pendingHoldRows()"
+        [unitId]="donationData()?.unitId ?? ''"
+        [transactionId]="donationData()?.transactionId ?? ''"
+        (save)="onHoldPanelSave($event)"
+        (cancel)="onHoldPanelClose()">
+      </app-place-hold-side-panel>
+    </div>
+  }
+
+</div>

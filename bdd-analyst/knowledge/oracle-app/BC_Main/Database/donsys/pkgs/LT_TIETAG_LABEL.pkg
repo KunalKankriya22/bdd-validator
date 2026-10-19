@@ -1,0 +1,713 @@
+CREATE OR REPLACE PACKAGE LT_TIETAG_LABEL as
+/*  ------------- Change History------------
+
+ Ver: 01 - LT2018 (Ashok) - 01/18/2017 - Initial creation.
+ Ver: 02 - LT2018 (Ashok) - 03/28/2017 - Label generation logic modified.
+ Ver: 03 - LT2018 (Ashok) - 04/11/2017 - IM 451 BC_SP_INS table is at chapter level.
+                                       - IM 508 timezone appled to print date.
+ Ver:04    2019R2 (Edwin) - 06/21/2021   MLT 4386
+ Ver:05    2022R3 (Ashok) - 07/14/2022 - Search for V05 GEN_ADTT_FILE routine updated. 
+           MLT-5282 (DOB label added) 
+ Ver:06    2022R3 (Ashok) - 08/02/2022 - V06; Use special_units chapter id instead of donations chapter id.             
+------------------------------------------------ */
+   procedure GEN_SPTT_FILE (pDonorID in varchar2,
+                            pInterCode in varchar2,
+                            pNoLabels  in number,
+                            pPrinter   in varchar2,
+                            pChapterID  IN VARCHAR2);
+
+   procedure GEN_ADTT_FILE (pPatID     in varchar2,
+                            pSeqNo     in varchar2,
+                            pSurgID    in varchar2,
+                            pSurgDate  in Date,
+                            pType      in varchar2,
+                            pProdTyp   in varchar2,
+                            pIrr       in varchar2,
+                            pHLA       in varchar2,
+                            pNoLabels  in number,
+                            pPrinter   in varchar2);
+
+  function get_column(pString in varchar2, pColNo in number, pSep in varchar2)
+  return varchar2;
+  
+  FUNCTION ISBT_CHK_DIGIT(pUnit in varchar2) RETURN varchar2;
+end;
+/
+
+
+CREATE OR REPLACE PACKAGE BODY LT_TIETAG_LABEL as
+
+   /*-- 4.01.02 Modify ADTT not to print Irradiate for Stem cells */
+
+   Function Get_Start_Code(ln_no in number)
+   return varchar2;
+
+   Function Get_Value_Start_Code(ln_no in number)
+   return varchar2;
+
+   Function Get_Stop_Code(ln_no in number)
+   return varchar2;
+
+   Procedure log_err(err_cd in varchar2, err_text in varchar2);
+
+   Procedure GEN_SPTT_FILE(pDonorID in varchar2,
+                           pInterCode in varchar2,
+                           pNoLabels  in number,
+                           pPrinter   in varchar2,
+                           pChapterID IN varchar2) -- IM 451,508
+   as
+       v_lbdir  varchar2(100);
+       v_fl_id  utl_file.file_type;
+       fl_name  varchar2(100) := pDonorID || '_' || pInterCode ||
+                                 to_char(sysdate,'YYDDDHH24MISS')||'.txt';
+       v_Line   varchar2(150);
+       v_err_trace varchar2(5);
+       chp_sysdate  DATE; -- IM 508
+
+       cursor c1 is
+          select line_text, rownum
+          from bc_sp_ins
+          where label_code = pInterCode
+            and chapter_id = pChapterID -- IM 451
+          order by line_number;
+
+   BEGIN
+      BEGIN
+         SELECT parameter_value INTO v_lbdir
+         FROM valid_parameters
+         WHERE parameter_code = 'BPROT';
+      EXCEPTION
+         WHEN others THEN
+            log_err('TTAG', 'Label Directory -' || sqlerrm);
+            return;
+      END;
+      v_err_trace := '-1-';
+      v_fl_id := UTL_FILE.FOPEN(v_lbdir,fl_name,'W');
+      v_Line := null;
+      v_Line := GET_START_CODE(0);
+      utl_file.put_line(v_fl_id,v_Line);
+      v_Line := GET_START_CODE(1)||
+                'SPECIAL INSTRUCTIONS (DONOR COMMENTS)'||
+                GET_STOP_CODE(1);
+      utl_file.put_line(v_fl_id,v_Line);
+
+      v_err_trace := '-2-';
+      declare
+         vDonor         varchar2(10);
+         vParticipant   varchar2(10) := null;
+         vDOB           date;
+      begin
+         SELECT d.donor_id, s.participant_id, d.date_of_birth
+         into vDonor, vParticipant, vDOB
+         FROM DONORS D, BC_STUDY S
+         WHERE D.DONOR_ID= pDonorID
+         AND D.DONOR_ID = S.DONOR_ID (+);
+         
+         v_line := GET_START_CODE(3) || 'Donor ID' || GET_STOP_CODE(3);
+         utl_file.put_line(v_fl_id,v_Line);
+         
+         select vDonor ||
+                decode(vParticipant,null,null, ' / '||vParticipant)
+         into v_Line
+         from Dual;        
+         
+         v_line := GET_VALUE_START_CODE(3)|| ': ' || v_line || GET_STOP_CODE(3);
+         utl_file.put_line(v_fl_id,v_Line);
+         
+         v_Line := GET_START_CODE(5)|| 'Birth Date'  || GET_STOP_CODE(5);
+         utl_file.put_line(v_fl_id,v_Line);
+         
+         v_Line := GET_VALUE_START_CODE(5) || ': '
+                   || to_char(vDOB,'MM/DD/YYYY')  || 
+                   GET_STOP_CODE(5);
+         utl_file.put_line(v_fl_id,v_Line);
+      exception
+         when others then
+            log_err('TTAG', 'Donor ID -' || sqlerrm);
+      end;
+
+      v_err_trace := '-3-';
+      
+      chp_sysdate := lifetrack_timezone_convert.get_local_time(pChapterID, sysdate); -- IM 508
+      
+      v_Line := GET_START_CODE(6)|| 'Print Date' || GET_STOP_CODE(6);
+      utl_file.put_line(v_fl_id,v_Line);
+      
+      v_Line := GET_VALUE_START_CODE(6) || ': ' 
+                || to_char(chp_sysdate,'MM/DD/YYYY') || -- IM 508
+                GET_STOP_CODE(6);
+      utl_file.put_line(v_fl_id,v_Line);
+
+      v_err_trace := '-4-';
+      v_Line := GET_START_CODE(8)||
+                ' Special Instructions/Comments' ||
+                GET_STOP_CODE(8);
+      utl_file.put_line(v_fl_id,v_Line);
+  
+      v_Line := GET_START_CODE(9)||
+                '  --------------------------------' ||
+                GET_STOP_CODE(9);
+      utl_file.put_line(v_fl_id,v_Line);
+
+      v_err_trace := '-5-';
+      for rec in c1 loop
+         v_line := GET_START_CODE(9+rec.rownum)||
+                   ' ' || rec.line_text ||
+                GET_STOP_CODE(9+rec.rownum);
+         utl_file.put_line(v_fl_id,v_Line);
+      end loop;
+
+      v_err_trace := '-6-';
+      v_line := GET_START_CODE(22);
+      utl_file.put_line(v_fl_id,v_Line);
+      utl_file.fclose(v_fl_id);
+      insert into BC_PRNT_JOB_LIST
+      (file_name, print_id, no_copies)
+      values
+      (fl_name, pPrinter, pNoLabels);
+      commit;
+   EXCEPTION
+      WHEN UTL_FILE.INTERNAL_ERROR THEN
+         log_err('TTAG', 'UTL_FILE - Internal Error');
+      WHEN UTL_FILE.INVALID_FILEHANDLE THEN
+         log_err('TTAG','UTL_FILE - Invalid Filehandle');
+      WHEN UTL_FILE.INVALID_MODE THEN
+         log_err('TTAG','UTL_FILE - Invalid Mode');
+      WHEN UTL_FILE.INVALID_OPERATION THEN
+         log_err('TTAG','UTL_FILE - Invalid Operation');
+      WHEN UTL_FILE.INVALID_PATH THEN
+         log_err('TTAG','UTL_FILE - Invalid Path');
+      WHEN UTL_FILE.READ_ERROR THEN
+         log_err('TTAG','UTL_FILE - READ Error');
+      WHEN UTL_FILE.WRITE_ERROR THEN
+         log_err('TTAG','UTL_FILE - WRITE Error');
+      WHEN OTHERS THEN
+         log_err('TTAG', 'UTL_FILE - ' || sqlerrm || v_err_trace);
+         UTL_FILE.FCLOSE_ALL;
+   END;
+
+   procedure GEN_ADTT_FILE (pPatID     in varchar2,
+                            pSeqNo     in varchar2,
+                            pSurgID    in varchar2,
+                            pSurgDate  in Date,
+                            pType      in varchar2,
+                            pProdTyp   in varchar2,
+                            pIrr       in varchar2,
+                            pHLA       in varchar2,
+                            pNoLabels  in number,
+                            pPrinter   in varchar2)
+   is
+       v_lbdir  varchar2(100);
+       v_fl_id  utl_file.file_type;
+       fl_name  varchar2(100) := pPatID || '_' || pSurgID || '_' || pSeqNo ||
+                                 '_' || pProdTyp || '_' ||
+                                 to_char(sysdate,'YYDDDHH24MISS')||'.txt';
+       v_Line   varchar2(150);
+       v_err_trace varchar2(5);
+       vDonor    varchar2(10);
+       vChapter  VARCHAR2(4);
+   BEGIN
+      
+      BEGIN
+         SELECT parameter_value INTO v_lbdir
+         FROM valid_parameters
+         WHERE parameter_code = 'BPROT';
+      EXCEPTION
+         WHEN others THEN
+            log_err('TTAG', 'Label Directory -' || sqlerrm);
+            return;
+      END;
+      v_err_trace := '-1-';
+      v_fl_id := UTL_FILE.FOPEN(v_lbdir,fl_name,'W');
+      v_line := null;
+      v_Line := GET_START_CODE(0);
+      utl_file.put_line(v_fl_id,v_Line);
+      v_Line := GET_START_CODE(1) || '                   ' || pType  ||
+                GET_STOP_CODE(1);
+      utl_file.put_line(v_fl_id,v_Line);
+
+
+      v_err_trace := '-2-';
+      declare
+         vUnit     varchar2(15);
+         vCollDate date;
+      begin
+         select decode(length(su.unit_id),
+                 13,su.unit_id||'-'||isbt_chk_digit(su.unit_id),
+                 su.unit_id) unit_id,
+                nvl(d.coll_date, su.coll_date) coll_date,
+                d.donor_id  , NVL(su.chapter_id, d.chapter_id) -- V06
+         into vUnit, vCollDate, vDonor, vChapter  
+         from special_units su, donations d
+         where su.pat_id = pPatId
+         and su.surg_id = pSurgId
+         and su.seq_no = pSeqNo
+         and su.unit_id = d.unit_id (+);
+         v_Line := GET_START_CODE(3) || 'Unit ID' || GET_STOP_CODE(3);
+         utl_file.put_line(v_fl_id,v_Line);                  
+         v_Line := GET_VALUE_START_CODE(3) || ': '
+                   || nvl(vUnit,'               ') 
+                   || '                        Coll Date :  ' 
+                   || to_char(vCollDate,'MM/DD/YYYY') 
+                   || 
+                   GET_STOP_CODE(3);
+         utl_file.put_line(v_fl_id,v_Line);
+         
+         v_Line := GET_START_CODE(5) || 'Donor ID' || GET_STOP_CODE(5);
+         utl_file.put_line(v_fl_id,v_Line);
+         v_Line := GET_VALUE_START_CODE(5) || ': '
+                  ||nvl(vDonor,'          ');
+         IF vDonor is not null THEN
+            v_Line := v_Line || '   for';
+         END IF;
+         v_Line := v_Line || GET_STOP_CODE(5);
+         utl_file.put_line(v_fl_id,v_Line);
+      exception
+         when others then
+            null;
+      end;
+
+   -- Get the Chapter from LT_USER_SESSION if the vChapter is null  MLT 4386
+     If vChapter is null then 
+        vChapter:=LT_USER_SESSION.get_chapter_id;
+     End if;
+
+      v_err_trace := '-3-';
+      declare
+         vPatName  varchar2(100);
+         vPatDOB   date;
+         vGender   varchar2(10);
+      begin
+         SELECT pat_last_name || ', ' || pat_first_name || ' ' ||
+                decode(pat_initials,null,null, substr(pat_initials,1,1) || '.')
+                name,
+                dob,
+                decode(sex,'M','MALE','F','FEMALE',null) gender
+         into vPatName, vPatDOB, vGender
+         from special_patients
+         where pat_id = pPatID;
+         v_Line := GET_START_CODE(6) || 'Patient' || GET_STOP_CODE(6);
+         utl_file.put_line(v_fl_id,v_Line);
+         
+         v_Line := GET_VALUE_START_CODE(6) || ': '
+                   || pPatID 
+                   || '   ' || substr(vPatName,1,50) || 
+                   GET_STOP_CODE(6);
+                   
+         utl_file.put_line(v_fl_id,v_Line);
+         
+         v_Line := GET_START_CODE(7) || 'DOB' || GET_STOP_CODE(7);  -- V05
+         utl_file.put_line(v_fl_id,v_Line);
+         
+         v_Line := GET_VALUE_START_CODE(7) || ': '
+                   || nvl(to_char(vPatDOB,'MM/DD/YYYY'),'                    ')
+                   || '                               Gender : ' || vGender ||
+                   GET_STOP_CODE(7);
+         utl_file.put_line(v_fl_id,v_Line);
+      exception
+         when others then
+            null;
+      end;
+
+      v_err_trace := '-4-';
+      declare
+         vComment   varchar2(255);
+         vHospital  varchar2(20);
+         vShipToID  varchar2(20);
+         vPhyID     varchar2(15);
+         vDNB       date;
+         vComm1     varchar2(200);
+         vComm2     varchar2(200);
+         vComm3     varchar2(200);
+         v_Char     varchar2(1);
+         vBreak     number(3);
+         vBreak2    number(3);
+         vProddesc  varchar2(50);
+      begin
+         select  comments, hospital_id, ship_id, phy_id, date_needed_by
+         into vComment, vHospital, vShipToID, vPhyID, vDNB
+         from transf_details td
+         where td.pat_id = pPatID
+         and td.surg_id = pSurgID;
+         vComm1 := null;
+         v_Char  := null;
+         if length(vComment) > 55 then
+            for i in REVERSE 1 .. 56
+            loop
+               v_char := substr(vComment,i-1,1);
+               if v_char in (' ', '.', ',', '-') then
+                  vComm1 := substr(vComment,1,i-1);
+                  vBreak := i-1;
+                  exit;
+               end if;
+            end loop;
+         else
+            vComm1 := vComment;
+            vBreak := length(vComment);
+         end if;
+         if length(vComment) > vBreak then
+            vComm2 := substr(vComment, vBreak+1);
+            if length(vComm2) > 55 then
+               for i in REVERSE 1 .. 56
+               loop
+                  v_char := substr(vComm2,i-1,1);
+                  if v_char in (' ', '.', ',', '-') then
+                     vComm2 := substr(vComm2,1,i-1);
+                     vBreak2:= i-1;
+                     exit;
+                  end if;
+               end loop;
+               vComm3 := substr(vComment,vBreak+vBreak2+1,55);
+            else
+               vComm3 := null;
+            end if;
+         else
+            vComm2 := null;
+            vComm3 := null;
+         end if;
+         v_Line := GET_START_CODE(9) || 'Comments' || GET_STOP_CODE(9);
+         utl_file.put_line(v_fl_id,v_Line);
+         
+         v_Line := GET_VALUE_START_CODE(9)|| ': ' || vComm1 || GET_STOP_CODE(9);
+         utl_file.put_line(v_fl_id,v_Line);
+         
+         v_Line := GET_VALUE_START_CODE(10) || '  ' || vComm2 || GET_STOP_CODE(10);
+         utl_file.put_line(v_fl_id,v_Line);
+         
+         v_Line := GET_VALUE_START_CODE(11) || '  ' || vComm3 || GET_STOP_CODE(11);
+         utl_file.put_line(v_fl_id,v_Line);
+
+         v_err_trace := '-5-';
+         begin
+            select product_type_desc into vProddesc
+            from valid_product_types
+            where product_type_code = pProdTyp
+            and rownum = 1;
+         exception
+            when others then
+               vProddesc := null;
+         end;
+         v_Line := GET_START_CODE(13) || 'Product' || GET_STOP_CODE(13);
+         utl_file.put_line(v_fl_id,v_Line);
+         
+         v_Line := GET_VALUE_START_CODE(13) || ': '
+                  || pProdTyp ||' ' ||vProddesc ||
+                   GET_STOP_CODE(13);
+         utl_file.put_line(v_fl_id,v_Line);
+
+         v_err_trace := '-6-';
+         declare
+            vHospName  varchar2(100);
+            vHaddress1 varchar2(100);
+            vHaddress2 varchar2(100);
+            vCaddress1 varchar2(100);
+            vCaddress2 varchar2(100);
+         begin
+            select cu.name name,
+                   cu.address_1 haddress1,
+                   cu.city ||' '||cu.state||' '||cu.zip haddress2,
+                   co.address_1 || decode(co.address_2, null, null,', ') ||
+                   co.address_2 caddress1,
+                   co.city ||' '||co.state||' '||co.zip caddress2
+            into vHospName, vHaddress1, vHaddress2, vCaddress1, vCaddress2
+            from customers cu, consignee co
+            where cu.customer_id = vHospital
+            and co.consignee_id = vShipToID
+            and co.chapter_id = vChapter;
+            
+            v_Line := GET_START_CODE(15) || 'Customer' || GET_STOP_CODE(15);
+            utl_file.put_line(v_fl_id,v_Line);
+            
+            v_Line :=  GET_VALUE_START_CODE(15) || ': ' 
+                       || substr(vHospName,1,35) ||
+                       GET_STOP_CODE(15);
+            utl_file.put_line(v_fl_id,v_Line);
+            
+            if vCaddress1 is not null then
+               v_Line := GET_VALUE_START_CODE(16) || '  '
+                         || substr(vCaddress1,1,60) ||
+                         GET_STOP_CODE(16);
+               utl_file.put_line(v_fl_id,v_Line);
+               v_Line := GET_VALUE_START_CODE(17) ||  '  '
+                         || substr(vCaddress2,1,60) ||
+                         GET_STOP_CODE(17);
+               utl_file.put_line(v_fl_id,v_Line);
+            else
+               v_Line := GET_VALUE_START_CODE(16) ||  '  '
+                         || substr(vHaddress1,1,60) ||
+                         GET_STOP_CODE(16);
+               utl_file.put_line(v_fl_id,v_Line);
+               v_Line := GET_VALUE_START_CODE(17) || '  '
+                         || substr(vHaddress2,1,60) ||
+                         GET_STOP_CODE(17);
+               utl_file.put_line(v_fl_id,v_Line);
+            end if;
+         exception
+            when others then
+               null;
+         end;
+
+         v_err_trace := '-7-';
+         declare
+            vPhysician  varchar2(60);
+         begin
+            select substr(last_name || ', ' || first_name,1,60)
+            into vPhysician
+            from physician_list
+            where phy_id = vPhyID;
+            v_Line := GET_START_CODE(19) || 'Physician' || GET_STOP_CODE(19);
+            utl_file.put_line(v_fl_id,v_Line);
+            
+            v_Line := GET_VALUE_START_CODE(19) || ': '
+                      || vPhysician ||
+                      GET_STOP_CODE(19);
+            utl_file.put_line(v_fl_id,v_Line);
+         exception
+            when others then
+               null;
+         end;
+      exception
+         when others then
+            log_err('TTAG', 'TRANSF_DET - ' || sqlerrm);
+      end;
+
+      v_err_trace :=  '-8-';
+      v_line := null;
+      If pSurgDate is not null then
+         v_line := GET_START_CODE(20) || 'Needed by'|| GET_STOP_CODE(20);
+         utl_file.put_line(v_fl_id,v_Line);
+         
+         v_line := ': ' || to_char(pSurgDate,'MM/DD/YYYY');
+      End If;
+      If pIrr = 'Y' and pProdTyp not like 'STEM%' then
+         --4.01.02 added condition for STEM
+         v_line := v_line || '                            ** IRRADIATE **';
+      End If;
+      
+      if v_line is not null then
+         v_line := GET_VALUE_START_CODE(20) ||
+                   v_line ||
+                   GET_STOP_CODE(20);
+         utl_file.put_line(v_fl_id,v_Line);
+      End If;
+
+      v_err_trace :=  '-9-';
+      if not (pHLA = 'N' or vDonor is null) then
+        DECLARE
+          vDelimiter VARCHAR2(2) := ', ';
+          vHLA  VARCHAR2(1000);
+        BEGIN
+          
+         /*   --- MLT-4386
+           SELECT DECODE(a1, NULL, NULL, 'A1-'||a1 ||vDelimiter) ||
+                DECODE(a2, NULL, NULL, 'A2-'||a2 ||vDelimiter) ||
+                DECODE(b1, NULL, NULL, 'B1-'||b1 ||vDelimiter) ||
+                DECODE(b2, NULL, NULL, 'B2-'||b2 ||vDelimiter)
+          INTO vHLA
+          FROM donor_hla_antigens
+          WHERE donor_id = vDonor;         
+          
+*/
+
+           SELECT DECODE(a1, NULL, NULL, 'A'||a1 ||vDelimiter) ||
+                  DECODE(a2, NULL, NULL, 'A'||a2 ||vDelimiter) ||
+                  DECODE(b1, NULL, NULL, 'B'||b1 ||vDelimiter) ||
+                 DECODE(b2, NULL, NULL, 'B'||b2 ||vDelimiter)
+          INTO vHLA
+          FROM donor_hla_antigens
+          WHERE donor_id = vDonor;        
+
+          vHLA := RTRIM(vHLA, vDelimiter);
+          
+          v_Line := GET_START_CODE(21) || 'Donor HLA' ||GET_STOP_CODE(21);
+          utl_file.put_line(v_fl_id,v_Line);
+          
+          v_Line := GET_VALUE_START_CODE(21) || ': '
+                   || substr(vHLA,1,90) || ' '||
+                   GET_STOP_CODE(21);
+          utl_file.put_line(v_fl_id,v_Line);          
+          
+        EXCEPTION
+          WHEN OTHERS THEN
+            NULL;
+        END;
+         
+         
+         /*
+         declare
+            vHLA varchar2(1000);
+            cursor c1 is
+               select d.allele,d.res_code
+               from BC_HLA_HDR h, BC_HLA_DET d
+               where h.rec_key = d.rec_key
+               and nvl(h.vrfy_ind,'N') = 'Y'
+               and nvl(d.master_res,'N') = '*'
+               and d.allele in ('A','B')
+               and donor_id = vDonor
+               order by d.allele,
+                to_number(substr(ltrim(upper(d.res_code),d.allele || '*'),1,2));
+         begin
+            for rec in c1 loop
+               vHLA := vHLA || '  ' || rec.res_code || ',';
+            end loop;
+            if length(vHLA) > 0 THEN
+               vHLA := substr(vHLA, 1, length(vHLA)-1);
+               v_Line := GET_START_CODE(21) || 'Donor HLA' ||GET_STOP_CODE(21);
+               utl_file.put_line(v_fl_id,v_Line);
+               
+               v_Line := GET_VALUE_START_CODE(21) || ': '
+                         || substr(vHLA,1,90) || ' '||
+                         GET_STOP_CODE(21);
+               utl_file.put_line(v_fl_id,v_Line);
+            end if;
+         end;
+         */
+      end if;
+
+      v_err_trace :=  '-10-';
+      v_Line := GET_START_CODE(22);
+      utl_file.put_line(v_fl_id,v_Line);
+      utl_file.fclose(v_fl_id);
+      insert into BC_PRNT_JOB_LIST
+      (file_name, print_id, no_copies)
+      values
+      (fl_name, pPrinter, pNoLabels);
+      commit;
+   exception
+      WHEN UTL_FILE.INTERNAL_ERROR THEN
+         log_err('TTAG', 'UTL_FILE - Internal Error');
+      WHEN UTL_FILE.INVALID_FILEHANDLE THEN
+         log_err('TTAG','UTL_FILE - Invalid Filehandle');
+      WHEN UTL_FILE.INVALID_MODE THEN
+         log_err('TTAG','UTL_FILE - Invalid Mode');
+      WHEN UTL_FILE.INVALID_OPERATION THEN
+         log_err('TTAG','UTL_FILE - Invalid Operation');
+      WHEN UTL_FILE.INVALID_PATH THEN
+         log_err('TTAG','UTL_FILE - Invalid Path');
+      WHEN UTL_FILE.READ_ERROR THEN
+         log_err('TTAG','UTL_FILE - READ Error');
+      WHEN UTL_FILE.WRITE_ERROR THEN
+         log_err('TTAG','UTL_FILE - WRITE Error');
+      WHEN OTHERS THEN
+         log_err('TTAG', 'UTL_FILE - ' || sqlerrm || v_err_trace);
+         UTL_FILE.FCLOSE_ALL;
+   END;
+
+   function get_column(pString in varchar2, pColNo in number, pSep in varchar2)
+   return varchar2 is
+      start_pos number;
+      end_pos number;
+      no_of_chars number;
+      outcol varchar2(500);
+   begin
+      -- if Column 1 is to be picked up
+      if pColno = 1 then
+         start_pos := 1;
+      else
+         start_pos := instr(pString,pSep,1,pColNo-1) + 1;
+      end if;
+      -- if beginning column is greater than total no of columns then null
+      -- would be returned.
+      if start_pos = 0 then
+        outcol := null;
+      else
+      -- Get End Pos of Column
+         if start_pos = 1 then
+            end_pos := instr(pString||pSep,pSep,1,pColNo) - 1;
+         else
+            end_pos := instr(pString||pSep,pSep,1,pColNo) - 1;
+         end if;
+         if end_pos < 1 then
+            end_pos := length(pString);
+         end if;
+         outcol := substr(pString,start_pos,end_pos-start_pos+1);
+      end if;
+      return outcol;
+   exception
+      when others then
+         return null;
+   end get_column;
+
+   FUNCTION ISBT_CHK_DIGIT(pUnit in varchar2) RETURN varchar2 IS
+      vRetval  varchar2(1);
+      iter     number := length(pUnit);
+      vChar    varchar2(1);
+      vCalcNum number := 0;
+      vNum     number := 0;
+   begin
+      for x in 1 .. iter loop
+         vChar := substr(pUnit,x,1);
+         vNum  := 0;
+         --For numerics
+         If ltrim(vChar,'0123456789') is not null then
+            vNum := ascii(vChar)-55;
+         else
+            vNum := ascii(vChar)-48;
+         end if;
+         vCalcNum := mod((vCalcNum+vNum)*2,37);
+      end loop;
+      vCalcNum := mod(38-vCalcNum,37);
+      vCalcNum := vCalcNum + 1;
+      vRetval :=  substr('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ*',vCalcNum,1);
+      return vRetval;
+   exception
+      when others then
+         return null;
+   end;
+   
+   Function Get_Start_Code(ln_no in number)
+   return varchar2 is
+       vRetval varchar2(30);
+   begin
+       select start_code into vRetval
+       from BC_TTSTARTSTOP
+       where label_type = 'SPINS'
+       and line_no = ln_no;
+       return vRetval;
+   exception
+       when others then
+          return null;
+   end;
+
+   Function Get_Value_Start_Code(ln_no in number)
+   return varchar2 is
+       vRetval varchar2(30);
+   begin
+       select value_start_code into vRetval
+       from BC_TTSTARTSTOP
+       where label_type = 'SPINS'
+       and line_no = ln_no;
+       return vRetval;
+   exception
+       when others then
+          return null;
+   end;
+   
+   Function Get_Stop_Code(ln_no in number)
+   return varchar2 is
+       vRetval varchar2(30);
+   begin
+       select stop_code into vRetval
+       from BC_TTSTARTSTOP
+       where label_type = 'SPINS'
+       and line_no = ln_no;
+       return vRetval;
+   exception
+       when others then
+          return null;
+   end;
+
+   Procedure log_err(err_cd in varchar2, err_text in varchar2) is
+       PRAGMA AUTONOMOUS_TRANSACTION;
+   BEGIN
+       insert into user_error_log
+       (insert_dats,     user_id,        program_name,
+        error_code,      error_msg)
+       values
+       (sysdate,         'SYSTEM',       'TIETAG',
+        substr(err_cd,1,4),   substr(err_text,1,500));
+       COMMIT;
+   END;
+
+END; --PACKAGE
+/

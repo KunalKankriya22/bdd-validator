@@ -1,0 +1,52 @@
+---
+tags:
+  - trigger
+  - SRVSYS
+---
+# SHELVES_BD
+
+**Schema**: [[schemas/SRVSYS/SRVSYS|SRVSYS]]
+**Table**: [[schemas/SRVSYS/Tables/SHELVES|SHELVES]]
+**Type**: BEFORE EACH ROW
+**Event**: DELETE
+**Status**: ENABLED
+
+## Trigger Body
+
+```plsql
+begin
+insert into SHELVES_AUDIT
+  (	CHAPTER_ID,
+	WAREHOUSE_ID,
+	DEVICE_TYPE,
+	DEVICE_NUMBER,
+	RACK_NUMBER,
+	SHELF_NUMBER,
+	SHELF_DESCRIPTION,
+	SHELF_TRAY_COUNT,
+	EFFECTIVE_DATE,
+	LAST_MODIFIED_DATE,
+	TERM_DATE,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  (	:old.CHAPTER_ID,
+	:old.WAREHOUSE_ID,
+	:old.DEVICE_TYPE,
+	:old.DEVICE_NUMBER,
+	:old.RACK_NUMBER,
+	:old.SHELF_NUMBER,
+	:old.SHELF_DESCRIPTION,
+	:old.SHELF_TRAY_COUNT,
+	:old.EFFECTIVE_DATE,
+	:old.LAST_MODIFIED_DATE,
+	:old.TERM_DATE,
+	:old.AUDIT_KEY,
+	'DELETE',LT_USER_SESSION.GET_USERID,
+    sysdate
+  ) ;
+  end ;
+```

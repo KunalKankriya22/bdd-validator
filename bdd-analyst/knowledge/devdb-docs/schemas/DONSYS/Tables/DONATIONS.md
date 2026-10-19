@@ -1,0 +1,139 @@
+---
+tags:
+  - table
+  - DONSYS
+---
+# DONATIONS
+
+**Schema**: [[schemas/DONSYS/DONSYS|DONSYS]]
+**Tablespace**: BC_DATA
+**Estimated Rows**: 100784
+**Last Analyzed**: 2026-05-20 03:00:20
+**Partitioned**: NO
+
+## Columns
+
+| # | Column | Type | Nullable | Default | Comment |
+| --- | --- | --- | --- | --- | --- |
+| 1 | TRANSACTION_ID | VARCHAR2(10) | No |  |  |
+| 2 | CHAPTER_ID | VARCHAR2(4) | No |  |  |
+| 3 | DRIVE_ID | VARCHAR2(10) | No |  |  |
+| 4 | COLL_DATE | DATE | No |  |  |
+| 5 | SET_ID | VARCHAR2(14) | No |  |  |
+| 6 | CREDIT_COUNT | NUMBER(3) | No |  |  |
+| 7 | DONOR_ID | VARCHAR2(10) | Yes |  |  |
+| 8 | CREDIT_SPONSOR | VARCHAR2(10) | Yes |  |  |
+| 9 | DONATION_TYPE | VARCHAR2(5) | Yes |  |  |
+| 10 | BLEED_START_TIME_L1 | DATE | Yes |  |  |
+| 11 | BLEED_START_TIME_L2 | DATE | Yes |  |  |
+| 12 | BLEED_START_TIME_R1 | DATE | Yes |  |  |
+| 13 | BLEED_START_TIME_R2 | DATE | Yes |  |  |
+| 14 | BLEED_END_TIME_R | DATE | Yes |  |  |
+| 15 | BLEED_END_TIME_L | DATE | Yes |  |  |
+| 16 | BLEED_START_PHLEB_L1 | VARCHAR2(6) | Yes |  |  |
+| 17 | BLEED_START_PHLEB_L2 | VARCHAR2(6) | Yes |  |  |
+| 18 | BLEED_START_PHLEB_R1 | VARCHAR2(6) | Yes |  |  |
+| 19 | BLEED_START_PHLEB_R2 | VARCHAR2(6) | Yes |  |  |
+| 20 | BLEED_END_PHLEB_R | VARCHAR2(6) | Yes |  |  |
+| 21 | BLEED_END_PHLEB_L | VARCHAR2(6) | Yes |  |  |
+| 22 | DEFERRAL_REASON | VARCHAR2(50) | Yes |  |  |
+| 23 | BAG_TYPE | VARCHAR2(5) | Yes |  |  |
+| 24 | DONOR_CUE | VARCHAR2(1) | Yes |  |  |
+| 25 | UNIT_ID | VARCHAR2(15) | Yes |  |  |
+| 26 | PROCEDURE_CODE | VARCHAR2(5) | Yes |  |  |
+| 27 | NOTE_ID | VARCHAR2(10) | Yes |  |  |
+| 28 | ORIGINAL_DONOR_ID | VARCHAR2(10) | Yes |  |  |
+| 29 | LOOKUP_ID | VARCHAR2(6) | Yes |  |  |
+| 30 | SCREENER_ID | VARCHAR2(6) | Yes |  |  |
+| 31 | PHYSICAL_ID | VARCHAR2(6) | Yes |  |  |
+| 32 | FIRST_REVIEWER_ID | VARCHAR2(6) | Yes |  |  |
+| 33 | SECOND_REVIEWER_ID | VARCHAR2(6) | Yes |  |  |
+| 34 | DEFERRED_THRU_DATE | DATE | Yes |  |  |
+| 35 | DONOR_SIGNATURE_FLAG | VARCHAR2(1) | Yes |  |  |
+| 36 | N_AUDIT_FLAG | VARCHAR2(1) | Yes |  |  |
+| 37 | N_AUDIT_USER | VARCHAR2(6) | Yes |  |  |
+| 38 | N_AUDIT_DATE | DATE | Yes |  |  |
+| 39 | ARM_USED | VARCHAR2(1) | Yes |  |  |
+| 40 | VOID_UNIT_ID | VARCHAR2(15) | Yes |  |  |
+| 41 | START_DATA_ENTRY_TIME | DATE | Yes |  |  |
+| 42 | END_DATA_ENTRY_TIME | DATE | Yes |  |  |
+| 43 | ENTRY_MODE | VARCHAR2(1) | Yes |  |  |
+| 44 | DEFERRAL_ID | VARCHAR2(8) | Yes |  |  |
+| 45 | MATERIAL_ID | VARCHAR2(6) | Yes |  |  |
+| 46 | BLEED_END_TIME_L2 | DATE | Yes |  |  |
+| 47 | BLEED_END_PHLEB_L2 | VARCHAR2(6) | Yes |  |  |
+| 48 | BLEED_END_TIME_R2 | DATE | Yes |  |  |
+| 49 | BLEED_END_PHLEB_R2 | VARCHAR2(6) | Yes |  |  |
+| 50 | INTERFACE_DATE | DATE | Yes |  |  |
+| 51 | PROGRAM_ID | VARCHAR2(30) | No |  |  |
+| 52 | INSERT_DATE | DATE | No |  |  |
+| 53 | INSERT_USER | VARCHAR2(6) | No |  |  |
+| 54 | AUDIT_KEY | NUMBER | No |  |  |
+| 55 | PLT_PRE_COUNT | NUMBER | Yes |  |  |
+| 56 | PLT_POST_COUNT | NUMBER | Yes |  |  |
+| 57 | DEFERRAL_TYPE | VARCHAR2(3) | Yes |  |  |
+| 58 | SPONSOR_CLAIM_ID | VARCHAR2(10) | Yes |  |  |
+| 59 | ACTUAL_RBC_LOSS | NUMBER(6) | Yes |  |  |
+| 60 | ACTUAL_PLASMA_LOSS | NUMBER(6) | Yes |  |  |
+| 61 | EQUIP_REFERENCE | VARCHAR2(9) | Yes |  |  |
+| 62 | EQUIP_TYPE | VARCHAR2(5) | Yes |  |  |
+| 63 | LOT_NUMBER | VARCHAR2(30) | Yes |  |  |
+| 64 | CATALOG_NUMBER | VARCHAR2(10) | Yes |  |  |
+| 65 | OTHER_ARM_USED | VARCHAR2(2) | Yes |  |  |
+
+## Primary Key
+
+**DONATIONS_PK**: `TRANSACTION_ID, CHAPTER_ID`
+
+## Foreign Keys
+
+_None_
+
+## Referenced By
+
+| Source | Constraint | Columns |
+| --- | --- | --- |
+| [[schemas/DONSYS/Tables/HEALTH_HISTORY\|DONSYS.HEALTH_HISTORY]] | DONAT_HEALTH_HIST_FK | TRANSACTION_ID, CHAPTER_ID → TRANSACTION_ID, CHAPTER_ID |
+| [[schemas/DONSYS/Tables/HEALTH_HISTORY_HOLDINGS\|DONSYS.HEALTH_HISTORY_HOLDINGS]] | DONAT_HEALTH_HIST_HOLD_FK | TRANSACTION_ID, CHAPTER_ID → TRANSACTION_ID, CHAPTER_ID |
+| [[schemas/DONSYS/Tables/PHYSICAL_FINDINGS\|DONSYS.PHYSICAL_FINDINGS]] | DONAT_PHYSICAL_FINDINGS_FK | TRANSACTION_ID, CHAPTER_ID → TRANSACTION_ID, CHAPTER_ID |
+
+## Indexes
+
+| Index | Type | Unique | Columns | Status |
+| --- | --- | --- | --- | --- |
+| DONATIONS_AK | NORMAL | NONUNIQUE | AUDIT_KEY | VALID |
+| DONATIONS_IDX1 | NORMAL | NONUNIQUE | UNIT_ID, COLL_DATE | VALID |
+| DONATIONS_IDX2 | NORMAL | NONUNIQUE | DONOR_ID | VALID |
+| DONATIONS_IDX3 | NORMAL | NONUNIQUE | VOID_UNIT_ID | VALID |
+| DONATIONS_IDX5 | NORMAL | NONUNIQUE | DEFERRAL_ID, CHAPTER_ID | VALID |
+| DONATIONS_IDX6 | NORMAL | NONUNIQUE | DRIVE_ID | VALID |
+| DONATIONS_IDX8 | NORMAL | NONUNIQUE | SET_ID | VALID |
+| DONATIONS_NI | NORMAL | NONUNIQUE | NOTE_ID | VALID |
+| DONATIONS_PK | NORMAL | UNIQUE | TRANSACTION_ID, CHAPTER_ID | VALID |
+
+## Triggers
+
+- [[schemas/DONSYS/Triggers/DONATIONS_AG_UPD|DONATIONS_AG_UPD]] — AFTER EACH ROW UPDATE (ENABLED)
+- [[schemas/DONSYS/Triggers/DONATIONS_BD|DONATIONS_BD]] — BEFORE EACH ROW DELETE (ENABLED)
+- [[schemas/DONSYS/Triggers/DONATIONS_BI|DONATIONS_BI]] — BEFORE EACH ROW INSERT (ENABLED)
+- [[schemas/DONSYS/Triggers/DONATIONS_BU|DONATIONS_BU]] — BEFORE EACH ROW UPDATE (ENABLED)
+- [[schemas/DONSYS/Triggers/DONATIONS_SF_REG_UPD|DONATIONS_SF_REG_UPD]] — AFTER EACH ROW INSERT OR UPDATE (ENABLED)
+- [[schemas/DONSYS/Triggers/DONATIONS_SF_UPD|DONATIONS_SF_UPD]] — AFTER EACH ROW UPDATE (ENABLED)
+- [[schemas/DONSYS/Triggers/DONATIONS_VISTA_UPD|DONATIONS_VISTA_UPD]] — AFTER EACH ROW UPDATE (ENABLED)
+
+## Grants
+
+| Grantee | Privilege | Grantable |
+| --- | --- | --- |
+| BLOODC_ROLE | DELETE | NO |
+| BLOODC_ROLE | INSERT | NO |
+| BLOODC_ROLE | SELECT | NO |
+| BLOODC_ROLE | UPDATE | NO |
+
+## Depended On By
+
+| Object | Type | Schema |
+| --- | --- | --- |
+| DON_INFO | FUNCTION | DONSYS |
+| DON_REF_VAL | PACKAGE | DONSYS |
+| GENBDR | PACKAGE | DONSYS |

@@ -1,0 +1,318 @@
+create or replace PACKAGE        "SRW_CALL_REPORT_RSM"
+AUTHID CURRENT_USER
+IS
+/**
+--
+--
+-- Purpose	:	To run a report that is scheduled to run at a later time.
+--
+--
+-- Log		:
+--
+-------------------------------------------------------------------------
+-- VER   DATE     BY       COMMENTS
+-- ---------------------------------------------------------------------
+-- 1.0  08/21/15 Ashok   Copied V4.0 FROM srw_call_report_lab.pkg and
+                          modified parameters being passed to report.
+                          SCR 19037
+-------------------------------------------------------------------------
+--
+--
+-------------------------------------------------------------------------
+**/
+
+   -- This script main function which will be called to RUN the report.
+   vrpt_nam      VARCHAR2 (100);
+   v_rept        NUMBER                                  := 0;
+   v_jobid       NUMBER                                  := 0;
+   v_repsource   server_parameters.parameter_code%TYPE;
+   v_repoutput   server_parameters.parameter_code%TYPE;
+   v_userid      server_parameters.parameter_code%TYPE;
+   --v_repserver   server_parameters.parameter_code%TYPE;
+   --v_gateway     server_parameters.parameter_code%TYPE;
+   v_repserver	 rpt_master_codes.code_info%TYPE;
+   v_repurl		 rpt_master_codes.code_info%TYPE;
+   v_gateway     VARCHAR2(240);
+   v_err_msg	 VARCHAR2(500);
+
+   CURSOR c1
+   IS
+      SELECT report_name, user_name,parm_id, report_name || parm_id file_name
+        FROM rpt_parm
+       WHERE start_time IS NOT NULL
+       AND report_name = 'RSMREPRT'
+       AND sysdate >= start_time;
+       /*
+       AND start_time >= sysdate
+       AND TO_CHAR (start_time, 'dd/mm/yyyy hh24:mi')
+        BETWEEN TO_CHAR (SYSDATE, 'dd/mm/yyyy hh24:mi')
+        AND TO_CHAR (SYSDATE + 5 / 60 / 24, 'dd/mm/yyyy hh24:mi');
+       */
+---
+   PROCEDURE run_srw_pkg_prc;
+
+---
+
+   /*
+   ** This procedure is the main function which will be called to RUN the report.
+   */
+   PROCEDURE run_report (
+      p_report_name   IN       VARCHAR2,
+      p_user_name     IN       VARCHAR2,
+      p_output        IN       VARCHAR2,
+      p_inp_parm      IN       VARCHAR2,
+      p_jobid         OUT      NUMBER
+   );
+END srw_call_report_rsm;
+/
+
+create or replace PACKAGE BODY        "SRW_CALL_REPORT_RSM"
+IS
+-- This script main function which will be called to RUN the report.
+   PROCEDURE run_srw_pkg_prc
+   IS
+-----------------------------------------------------------------------
+-- VER   DATE   BY       COMMENTS
+ ---------------------------------------------------------------------
+-- 1.0  082115  Ashok  Copied V4.0 FROM srw_call_report_lab.pkg and
+--                       modified parameters being passed to report.
+--
+--------------------------------------------------------------------
+   BEGIN
+      FOR i IN c1
+      LOOP
+         vrpt_nam := i.report_name;
+         srw_call_report_rsm.run_report (i.report_name,
+                                     i.user_name,
+                                     i.file_name,
+                                     i.parm_id,
+                                     v_jobid
+                                    );
+
+         IF v_jobid <> 0
+         THEN
+            DBMS_OUTPUT.put_line (   'Report: '
+                                  || i.report_name
+                                  || ' submitted successful.'
+                                 );
+
+            UPDATE rpt_parm
+               SET start_time = NULL
+             WHERE report_name = i.report_name
+               AND start_time IS NOT NULL
+               AND parm_id = i.parm_id;
+		 ELSE
+		   DBMS_OUTPUT.put_line ('Report: ' || i.report_name || ' failed.');
+         END IF;
+
+         v_rept := v_rept + 1;
+      END LOOP;
+
+      IF v_rept >= 1
+      THEN
+         COMMIT;
+      ELSE
+         DBMS_OUTPUT.put_line ('There is no report to submit.');
+      END IF;
+   EXCEPTION
+      WHEN OTHERS
+      THEN
+         DBMS_OUTPUT.put_line (   'Err: in Report: '
+                               || vrpt_nam
+                               || ' :: '
+                               || SQLERRM
+                              );
+   END run_srw_pkg_prc;
+
+   PROCEDURE run_report (
+      p_report_name   IN       VARCHAR2,
+      p_user_name     IN       VARCHAR2,
+      p_output        IN       VARCHAR2,
+      p_inp_parm      IN       VARCHAR2,
+      p_jobid         OUT      NUMBER
+   )
+   IS
+      myplist    srw_paramlist;
+      myident    srw.job_ident;
+      mystatus   srw.status_record;
+
+      -- SCR 19307
+      lv_chapter_id   VARCHAR2(4);
+      lv_result_parm  VARCHAR2(20);
+      lv_contract_id  VARCHAR2(9);
+      ld_extract_time DATE;
+      lv_lab_id       VARCHAR2(10);
+      lv_file_name    VARCHAR2(200);
+      --
+
+	    exit_error EXCEPTION;
+   BEGIN
+      v_gateway := NULL;
+      v_repsource := NULL;
+      v_repoutput := NULL;
+      v_userid := NULL;
+      v_repserver := NULL;
+	  v_repurl	  := NULL;
+	  v_err_msg   := NULL;
+
+
+	-- Added on 04/10/2012 to get least active jobs report server name.
+	-- GET REPSERVER and GATEWAY from master codes
+  	BC_CHECK_REPSERVER.get_reports_server( out_server_name => v_repserver,
+  		  								   out_error_msg   => v_err_msg
+   										  );
+	IF v_err_msg IS NOT NULL THEN
+	  RAISE exit_error;
+	END IF;
+
+	BC_CHECK_REPSERVER.get_reports_url( in_server_name => v_repserver,
+										out_server_url => v_repurl,
+										out_error_msg  => v_err_msg
+	   								   );
+	IF v_err_msg IS NOT NULL THEN
+	   RAISE exit_error;
+	END IF;
+
+    v_gateway := v_repurl || '/reports/rwservlet';
+	------------------------------------------------
+
+	  -- Get the REPSOURCE, REPOUTPUT and USERID from server_parameters table.
+      FOR i IN (SELECT *
+                  FROM server_parameters)
+      LOOP
+         IF i.parameter_code = 'REPSOURCE'
+         THEN
+            v_repsource := i.parameter_value;
+		 ELSIF i.parameter_code = 'REPOUTPUT'
+         THEN
+            v_repoutput := i.parameter_value;
+         ELSIF i.parameter_code = 'USERID'
+         THEN
+            v_userid := i.parameter_value;
+	     END IF;
+		 /*
+         ELSIF i.parameter_code = 'GATEWAY'
+         THEN
+            v_gateway := i.parameter_value;
+         ELSIF i.parameter_code = 'REPSERVER'
+         THEN
+            v_repserver := i.parameter_value;
+         END IF;
+		 */
+      END LOOP;
+
+
+
+    /*  -- SCR 19307
+         -- Additional parameter for calling RSM report  (copied from RGIREXTR.fmb for reference)
+        add_parameter(pl_id,'P_PARM_ID',TEXT_PARAMETER,gl_report_id) ;
+        add_parameter(pl_id,'NO_OF_COPIES',TEXT_PARAMETER,1);
+        add_parameter(pl_id,'P_CHAPTER_ID',TEXT_PARAMETER,nvl(gl_chapter_id,'WAD'));
+        add_parameter(pl_id,'PRINT_ID',TEXT_PARAMETER,NULL);
+        add_parameter(pl_id,'P_TEST_LAB_ID',TEXT_PARAMETER,gl_testing_facility);
+        add_parameter(pl_id,'P_REPORT_ID',TEXT_PARAMETER,gl_report_id) ;
+        add_parameter(pl_id,'RESULT_PARM',TEXT_PARAMETER,gl_result_parm_id);
+        add_parameter(pl_id,'RPT_NAME',TEXT_PARAMETER,upper(gc_rep_name));
+        add_parameter(pl_id,'USER_ID',TEXT_PARAMETER,upper(gl_user));
+        add_parameter(pl_id,'P_FILE_NAME',TEXT_PARAMETER,gl_filename);
+     */
+
+     -- SCR 19307
+     DECLARE
+       cursor c1 is
+        select *
+          from rgt_schedule_extract
+         where report_id = p_inp_parm;
+
+       cursor c2(pl_parm_code VARCHAR2) IS
+        SELECT parm_select
+          FROM rpt_parm_select
+         WHERE report_name = 'RSMREPRT'
+           AND parm_id = p_inp_parm
+           AND parm_code = pl_parm_code;
+
+     BEGIN
+       for c1rec in c1 loop
+         lv_chapter_id := c1rec.chapter_id;
+         lv_result_parm := c1rec.result_parm_id;
+         lv_contract_id := c1rec.contract_id;
+         ld_extract_time := c1rec.extract_date_time;
+       end loop;
+
+       OPEN c2('LABID');
+       FETCH c2 INTO lv_lab_id;
+       CLOSE c2;
+
+
+       lv_file_name := lv_result_parm || '_' || lv_contract_id || '_' || TO_CHAR(ld_extract_time, 'MMDDHHMI') || '.pdf';
+
+     END;
+     ----------
+
+
+      srw.start_debugging;
+      myplist := srw_paramlist (srw_parameter ('', ''));
+      srw.ADD_PARAMETER (myplist, 'GATEWAY', v_gateway);
+      srw.ADD_PARAMETER (myplist, 'SERVER', v_repserver);
+      srw.ADD_PARAMETER (myplist,
+                         'REPORT',
+                         v_repsource || LOWER (p_report_name)
+                        );
+
+      srw.ADD_PARAMETER (myplist, 'DESTYPE', 'FILE');
+      srw.ADD_PARAMETER (myplist,
+                         'DESNAME',
+                         lv_file_name  -- SCR 19307
+                        );
+
+      srw.ADD_PARAMETER (myplist, 'DESFORMAT', 'pdf');
+      srw.ADD_PARAMETER (myplist, 'PARAMFORM', 'no');
+      srw.ADD_PARAMETER (myplist, 'USERID', v_userid);
+      srw.ADD_PARAMETER (myplist, 'P_PARM_ID', p_inp_parm);
+      srw.ADD_PARAMETER (myplist, 'P_USER', p_user_name);   -- This line was added by Edwin 12/01/09
+
+
+      --SCR 19307
+      srw.ADD_PARAMETER (myplist, 'P_CHAPTER_ID', lv_chapter_id);
+      srw.ADD_PARAMETER (myplist, 'PRINT_ID', NULL);
+      srw.ADD_PARAMETER (myplist, 'P_TEST_LAB_ID', lv_lab_id);
+      srw.ADD_PARAMETER (myplist, 'P_REPORT_ID', p_inp_parm);
+      srw.ADD_PARAMETER (myplist, 'RESULT_PARM', lv_result_parm);
+      srw.ADD_PARAMETER (myplist, 'RPT_NAME', p_report_name);
+      srw.ADD_PARAMETER (myplist, 'USER_ID', p_user_name);
+      srw.ADD_PARAMETER (myplist, 'P_FILE_NAME', lv_file_name);
+      ---
+
+      myident := srw.run_report (myplist);
+      srw.stop_debugging;
+      mystatus := srw.report_status (myident);
+      DBMS_OUTPUT.put_line ('myStatus: ' || mystatus.statuscode);
+
+      UPDATE rpt_parm
+         SET report_status = 'C',
+		     rep_server = v_repserver,
+             end_date = SYSDATE
+       WHERE
+	--appl_id = 'DON' -- Commented as per Edwin
+         --and  user_name = user
+         report_name = UPPER (p_report_name)
+         AND parm_id = p_inp_parm;
+
+      DBMS_OUTPUT.put_line ('Report completed');
+
+      UPDATE rpt_parm
+         SET rep_job_id = myident.jobid
+       WHERE UPPER (report_name) = UPPER (p_report_name)
+         AND parm_id = p_inp_parm;
+
+      COMMIT;
+      DBMS_OUTPUT.put_line ('Job ID: ' || myident.jobid);
+      p_jobid := myident.jobid;
+   EXCEPTION
+      WHEN EXIT_ERROR THEN
+         DBMS_OUTPUT.put_line (   'Err: in Running Report: ' || v_err_msg);
+      WHEN OTHERS THEN
+         NULL;
+   END;                                             /* Procedure RUN_REPORT */
+END srw_call_report_rsm;
+/

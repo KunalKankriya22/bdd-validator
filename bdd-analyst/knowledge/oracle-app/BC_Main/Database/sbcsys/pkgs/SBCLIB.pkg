@@ -1,0 +1,1729 @@
+CREATE OR REPLACE PACKAGE sbclib IS
+/*  Version History  ------
+
+   Ver: 01   Initial version at LT2018
+   Ver: 02  adding customner overriding confirmatory testing --2018R2
+   Ver: 03  MLT-2866
+   Ver: 04  MLT-3149
+   Ver: 05  MLT-5039 (process_tcicoldt_units routine added)
+   Ver: 06  MLT-5958 gen_seq added.
+   Ver: 07  MLT-6032 (created the routine object_lock_unlock)
+   Ver: 08  MLT-6583 (new routines added to be called from DELUNIT)
+   Ver: 09  MLT-8187  (wallet check for reports)
+
+*/
+    FUNCTION calculate_time (
+        start_time DATE,
+        end_time   DATE
+    ) RETURN VARCHAR2;
+
+    FUNCTION unit_system_interdiction (
+        p_unit_id           VARCHAR2,
+        p_coll_date         DATE,
+        p_chapter_id        VARCHAR2,
+        p_system_inter_code VARCHAR2,
+        p_user_id           VARCHAR2,
+        p_prog_name         VARCHAR2
+    ) RETURN VARCHAR2;
+
+    FUNCTION comp_system_interdiction (
+        p_unit_id           VARCHAR2,
+        p_coll_date         DATE,
+        p_chapter_id        VARCHAR2,
+        p_product_code      VARCHAR2,
+        p_system_inter_code VARCHAR2,
+        p_user_id           VARCHAR2,
+        p_prog_name         VARCHAR2
+    ) RETURN VARCHAR2;
+
+    FUNCTION insert_test_parms (
+        p_chapter_id VARCHAR2,
+        p_test_id    VARCHAR2,
+        p_tb_id      VARCHAR2,
+        p_parm_type  VARCHAR2,
+        p_program_id VARCHAR2
+    ) RETURN VARCHAR2;
+	-- Added "p_test_chapter_id" parameter to below function
+	-- Added by Kishore on 03/12/2012
+    FUNCTION load_holding_tests (
+        p_unit_id         VARCHAR2,
+        p_test_id         VARCHAR2,
+        p_well_number     VARCHAR2,
+        p_absorbance      VARCHAR2,
+        p_ratio           VARCHAR2,
+        p_result_status   VARCHAR2,
+        p_tb_id           VARCHAR2,
+        p_machine_id      VARCHAR2,
+        p_status          VARCHAR2,
+        p_machine_flags   VARCHAR2,
+        p_program_id      VARCHAR2,
+        p_result_dats     DATE,
+        p_test_chapter_id VARCHAR2
+    ) RETURN VARCHAR2;
+
+    FUNCTION move_holding_tests (
+        p_chapter_id VARCHAR2,
+        p_test_id    VARCHAR2,
+        p_tb_id      VARCHAR2,
+        p_void_code  VARCHAR2,
+        p_program_id VARCHAR2
+    ) RETURN VARCHAR2;
+
+    PROCEDURE validate_unit_chkdigit (
+        p_unit_id   IN VARCHAR2,
+        p_chk_digit OUT VARCHAR2
+    );
+
+    PROCEDURE generate_batch_id (
+        p_chapter_id IN VARCHAR2,
+        p_program_id IN VARCHAR2,
+        p_batch_id   OUT NUMBER,
+        p_status     OUT VARCHAR2
+    );
+
+  -- SCR 177145  -- LT2015SP1
+    PROCEDURE gen_seq (
+        p_type    IN VARCHAR2,
+        p_chp_id  IN VARCHAR2,
+        p_seq     OUT VARCHAR2,
+        p_err_msg OUT VARCHAR2
+    );
+
+    FUNCTION gen_seq (
+        p_type   IN VARCHAR2,
+        p_chp_id IN VARCHAR2
+    ) RETURN NUMBER;
+
+    PROCEDURE intercept_data_parser (
+        pl_inp_file_name IN VARCHAR2,
+        pl_inp_record    IN VARCHAR2,
+        pl_chapter_id    IN VARCHAR2,
+        pl_user_id       IN VARCHAR2,
+        pl_error         OUT VARCHAR2
+    );
+
+    PROCEDURE sch_customer_over_tests (
+        pl_unit_id              IN VARCHAR2,
+        pl_coll_date            IN DATE,
+        pl_chapter_id           IN VARCHAR2,
+        pl_reactive_test_id     IN VARCHAR2,
+        pl_reactive_result_code IN VARCHAR2,
+        pl_plate_seq            IN VARCHAR2,
+        pl_program_id           IN VARCHAR2,
+        pl_utrs_or_utb          IN VARCHAR2,
+        pl_out_status           OUT VARCHAR2
+    );
+
+    TYPE string_array IS
+        TABLE OF VARCHAR2(200) INDEX BY BINARY_INTEGER;
+    TYPE stringindex_array IS
+        TABLE OF BOOLEAN INDEX BY VARCHAR2(200);
+    PROCEDURE process_tcicoldt_units (
+        units_list_in IN string_array,
+        chapter_id_in IN VARCHAR2,
+        batch_id_out  OUT VARCHAR2,
+        status_out    OUT VARCHAR2
+    );
+
+    PROCEDURE object_lock_unlock (
+        p_pkg_name IN VARCHAR2,
+        p_fcn_name IN VARCHAR2,
+        p_user     IN VARCHAR2,
+        p_flag_ul  IN VARCHAR2
+    );
+    
+    FUNCTION delunit_tabCount(
+        table_in IN VARCHAR2, 
+        colname_in IN VARCHAR2, 
+        colvalue_in IN VARCHAR2 )
+        RETURN PLS_INTEGER;
+
+    PROCEDURE delunit_insert_deleted_units(
+        unit_id_in IN VARCHAR2,
+        prog_name_in IN VARCHAR2, 
+        user_id_in   IN VARCHAR2,
+        status_out OUT VARCHAR2);
+
+    PROCEDURE delunit_do_delete(
+        unit_id_in IN VARCHAR2, 
+        prog_name_in IN VARCHAR2, 
+        status_out OUT VARCHAR2);
+
+     FUNCTION WALLET_ENABLED
+         RETURN BOOLEAN;
+
+
+                        
+END sbclib;
+/
+
+CREATE OR REPLACE PACKAGE BODY sbclib IS
+      --
+    FUNCTION calculate_time (
+        start_time IN DATE,
+        end_time   IN DATE
+    ) RETURN VARCHAR2 IS
+        temp_sec  NUMBER;
+        temp_hr   NUMBER;
+        temp_min  NUMBER(2);
+        temp_diff VARCHAR2(10);
+    BEGIN
+        temp_sec := ( end_time - start_time ) * 24 * 3600;
+        IF temp_sec IS NULL THEN
+            RETURN ( '' );
+        END IF;
+        temp_hr := floor(temp_sec / 3600);
+        temp_min := round((temp_sec -(temp_hr * 3600)) / 60);
+        /*  if temp_hr not between 0 and 999
+          then
+             temp_diff := '';
+          else
+	     Commented by Sobha PR 001.033211*/
+        temp_diff := lpad(to_char(abs(temp_hr)), 3, '0')
+                     || ':'
+                     || lpad(to_char(temp_min), 2, '0');
+          --end if;
+        RETURN ( temp_diff );
+    END;
+      --
+      --
+    FUNCTION unit_system_interdiction (
+        p_unit_id           IN VARCHAR2,
+        p_coll_date         IN DATE,
+        p_chapter_id        IN VARCHAR2,
+        p_system_inter_code IN VARCHAR2,
+        p_user_id           IN VARCHAR2,
+        p_prog_name         IN VARCHAR2
+    ) RETURN VARCHAR2 IS
+    BEGIN
+        INSERT INTO unit_interdictions (
+            unit_id,
+            coll_date,
+            chapter_id,
+            inter_code,
+            insert_dats,
+            inter_user_id,
+            program_id
+        )
+            SELECT
+                p_unit_id,
+                p_coll_date,
+                p_chapter_id,
+                inter_code,
+                sysdate,
+                p_user_id,
+                p_prog_name
+            FROM
+                valid_interdictions_lab
+            WHERE
+                    system_inter_code = p_system_inter_code
+                AND inter_code NOT IN (
+                    SELECT
+                        inter_code
+                    FROM
+                        unit_interdictions
+                    WHERE
+                            unit_id = p_unit_id
+                        AND trunc(coll_date) = trunc(p_coll_date)
+                        AND chapter_id = p_chapter_id
+                )
+                AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate + 365);
+
+        RETURN ( '0' );
+    EXCEPTION
+        WHEN no_data_found THEN
+            RETURN ( '1' );
+        WHEN too_many_rows THEN
+            RETURN ( '-2' );
+        WHEN dup_val_on_index THEN
+            RETURN ( '-3' );
+        WHEN value_error THEN
+            RETURN ( '-4' );
+        WHEN program_error THEN
+            RETURN ( '-5' );
+        WHEN storage_error THEN
+            RETURN ( '-6' );
+    END;
+      --
+    FUNCTION comp_system_interdiction (
+        p_unit_id           IN VARCHAR2,
+        p_coll_date         IN DATE,
+        p_chapter_id        IN VARCHAR2,
+        p_product_code      IN VARCHAR2,
+        p_system_inter_code IN VARCHAR2,
+        p_user_id           IN VARCHAR2,
+        p_prog_name         IN VARCHAR2
+    ) RETURN VARCHAR2 IS
+    BEGIN
+        INSERT INTO component_interdictions (
+            unit_id,
+            coll_date,
+            chapter_id,
+            product_code,
+            inter_code,
+            insert_dats,
+            inter_user_id,
+            program_id
+        )
+            SELECT
+                p_unit_id,
+                p_coll_date,
+                p_chapter_id,
+                p_product_code,
+                inter_code,
+                sysdate,
+                p_user_id,
+                p_prog_name
+            FROM
+                valid_interdictions_lab
+            WHERE
+                    system_inter_code = p_system_inter_code
+                AND inter_code NOT IN (
+                    SELECT
+                        inter_code
+                    FROM
+                        component_interdictions
+                    WHERE
+                            unit_id = p_unit_id
+                        AND trunc(coll_date) = trunc(p_coll_date)
+                        AND chapter_id = p_chapter_id
+                        AND product_code = p_product_code
+                )
+                AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate + 365);
+
+        RETURN ( '0' );
+    EXCEPTION
+        WHEN no_data_found THEN
+            RETURN ( '1' );
+        WHEN too_many_rows THEN
+            RETURN ( '-2' );
+        WHEN dup_val_on_index THEN
+            RETURN ( '-3' );
+        WHEN value_error THEN
+            RETURN ( '-4' );
+        WHEN program_error THEN
+            RETURN ( '-5' );
+        WHEN storage_error THEN
+            RETURN ( '-6' );
+    END;
+      --
+      --
+    FUNCTION insert_test_parms (
+        p_chapter_id IN VARCHAR2,
+        p_test_id    IN VARCHAR2,
+        p_tb_id      IN VARCHAR2,
+        p_parm_type  IN VARCHAR2,
+        p_program_id IN VARCHAR2
+    ) RETURN VARCHAR2 IS
+
+        tmp_cnt NUMBER;
+        CURSOR c1 IS
+        SELECT
+            tp.parm_code
+        FROM
+            test_parms       tp,
+            valid_test_parms vp
+        WHERE
+                tp.test_id = p_test_id
+            AND tp.parm_type = p_parm_type
+            AND sysdate BETWEEN tp.eff_date AND nvl(tp.term_date, sysdate)
+            AND tp.parm_code = vp.parm_code
+            AND sysdate BETWEEN vp.eff_date AND nvl(vp.term_date, sysdate)
+        ORDER BY
+            tp.sequence;
+
+    BEGIN
+        SELECT
+            COUNT(*)
+        INTO tmp_cnt
+        FROM
+            test_batch_parms
+        WHERE
+                test_id = p_test_id
+            AND tb_id = p_tb_id
+            AND chapter_id = p_chapter_id;
+
+        IF tmp_cnt > 0 THEN
+            RETURN ( 'Batch parameters already exist' );
+        END IF;
+        tmp_cnt := 0;
+        FOR rec IN c1 LOOP
+            tmp_cnt := tmp_cnt + 1;
+            INSERT INTO test_batch_parms (
+                chapter_id,
+                tb_id,
+                test_id,
+                sequence,
+                parm_code,
+                program_id
+            ) VALUES (
+                p_chapter_id,
+                p_tb_id,
+                p_test_id,
+                tmp_cnt,
+                rec.parm_code,
+                p_program_id
+            );
+
+        END LOOP;
+
+        IF tmp_cnt = 0 THEN
+            RETURN ( 'No parameters defined for test' );
+        END IF;
+        UPDATE test_batch_det
+        SET
+            parm_type = p_parm_type
+        WHERE
+                test_id = p_test_id
+            AND tb_id = p_tb_id
+            AND test_chapter_id = p_chapter_id;
+
+        RETURN ( '0' );
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN ( 'Unexpected Error' );
+    END;
+      --
+      --
+
+	  -- Added "p_test_chapter_id" parameter to below function
+	  -- Added by Kishore on 03/12/2012
+    FUNCTION load_holding_tests (
+        p_unit_id         IN VARCHAR2,
+        p_test_id         IN VARCHAR2,
+        p_well_number     IN VARCHAR2,
+        p_absorbance      IN VARCHAR2,
+        p_ratio           IN VARCHAR2,
+        p_result_status   IN VARCHAR2,
+        p_tb_id           IN VARCHAR2,
+        p_machine_id      IN VARCHAR2,
+        p_status          IN VARCHAR2,
+        p_machine_flags   IN VARCHAR2,
+        p_program_id      IN VARCHAR2,
+        p_result_dats     IN DATE,
+        p_test_chapter_id IN VARCHAR2
+    ) RETURN VARCHAR2 IS
+        t_chapter_id VARCHAR2(4);
+    BEGIN
+        IF p_test_chapter_id IS NULL THEN
+            BEGIN
+                SELECT
+                    chapter_id
+                INTO t_chapter_id
+                FROM
+                    system_users
+                WHERE
+                    user_id = lt_user_session.get_userid;
+
+            END;
+        ELSE
+            t_chapter_id := p_test_chapter_id;
+        END IF;
+
+        INSERT INTO holding_tests (
+            unit_id,
+            test_id,
+            test_mode,
+            well_number,
+            absorbance,
+            ratio,
+            result_status_1,
+            tb_id,
+            test_chapter_id,
+            machine_id,
+            holding_status,
+            machine_flags,
+            program_id,
+            result_dats,
+            insert_user_id,
+            insert_dats
+        ) VALUES (
+            p_unit_id,
+            p_test_id,
+            'A',
+            p_well_number,
+            p_absorbance,
+            p_ratio,
+            p_result_status,
+            p_tb_id,
+            t_chapter_id,
+            p_machine_id,
+            p_status,
+            p_machine_flags,
+            p_program_id,
+            p_result_dats,
+            decode(substr(lt_user_session.get_userid, 1, 4),
+                   'OPS$',
+                   substr(lt_user_session.get_userid, 5, 6),
+                   substr(lt_user_session.get_userid, 1, 6)),
+            sysdate
+        );
+
+        RETURN ( '0' );
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN ( 'error inserting into holding tests: '
+                     || sqlcode );
+    END;
+    --
+    --
+    FUNCTION move_holding_tests (
+        p_chapter_id IN VARCHAR2,
+        p_test_id    IN VARCHAR2,
+        p_tb_id      IN VARCHAR2,
+        p_void_code  IN VARCHAR2,
+        p_program_id IN VARCHAR2
+    ) RETURN VARCHAR2 IS
+
+        temp_value       CHAR(80);
+        t_chapter_id     VARCHAR2(4);
+        t_coll_date      DATE;
+        t_reactive       NUMBER;
+        temp_test_seq_no NUMBER;
+        CURSOR holding IS
+        SELECT
+            ROWID,
+            unit_id,
+            test_id,
+            tb_seq_no,
+            well_number,
+            absorbance,
+            ratio,
+            result_status_1,
+            tb_id,
+            test_chapter_id,
+            result_dats,
+            result_user_id,
+            test_mode,
+            chapter_id,
+            coll_date,
+            testing_lab_code
+        FROM
+            holding_tests
+        WHERE
+                test_chapter_id = p_chapter_id
+            AND tb_id = p_tb_id
+            AND test_id = p_test_id
+            AND holding_status IS NULL
+            AND result_status_1 IS NOT NULL
+            AND result_status_2 IS NULL;
+
+    BEGIN
+        FOR hold IN holding LOOP
+            IF hold.coll_date IS NULL OR hold.chapter_id IS NULL THEN
+                SELECT
+                    MAX(nvl(hold.coll_date, coll_date)),
+                    MAX(nvl(hold.chapter_id, chapter_id))
+                INTO
+                    t_coll_date,
+                    t_chapter_id
+                FROM
+                    units
+                WHERE
+                    unit_id = hold.unit_id;
+
+            ELSE
+                t_coll_date := hold.coll_date;
+                t_chapter_id := hold.chapter_id;
+            END IF;
+
+            SELECT
+                COUNT('x')
+            INTO t_reactive
+            FROM
+                master_codes
+            WHERE
+                    code_type = 'REAC'
+                AND code = hold.result_status_1
+                AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate);
+
+            IF p_void_code IS NULL OR t_reactive > 0 THEN
+                IF hold.test_mode = 'M' THEN
+                    BEGIN
+                        SELECT
+                            MIN(test_seq_no)
+                        INTO temp_test_seq_no
+                        FROM
+                            utrs
+                        WHERE
+                                unit_id = hold.unit_id
+                            AND nvl(coll_date, sysdate) = nvl(t_coll_date, sysdate)
+                            AND nvl(chapter_id, 'XXXXX') = nvl(t_chapter_id, 'XXXXX')
+                            AND test_id = hold.test_id
+                            AND result_status_1 IS NULL
+                            AND cancel_flag IS NULL;
+
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            RETURN ( 'Error in selecting from utrs' );
+                    END;
+
+                    IF nvl(temp_test_seq_no, 0) > 0 THEN
+                        BEGIN
+                            UPDATE utrs
+                            SET
+                                result_status_1 = hold.result_status_1,
+                                result_dats = hold.result_dats,
+                                result_user_id = hold.result_user_id,
+                                testing_lab_code = hold.testing_lab_code,
+                                tb_id = hold.tb_id,
+                                tb_seq_no = hold.tb_seq_no,
+                                test_chapter_id = hold.test_chapter_id,
+                                test_mode = hold.test_mode,
+                                absorbance = hold.absorbance,
+                                ratio = hold.ratio,
+                                well_number = hold.well_number,
+                                program_id = p_program_id
+                            WHERE
+                                    unit_id = hold.unit_id
+                                AND nvl(coll_date, sysdate) = nvl(t_coll_date, sysdate)
+                                AND nvl(chapter_id, 'XXXXX') = nvl(t_chapter_id, 'XXXXX')
+                                AND test_id = hold.test_id
+                                AND result_status_1 IS NULL
+                                AND test_seq_no = temp_test_seq_no;
+
+                        EXCEPTION
+                            WHEN OTHERS THEN
+                                RETURN ( 'Error in updating utrs' );
+                        END;
+
+                    ELSE
+                        BEGIN
+                            SELECT
+                                MIN(test_seq_no)
+                            INTO temp_test_seq_no
+                            FROM
+                                unit_test_base
+                            WHERE
+                                    unit_id = hold.unit_id
+                                AND nvl(coll_date, sysdate) = nvl(t_coll_date, sysdate)
+                                AND nvl(chapter_id, 'XXXXX') = nvl(t_chapter_id, 'XXXXX')
+                                AND test_id = hold.test_id
+                                AND result_status_1 IS NULL
+                                AND cancel_flag IS NULL;
+
+                        EXCEPTION
+                            WHEN OTHERS THEN
+                                RETURN ( 'Error in selecting from utb' );
+                        END;
+
+                        IF nvl(temp_test_seq_no, 0) > 0 THEN
+                            BEGIN
+                                UPDATE unit_test_base
+                                SET
+                                    result_status_1 = hold.result_status_1,
+                                    result_dats = hold.result_dats,
+                                    result_user_id = hold.result_user_id,
+                                    testing_lab_code = hold.testing_lab_code,
+                                    tb_id = hold.tb_id,
+                                    tb_seq_no = hold.tb_seq_no,
+                                    test_chapter_id = hold.test_chapter_id,
+                                    test_mode = hold.test_mode,
+                                    absorbance = hold.absorbance,
+                                    ratio = hold.ratio,
+                                    well_number = hold.well_number,
+                                    program_id = p_program_id
+                                WHERE
+                                        unit_id = hold.unit_id
+                                    AND nvl(coll_date, sysdate) = nvl(t_coll_date, sysdate)
+                                    AND nvl(chapter_id, 'XXXXX') = nvl(t_chapter_id, 'XXXXX')
+                                    AND test_id = hold.test_id
+                                    AND result_status_1 IS NULL
+                                    AND test_seq_no = temp_test_seq_no
+                                    AND cancel_flag IS NULL
+                                    AND ROWNUM = 1;
+
+                            EXCEPTION
+                                WHEN OTHERS THEN
+                                    RETURN ( 'Error in updating utb' );
+                            END;
+
+                        ELSE
+                            BEGIN
+                                INSERT INTO unit_test_base (
+                                    unit_id,
+                                    coll_date,
+                                    chapter_id,
+                                    test_seq_no,
+                                    test_id,
+                                    test_mode,
+                                    result_status_1,
+                                    tb_id,
+                                    test_chapter_id,
+                                    tb_seq_no,
+                                    well_number,
+                                    absorbance,
+                                    ratio,
+                                    result_dats,
+                                    result_user_id,
+                                    testing_lab_code,
+                                    insert_dats,
+                                    insert_user_id,
+                                    program_id
+                                )
+                                    SELECT
+                                        hold.unit_id,
+                                        t_coll_date,
+                                        t_chapter_id,
+                                        nvl(MAX(test_seq_no),
+                                            0) + 1,
+                                        hold.test_id,
+                                        hold.test_mode,
+                                        hold.result_status_1,
+                                        hold.tb_id,
+                                        hold.test_chapter_id,
+                                        hold.tb_seq_no,
+                                        hold.well_number,
+                                        hold.absorbance,
+                                        hold.ratio,
+                                        hold.result_dats,
+                                        hold.result_user_id,
+                                        hold.testing_lab_code,
+                                        sysdate,
+                                        decode(substr(lt_user_session.get_userid, 1, 4),
+                                               'OPS$',
+                                               substr(lt_user_session.get_userid, 5),
+                                               lt_user_session.get_userid),
+                                        p_program_id
+                                    FROM
+                                        unit_test_base
+                                    WHERE
+                                            unit_id = hold.unit_id
+                                        AND nvl(coll_date, sysdate) = nvl(t_coll_date, sysdate)
+                                        AND nvl(chapter_id, 'XXXXX') = nvl(t_chapter_id, 'XXXXX')
+                                        AND test_id = hold.test_id;
+
+                            EXCEPTION
+                                WHEN OTHERS THEN
+                                    RETURN ( 'Error in inserting utb' );
+                            END;
+                        END IF;
+
+                    END IF;
+
+                    BEGIN
+                        temp_value := test_results.update_inter(hold.unit_id, t_coll_date, t_chapter_id, hold.test_id, hold.result_status_1
+                        ,
+                                                               p_program_id);
+
+                        IF temp_value != '0' THEN
+                            RETURN ( temp_value );
+                        END IF;
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            RETURN ( 'error calling update inter' );
+                    END;
+
+                ELSE
+                    IF hold.absorbance IS NOT NULL THEN
+                        BEGIN
+                            temp_value := test_results.update_auto_test(hold.unit_id, hold.test_id, hold.well_number, hold.absorbance
+                            , hold.ratio,
+                                                                       hold.result_status_1, hold.tb_id, p_program_id, hold.result_dats
+                                                                       );
+
+                            IF temp_value != '0' THEN
+                                RETURN ( temp_value );
+                            END IF;
+                        EXCEPTION
+                            WHEN OTHERS THEN
+                                RETURN ( 'error calling update_auto' );
+                        END;
+
+                    END IF;
+                END IF;
+            ELSE
+                BEGIN
+                    INSERT INTO test_voids (
+                        unit_id,
+                        coll_date,
+                        chapter_id,
+                        test_seq_no,
+                        test_id,
+                        test_mode,
+                        tb_id,
+                        test_chapter_id,
+                        tb_seq_no,
+                        well_number,
+                        absorbance,
+                        ratio,
+                        result_status_1,
+                        result_dats,
+                        result_user_id,
+                        insert_dats,
+                        insert_user_id,
+                        void_type,
+                        void_reason_code,
+                        void_dats,
+                        void_user_id
+                    )
+                        SELECT
+                            hold.unit_id,
+                            t_coll_date,
+                            t_chapter_id,
+                            nvl(MAX(test_seq_no),
+                                0) + 1,
+                            hold.test_id,
+                            'A',
+                            hold.tb_id,
+                            hold.test_chapter_id,
+                            hold.tb_seq_no,
+                            hold.well_number,
+                            hold.absorbance,
+                            hold.ratio,
+                            hold.result_status_1,
+                            hold.result_dats,
+                            decode(substr(lt_user_session.get_userid, 1, 4),
+                                   'OPS$',
+                                   substr(lt_user_session.get_userid, 5, 6),
+                                   substr(lt_user_session.get_userid, 1, 6)),
+                            nvl(MAX(insert_dats),
+                                sysdate),
+                            nvl(MAX(insert_user_id),
+                                decode(substr(lt_user_session.get_userid, 1, 4),
+                                       'OPS$',
+                                       substr(lt_user_session.get_userid, 5, 6),
+                                       substr(lt_user_session.get_userid, 1, 6))),
+                            'A',
+                            p_void_code,
+                            sysdate,
+                            decode(substr(lt_user_session.get_userid, 1, 4),
+                                   'OPS$',
+                                   substr(lt_user_session.get_userid, 5, 6),
+                                   substr(lt_user_session.get_userid, 1, 6))
+                        FROM
+                            test_voids
+                        WHERE
+                                unit_id = hold.unit_id
+                            AND test_id = hold.test_id
+                            AND nvl(chapter_id, '*') = nvl(t_chapter_id, '*');
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        RETURN ( 'error inserting to void: '
+                                 || sqlerrm );
+                END;
+            END IF;
+
+            BEGIN
+                UPDATE holding_tests
+                SET
+                    holding_status = 'U'
+                WHERE
+                    ROWID = hold.rowid;
+
+            EXCEPTION
+                WHEN OTHERS THEN
+                    RETURN ( 'deleting from holding: '
+                             || sqlerrm );
+            END;
+
+        END LOOP;
+
+        RETURN '0';
+    END;
+
+    PROCEDURE validate_unit_chkdigit (
+        p_unit_id   IN VARCHAR2,
+        p_chk_digit OUT VARCHAR2
+    ) IS
+
+        temp_v_len         NUMBER := 0;
+        temp_v_chr         VARCHAR2(1);
+        temp_n_a           NUMBER := 0;
+        temp_n_check_value NUMBER := 0;
+        temp_n_si          NUMBER := 0;
+    BEGIN
+        temp_v_len := length(p_unit_id);
+        FOR i IN 1..temp_v_len LOOP
+            temp_v_chr := substr(p_unit_id, i, 1);
+            IF ( ltrim(temp_v_chr, '0987654321') IS NULL ) THEN
+                temp_n_a := ascii(temp_v_chr) - 48;
+            ELSIF ( temp_v_chr = '*' ) THEN
+                temp_n_a := 36;
+            ELSE
+                temp_n_a := ascii(temp_v_chr) - 55;
+            END IF;
+
+            temp_n_si := MOD(((temp_n_si + temp_n_a) * 2), 37);
+        END LOOP;
+
+        temp_n_check_value := MOD((38 - temp_n_si), 37);
+  -- based on the check_value get the decoded value from the
+        p_chk_digit := substr('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ*', temp_n_check_value + 1, 1);
+    END;
+
+    PROCEDURE generate_batch_id (
+        p_chapter_id IN VARCHAR2,
+        p_program_id IN VARCHAR2,
+        p_batch_id   OUT NUMBER,
+        p_status     OUT VARCHAR2
+    ) IS
+        t_batch_id NUMBER;
+    BEGIN
+        p_status := 'OK';
+        BEGIN
+            SELECT
+                nvl(tb_seq, 1000) + 1
+            INTO t_batch_id
+            FROM
+                chapters
+            WHERE
+                chapter_id = p_chapter_id;
+
+        EXCEPTION
+            WHEN no_data_found THEN
+                t_batch_id := NULL;
+                p_status := 'Error: Invalid Chapter ID';
+            WHEN OTHERS THEN
+                t_batch_id := NULL;
+                p_status := 'Error: '
+                            || sqlcode
+                            || ' - '
+                            || sqlerrm;
+        END;
+
+        IF t_batch_id IS NOT NULL THEN
+            BEGIN
+                UPDATE chapters
+                SET
+                    tb_seq = t_batch_id,
+                    program_id = p_program_id
+                WHERE
+                    chapter_id = p_chapter_id;
+
+            EXCEPTION
+                WHEN OTHERS THEN
+                    p_status := 'Error while updating the CHAPTERS table';
+            END;
+
+            COMMIT;
+        END IF;
+
+        p_batch_id := t_batch_id;
+    END generate_batch_id;
+
+-- SCR 177145  -- LT2015SP1
+    PROCEDURE gen_seq (
+        p_type    IN VARCHAR2,
+        p_chp_id  IN VARCHAR2,
+        p_seq     OUT VARCHAR2,
+        p_err_msg OUT VARCHAR2
+    ) IS
+        l_temp_num NUMBER;
+        l_err_msg  VARCHAR2(200);
+    BEGIN
+        p_err_msg := 'OK';
+
+  -- generate new number
+
+        SELECT
+            max_number + 1
+        INTO l_temp_num
+        FROM
+            number_generation
+        WHERE
+                chapter_id = p_chp_id
+            AND number_type = p_type
+        FOR UPDATE OF max_number;
+  --
+        p_seq := lpad(to_char(l_temp_num), 4, '0');
+        UPDATE number_generation
+        SET
+            max_number = l_temp_num
+        WHERE
+                chapter_id = p_chp_id
+            AND number_type = p_type;
+
+        COMMIT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_err_msg := substr(sqlerrm, 1, 150);
+    END gen_seq;
+
+    FUNCTION gen_seq (
+        p_type   IN VARCHAR2,
+        p_chp_id IN VARCHAR2
+    ) RETURN NUMBER IS
+        PRAGMA autonomous_transaction;
+        l_temp_num NUMBER;
+    BEGIN
+        UPDATE number_generation
+        SET
+            max_number = max_number + 1
+        WHERE
+                chapter_id = p_chp_id
+            AND number_type = p_type
+        RETURNING max_number INTO l_temp_num;
+
+        COMMIT;
+        RETURN l_temp_num;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN 0;
+    END gen_seq;
+
+    PROCEDURE intercept_data_parser (
+        pl_inp_file_name IN VARCHAR2,
+        pl_inp_record    IN VARCHAR2,
+        pl_chapter_id    IN VARCHAR2,
+        pl_user_id       IN VARCHAR2,
+        pl_error         OUT VARCHAR2
+    ) IS
+
+        temp_coll_date     DATE;
+        field_delimiter    VARCHAR2(1);
+        repeat_delimiter   VARCHAR2(1);
+        p_file_name        VARCHAR2(100);
+        result_file_name   VARCHAR2(100);
+        read_record        VARCHAR2(900);
+        fetch_count        NUMBER := 0;
+        process_date_time  VARCHAR2(25);
+        v_unit_id          VARCHAR2(20);
+        v_chapter_id       VARCHAR2(4);
+        record_count       NUMBER := 0;
+        upload_count       NUMBER := 0;
+        err_msg            VARCHAR2(300);
+        ncount             NUMBER := 0;
+        no_of_units        NUMBER := 0;
+        g_local_time       DATE;
+        p_chp_sys_date     DATE;
+        start_time         VARCHAR2(30);
+        end_time           VARCHAR2(30);
+        v_inst_code        VARCHAR2(26);
+        v_unit_suffix      VARCHAR2(15);
+        v_product_code     VARCHAR2(10);
+        v_treat_start_time VARCHAR2(30);
+        v_tot_treat_time   VARCHAR2(20);
+        v_dosage_measured  VARCHAR2(20);
+        v_status           VARCHAR2(10);
+        v_target_dose      VARCHAR2(20);
+        v_operator_id      VARCHAR2(30);
+        v_chamber_number   VARCHAR2(10);
+        v_agitation_time   VARCHAR2(10);
+        v_inst_message     VARCHAR2(310);
+        v_software_ver     VARCHAR2(10);
+        v_site_code        VARCHAR2(20);
+        v_lot_number       VARCHAR2(15);
+        v_set_code         VARCHAR2(15);
+        v_check_sum        VARCHAR2(20);
+        first_delimitor    NUMBER := 0;
+        v_error_code       VARCHAR2(10);
+        ndup               NUMBER := 0;
+        l_error            VARCHAR2(2000);
+        exit_process EXCEPTION;
+
+        PROCEDURE get_column (
+            txtline IN VARCHAR2,
+            delimit IN CHAR,
+            strt    IN NUMBER,
+            endc    IN NUMBER,
+            outcol  OUT VARCHAR2
+        ) IS
+            stringend NUMBER;
+        BEGIN
+            IF instr(txtline, delimit, 1, endc) = 0 THEN
+                stringend := length(txtline);
+            ELSE
+                stringend := instr(txtline, delimit, 1, endc) - instr(txtline, delimit, 1, strt) - 1;
+            END IF;
+
+            outcol := substr(txtline, instr(txtline, delimit, 1, strt) + 1, stringend);
+
+        END get_column;
+
+        PROCEDURE read_delimiter IS
+            read_hdr VARCHAR2(250);
+        BEGIN
+            field_delimiter := ',';
+        END read_delimiter;
+
+    BEGIN
+        pl_error := 'OK';
+        result_file_name := pl_inp_file_name;
+        read_record := pl_inp_record;
+        v_chapter_id := pl_chapter_id;
+
+    --p_chp_sys_date:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+    --                                                          sysdate);
+        p_chp_sys_date := sysdate;
+        BEGIN
+            read_delimiter;
+            first_delimitor := instr(read_record, ',', 1);
+            v_inst_code := substr(read_record, 1, first_delimitor - 1);
+            IF
+                substr(v_inst_code, 1, 1) = '"'
+                AND substr(v_inst_code, -1) = '"'
+            THEN
+                v_inst_code := substr(v_inst_code, 2, length(v_inst_code) - 2);
+            END IF;
+
+     ---message('Inst code='||v_inst_code);
+        EXCEPTION
+            WHEN OTHERS THEN
+                l_error := 'Inst Parsing:'
+                           || substr(sqlerrm, 1, 200);
+                RAISE exit_process;
+        END;
+
+
+   --Get unit ID (Donation Number)
+        get_column(read_record, field_delimiter, 1, 2, v_unit_id);
+        v_unit_id := substr(v_unit_id, 2, length(v_unit_id) - 2);
+        IF length(v_unit_id) = 16 THEN
+            v_unit_id := substr(v_unit_id, 2, 13);
+        ELSIF length(v_unit_id) = 15 THEN
+            v_unit_id := substr(v_unit_id, 1, 13);
+        END IF;
+
+  --- message('v_unit_id='||v_unit_id);
+
+     --Get unit suffix
+        get_column(read_record, field_delimiter, 2, 3, v_unit_suffix);
+        v_unit_suffix := substr(v_unit_suffix, 2, length(v_unit_suffix) - 2);
+
+     ---message('unit_suffix-'||v_unit_suffix);
+
+     --Get product code
+        get_column(read_record, field_delimiter, 3, 4, v_product_code);
+        v_product_code := substr(v_product_code, 2, length(v_product_code) - 2);
+
+     ---message('v_product_code:'||v_product_code);
+
+     --Get treatment start time
+        get_column(read_record, field_delimiter, 4, 5, v_treat_start_time);
+        v_treat_start_time := substr(v_treat_start_time, 2, length(v_treat_start_time) - 2);
+
+     ---message('v_treat_start_time:'||v_treat_start_time);
+
+     --Get total treat time
+        get_column(read_record, field_delimiter, 5, 6, v_tot_treat_time);
+        v_tot_treat_time := substr(v_tot_treat_time, 2, length(v_tot_treat_time) - 2);
+
+      ---message('v_tot_treat_time:'||v_tot_treat_time);
+
+    --Get Dosabge measured
+        get_column(read_record, field_delimiter, 6, 7, v_dosage_measured);
+        v_dosage_measured := substr(v_dosage_measured, 2, length(v_dosage_measured) - 2);
+
+      ---message('v_dosage_measured:'||v_dosage_measured);
+
+   --Get status
+        get_column(read_record, field_delimiter, 7, 8, v_status);
+        v_status := substr(v_status, 2, length(v_status) - 2);
+
+      ---message('v_status:'||v_status);
+
+    --Get target dose
+        get_column(read_record, field_delimiter, 8, 9, v_target_dose);
+        v_target_dose := substr(v_target_dose, 2, length(v_target_dose) - 2);
+
+    --Get operator
+        get_column(read_record, field_delimiter, 9, 10, v_operator_id);
+        v_operator_id := substr(v_operator_id, 2, length(v_operator_id) - 2);
+
+      ---message('Operator ID:'||v_operator_id);
+
+     --Get chamber number
+        get_column(read_record, field_delimiter, 10, 11, v_chamber_number);
+        v_chamber_number := substr(v_chamber_number, 2, length(v_chamber_number) - 2);
+     ---message('v_chamber number:'||v_chamber_number);
+
+    --Get Agitation Time
+        get_column(read_record, field_delimiter, 11, 12, v_agitation_time);
+        v_agitation_time := substr(v_agitation_time, 2, length(v_agitation_time) - 2);
+    ---message('v_agitation_time:'||v_agitation_time);
+
+      --Get inst message
+        get_column(read_record, field_delimiter, 12, 13, v_inst_message);
+        v_inst_message := substr(v_inst_message, 2, length(v_inst_message) - 2);
+    ---message('v_inst_message:'||v_inst_message);
+
+    --Get software version
+        get_column(read_record, field_delimiter, 13, 14, v_software_ver);
+        v_software_ver := substr(v_software_ver, 2, length(v_software_ver) - 2);
+    ---message('v_software_ver:'||v_software_ver);
+
+    --Get site code
+        get_column(read_record, field_delimiter, 14, 15, v_site_code);
+        v_site_code := substr(v_site_code, 2, length(v_site_code) - 2);
+   ---message('v_site_code:'||v_site_code);
+
+    --Get Lot Number
+        get_column(read_record, field_delimiter, 15, 16, v_lot_number);
+        v_lot_number := substr(v_lot_number, 2, length(v_lot_number) - 2);
+   ---message('v_lot_number:'||v_lot_number);
+
+    --Get set code
+        get_column(read_record, field_delimiter, 16, 17, v_set_code);
+        v_set_code := substr(v_set_code, 2, length(v_set_code) - 2);
+    ---message('v_set_code:'||v_set_code);
+
+    --Get checksum
+        get_column(read_record, field_delimiter, 17, 18, v_check_sum);
+        v_check_sum := substr(v_check_sum, 2, length(v_check_sum) - 2);
+    ---message('v_check_sum:'||v_check_sum);
+
+     -- check for duplicate entry for unit+product code
+        SELECT
+            nvl(COUNT(*),
+                0)
+        INTO ndup
+        FROM
+            api_pathogen_reduction
+        WHERE
+                unit_id = v_unit_id
+            AND product_code = v_product_code;
+
+        IF ndup = 0 THEN
+            INSERT INTO api_pathogen_reduction (
+                file_id,
+                instrument_code,
+                unit_id,
+                unit_suffix,
+                product_code,
+                treatment_start_time,
+                total_treatment_time,
+                dosage_measured,
+                status,
+                target_dose,
+                operator_id,
+                chamber_number,
+                agitation_time,
+                inst_message_code,
+                software_version,
+                site_code,
+                lot_number,
+                set_code,
+                check_sum,
+                record_status,
+                insert_date,
+                insert_user,
+                program_id,
+                audit_key
+            ) VALUES (
+                result_file_name,
+                v_inst_code,
+                v_unit_id,
+                v_unit_suffix,
+                v_product_code,
+                TO_DATE(v_treat_start_time, 'YYYYMMDD HH24:MI'),
+                v_tot_treat_time,
+                TO_NUMBER(v_dosage_measured),
+                v_status,
+                TO_NUMBER(v_target_dose),
+                v_operator_id,
+                v_chamber_number,
+                v_agitation_time,
+                v_inst_message,
+                v_software_ver,
+                v_site_code,
+                v_lot_number,
+                v_set_code,
+                v_check_sum,
+                'p',
+                p_chp_sys_date,
+                nvl(pl_user_id, user),
+                'INTRCPT',
+                audit_seq_lab.NEXTVAL
+            );
+
+            COMMIT;
+        ELSE
+            l_error := 'Duplicate Data: '
+                       || v_unit_id
+                       || ' Prod '
+                       || v_product_code;
+            RAISE exit_process;
+        END IF;
+
+        g_local_time := sysdate;
+        end_time := to_char(g_local_time, 'mm-dd-yy hh24:mi:ss');
+    EXCEPTION
+        WHEN exit_process THEN
+            pl_error := l_error;
+        WHEN OTHERS THEN
+            pl_error := substr(sqlerrm, 1, 300);
+    END intercept_data_parser;
+
+--The below procedure is to override the confirmatroy tests in TESTS tablei
+-- if the customer override table is populated for the particular contract
+
+    PROCEDURE sch_customer_over_tests (
+        pl_unit_id              IN VARCHAR2,
+        pl_coll_date            IN DATE,
+        pl_chapter_id           IN VARCHAR2,
+        pl_reactive_test_id     IN VARCHAR2,
+        pl_reactive_result_code IN VARCHAR2,
+        pl_plate_seq            IN VARCHAR2,
+        pl_program_id           IN VARCHAR2,
+        pl_utrs_or_utb          IN VARCHAR2,
+        pl_out_status           OUT VARCHAR2
+    ) IS
+
+        pl_contract_id    VARCHAR2(15);
+        nutbcount         NUMBER := 0;
+        nutrscount        NUMBER := 0;
+        nutrs_test_seq_no NUMBER := 0;
+        nutb_test_seq_no  NUMBER := 0;
+        ncount            NUMBER := 0;
+        p_chp_date        DATE;
+        CURSOR confirm_override (
+            cont_id IN VARCHAR2,
+            l_date  IN DATE
+        ) IS
+        SELECT
+            confirm_test_id
+        FROM
+            valid_customer_confirm_tests
+        WHERE
+                contract_id = cont_id
+            AND reactive_test_id = pl_reactive_test_id
+            AND reactive_test_result = pl_reactive_result_code
+            AND reactive_plate_seq = pl_plate_seq
+            AND l_date BETWEEN eff_date AND nvl(term_date, l_date + 10);
+
+        PROCEDURE sched_conf_utr (
+            p_unit_id      VARCHAR2,
+            p_coll_date    DATE,
+            p_chapter_id   VARCHAR2,
+            p_conf_test_id VARCHAR2,
+            p_program_id   VARCHAR2
+        ) IS
+        BEGIN
+            INSERT INTO utrs (
+                unit_id,
+                coll_date,
+                chapter_id,
+                test_seq_no,
+                test_id,
+                insert_dats,
+                insert_user_id,
+                program_id
+            )
+                SELECT
+                    p_unit_id,
+                    p_coll_date,
+                    p_chapter_id,
+                    nvl(MAX(test_seq_no),
+                        0) + 1,
+                    p_conf_test_id,
+                    sysdate,
+                    lt_user_session.get_userid,
+                    p_program_id
+                FROM
+                    utrs utr1
+                WHERE
+                        utr1.unit_id = p_unit_id
+                    AND nvl(utr1.coll_date, sysdate + 100) = nvl(p_coll_date, sysdate + 100)
+                    AND nvl(utr1.chapter_id, 'NULL') = nvl(p_chapter_id, 'NULL')
+                    AND utr1.test_id = p_conf_test_id;
+
+        EXCEPTION
+            WHEN dup_val_on_index THEN
+                NULL;
+        END sched_conf_utr;
+	--
+
+        --Schedule a confirmatory test  in unit_test_base
+	--
+        PROCEDURE sched_conf_utb (
+            p_unit_id      VARCHAR2,
+            p_coll_date    DATE,
+            p_chapter_id   VARCHAR2,
+            p_conf_test_id VARCHAR2,
+            p_program_id   VARCHAR2
+        ) IS
+        BEGIN
+            INSERT INTO unit_test_base (
+                unit_id,
+                coll_date,
+                chapter_id,
+                test_seq_no,
+                test_id,
+                insert_dats,
+                insert_user_id,
+                program_id
+            )
+                SELECT
+                    p_unit_id,
+                    p_coll_date,
+                    p_chapter_id,
+                    nvl(MAX(test_seq_no),
+                        0) + 1,
+                    p_conf_test_id,
+                    sysdate,
+                    lt_user_session.get_userid,
+                    p_program_id
+                FROM
+                    unit_test_base utb1
+                WHERE
+                        utb1.unit_id = p_unit_id
+                    AND nvl(utb1.coll_date, sysdate + 100) = nvl(p_coll_date, sysdate + 100)
+                    AND nvl(utb1.chapter_id, 'NULL') = nvl(p_chapter_id, 'NULL')
+                    AND utb1.test_id = p_conf_test_id;
+
+        EXCEPTION
+            WHEN dup_val_on_index THEN
+                NULL;
+        END sched_conf_utb;
+	--
+
+        FUNCTION istestmissing (
+            p_unit_id    VARCHAR2,
+            p_coll_date  DATE,
+            p_chapter_id VARCHAR2,
+            p_test_id    VARCHAR2
+        ) RETURN BOOLEAN IS
+            test_count NUMBER(2);
+        BEGIN
+            SELECT
+                COUNT(*)
+            INTO test_count
+            FROM
+                utrs
+            WHERE
+                    unit_id = p_unit_id
+                AND nvl(coll_date, sysdate + 100) = nvl(p_coll_date, sysdate + 100)
+                AND nvl(chapter_id, 'NULL') = nvl(p_chapter_id, 'NULL')
+                AND test_id = p_test_id
+                AND cancel_flag IS NULL;
+
+            SELECT
+                test_count + COUNT(*)
+            INTO test_count
+            FROM
+                unit_test_base
+            WHERE
+                    unit_id = p_unit_id
+                AND nvl(coll_date, sysdate + 100) = nvl(p_coll_date, sysdate + 100)
+                AND nvl(chapter_id, 'NULL') = nvl(p_chapter_id, 'NULL')
+                AND test_id = p_test_id
+                AND cancel_flag IS NULL;
+
+            IF test_count > 0 THEN
+                RETURN FALSE;
+            ELSE
+                RETURN TRUE;
+            END IF;
+        END istestmissing;
+
+    BEGIN
+
+   -- get the contract ID
+
+        p_chp_date := lifetrack_timezone_convert.get_local_time(pl_chapter_id, sysdate);
+        BEGIN
+            SELECT
+                contract_id
+            INTO pl_contract_id
+            FROM
+                units
+            WHERE
+                    unit_id = pl_unit_id
+                AND ROWNUM = 1;
+
+        EXCEPTION
+            WHEN no_data_found THEN
+                pl_out_status := 'NO';    --- MLT- 2866
+                RETURN;
+            WHEN OTHERS THEN
+                pl_out_status := 'NO'; ---Location 10-'||substr(sqlerrm,1,40);   --- MLT- 2866
+                RETURN;
+        END;
+
+  --- check if the override records exists
+
+        SELECT
+            nvl(COUNT(*),
+                0)
+        INTO ncount
+        FROM
+            valid_customer_confirm_tests
+        WHERE
+                contract_id = pl_contract_id
+            AND reactive_test_id = pl_reactive_test_id
+            AND reactive_test_result = pl_reactive_result_code
+            AND reactive_plate_seq = pl_plate_seq
+            AND p_chp_date BETWEEN eff_date AND nvl(term_date, p_chp_date + 10);
+
+        IF ncount > 0 THEN
+            pl_out_status := 'YES';
+        ELSE
+            pl_out_status := 'NO';       --means no customer override occured
+            RETURN;
+        END IF;
+
+        FOR z IN confirm_override(pl_contract_id, p_chp_date) LOOP
+            BEGIN
+                IF istestmissing(pl_unit_id, pl_coll_date, pl_chapter_id, z.confirm_test_id) THEN
+
+        -- Check if the test needs to be scheduled in UTRS or UTB
+
+                    IF pl_utrs_or_utb = 'UTRS' THEN
+                        sched_conf_utr(pl_unit_id, pl_coll_date, pl_chapter_id, z.confirm_test_id, pl_program_id);
+                    ELSIF pl_utrs_or_utb = 'UTB' THEN
+                        sched_conf_utb(pl_unit_id, pl_coll_date, pl_chapter_id, z.confirm_test_id, pl_program_id);
+                    END IF;
+
+                END IF;
+
+            EXCEPTION
+                WHEN OTHERS THEN
+                    pl_out_status := 'Location-11'
+                                     || substr(sqlerrm, 1, 60);
+                    RETURN;
+            END;
+        END LOOP;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            pl_out_status := 'Location-12'
+                             || substr(sqlerrm, 1, 65);
+    END sch_customer_over_tests;
+
+-------------------------------------
+    PROCEDURE process_tcicoldt_units (
+        units_list_in IN string_array,
+        chapter_id_in IN VARCHAR2,
+        batch_id_out  OUT VARCHAR2,
+        status_out    OUT VARCHAR2
+    ) IS
+        ncnt             NUMBER;
+        lv_orig_batch_id VARCHAR2(100);
+        lv_status        VARCHAR2(1000);
+        indx             PLS_INTEGER;
+    BEGIN
+        -- status_out : 'OK'
+            -- batch_id_out : NULL => new batch id is not required.
+            -- batch_id_out : NOT NULL => new batch Id was created and returned.
+
+        -- status_out : NOT 'OK' => error in processing.
+            -- batch_id_out : Ignore this value.
+
+        status_out := 'OK';
+        batch_id_out := NULL;
+        IF units_list_in.count = 0 THEN
+            status_out := 'Err1: Units not found in array';
+            RETURN;
+        END IF;
+        indx := units_list_in.first;
+        -- Get batch id for first unit id in the list.
+        BEGIN
+            SELECT
+                batch_id
+            INTO lv_orig_batch_id
+            FROM
+                units
+            WHERE
+                    unit_id = units_list_in(indx)
+                AND chapter_id = chapter_id_in
+                AND ROWNUM = 1;
+
+        EXCEPTION
+            WHEN no_data_found THEN
+                status_out := 'Err2: Batch ID cannot be retrieved for ' || units_list_in(indx);
+        END;
+        -------
+
+        SELECT
+            COUNT(DISTINCT batch_id)
+        INTO ncnt
+        FROM
+            units
+        WHERE
+            unit_id IN (
+                SELECT
+                    *
+                FROM
+                    TABLE ( units_list_in )
+            )
+            AND chapter_id = chapter_id_in;
+
+        -- If the list has units belonging to multiple batches - create a new batch.
+        IF ncnt > 1 THEN
+            lab_common.gen_batch_id(substr(lv_orig_batch_id, 1, 6), chapter_id_in, batch_id_out, lv_status);
+
+            IF lv_status IS NOT NULL THEN
+                batch_id_out := NULL;
+                status_out := 'Err3: ' || lv_status;
+            END IF;
+
+            RETURN;
+        END IF;
+
+        IF ncnt = 1 THEN
+            SELECT
+                COUNT(1)
+            INTO ncnt
+            FROM
+                units
+            WHERE
+                    batch_id = lv_orig_batch_id
+                AND unit_id NOT IN (
+                    SELECT
+                        *
+                    FROM
+                        TABLE ( units_list_in )
+                );
+
+            -- not all the units from the batch are scanned,
+            -- so create a new batch for the scanned units.
+            IF ncnt > 0 THEN
+                lab_common.gen_batch_id(substr(lv_orig_batch_id, 1, 6), chapter_id_in, batch_id_out, lv_status);
+
+                IF lv_status IS NOT NULL THEN
+                    batch_id_out := NULL;
+                    status_out := 'Err4: ' || lv_status;
+                END IF;
+
+                RETURN;
+            END IF;
+
+        END IF;
+
+    END process_tcicoldt_units;
+
+    PROCEDURE object_lock_unlock (
+        p_pkg_name IN VARCHAR2,
+        p_fcn_name IN VARCHAR2,
+        p_user     IN VARCHAR2,
+        p_flag_ul  IN VARCHAR2
+    ) IS
+        l_cnt NUMBER;
+    BEGIN
+        IF p_flag_ul = 'L' THEN
+            INSERT INTO db_package_lock (
+                package_name,
+                function_name,
+                locked_on,
+                locked_by
+            ) VALUES (
+                p_pkg_name,
+                p_fcn_name,
+                sysdate,
+                p_user
+            );
+
+        ELSIF p_flag_ul = 'U' THEN
+            DELETE FROM db_package_lock
+            WHERE
+                    package_name = p_pkg_name
+                AND function_name = nvl(p_fcn_name, function_name);
+
+        END IF;
+
+        COMMIT;
+    END object_lock_unlock;
+    
+    FUNCTION delunit_tabCount(
+        table_in IN VARCHAR2, 
+        colname_in IN VARCHAR2, 
+        colvalue_in IN VARCHAR2 )
+        RETURN PLS_INTEGER IS
+        
+        lv_query VARCHAR2(32767);
+        ln_return PLS_INTEGER;
+    BEGIN
+        IF table_in IS NULL OR colname_in IS NULL OR colvalue_in IS NULL
+        THEN
+            RETURN 0;
+        END IF;
+        
+        lv_query := 'SELECT COUNT(*) 
+                       FROM ' || table_in ||
+                    ' WHERE ' || colname_in || ' = :value_in';
+                       
+        EXECUTE IMMEDIATE lv_query INTO ln_return USING colvalue_in;
+        
+        RETURN ln_return;
+    END delunit_tabCount;
+    
+    PROCEDURE delunit_insert_deleted_units(unit_id_in IN VARCHAR2,
+                                   prog_name_in IN VARCHAR2, 
+                                   user_id_in   IN VARCHAR2,
+                                   status_out OUT VARCHAR2) IS
+        lv_query VARCHAR2(32767);
+    BEGIN
+        status_out := 'OK';
+        
+        IF unit_id_IN IS NULL OR
+            prog_name_in IS NULL OR
+            user_id_in IS NULL THEN
+            status_out := 'Missing input parameters - Unit Id/Prog. Name/User Id';
+            RETURN;
+        END IF;
+        
+        FOR rec IN (
+          SELECT UPPER(table_name) table_name, 
+                 UPPER(column_name) column_name
+            FROM appl_rep_columns
+            WHERE application = prog_name_in
+              AND table_name in (select table_name from 
+                                             all_tab_columns
+                                             where column_name = 'AUDIT_KEY')        
+        )
+        LOOP
+            lv_query :=  'INSERT INTO DELETED_UNITS(audit_key, unit_id, table_name,'||
+                             ' user_id, program_id)'|| 
+                             ' SELECT  audit_key, '||rec.column_name||
+                              ' , :table_name, :user_id, :program_id ' ||
+                              ' FROM '|| rec.table_name||
+                              ' WHERE '|| rec.column_name||' = :unit_id';   
+            EXECUTE IMMEDIATE lv_query using rec.table_name, user_id_in, prog_name_in, unit_id_in;                      
+        END LOOP;
+    END delunit_insert_deleted_units;
+
+    PROCEDURE delunit_do_delete(unit_id_in IN VARCHAR2, 
+                        prog_name_in IN VARCHAR2, 
+                        status_out OUT VARCHAR2) IS
+        lv_query VARCHAR2(32767);
+        lv_debugMsg VARCHAR2(200);
+    BEGIN
+        status_out := 'OK';
+        lv_debugMsg := NULL;
+        FOR rec IN (SELECT table_name, column_name
+                      FROM appl_rep_columns
+                      WHERE application = prog_name_in)
+        LOOP
+            lv_debugMsg := rec.table_name || '-' || rec.column_name;
+            lv_query := 'DELETE FROM ' || rec.table_name ||
+                        '  WHERE ' || rec.column_name || ' = :col_value';
+            
+            EXECUTE IMMEDIATE lv_query USING unit_id_in;        
+        
+        END LOOP;
+    EXCEPTION
+        WHEN OTHERS THEN
+            status_out := lv_debugMsg || ' - ERR: ' || SUBSTR(sqlerrm, 1, 1500);
+    END delunit_do_delete;
+
+
+    FUNCTION wallet_enabled RETURN BOOLEAN 
+    IS
+	
+	v_wallet_enabled CHAR(1);
+	
+    BEGIN
+
+	SELECT	NVL(WALLET_ENABLED,'N')  
+        INTO v_wallet_enabled
+        FROM lt_application_config;
+
+	IF v_wallet_enabled ='Y' 
+	THEN
+		RETURN TRUE;
+	ELSE
+		RETURN FALSE;
+	END IF;
+  
+    EXCEPTION
+	WHEN OTHERS 
+	THEN
+		RETURN FALSE;
+    END wallet_enabled;
+
+
+    
+END sbclib;
+/

@@ -1,0 +1,347 @@
+<div class="raw-data-tab">
+  <!-- Toolbar - Only show when data has been loaded -->
+  @if (chapterId && instrumentId && hasLoadedData()) {
+    <div class="toolbar">
+      <div class="toolbar__controls-left">
+        <button mat-button class="filter-button" cdkOverlayOrigin #filterOrigin="cdkOverlayOrigin"
+                (click)="toggleFilter()" [class.filter-button--active]="isFilterOpen"
+                aria-label="Toggle filter panel"
+                [attr.aria-expanded]="isFilterOpen">
+          <mat-icon aria-hidden="true">filter_list</mat-icon>
+          FILTER
+        </button>
+
+        <!-- Filter overlay -->
+        <ng-template cdkConnectedOverlay [cdkConnectedOverlayOrigin]="filterOrigin"
+                     [cdkConnectedOverlayOpen]="isFilterOpen" [cdkConnectedOverlayHasBackdrop]="true"
+                     cdkConnectedOverlayBackdropClass="cdk-overlay-transparent-backdrop"
+                     (backdropClick)="onFilterClose()">
+          <app-raw-data-filter-panel
+            [currentFilters]="currentFilters"
+            [chapterId]="chapterId"
+            [instrumentId]="instrumentId"
+            [rawDataList]="rawDataList()"
+            (apply)="onFilterApply($event)"
+            (close)="onFilterClose()">
+          </app-raw-data-filter-panel>
+        </ng-template>
+
+        <!-- Inline Filter Chips -->
+        @if (filterChips.length > 0) {
+          <app-filter-chips
+            [chips]="filterChips"
+            [maxVisible]="3"
+            (removeChip)="removeFilterChip($event)"
+            (clearAll)="clearAllFilters()">
+          </app-filter-chips>
+        }
+      </div>
+
+      <app-search-bar
+        [config]="searchConfig"
+        (search)="onSearch($event)"
+        class="search-bar" />
+    </div>
+  }
+
+  <!-- Get Started State - Before selecting chapter/instrument -->
+  @if (!chapterId || !instrumentId) {
+    <div class="empty-state" role="status">
+      <mat-icon class="empty-state__icon" aria-hidden="true">edit</mat-icon>
+      <p class="empty-state__title">Get Started</p>
+      <p class="empty-state__message">
+        Select a Chapter ID and Instrument ID to access instrument interface functions.
+      </p>
+    </div>
+  }
+
+  <!-- Table Container - Show when chapter and instrument are selected -->
+  @if (chapterId && instrumentId) {
+    <div class="table-container">
+      <!-- Loading State -->
+      @if (loading()) {
+        <div class="table-loading-state" role="status" aria-live="polite">
+          <mat-spinner diameter="48" aria-label="Loading raw data"></mat-spinner>
+          <p>Loading raw data...</p>
+        </div>
+      }
+
+      <!-- Empty State - No data loaded yet -->
+      @if (!loading() && !hasLoadedData()) {
+        <div class="table-empty-state">
+          <mat-icon class="empty-icon" aria-hidden="true">edit</mat-icon>
+          <p class="empty-message">Click the RETRIEVE button to load raw data.</p>
+        </div>
+      }
+
+      <!-- Data Table - Always show when data has been loaded -->
+      @if (!loading() && hasLoadedData()) {
+        <div class="table-wrapper">
+          <table mat-table [dataSource]="paginatedData()" class="data-table" multiTemplateDataRows aria-label="Raw data table">
+          <!-- Expand Column -->
+          <ng-container matColumnDef="expand">
+            <th mat-header-cell *matHeaderCellDef class="expand-column">
+              <button
+                mat-icon-button
+                (click)="toggleAllRows()"
+                [attr.aria-label]="allExpanded() ? 'Collapse all rows' : 'Expand all rows'"
+                [attr.aria-expanded]="allExpanded()">
+                <mat-icon aria-hidden="true">{{ allExpanded() ? 'expand_less' : 'expand_more' }}</mat-icon>
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row" class="expand-column">
+              <button
+                mat-icon-button
+                (click)="toggleRow(row); $event.stopPropagation()"
+                [attr.aria-label]="isExpanded(row) ? 'Collapse row' : 'Expand row'"
+                [attr.aria-expanded]="isExpanded(row)">
+                <mat-icon aria-hidden="true">
+                  {{ isExpanded(row) ? 'expand_less' : 'expand_more' }}
+                </mat-icon>
+              </button>
+            </td>
+          </ng-container>
+
+          <!-- File ID Column -->
+          <ng-container matColumnDef="fileId">
+            <th mat-header-cell *matHeaderCellDef>
+              <button mat-button class="column-header">
+                File ID
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row" class="truncate-cell" [matTooltip]="row.fileId || '-'" matTooltipPosition="below">{{ row.fileId || '-' }}</td>
+          </ng-container>
+
+          <!-- Unit ID Column -->
+          <ng-container matColumnDef="unitId">
+            <th mat-header-cell *matHeaderCellDef [attr.aria-sort]="sortDirection() === 'ASC' ? 'ascending' : 'descending'">
+              <button mat-button class="column-header column-header--sortable" (click)="toggleSort()" aria-label="Sort by Unit ID">
+                <span>Unit ID</span>
+                <mat-icon class="sort-icon" aria-hidden="true">{{ sortDirection() === 'ASC' ? 'arrow_upward' : 'arrow_downward' }}</mat-icon>
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.unitId || '-' }}</td>
+          </ng-container>
+
+          <!-- Machine Test ID Column -->
+          <ng-container matColumnDef="machineTestId">
+            <th mat-header-cell *matHeaderCellDef>
+              <button mat-button class="column-header">
+                Test ID
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.machineTestId || '-' }}</td>
+          </ng-container>
+
+          <!-- Machine Result Column -->
+          <ng-container matColumnDef="machineResult">
+            <th mat-header-cell *matHeaderCellDef>
+              <button mat-button class="column-header">
+                Result
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.machineResult || '-' }}</td>
+          </ng-container>
+
+          <!-- Result Date Column -->
+          <ng-container matColumnDef="resultDate">
+            <th mat-header-cell *matHeaderCellDef>
+              <button mat-button class="column-header">
+                Result Date
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.resultDate ? (row.resultDate | date: 'dd-MMM-yyyy' | uppercase) : '-' }}</td>
+          </ng-container>
+
+          <!-- Result User ID Column -->
+          <ng-container matColumnDef="resultUserId">
+            <th mat-header-cell *matHeaderCellDef>
+              <button mat-button class="column-header">
+                Result User ID
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.resultUserId || '-' }}</td>
+          </ng-container>
+
+          <!-- Final Pool Size Column -->
+          <ng-container matColumnDef="finalPoolSize">
+            <th mat-header-cell *matHeaderCellDef>
+              <button mat-button class="column-header">
+                Pool Size
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.finalPoolSize ?? '-' }}</td>
+          </ng-container>
+
+          <!-- External Batch ID Column -->
+          <ng-container matColumnDef="extBatchId">
+            <th mat-header-cell *matHeaderCellDef>
+              <button mat-button class="column-header">
+                External Batch ID
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.extBatchId || '-' }}</td>
+          </ng-container>
+
+          <!-- Upload Status Column -->
+          <ng-container matColumnDef="uploadStatus">
+            <th mat-header-cell *matHeaderCellDef class="status-column-header">
+              <button mat-button class="column-header">
+                Status
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row" class="status-column-cell">
+              <span class="status-badge" [ngClass]="getStatusClass(row.uploadStatus)" [attr.aria-label]="'Status: ' + getStatusLabel(row.uploadStatus)">
+                <mat-icon aria-hidden="true">{{ getStatusIcon(row.uploadStatus) }}</mat-icon>
+                {{ getStatusLabel(row.uploadStatus) }}
+              </span>
+            </td>
+          </ng-container>
+
+          <!-- Expanded Detail Column -->
+          <ng-container matColumnDef="expandedDetail">
+            <td mat-cell *matCellDef="let row" [attr.colspan]="displayedColumns.length"></td>
+          </ng-container>
+
+          <!-- Header and Row Definitions -->
+          <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+          <tr
+            mat-row
+            *matRowDef="let row; columns: displayedColumns"
+            [class.expanded-row]="isExpanded(row)"
+            class="table-row"></tr>
+
+          <!-- Expanded Row Content -->
+          <tr class="detail-row" *matRowDef="let row; columns: ['expandedDetail']">
+            @if (isExpanded(row)) {
+              <td [attr.colspan]="displayedColumns.length" class="expanded-content">
+                <div class="detail-container">
+                  <!-- Test IDs & Results -->
+                  <div class="detail-section">
+                    <h3 class="detail-title">Test IDs & Results</h3>
+                    <div class="detail-grid">
+                      <div class="detail-item">
+                        <span class="detail-label">Test ID 1</span>
+                        <span class="detail-value">{{ row.testId1 || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Result 1</span>
+                        <span class="detail-value">{{ row.result1 || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Test ID 2</span>
+                        <span class="detail-value">{{ row.testId2 || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Result 2</span>
+                        <span class="detail-value">{{ row.result2 || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Test ID 3</span>
+                        <span class="detail-value">{{ row.testId3 || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Result 3</span>
+                        <span class="detail-value">{{ row.result3 || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Test ID 4</span>
+                        <span class="detail-value">{{ row.testId4 || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Result 4</span>
+                        <span class="detail-value">{{ row.result4 || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Test ID 5</span>
+                        <span class="detail-value">{{ row.testId5 || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Result 5</span>
+                        <span class="detail-value">{{ row.result5 || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Test ID 6</span>
+                        <span class="detail-value">{{ row.testId6 || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Result 6</span>
+                        <span class="detail-value">{{ row.result6 || '-' }}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Additional Details -->
+                  <div class="detail-section">
+                    <h3 class="detail-title">Additional Details</h3>
+                    <div class="detail-grid">
+                      <div class="detail-item">
+                        <span class="detail-label">Collection Date</span>
+                        <span class="detail-value">{{ row.collDate ? (row.collDate | date: 'dd-MMM-yyyy' | uppercase) : '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Skip Record</span>
+                        <span class="detail-value">{{ row.skipRecord || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Well No</span>
+                        <span class="detail-value">{{ row.wellNumber || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Abs</span>
+                        <span class="detail-value">{{ row.absorbance || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Ratio</span>
+                        <span class="detail-value">{{ row.ratio || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Error Code</span>
+                        <span class="detail-value" [class.error-text]="row.errorCode">{{ row.errorCode || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Plate ID</span>
+                        <span class="detail-value">{{ row.plateId || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Site ID</span>
+                        <span class="detail-value">{{ row.siteId || '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">Parsed By</span>
+                        <span class="detail-value">{{ row.parsedBy || '-' }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </td>
+            }
+          </tr>
+        </table>
+        </div>
+
+        <!-- Empty State Overlay - Show when no data -->
+        @if (paginatedData().length === 0) {
+          <div class="table-empty-state">
+            <mat-icon class="empty-icon" aria-hidden="true">edit</mat-icon>
+            <p class="empty-title">No Data Available</p>
+            <p class="empty-message">No data found for the selected Instrument ID.</p>
+          </div>
+        }
+
+        <!-- Paginator -->
+        <nav class="paginator-nav" aria-label="Table pagination navigation">
+          <mat-paginator
+            [length]="totalItems()"
+            [pageSize]="pageSize()"
+            [pageIndex]="pageIndex()"
+            [pageSizeOptions]="[10, 25, 50, 100]"
+            (page)="onPageChange($event)"
+            showFirstLastButtons
+            aria-label="Select page">
+          </mat-paginator>
+        </nav>
+      }
+    </div>
+  }
+</div>

@@ -1,0 +1,142 @@
+CREATE OR REPLACE PACKAGE UPDATE_DST
+/*******************************************************************************
+* Package Name	:	update_dst.pkg                                             *
+*                   This package will be schduled to run at specific interavls *
+*                   update chapters table with DST specific timezone values    *
+********************************************************************************
+* Developed By	:	Arun	On	:	29 April 2011	Version	:	1.0 (Initial)  *
+********************************************************************************
+* Modification History                                                         *
+*                                                                              *
+* Modified by		On			IM No/Version	Remarks                        *
+* ***************** *********** *************** ********************************
+* 01 Arun       04/29/11  Initial Version
+* 02 Ashok      03/10/16  IM 208 -- valid_dst_cur cursor query modified.       *
+* 03 Ashok      03/14/16  IM 215 --     *
+*                                                                              *
+*******************************************************************************/
+IS
+
+	PROCEDURE UPDATE_DST;
+END;
+/
+CREATE OR REPLACE PACKAGE BODY update_dst
+/*******************************************************************************
+* Package Name	:	update_dst.pkg                                             *
+*                   This package will be schduled to run at specific interavls *
+*                   update chapters table with DST specific timezone values    *
+********************************************************************************
+* Developed By	:	Arun	On	:	29 April 2011	Version	:	1.0 (Initial)  *
+********************************************************************************
+* Modification History                                                         *
+*                                                                              *
+* Modified by		On			IM No/Version	Remarks                        *
+* ***************** *********** *************** ********************************
+*                                                                              *
+*                                                                              *
+*******************************************************************************/
+IS
+	FUNCTION get_local_date	(
+								chapter IN VARCHAR2
+								,v_date IN DATE DEFAULT SYSDATE
+							)
+	RETURN DATE
+		/*  Function to return local date value,  in case no parameter this
+		will return system date converted to local date--*/
+	IS
+		v_localdate	DATE;
+		is_timezone_enabled	CHAR(1);
+	BEGIN
+		/* To display local time*/
+		SELECT time_zone_enabled
+		INTO is_timezone_enabled
+		FROM lt_application_config
+		;
+
+		IF is_timezone_enabled = 'Y'
+			THEN
+			Lifetrack_timezone_convert.get_local_time(chapter,v_date ,v_localdate);
+		ELSE
+			v_localdate	:=	SYSDATE;
+		END IF;
+
+	  RETURN v_localdate;
+	END;
+
+	PROCEDURE update_dst
+	IS
+		CURSOR valid_dst_cur
+		IS
+		SELECT	chapter_id
+				,start_time
+				,end_time
+				,tz_base_diff
+				,off_set
+        -- IM 208
+				--,(SUBSTR(EXTRACT(HOUR FROM tzbdiff),1,1)||
+					--LPAD(SUBSTR(EXTRACT(HOUR FROM tzbdiff),2,1),2,0)||':'||
+					--LPAD(EXTRACT(MINUTE FROM tzbdiff),2,0)) dst_base_diff
+        ,DECODE
+         (
+          SUBSTR(tzbdiff,1,1),
+          '-', '-' || LPAD(SUBSTR(EXTRACT(HOUR FROM tzbdiff),2,2),2,0),
+          '+', '+' || LPAD(SUBSTR(EXTRACT(HOUR FROM tzbdiff),1,2),2,0)
+         ) || ':'||	LPAD(EXTRACT(MINUTE FROM tzbdiff),2,0) dst_base_diff
+				,time_zone
+		FROM	(SELECT	ch.chapter_id
+						,vcdo.start_time
+						,vcdo.end_time
+						,tz_base_diff
+						,vcdo.off_set
+						,(SUBSTR(vcdo.tz_base_diff,1,1)||'1')*TO_DSINTERVAL('0 '||SUBSTR(vcdo.tz_base_diff,2, 5)||':00')
+						--,vcdo.tz_base_diff
+						+to_dsinterval('0 '||TRUNC(vcdo.off_set/60)||':'||(vcdo.off_set-TRUNC(vcdo.off_set/60)*60)||':00') tzbdiff
+						,ch.time_zone
+				FROM 	valid_chapter_dst_offset vcdo
+						,chapters ch
+				WHERE 	vcdo.chapter_id = ch.chapter_id
+				)
+		;
+
+		tz_diff		VARCHAR2(15);tz_diff1		VARCHAR2(15);
+		dtLocalDate	DATE;
+		sql_str		VARCHAR2(500);
+
+	BEGIN
+		FOR valid_dst IN valid_dst_cur
+		LOOP
+			dtLocalDate	:=get_local_date(valid_dst.chapter_id);
+
+			IF 	TO_CHAR(valid_dst.start_time,'RRRR')= TO_CHAR(dtLocalDate,'RRRR')
+			THEN
+
+				sql_str := 'UPDATE CHAPTERS SET TIME_ZONE = :1 WHERE chapter_id = :2 RETURNING time_zone INTO :3';
+
+				IF valid_dst.start_time <= dtLocalDate
+					AND valid_dst.end_time >= dtLocalDate
+				THEN
+					--dbms_output.put_line('In DST '||valid_dst.dst_base_diff);
+					tz_diff	:=	valid_dst.dst_base_diff;
+				ELSE
+					tz_diff	:=	valid_dst.tz_base_diff;
+					dbms_output.put_line('In Non DST '||valid_dst.tz_base_diff);
+
+				END IF;
+				--dbms_output.put_line('In Final '||tz_diff||' : '||valid_dst.time_zone);
+				IF valid_dst.time_zone <> NVL(tz_diff,valid_dst.time_zone)
+				THEN
+					EXECUTE IMMEDIATE sql_str USING tz_diff, valid_dst.chapter_id RETURNING INTO tz_diff1 ;
+					--dbms_output.put_line('In Final '||tz_diff1);
+				END IF;
+			END IF;
+
+		END LOOP;
+
+		COMMIT;
+	EXCEPTION
+		WHEN OTHERS THEN NULL;
+	END
+	;
+END;
+/
+

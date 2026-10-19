@@ -1,0 +1,360 @@
+<h2 class="cdk-visually-hidden">Override Rules</h2>
+<!-- Test ID Selection Card -->
+<div class="controls-card">
+  <div class="controls-row">
+    <mat-form-field appearance="fill" class="test-id-select">
+      <mat-label>Test ID</mat-label>
+      <mat-select [formControl]="testIdControl"
+                  placeholder="Select Test ID"
+                  [disabled]="isEditMode"
+                  (openedChange)="onTestIdDropdownOpened($event)">
+        <mat-option>
+          <ngx-mat-select-search
+            [formControl]="testIdSearchControl"
+            placeholderLabel="Search Test ID..."
+            noEntriesFoundLabel="No matching test IDs"
+            aria-label="Search test IDs">
+          </ngx-mat-select-search>
+        </mat-option>
+        <mat-option *ngFor="let testId of testIdOptions()" [value]="testId.testId">
+          {{ testId.testId }}{{ testId.testDesc ? ' - ' + testId.testDesc : '' }}
+        </mat-option>
+      </mat-select>
+    </mat-form-field>
+
+    <button
+      type="button"
+      mat-button
+      class="btn-clear"
+      (click)="onClearTestId()"
+      [disabled]="isEditMode || !testIdControl.value"
+      aria-label="Clear test ID selection">
+      CLEAR ALL
+    </button>
+  </div>
+</div>
+
+<!-- Table Card -->
+<div class="override-rules__card" #tableCard>
+  <!-- Table Controls -->
+  <div class="override-rules__controls">
+    <!-- Left section: Filter button / Validation Error -->
+    <div class="override-rules__controls-left">
+      <button
+        *ngIf="!isEditMode"
+        #filterBtn
+        type="button"
+        mat-button
+        class="filter-button"
+        [class.filter-button--active]="isFilterOpen"
+        aria-label="Open filter options"
+        (click)="openFilter()">
+        <span class="filter-icon" aria-hidden="true"></span>
+        FILTER
+      </button>
+
+      <!-- Validation Error Message (left side in edit mode, only after save attempt) -->
+      <div *ngIf="isEditMode && showValidationBanner && hasValidationErrors" class="validation-error-inline" role="alert" aria-live="polite">
+        <mat-icon aria-hidden="true">error</mat-icon>
+        <span>Please address the fields indicated below.</span>
+      </div>
+
+      <!-- Filter Chips -->
+      <app-filter-chips
+        *ngIf="!isEditMode && filterChips.length > 0"
+        [chips]="filterChips"
+        [maxVisible]="1"
+        (removeChip)="onRemoveFilterChip($event)"
+        (clearAll)="clearAllFilters()">
+      </app-filter-chips>
+    </div>
+
+    <!-- Right section: Buttons and Search bar -->
+    <div class="override-rules__controls-right">
+      <!-- Normal mode: Show ADD/EDIT button next to search -->
+      <button
+        *ngIf="!isEditMode"
+        mat-stroked-button
+        class="add-edit-button"
+        [disabled]="!testIdControl.value"
+        (click)="onAddEditClick()"
+        aria-label="Add or edit override rule">
+        ADD/EDIT OVERRIDE RULE
+      </button>
+
+      <app-search-bar
+        *ngIf="!isEditMode"
+        [config]="searchConfig"
+        [class.search-bar-disabled]="!testIdControl.value"
+        (search)="onSearch($event)">
+      </app-search-bar>
+
+      <!-- Edit mode: Show action buttons on the right -->
+      <div *ngIf="isEditMode" class="edit-mode-actions">
+        <button
+          mat-stroked-button
+          class="btn-add-new"
+          (click)="onAddNewRow()"
+          aria-label="Add new override rule">
+          <mat-icon aria-hidden="true">add</mat-icon>
+          ADD NEW OVERRIDE RULE
+        </button>
+
+        <button
+          mat-stroked-button
+          class="btn-cancel"
+          (click)="onCancelEdit()"
+          aria-label="Cancel editing">
+          <mat-icon aria-hidden="true">close</mat-icon>
+          CANCEL
+        </button>
+
+        <button
+          mat-raised-button
+          class="btn-save"
+          [disabled]="isLoading || dirtyRowIds.size === 0"
+          (click)="onSave()"
+          aria-label="Save changes">
+          <mat-icon aria-hidden="true">check</mat-icon>
+          SAVE
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Error State -->
+  <div
+    *ngIf="hasError && !isLoading"
+    class="override-rules__error"
+    role="alert"
+    aria-live="assertive"
+    aria-atomic="true">
+    <mat-icon class="error-icon" aria-hidden="true">error_outline</mat-icon>
+    <p class="error-message">{{ errorMessage }}</p>
+    <button type="button" mat-raised-button color="primary" (click)="loadData()" aria-label="Retry loading data">
+      Retry
+    </button>
+  </div>
+
+  <!-- Read-only Data Table (normal mode) -->
+  <div *ngIf="!isEditMode" class="override-rules__table-wrapper">
+    <app-data-table
+      *ngIf="!hasError"
+      [config]="tableConfig"
+      [data]="dataSource"
+      [loading]="isLoading"
+      (pageChange)="onPageChange($event)">
+    </app-data-table>
+  </div>
+
+  <!-- Editable Table (edit mode) -->
+  <div *ngIf="isEditMode" class="editable-table-wrapper">
+    <!-- Loading state while preparing editable rows -->
+    <div *ngIf="isLoading" class="editable-table__loading" role="status" aria-live="polite">
+      <mat-spinner diameter="48" aria-label="Loading override rules"></mat-spinner>
+      <p class="data-table__loading-text">Loading override rules...</p>
+    </div>
+    <table *ngIf="!isLoading" class="editable-table" aria-label="Edit override rules">
+      <thead>
+        <tr>
+          <th scope="col">Test ID</th>
+          <th scope="col">Current Result</th>
+          <th scope="col">New Result</th>
+          <th scope="col">Override Flag</th>
+          <th scope="col">Interdiction</th>
+          <th scope="col">Effective Date</th>
+          <th scope="col">Termination Date</th>
+          <th scope="col" *ngIf="hasNewRowsFlag"><span class="cdk-visually-hidden">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr *ngFor="let row of editableRows; let i = index; trackBy: trackByRow"
+            [class.dirty-row]="dirtyRowIds.has(i)"
+            [class.error-row]="hasRowErrors(row)">
+
+          <!-- Test ID (read-only) -->
+          <td>{{ row.testId }}</td>
+
+          <!-- Current Result (searchable dropdown) -->
+          <td>
+            <mat-form-field appearance="outline"
+                           class="table-field"
+                           [class.mat-form-field-invalid]="row.errors?.['currentResultStatus']"
+                           [matTooltip]="row.errors?.['currentResultStatus'] || ''"
+                           matTooltipPosition="below">
+              <mat-select [(ngModel)]="row.currentResultStatus"
+                         (ngModelChange)="onRowFieldChange(i, 'currentResultStatus', $event)"
+                         (openedChange)="onDropdownOpened(i, 'currentResult', $event); !$event && currentResultSearchControl.setValue('')"
+                         aria-label="Current Result">
+                <mat-option>
+                  <ngx-mat-select-search
+                    [formControl]="currentResultSearchControl"
+                    placeholderLabel="Search..."
+                    noEntriesFoundLabel="No results found"
+                    aria-label="Search current results">
+                  </ngx-mat-select-search>
+                </mat-option>
+                <mat-option *ngFor="let opt of (isDropdownOpen(i, 'currentResult') ? filteredCurrentResultOptions : allResultOptions)" [value]="opt.value">
+                  {{ opt.label }}
+                </mat-option>
+              </mat-select>
+              <mat-error *ngIf="row.errors?.['currentResultStatus']">
+                {{ row.errors?.['currentResultStatus'] }}
+              </mat-error>
+            </mat-form-field>
+          </td>
+
+          <!-- New Result (searchable dropdown) -->
+          <td>
+            <mat-form-field appearance="outline"
+                           class="table-field"
+                           [class.mat-form-field-invalid]="row.errors?.['newResultStatus']"
+                           [matTooltip]="row.errors?.['newResultStatus'] || ''"
+                           matTooltipPosition="below">
+              <mat-select [(ngModel)]="row.newResultStatus"
+                         (ngModelChange)="onRowFieldChange(i, 'newResultStatus', $event)"
+                         (openedChange)="onDropdownOpened(i, 'newResult', $event); !$event && newResultSearchControl.setValue('')"
+                         aria-label="New Result">
+                <mat-option>
+                  <ngx-mat-select-search
+                    [formControl]="newResultSearchControl"
+                    placeholderLabel="Search..."
+                    noEntriesFoundLabel="No results found"
+                    aria-label="Search new results">
+                  </ngx-mat-select-search>
+                </mat-option>
+                <mat-option *ngFor="let opt of (isDropdownOpen(i, 'newResult') ? filteredNewResultOptions : allResultOptions)" [value]="opt.value">
+                  {{ opt.label }}
+                </mat-option>
+              </mat-select>
+              <mat-error *ngIf="row.errors?.['newResultStatus']">
+                {{ row.errors?.['newResultStatus'] }}
+              </mat-error>
+            </mat-form-field>
+          </td>
+
+          <!-- Override Flag (dropdown) -->
+          <td>
+            <mat-form-field appearance="outline"
+                           class="table-field"
+                           [class.mat-form-field-invalid]="row.errors?.['overrideFlag']"
+                           [matTooltip]="row.errors?.['overrideFlag'] || ''"
+                           matTooltipPosition="below">
+              <mat-select [(ngModel)]="row.overrideFlag"
+                         (ngModelChange)="onRowFieldChange(i, 'overrideFlag', $event)"
+                         aria-label="Override Flag">
+                <mat-option *ngFor="let flag of overrideFlagOptions" [value]="flag.value">
+                  {{ flag.label }}
+                </mat-option>
+              </mat-select>
+              <mat-error *ngIf="row.errors?.['overrideFlag']">
+                {{ row.errors?.['overrideFlag'] }}
+              </mat-error>
+            </mat-form-field>
+          </td>
+
+          <!-- Interdiction (searchable dropdown) -->
+          <td>
+            <mat-form-field appearance="outline"
+                           class="table-field interdiction-field"
+                           [class.mat-form-field-invalid]="row.errors?.['interCode']"
+                           [matTooltip]="row.errors?.['interCode'] || ''"
+                           matTooltipPosition="below">
+              <mat-select [(ngModel)]="row.interCode"
+                         (ngModelChange)="onRowFieldChange(i, 'interCode', $event)"
+                         (openedChange)="onDropdownOpened(i, 'interdiction', $event); !$event && interdictionSearchControl.setValue('')"
+                         aria-label="Interdiction">
+                <mat-option>
+                  <ngx-mat-select-search
+                    [formControl]="interdictionSearchControl"
+                    placeholderLabel="Search..."
+                    noEntriesFoundLabel="No results found"
+                    aria-label="Search interdiction codes">
+                  </ngx-mat-select-search>
+                </mat-option>
+                <mat-option *ngFor="let interdiction of (isDropdownOpen(i, 'interdiction') ? filteredInterdictionOptions : allInterdictionOptions)"
+                           [value]="interdiction.interCode">
+                  {{ interdiction.interCode }}{{ interdiction.interDesc ? ' - ' + interdiction.interDesc : '' }}
+                </mat-option>
+              </mat-select>
+              <mat-error *ngIf="row.errors?.['interCode']">
+                {{ row.errors?.['interCode'] }}
+              </mat-error>
+            </mat-form-field>
+          </td>
+
+          <!-- Effective Date (date picker) - readonly for existing records with past dates -->
+          <td>
+            <mat-form-field appearance="outline"
+                           class="table-field"
+                           [class.mat-form-field-invalid]="row.errors?.['effDate']"
+                           [class.readonly-field]="isPastEffectiveDate(row)"
+                           [matTooltip]="row.errors?.['effDate'] || (isPastEffectiveDate(row) ? 'Past effective dates cannot be modified' : '')"
+                           matTooltipPosition="below">
+              <input matInput
+                     [matDatepicker]="effDatePicker"
+                     [(ngModel)]="row.effDate"
+                     (ngModelChange)="onRowFieldChange(i, 'effDate', $event)"
+                     (input)="onDateInput($event, i, 'effDate')"
+                     (dateChange)="onEffectiveDateChange($event, row, i)"
+                     (blur)="onEffectiveDateBlur($event, row, i)"
+                     [min]="minDate"
+                     [disabled]="isPastEffectiveDate(row)"
+                     [id]="'effDate-' + i"
+                     #effDateInput="ngModel"
+                     autocomplete="off"
+                     placeholder="Select Date *"
+                     aria-label="Effective Date">
+              <mat-datepicker-toggle matIconSuffix [for]="effDatePicker" [disabled]="isPastEffectiveDate(row)">
+              </mat-datepicker-toggle>
+              <mat-datepicker #effDatePicker [startAt]="minDate"></mat-datepicker>
+              <mat-error *ngIf="row.errors?.['effDate']">
+                {{ row.errors?.['effDate'] }}
+              </mat-error>
+            </mat-form-field>
+          </td>
+
+          <!-- Termination Date (date picker) - editable for both new and existing records -->
+          <td>
+            <mat-form-field appearance="outline"
+                           class="table-field"
+                           [class.mat-form-field-invalid]="row.errors?.['termDate']"
+                           [matTooltip]="row.errors?.['termDate'] || ''"
+                           matTooltipPosition="above">
+              <input matInput
+                     [matDatepicker]="termDatePicker"
+                     [(ngModel)]="row.termDate"
+                     (ngModelChange)="onRowFieldChange(i, 'termDate', $event)"
+                     (input)="onDateInput($event, i, 'termDate')"
+                     (dateChange)="onTerminationDateChange($event, row, i)"
+                     (blur)="onTerminationDateBlur($event, row, i)"
+                     [min]="getTerminationMinDate(row)"
+                     [id]="'termDate-' + i"
+                     #termDateInput="ngModel"
+                     autocomplete="off"
+                     placeholder="Select Date"
+                     aria-label="Termination Date">
+              <mat-datepicker-toggle matIconSuffix [for]="termDatePicker">
+              </mat-datepicker-toggle>
+              <mat-datepicker #termDatePicker [startAt]="getTerminationMinDate(row)"></mat-datepicker>
+              <mat-error *ngIf="row.errors?.['termDate']">
+                {{ row.errors?.['termDate'] }}
+              </mat-error>
+            </mat-form-field>
+          </td>
+
+          <!-- Actions (delete row - only visible when there are new rows) -->
+          <td *ngIf="hasNewRowsFlag">
+            <button mat-icon-button
+                    *ngIf="row.auditKey === 0"
+                    class="delete-row-btn"
+                    (click)="onDeleteRow(i)"
+                    aria-label="Delete row">
+              <img src="assets/images/icons/delete.svg" alt="" class="delete-icon-svg" aria-hidden="true">
+            </button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>

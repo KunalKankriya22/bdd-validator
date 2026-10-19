@@ -1,0 +1,640 @@
+<div class="attach-donor-container" [attr.aria-labelledby]="elementId('page-title')">
+  <!-- Page Header with Breadcrumb -->
+  <h1 [id]="elementId('page-title')" class="cdk-visually-hidden">{{ pageHeader()?.title || 'Attach Donor' }}</h1>
+  <app-page-header-with-breadcrumb [config]="pageHeaderConfig"></app-page-header-with-breadcrumb>
+
+  <!-- Transaction Info Header -->
+  <div class="transaction-header" role="region" [attr.aria-label]="'Transaction information'" [formGroup]="transactionForm">
+    <!-- Transaction Fields Grid -->
+    <div class="transaction-grid">
+      <!-- Donation/Deferral ID -->
+      <div class="transaction-field">
+        <label class="field-label">Donation/Deferral ID <span class="required">*</span></label>
+        <mat-form-field appearance="fill" class="field-input">
+          <mat-select
+            [id]="elementId('transaction-type')"
+            [formControl]="transactionTypeControl"
+            [attr.aria-label]="'Donation or Deferral ID'"
+            [attr.aria-required]="true">
+            @for (type of transactionTypes; track type) {
+              <mat-option [value]="type">{{ type }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+      </div>
+
+      <!-- Unit ID / Deferral ID -->
+      <div class="transaction-field">
+        <label class="field-label">{{ unitIdLabel() }}</label>
+        <mat-form-field appearance="fill" class="field-input">
+          <input matInput
+                 type="text"
+                 formControlName="unitId"
+                 [attr.aria-label]="unitIdLabel()"
+                 placeholder="-"
+                 (keyup.enter)="onUnitIdSearch()"
+                 (blur)="onUnitIdBlur()">
+        </mat-form-field>
+      </div>
+
+      <!-- Collection Date -->
+      <div class="transaction-field">
+        <label [id]="elementId('collection-date-label')" class="field-label">Collection Date</label>
+        <div class="field-value" role="status" [attr.aria-labelledby]="elementId('collection-date-label')">{{ formatDate(transactionData()?.collectionDate || null) || '-' }}</div>
+      </div>
+
+      <!-- Transaction ID -->
+      <div class="transaction-field">
+        <label class="field-label">
+          Transaction ID
+          @if (transactionType() === 'Deferral' && !transactionIdAutoPopulated()) {
+            <span class="required">*</span>
+          }
+        </label>
+        <mat-form-field appearance="fill" class="field-input">
+          <input matInput
+                 type="text"
+                 formControlName="transactionId"
+                 aria-label="Transaction ID"
+                 [attr.aria-required]="transactionType() === 'Deferral' && !transactionIdAutoPopulated()"
+                 placeholder="-"
+                 (keyup.enter)="onSearch()"
+                 [readonly]="transactionIdAutoPopulated()">
+        </mat-form-field>
+      </div>
+
+      <!-- Entered By -->
+      <div class="transaction-field">
+        <label [id]="elementId('entered-by-label')" class="field-label">Entered By</label>
+        <div class="field-value" [attr.aria-labelledby]="elementId('entered-by-label')">{{ transactionData()?.enteredBy || '-' }}</div>
+      </div>
+
+      <!-- Resolved Status -->
+      <div class="transaction-field">
+        <label [id]="elementId('resolved-status-label')" class="field-label">Resolved Status</label>
+        <div class="field-value resolved-value" [class.resolved]="resolvedStatus() === 'Resolved'" [attr.aria-labelledby]="elementId('resolved-status-label')">
+          <mat-icon class="status-icon" aria-hidden="true">{{ resolvedStatus() === 'Resolved' ? 'check_circle' : 'radio_button_unchecked' }}</mat-icon>
+          <span>{{ resolvedStatus() }}</span>
+        </div>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="header-actions">
+        <button
+          mat-button
+          type="button"
+          class="clear-all-btn"
+          aria-label="Clear all form fields and reset"
+          [disabled]="loading()"
+          (click)="onClearAll()">
+          CLEAR ALL
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Key Data Section - Block 2 (shown when transaction is loaded) -->
+  @if (originalKeyData || hasResults() || transactionData()) {
+    <div class="key-data-section" role="region" [attr.aria-label]="'Original donor key data'">
+      <div class="key-data-content">
+        <div class="key-data-left">
+          <div class="key-data-label">Original Key Data:</div>
+          <span class="key-data-text">{{ originalKeyData }}</span>
+          @if (keyDataComplete()) {
+            <div class="entry-ok-control">
+              <mat-form-field appearance="fill" class="entry-ok-dropdown">
+                <mat-label>Entry OK?</mat-label>
+                <mat-select [formControl]="entryOkControl"
+                            panelClass="entry-ok-panel"
+                            (selectionChange)="onEntryOkChange($event.value)">
+                  @for (option of entryOkOptions; track option) {
+                    <mat-option [value]="option">{{ option }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+            </div>
+          }
+          <button type="button" mat-icon-button
+            class="info-icon-btn"
+            (click)="onShowDonorListHelp()"
+            [attr.aria-label]="'Show donor list information'">
+            <mat-icon aria-hidden="true">info_outline</mat-icon>
+          </button>
+        </div>
+        <!-- Entry OK Error Message Display -->
+        @if (entryOkError()) {
+          <div class="entry-ok-error-message" role="alert">
+            <mat-icon class="error-icon" aria-hidden="true">warning</mat-icon>
+            <span>{{ entryOkError() }}</span>
+          </div>
+        }
+        <div class="key-data-right">
+          @if (entryOkConfirmed()) {
+            @if (!duplicateMode()) {
+              <button
+                mat-stroked-button
+                (click)="onToggleDuplicateMode()"
+                class="duplicate-btn"
+                [disabled]="!canToggleDuplicate()">
+                DUPLICATE
+              </button>
+            }
+            @if (duplicateMode()) {
+              <button
+                mat-stroked-button
+                (click)="onMarkDuplicates()"
+                class="mark-duplicates-btn"
+                [disabled]="!canMarkDuplicates()">
+                MARK DUPLICATES
+              </button>
+              <button
+                mat-stroked-button
+                (click)="onToggleDuplicateMode()"
+                class="cancel-duplicate-btn">
+                CANCEL
+              </button>
+            }
+            <button
+              mat-stroked-button
+              (click)="onAddNewDonor()"
+              class="add-donor-btn">
+              ADD NEW DONOR
+            </button>
+          }
+        </div>
+      </div>
+    </div>
+  }
+
+  <!-- Status Banner — always visible when transaction loaded -->
+  @if (transactionData()) {
+    <div class="status-banner" [class.resolved]="resolvedStatus() === 'Resolved'" role="status" aria-live="polite">
+      <mat-icon class="status-banner-icon" aria-hidden="true">{{ resolvedStatus() === 'Resolved' ? 'check_circle' : 'pending' }}</mat-icon>
+      <span class="status-banner-text">{{ resolvedStatus() === 'Resolved' ? 'Resolved — Donor attached successfully' : 'Not Resolved — Waiting for donor selection' }}</span>
+    </div>
+  }
+
+  <!-- Loading State -->
+  @if (loading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading donor matches"></mat-spinner>
+      <span class="cdk-visually-hidden">Loading, please wait...</span>
+    </div>
+  }
+
+  <!-- Empty State - No Results to Display -->
+  @if (!loading() && !hasResults() && !isNewDonorMode()) {
+    <div class="empty-state" role="status" aria-live="polite">
+      <mat-icon class="empty-state-icon" aria-hidden="true">search</mat-icon>
+      <h2 class="empty-state-title">No Results to Display</h2>
+      <p class="empty-state-subtitle">Please enter search criteria to view Results</p>
+    </div>
+  }
+
+  <!-- Donors Table - Block 3: Only show after Entry OK is confirmed -->
+  @if (!loading() && hasResults() && entryOkConfirmed()) {
+    <div class="donors-section">
+      <!-- Table with Results -->
+      <mat-radio-group [formControl]="donorSelectionControl" class="table-radio-group">
+        <div class="table-container">
+          <table class="donors-table" role="table" [attr.aria-label]="'Graded donor matches'">
+            <thead>
+              <tr>
+                <th scope="col">Select</th>
+                <th scope="col">Donor ID</th>
+                <th scope="col">Grade</th>
+                <th scope="col">Donor Group Master</th>
+                <th scope="col">Last Name</th>
+                <th scope="col">First Name</th>
+                <th scope="col">Date of Birth</th>
+                <th scope="col">Sex</th>
+                <th scope="col"><span class="cdk-visually-hidden">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (donor of gradedDonors(); track donor.donorId) {
+                <tr
+                  [class.selected-row]="isDonorSelected(donor)"
+                  (click)="onSelectDonor(donor)">
+                  <td (click)="$event.stopPropagation()">
+                    @if (duplicateMode()) {
+                      <mat-checkbox
+                        [checked]="isDonorSelected(donor)"
+                        [disabled]="!!donor.potentialDuplicateFlag"
+                        (change)="onSelectDonor(donor)"
+                        [attr.aria-label]="'Select donor ' + donor.donorId">
+                      </mat-checkbox>
+                    } @else {
+                      <mat-radio-button
+                        [checked]="isDonorSelected(donor)"
+                        [value]="donor.donorId"
+                        [disabled]="!donorSelectionEnabled()"
+                        (change)="onSelectDonor(donor)"
+                        [attr.aria-label]="'Select donor ' + donor.donorId">
+                      </mat-radio-button>
+                    }
+                  </td>
+                <td>{{ donor.donorId }}</td>
+                <td>{{ donor.grade || '-' }}</td>
+                <td>{{ donor.dgmId || '-' }}</td>
+                <td [class.mismatch]="hasMismatch(donor, 'lastName')">{{ donor.lastName }}@if (hasMismatch(donor, 'lastName')) {<span class="cdk-visually-hidden"> (mismatch)</span>}</td>
+                <td [class.mismatch]="hasMismatch(donor, 'firstName')">{{ donor.firstName }}@if (hasMismatch(donor, 'firstName')) {<span class="cdk-visually-hidden"> (mismatch)</span>}</td>
+                <td [class.mismatch]="hasMismatch(donor, 'dateOfBirth')">{{ formatDate(donor.dateOfBirth) }}@if (hasMismatch(donor, 'dateOfBirth')) {<span class="cdk-visually-hidden"> (mismatch)</span>}</td>
+                <td [class.mismatch]="hasMismatch(donor, 'gender')">{{ donor.gender }}@if (hasMismatch(donor, 'gender')) {<span class="cdk-visually-hidden"> (mismatch)</span>}</td>
+                <td>
+                  <button
+                    mat-icon-button
+                    (click)="onViewDonorDetails(donor); $event.stopPropagation()"
+                    [attr.aria-label]="'View details for donor ' + donor.donorId"
+                    [disabled]="!donorSelectionEnabled()"
+                    matTooltip="View donor details">
+                    <mat-icon aria-hidden="true">visibility</mat-icon>
+                  </button>
+                </td>
+              </tr>
+            }
+            </tbody>
+          </table>
+        </div>
+      </mat-radio-group>
+    </div>
+  }
+
+  <!-- Donor Record Section - Block 4 (static placeholder when no donor selected, only show if results exist and Entry OK confirmed) -->
+  @if (hasResults() && entryOkConfirmed() && (!selectedDonor() || !donorRecordExpanded()) && !isNewDonorMode()) {
+    <div class="donor-record-section">
+      <div class="donor-record-placeholder">
+        <mat-icon class="donor-record-icon" aria-hidden="true">edit</mat-icon>
+        <div class="donor-record-text">
+          <h3 class="donor-record-title">Donor Record</h3>
+          <p class="donor-record-subtitle">This section will be used to modify a donor record.</p>
+        </div>
+      </div>
+    </div>
+  }
+
+  <!-- Donor Record Form (shows when eye icon clicked OR new donor mode) -->
+  @if ((selectedDonor() && donorRecordExpanded()) || isNewDonorMode()) {
+    <div class="donor-record-form-wrapper" [formGroup]="donorRecordForm">
+
+      <!-- ===== Personal Information ===== -->
+      <section class="form-section" aria-label="Personal information">
+        <h3 class="section-title">
+          Personal Information
+          <button type="button" mat-icon-button class="info-icon-btn" aria-label="Donor personal details information" matTooltip="Donor personal details">
+            <mat-icon aria-hidden="true">info</mat-icon>
+          </button>
+        </h3>
+        <div class="form-row five-col">
+          <mat-form-field appearance="fill">
+            <mat-label>Last Name</mat-label>
+            <input matInput formControlName="lastName" class="uppercase-input" required
+                   (input)="toUpperCase($event, 'lastName')">
+            @if (donorRecordForm.get('lastName')?.hasError('invalidContactName') && donorRecordForm.get('lastName')?.touched) {
+              <mat-error>Last Name can only contain letters, spaces, hyphens, and apostrophes</mat-error>
+            }
+          </mat-form-field>
+          <mat-form-field appearance="fill">
+            <mat-label>First Name</mat-label>
+            <input matInput formControlName="firstName" class="uppercase-input" required
+                   (input)="toUpperCase($event, 'firstName')">
+            @if (donorRecordForm.get('firstName')?.hasError('invalidContactName') && donorRecordForm.get('firstName')?.touched) {
+              <mat-error>First Name can only contain letters, spaces, hyphens, and apostrophes</mat-error>
+            }
+          </mat-form-field>
+          <mat-form-field appearance="fill">
+            <mat-label>Middle Name</mat-label>
+            <input matInput formControlName="middleName" class="uppercase-input"
+                   (input)="toUpperCase($event, 'middleName')">
+          </mat-form-field>
+          <mat-form-field appearance="fill">
+            <mat-label>Alternate ID</mat-label>
+            <input matInput formControlName="alternateId">
+          </mat-form-field>
+          <mat-form-field appearance="fill">
+            <mat-label>Alternate Type</mat-label>
+            <mat-select formControlName="alternateType" placeholder="-"
+                        (openedChange)="onSelectOpenedChange(alternateTypeSearchCtrl, $event)">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="alternateTypeSearchCtrl"
+                  placeholderLabel="Search..."
+                  noEntriesFoundLabel="No matching types">
+                </ngx-mat-select-search>
+              </mat-option>
+              <mat-option value="">-</mat-option>
+              @for (type of filteredAlternateIdTypes(); track type.code) {
+                <mat-option [value]="type.code">{{ type.code }} - {{ type.description }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+        </div>
+        <div class="form-row two-col">
+          <mat-form-field appearance="fill">
+            <mat-label>Date of Birth</mat-label>
+            <input matInput [matDatepicker]="dobPicker" formControlName="dateOfBirth" required
+                   (input)="onDobInput($event)"
+                   placeholder="DD-MMM-YYYY">
+            <mat-datepicker-toggle matIconSuffix [for]="dobPicker"></mat-datepicker-toggle>
+            <mat-datepicker #dobPicker></mat-datepicker>
+            @if (donorRecordForm.get('dateOfBirth')?.hasError('invalidDateFormat') || donorRecordForm.get('dateOfBirth')?.hasError('invalidDate') || donorRecordForm.get('dateOfBirth')?.hasError('matDatepickerParse')) {
+              <mat-error>Date of Birth is invalid</mat-error>
+            }
+          </mat-form-field>
+          <mat-form-field appearance="fill">
+            <mat-label>Sex</mat-label>
+            <mat-select formControlName="gender" required>
+              <mat-option value="Male">Male</mat-option>
+              <mat-option value="Female">Female</mat-option>
+            </mat-select>
+          </mat-form-field>
+        </div>
+      </section>
+
+      <!-- ===== Address Information ===== -->
+      <section class="form-section" aria-label="Address information">
+        <h3 class="section-title">Address Information</h3>
+        <div class="form-row one-col">
+          <mat-form-field appearance="fill" class="full-width">
+            <mat-label>Home Address</mat-label>
+            <input matInput formControlName="homeAddress" class="uppercase-input" required
+                   aria-required="true"
+                   [readonly]="intlAddressActive()"
+                   (input)="toUpperCase($event, 'homeAddress')">
+            @if (donorRecordForm.get('homeAddress')?.hasError('required') && donorRecordForm.get('homeAddress')?.touched) {
+              <mat-error>Home Address is required</mat-error>
+            }
+          </mat-form-field>
+        </div>
+        <div class="form-row four-col">
+          <mat-form-field appearance="fill">
+            <mat-label>Apartment No.</mat-label>
+            <input matInput formControlName="apartmentNo" class="uppercase-input"
+                   [readonly]="intlAddressActive()"
+                   (input)="toUpperCase($event, 'apartmentNo')">
+          </mat-form-field>
+          <mat-form-field appearance="fill">
+            <mat-label>City</mat-label>
+            <input matInput formControlName="city" [matAutocomplete]="cityAuto" class="uppercase-input" required
+                   [readonly]="intlAddressActive()"
+                   (input)="toUpperCase($event, 'city')" (blur)="onCityBlur()">
+            <mat-autocomplete #cityAuto="matAutocomplete" (optionSelected)="onCitySelected($event.option.value)">
+              @for (city of cityOptions(); track city.code) {
+                <mat-option [value]="city.description">{{ city.description }}</mat-option>
+              }
+            </mat-autocomplete>
+            @if (donorRecordForm.get('city')?.hasError('required') && donorRecordForm.get('city')?.touched) {
+              <mat-error>City is required</mat-error>
+            }
+            @if (donorRecordForm.get('city')?.hasError('trimmedMinLength') && donorRecordForm.get('city')?.touched) {
+              <mat-error>City must be at least 3 characters</mat-error>
+            }
+            @if (donorRecordForm.get('city')?.hasError('invalidCity') && donorRecordForm.get('city')?.touched) {
+              <mat-error>City not found in valid city list</mat-error>
+            }
+          </mat-form-field>
+          <mat-form-field appearance="fill">
+            <mat-label>State</mat-label>
+            <input matInput formControlName="state" maxlength="2" class="uppercase-input"
+                   [readonly]="intlAddressActive()"
+                   (input)="toUpperCase($event, 'state')">
+          </mat-form-field>
+          <mat-form-field appearance="fill">
+            <mat-label>Zip</mat-label>
+            <input matInput formControlName="zip" class="uppercase-input"
+                   [readonly]="intlAddressActive()"
+                   (input)="toUpperCase($event, 'zip')" (blur)="onZipBlur()">
+          </mat-form-field>
+        </div>
+        <div class="section-actions-below">
+          <button mat-stroked-button type="button" color="primary"
+                  aria-label="Open international address dialog"
+                  (click)="onOpenInternationalAddress()">
+            INTERNATIONAL ADDRESS
+          </button>
+          <button mat-stroked-button type="button" color="primary"
+                  aria-label="Open alternate address dialog"
+                  (click)="onOpenAlternateAddress()">
+            ALTERNATE ADDRESS
+          </button>
+        </div>
+      </section>
+
+      <!-- ===== Contact Information ===== -->
+      <section class="form-section" aria-label="Contact information">
+        <h3 class="section-title">Contact Information</h3>
+        <mat-radio-group formControlName="preferredPhone" aria-label="Preferred phone number">
+          <div class="form-row contact-row">
+            <div class="phone-field-group">
+              <mat-form-field appearance="fill" class="phone-field">
+                <mat-label>Home Phone Number</mat-label>
+                <input matInput
+                       formControlName="homePhone"
+                       type="tel"
+                       maxlength="12"
+                       placeholder="###-###-####"
+                       [readonly]="intlAddressActive()"
+                       (input)="formatPhoneInput($event, 'homePhone')"
+                       (blur)="onPhoneBlur('homePhone')">
+                @if (donorRecordForm.get('homePhone')?.invalid && donorRecordForm.get('homePhone')?.touched) {
+                  <mat-error>Invalid phone number format</mat-error>
+                }
+              </mat-form-field>
+              <mat-radio-button class="preferred-radio" value="home" aria-label="Set home phone as preferred">
+                Preferred?
+              </mat-radio-button>
+            </div>
+            <div class="phone-field-group">
+              <mat-form-field appearance="fill" class="phone-field">
+                <mat-label>Work Phone Number</mat-label>
+                <input matInput
+                       formControlName="workPhone"
+                       type="tel"
+                       maxlength="18"
+                       placeholder="###-###-####"
+                       [readonly]="intlAddressActive()"
+                       (input)="formatPhoneInput($event, 'workPhone')"
+                       (blur)="onPhoneBlur('workPhone')">
+                @if (donorRecordForm.get('workPhone')?.hasError('pattern') && donorRecordForm.get('workPhone')?.touched) {
+                  <mat-error>Invalid phone number format (###-###-#### or ###-####)</mat-error>
+                }
+              </mat-form-field>
+              <mat-form-field appearance="fill" class="extension-field">
+                <mat-label>Ext.</mat-label>
+                <input matInput
+                       formControlName="workPhoneExtension"
+                       type="text"
+                       maxlength="6"
+                       placeholder="Ext"
+                       [readonly]="intlAddressActive()">
+              </mat-form-field>
+              <mat-radio-button class="preferred-radio" value="work" aria-label="Set work phone as preferred">
+                Preferred?
+              </mat-radio-button>
+            </div>
+          </div>
+          <div class="form-row contact-row">
+            <div class="phone-field-group">
+              <mat-form-field appearance="fill" class="phone-field">
+                <mat-label>Mobile Phone Number</mat-label>
+                <input matInput
+                       formControlName="mobilePhone"
+                       type="tel"
+                       maxlength="12"
+                       placeholder="###-###-####"
+                       [readonly]="intlAddressActive()"
+                       (input)="formatPhoneInput($event, 'mobilePhone')"
+                       (blur)="onPhoneBlur('mobilePhone')">
+                @if (donorRecordForm.get('mobilePhone')?.invalid && donorRecordForm.get('mobilePhone')?.touched) {
+                  <mat-error>Invalid phone number format</mat-error>
+                }
+              </mat-form-field>
+              <mat-radio-button class="preferred-radio" value="mobile" aria-label="Set mobile phone as preferred">
+                Preferred?
+              </mat-radio-button>
+            </div>
+            <mat-form-field appearance="fill" class="email-field">
+              <mat-label>Email</mat-label>
+              <input matInput formControlName="email" [readonly]="intlAddressActive()">
+              @if (donorRecordForm.get('email')?.hasError('invalidEmail') && donorRecordForm.get('email')?.touched) {
+                <mat-error>Please enter a valid email address</mat-error>
+              }
+            </mat-form-field>
+          </div>
+        </mat-radio-group>
+      </section>
+
+      <!-- ===== Employer/School Information ===== -->
+      <section class="form-section" aria-label="Employer information">
+        <h3 class="section-title">Employer/School Information</h3>
+        <div class="form-row five-col">
+          <mat-form-field appearance="fill">
+            <mat-label>Employer/School Name</mat-label>
+            <input matInput
+                   formControlName="employerSchoolName"
+                   [matAutocomplete]="employerAuto"
+                   placeholder="Type to search or enter new"
+                   class="uppercase-input"
+                   (input)="onEmployerSearch($event); toUpperCase($event, 'employerSchoolName')">
+            <mat-autocomplete #employerAuto="matAutocomplete"
+                              (optionSelected)="onEmployerSelected($event.option.value)"
+                              [displayWith]="displayEmployer.bind(this)">
+              @for (employer of filteredEmployerOptions(); track employer.value) {
+                <mat-option [value]="employer.value">{{ employer.label }}</mat-option>
+              }
+            </mat-autocomplete>
+          </mat-form-field>
+          <mat-form-field appearance="fill">
+            <mat-label>City</mat-label>
+            <input matInput formControlName="employerCity" [matAutocomplete]="empCityAuto" class="uppercase-input"
+                   (input)="toUpperCase($event, 'employerCity')">
+            <mat-autocomplete #empCityAuto="matAutocomplete">
+              @for (city of employerCityOptions(); track city.code) {
+                <mat-option [value]="city.description">{{ city.description }}</mat-option>
+              }
+            </mat-autocomplete>
+          </mat-form-field>
+          <mat-form-field appearance="fill">
+            <mat-label>State</mat-label>
+            <input matInput formControlName="employerState" maxlength="2" class="uppercase-input"
+                   (input)="toUpperCase($event, 'employerState')">
+          </mat-form-field>
+          <mat-form-field appearance="fill">
+            <mat-label>Zip</mat-label>
+            <input matInput formControlName="employerZip" class="uppercase-input"
+                   (input)="toUpperCase($event, 'employerZip')" (blur)="onEmployerZipBlur()">
+          </mat-form-field>
+          <mat-form-field appearance="fill">
+            <mat-label>Ethnic Group</mat-label>
+            <mat-select formControlName="ethnicGroup"
+                        (openedChange)="onSelectOpenedChange(ethnicGroupSearchCtrl, $event)">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="ethnicGroupSearchCtrl"
+                  placeholderLabel="Search..."
+                  noEntriesFoundLabel="No matching groups">
+                </ngx-mat-select-search>
+              </mat-option>
+              <mat-option value="">-</mat-option>
+              @for (eg of filteredEthnicGroups(); track eg.code) {
+                <mat-option [value]="eg.code">{{ eg.code }} - {{ eg.description }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+        </div>
+        <div class="section-actions-below">
+          <button mat-stroked-button type="button" color="primary"
+                  (click)="openAddEmployerDialog()">
+            ADD NEW EMPLOYER
+          </button>
+          <button mat-stroked-button type="button" color="primary"
+                  aria-label="Open international address dialog for employer"
+                  (click)="onOpenInternationalAddress()">
+            INTERNATIONAL ADDRESS
+          </button>
+        </div>
+      </section>
+
+      <!-- Save Section -->
+      <div class="save-section">
+        @if (isNewDonorMode()) {
+          <div class="new-donor-actions">
+            <button mat-raised-button
+                    color="primary"
+                    type="button"
+                    class="save-new-donor-btn"
+                    (click)="onSaveNewDonor()"
+                    [disabled]="isSubmitting() || loading()">
+              SAVE NEW DONOR
+            </button>
+            <button mat-stroked-button
+                    type="button"
+                    class="cancel-new-donor-btn"
+                    (click)="onCancelNewDonor()"
+                    [disabled]="isSubmitting()">
+              CANCEL
+            </button>
+          </div>
+        } @else {
+          <button mat-stroked-button
+                  class="phlebotomy-btn"
+                  type="button"
+                  (click)="onViewPhlebotomyDetails()"
+                  [disabled]="!canViewPhlebotomy()">
+            PHLEBOTOMY DETAILS
+          </button>
+          <div class="save-right-group">
+            <div [id]="elementId('save-instruction')" class="phlebotomist-note">
+              <mat-icon aria-hidden="true">info</mat-icon>
+              @if (transactionType() === 'Deferral') {
+                <span>Re-enter the same Deferral ID to save the above details</span>
+              } @else {
+                <span>Re-enter the same Unit ID to save the above details</span>
+              }
+            </div>
+            @if (transactionType() !== 'Deferral') {
+              <mat-form-field appearance="fill" class="save-field-input">
+                <mat-label>Unit ID</mat-label>
+                <input matInput
+                       type="text"
+                       [formControl]="saveUnitIdControl"
+                       [attr.aria-describedby]="elementId('save-instruction')"
+                       (keyup.enter)="onSaveDonorRecord()">
+              </mat-form-field>
+            }
+            @if (transactionType() === 'Deferral') {
+              <mat-form-field appearance="fill" class="save-field-input">
+                <mat-label>Transaction ID</mat-label>
+                <input matInput
+                       type="text"
+                       [formControl]="saveTransactionIdControl"
+                       [attr.aria-describedby]="elementId('save-instruction')"
+                       (keyup.enter)="onSaveDonorRecord()">
+              </mat-form-field>
+            }
+          </div>
+        }
+      </div>
+    </div>
+  }
+</div>

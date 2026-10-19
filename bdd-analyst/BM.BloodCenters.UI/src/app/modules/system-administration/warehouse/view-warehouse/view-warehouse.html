@@ -1,0 +1,218 @@
+<div class="warehouse-page">
+  <div class="page-wrapper">
+    <!-- Visually hidden h1 for proper heading hierarchy -->
+    <h1 class="cdk-visually-hidden">User Warehouse</h1>
+
+    <!-- Page Header with Breadcrumb -->
+    <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+    <!-- SEARCH CARD -->
+    <div class="search-card">
+      <form (ngSubmit)="onRetrieve()" class="search-user">
+        <mat-form-field appearance="fill" class="user-id-select">
+          <mat-label>Search by User ID</mat-label>
+          <mat-select [formControl]="userIdControl" placeholder="Select User ID">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="userSearchControl"
+                placeholderLabel="Search users..."
+                noEntriesFoundLabel="No matching users">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (user of filteredUserOptions; track user.userId) {
+              <mat-option [value]="user.userId">
+                {{ user.userId }}{{ user.userName ? ' - ' + user.userName : '' }}
+              </mat-option>
+            }
+            @if (filteredUserOptions.length === 0) {
+              <mat-option disabled>
+                No Data Available
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <button mat-raised-button type="submit" class="btn-retrieve" [disabled]="!userId">
+          RETRIEVE
+        </button>
+      </form>
+    </div>
+
+    <!-- WAREHOUSE PANEL -->
+    <div class="warehouse-panel" #warehousePanel>
+      <!-- Panel Header -->
+      <div class="panel-header">
+        <div class="panel-title-section">
+          <!-- Before search: Show default title -->
+          <ng-container *ngIf="!hasSearched">
+            <h2 class="panel-title">Warehouse Assignments</h2>
+            <p class="panel-subtitle">
+              User warehouse assignments will display here.
+            </p>
+          </ng-container>
+
+          <!-- After search with no user data: Show default title -->
+          <ng-container *ngIf="hasSearched && !userFullName && !isLoading">
+            <h2 class="panel-title">Warehouse Assignments</h2>
+            <p class="panel-subtitle">
+              User warehouse assignments will display here.
+            </p>
+          </ng-container>
+
+          <!-- After successful search: Show User Info -->
+          <ng-container *ngIf="hasSearched && userFullName">
+            <h2 class="panel-title user-name-title">{{ userFullName }}</h2>
+            <p class="panel-subtitle user-meta-subtitle">
+              {{ displayUserId }}<span class="separator" *ngIf="userGroup"></span><span
+                *ngIf="userGroup">{{ userGroup }}</span>
+            </p>
+          </ng-container>
+        </div>
+
+        <!-- Assign Warehouse button - shown after successful user search -->
+        <button *ngIf="hasSearched && userFullName" type="button" class="btn-primary" (click)="openAssignWarehouseDialog()">
+          <mat-icon aria-hidden="true">add</mat-icon>
+          ASSIGN WAREHOUSE
+        </button>
+      </div>
+
+      <!-- EMPTY STATE (Before search) -->
+      <div *ngIf="!hasSearched" class="empty-state-container">
+        <div class="empty-state-icon" aria-hidden="true">
+          <mat-icon>edit</mat-icon>
+        </div>
+        <h3 class="empty-state-title">Get Started</h3>
+        <p class="empty-state-message">
+          Use the Search bar above to locate a user and to manage<br />
+          his/her warehouse assignments.
+        </p>
+      </div>
+
+      <!-- ERROR STATE -->
+      <div *ngIf="hasError" class="inline-error" role="alert" aria-live="assertive">
+        We couldn't load assignments. Please retry.
+      </div>
+
+      <!-- TABLE CONTENT (After search) -->
+      <ng-container *ngIf="hasSearched && !hasError && userFullName">
+
+        <!-- TABLE CONTROLS -->
+        <div class="table-controls">
+          <div class="table-controls-left">
+            <!-- Filter button -->
+            <button type="button" class="filter-button" #filterBtn (click)="openFilter()"
+              [class.filter-button--active]="isFilterOpen"
+              aria-label="Open filter menu">
+              <span class="filter-icon" aria-hidden="true"></span>
+              <span class="filter-text">FILTER</span>
+            </button>
+
+            <!-- Filter chips (responsive with dynamic +N badge) -->
+            <app-filter-chips
+              *ngIf="filterChips.length > 0"
+              [chips]="filterChips"
+              [maxVisible]="3"
+              (removeChip)="removeChip($event)"
+              (clearAll)="clearFilters()">
+            </app-filter-chips>
+          </div>
+
+          <div class="table-controls-right">
+            <!-- Search bar -->
+            <app-search-bar
+              [config]="tableSearchConfig"
+              (search)="onTableSearch($event)">
+            </app-search-bar>
+          </div>
+        </div>
+
+        <!-- TABLE -->
+        <div class="table-wrapper" *ngIf="pagedAssignments.length > 0">
+          <div class="table-scroll-container">
+            <table class="warehouse-table" [attr.aria-label]="'Warehouse assignments for ' + (userFullName || 'user')">
+              <thead>
+                <tr>
+                  <th scope="col" class="sortable" (click)="toggleSort()">
+                    <span class="th-content-sortable">
+                      Warehouse
+                      <mat-icon *ngIf="sortDirection === null" class="sort-icon" aria-hidden="true">unfold_more</mat-icon>
+                      <mat-icon *ngIf="sortDirection === 'asc'" class="sort-icon" aria-hidden="true">arrow_upward</mat-icon>
+                      <mat-icon *ngIf="sortDirection === 'desc'" class="sort-icon" aria-hidden="true">arrow_downward</mat-icon>
+                    </span>
+                  </th>
+                  <th scope="col">Chapter</th>
+                  <th scope="col">Default Printer</th>
+                  <th scope="col">Effective Date</th>
+                  <th scope="col">Termination Date</th>
+                  <th scope="col">Modification Date</th>
+                  <th scope="col" class="action-column"><span class="cdk-visually-hidden">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr *ngFor="let row of pagedAssignments; let i = index" [class.row-editing]="isRowEditing(i)">
+                  <td>{{ row.warehouseDescription ? row.warehouse + ' - ' + row.warehouseDescription : row.warehouse }}</td>
+                  <td>{{ row.chapterId }} - {{ row.chapterName }}</td>
+                  <td>{{ row.defaultPrinter }}</td>
+                  <td>{{ formatDate(row.effectiveDate) || '-' }}</td>
+                  <td>{{ formatDate(row.terminationDate) || '-' }}</td>
+                  <td>{{ formatDate(row.modifiedDate) || '-' }}</td>
+                  <td class="action-column">
+                    <button
+                      type="button"
+                      class="edit-btn"
+                      (click)="openEditWarehouseDialog(row, getAbsoluteRowIndex(i))"
+                      [attr.aria-label]="'Edit warehouse ' + row.warehouse">
+                      <mat-icon class="edit-icon" aria-hidden="true">edit</mat-icon>
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Pagination -->
+          <div class="pagination">
+            <div class="page-size">
+              <span class="page-size-label">Rows per page:</span>
+              <mat-form-field appearance="fill" class="page-size-select">
+                <mat-select [(ngModel)]="pageSize" (selectionChange)="onPageSizeChange()" aria-label="Rows per page" panelClass="pagination-select-panel">
+                  <mat-option *ngFor="let size of pageSizeOptions" [value]="size">
+                    {{ size }}
+                  </mat-option>
+                </mat-select>
+              </mat-form-field>
+            </div>
+
+            <div class="page-range" role="status" aria-live="polite"
+                 [attr.aria-label]="'Showing rows ' + startRow + ' to ' + endRow + ' of ' + filteredAssignments.length">
+              {{ startRow }} – {{ endRow }} of {{ filteredAssignments.length }}
+            </div>
+
+            <div class="page-actions">
+              <button mat-icon-button (click)="goToFirst()" [disabled]="pageIndex === 0" aria-label="Go to first page">
+                <mat-icon aria-hidden="true">first_page</mat-icon>
+              </button>
+              <button mat-icon-button (click)="prevPage()" [disabled]="pageIndex === 0" aria-label="Go to previous page">
+                <mat-icon aria-hidden="true">chevron_left</mat-icon>
+              </button>
+              <button mat-icon-button (click)="nextPage()" [disabled]="(pageIndex + 1) * pageSize >= filteredAssignments.length" aria-label="Go to next page">
+                <mat-icon aria-hidden="true">chevron_right</mat-icon>
+              </button>
+              <button mat-icon-button (click)="goToLast()" [disabled]="(pageIndex + 1) * pageSize >= filteredAssignments.length" aria-label="Go to last page">
+                <mat-icon aria-hidden="true">last_page</mat-icon>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- No Assignments -->
+        <div *ngIf="pagedAssignments.length === 0 && !isLoading" class="empty-state-container">
+          <div class="empty-state-icon" aria-hidden="true">
+            <mat-icon>edit</mat-icon>
+          </div>
+          <p class="empty-state-message">{{ assignments.length === 0 ? 'No warehouse assignments found for this user. Use ASSIGN WAREHOUSE to add one.' : getEmptyMessage() }}</p>
+        </div>
+      </ng-container>
+    </div>
+  </div>
+</div>

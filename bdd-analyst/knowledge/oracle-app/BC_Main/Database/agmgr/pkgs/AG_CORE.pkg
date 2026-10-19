@@ -1,0 +1,2265 @@
+CREATE OR REPLACE PACKAGE AG_CORE AS 
+
+/*-----------------------------------------------------------------------------------
+|| Author       : WellSky BC.
+|| Description  : Core pkg that deals with antigens. 
+||              : Main Routine is start_job that calculates if an antigen is confirmed for a donor.
+|| Requirements : 
+|| Call Syntax  :AG_CORE.START_JOB
+|| Version
+|| 01   10/29/2023  New pkg creation.
+|| 02   10/31/2023  MLT-6387 (Get UNITS SET issue)
+|| 03   11/01/2023  MLT-6390 (3 units scenario - Formula corrected)      
+|| 04   11/07/2023  MLT-6404  Multiple tests scenario - using source of truth as utrs.
+||                            Handle cancelled tests by resetting antigen flag.  
+||      11/14/2023  MLT-6404  Logging changes. Table renamed from _temp to _job_queue
+||      11/20/2023  MLT-6404  handle_merged_donors added
+|| 05   11/29/2023  MLT-6423  handle_attach_detach added.
+||                            get_antigen_confirm_status parameter spec updated.
+|| 06   12/07/2023  MLT-6437  
+||                              6.0 Added lock/unlock for start_job.
+||                              6.1 Use result code column, 
+||                                  Use REAC, NREAC mastercodes, store + / - for result_code                                  
+||                              6.2 Discard if results do not match with earlier results for all the scenarios
+||                                  already confirmed, to be confirmed, or not yet confirmed.
+||                                  Use Exclude_flag to exclude units from pkg evaluation.
+||                              6.3 EDIT feature
+|| 07   02/02/2024  MLT-6535    7.0 Using tz conversion for checking effective date , term date.
+||                                  use table VALID_EXT_ANT_APPROVED_DET to check if test batch is 
+||                                  configured to retreive license flag.
+|| 08   02/13/2024  MLT-6593    8.0 recompute_antigen_status added.            
+|| 09   03/26/2024  MLT-6451    9.0 Populating chapter_id in ag_donor_tests_det table (used for AGRDISCR report)
+|| Add logging for handle_merged_donors and handle_attach_Detach_units
+|| 10   05/14/2024  MLT-6276    10.0 handle_hist_antigens routine added.
+|| 11   06/05/2024  MLT-6904    11  MLT-6904 - Lic flag moved to test_kits level instead of reagents level
+||                                  MLT-6904 - antigen_group soored at ag_donor_tests_det table        
+|| 12   07/18/2024  MLT-7011    12  Use chapter id from utrs instead of chapter id from valid_ext_ant_approved_det table.
+||------2024.1.0 Release version 12----------------------------------------------------------------------------
+||  
+*/-----------------------------------------------------------------------------------
+
+    PROCEDURE START_JOB;
+    PROCEDURE handle_merged_donors(primary_donor_in     IN VARCHAR2, 
+                                   secondary_donor_in   IN VARCHAR2) ; 
+    PROCEDURE handle_attach_detach_units(unit_id_in     IN VARCHAR2,
+                                         donor_id_in    IN VARCHAR2,
+                                         ad_flag_in     IN VARCHAR2);
+    PROCEDURE recompute_antigen_status (donor_id_in IN VARCHAR2, antigen_code_in IN VARCHAR2);
+    PROCEDURE recompute_antigen_status (donor_id_in IN VARCHAR2, antigen_code_in IN VARCHAR2, program_id_IN in VARCHAR2);
+    FUNCTION get_test_ag_group (test_id_in IN VARCHAR2) RETURN VARCHAR2;
+
+    PROCEDURE handle_hist_antigens(start_date_in        IN DATE, 
+                                   end_date_in          IN DATE,
+                                   increment_months_in  IN NUMBER,
+                                   status_out           OUT VARCHAR2);
+
+    FUNCTION version_no RETURN VARCHAR2;
+END AG_CORE;
+
+
+
+
+
+
+/
+
+
+CREATE OR REPLACE PACKAGE BODY AG_CORE AS
+
+    gv_version_no VARCHAR2(03) := '12';
+
+
+    gc_logsDir      CONSTANT VARCHAR2(20) := 'LOGDR';
+    gv_log_mode VARCHAR2(10);
+
+    gd_SYSDATE  DATE;
+    gb_genLog   BOOLEAN := FALSE;
+    gn_rowCnt   NUMBER;
+
+    gd_start_date DATE;
+    gd_end_date   DATE;
+    gt_start      PLS_INTEGER;
+    gt_end        PLS_INTEGER;
+
+    TYPE log_text_tab IS TABLE OF VARCHAR2(1000) INDEX BY PLS_INTEGER;
+    g_log_text      log_text_tab;
+
+    TYPE string_nt is TABLE OF VARCHAR2(20);
+    g_ag_groups_list string_nt;
+
+    TYPE boolean_aat IS TABLE OF BOOLEAN INDEX BY VARCHAR2(10);
+
+    nreac_codes boolean_aat; -- NEGATIVE RESULTS
+    reac_codes boolean_aat; -- REACTIVE RESULTS -- POSITIVE
+
+    lc_negative_res CONSTANT VARCHAR2(1) := '-';
+    lc_positive_res CONSTANT VARCHAR2(1) := '+';
+
+    CURSOR ag_tests_cur IS
+    SELECT
+        job_id,
+        unit_id,
+        chapter_id,
+        coll_date,
+        test_id,
+        test_seq_no,
+        result_code,
+        test_date,
+        action_flag
+    FROM
+        ag_donor_tests_job_queue
+    WHERE
+        status_flag IS NULL
+    ORDER BY
+        job_id ASC;
+    --FOR UPDATE SKIP LOCKED; -- Locks rows selected by the query at FETCH (not at OPEN CURSOR)
+
+    TYPE ag_tests_aat IS
+        TABLE OF ag_tests_cur%rowtype INDEX BY PLS_INTEGER;
+
+    ag_tests          ag_tests_aat;
+    lv_error          VARCHAR2(2000);
+
+    lv_confirm_result VARCHAR2(25); -- TODO CHECK SIZE.
+    gv_error          VARCHAR2(2000);
+    gn_job_id         NUMBER;
+
+    ncnt              NUMBER;
+
+    skip_record        EXCEPTION;
+
+    TYPE test_rec_t IS RECORD (
+        unit_id             utrs.unit_id%TYPE,
+        chapter_id          utrs.chapter_id%TYPE,
+        coll_date           utrs.coll_date%TYPE,
+        test_id             utrs.test_id%TYPE,
+        test_seq_no         utrs.test_seq_no%TYPE,
+        result_code         utrs.result_status_1%TYPE,
+        test_date           utrs.insert_dats%TYPE,
+        antigen_code        ag_donor_tests_det.antigen_code%TYPE,
+        lic_flag            ag_donor_tests_det.licensed_flag%TYPE,
+        test_type           ag_donor_tests_det.test_type%TYPE,
+        primary_rule_id     ag_donor_tests_det.primary_rule_id%TYPE,
+        rule_id             ag_donor_tests_det.rule_id%TYPE,
+        donor_id            ag_donor_tests_hdr.donor_id%TYPE,
+        no_of_units         valid_antigen_config_hdr.no_of_units%TYPE,
+        confirm_status      ag_donor_tests_det.confirm_status%TYPE,
+        test_ag_group       ag_donor_tests_hdr.antigen_group%TYPE
+    );  
+
+    test_rec test_rec_t;
+    
+    --
+    FUNCTION version_no RETURN VARCHAR2 IS
+    BEGIN
+        RETURN gv_version_no;
+    END version_no;
+
+    ----
+    PROCEDURE SET_LOG_MODE(log_type_in IN VARCHAR2) IS
+    BEGIN
+        gv_log_mode := log_type_in;
+    END SET_LOG_MODE;
+
+    PROCEDURE check_and_set_debug_level IS
+        nDebugLevel NUMBER;
+    BEGIN
+        SELECT DECODE(COUNT(1), 0, 0, MAX(debug_level))
+          INTO nDebugLevel
+          FROM debug_controls 
+        WHERE object_name = 'AG_CORE'
+          AND object_type = 'PKG'
+          AND debug_mode = 'Y';
+
+       IF nDebugLevel <= 5 THEN
+            SET_LOG_MODE('MSG'); -- MSG+ERR
+       ELSIF nDebugLevel <= 10 THEN
+            SET_LOG_MODE('DBG'); -- DBG+MSG+ERR
+       END IF;
+    END check_and_set_debug_level;
+
+    /*
+        Logs MSG types if pkg is set in debug controls with level between 0 and 5.
+    */    
+    PROCEDURE log_MSG_msg(msg_in IN VARCHAR2) IS
+    BEGIN
+        IF gv_log_mode IN ('MSG','DBG') THEN
+            g_log_text(NVL(g_log_text.LAST, 0) + 1) := msg_in;
+        END IF;            
+    END log_MSG_msg; 
+
+    /*
+        Logs DBG types if pkg is set in debug controls with level between 6 and 10.
+    */
+    PROCEDURE log_DBG_msg(msg_in IN VARCHAR2) IS
+    BEGIN
+        IF gv_log_mode = 'DBG' THEN
+            g_log_text(NVL(g_log_text.LAST, 0) + 1) := msg_in;
+        END IF;            
+    END log_DBG_msg;
+
+    /*
+        Always logs error messages
+    */
+    PROCEDURE log_ERR_msg(msg_in IN VARCHAR2) IS
+    BEGIN
+        g_log_text(NVL(g_log_text.LAST, 0) + 1) := msg_in;
+    END log_ERR_msg;    
+
+    PROCEDURE mark_start
+    IS
+    BEGIN
+      gt_start := DBMS_UTILITY.get_cpu_time;
+      gd_start_date := SYSDATE;
+    END mark_start;
+
+    PROCEDURE mark_end
+    IS
+    BEGIN
+        gt_end := DBMS_UTILITY.get_cpu_time;
+        gd_end_date := SYSDATE;
+    END mark_end;
+
+    PROCEDURE write_to_file(dir_in IN VARCHAR2, 
+                            file_in IN VARCHAR2, 
+                            msg_output IN log_text_tab) IS
+    BEGIN
+        IF file_in IS NULL THEN
+            RETURN;
+        END IF;
+
+        -- Send output to the specified file.
+        DECLARE
+            fid UTL_FILE.file_type;
+        BEGIN
+            fid := UTL_FILE.fopen(dir_in, file_in, 'W');
+
+
+            -- Log file Header
+            UTL_FILE.put_line (fid, RPAD('-', 75, '-'));
+            UTL_FILE.put_line (fid, 'File               : ' || 'AG_CORE.pkg');
+            UTL_FILE.put_line (fid, 'Version No         : ' || gv_version_no);
+            UTL_FILE.put_line (fid, 'Rows Processed     : ' || gn_rowCnt);
+            UTL_FILE.put_line (fid, 'Started            : ' || TO_CHAR(gd_start_date, 'MM-DD-YYYY HH24:MI:SS'));
+            UTL_FILE.put_line (fid, 'Completed          : ' || TO_CHAR(gd_end_date, 'MM-DD-YYYY HH24:MI:SS'));            
+            UTL_FILE.put_line (fid, 'Elapsed CPU Time   : ' || TO_CHAR( (gt_end - gt_start) / 100) || ' seconds.');            
+            UTL_FILE.put_line (fid, RPAD('-', 75, '-'));               
+            ------------
+
+            FOR indx IN msg_output.FIRST .. msg_output.LAST LOOP
+              UTL_FILE.put_line(fid, indx || '      ' || msg_output(indx));
+            END LOOP;
+
+            UTL_FILE.fclose(fid);
+        EXCEPTION
+            WHEN OTHERS THEN
+              dbms_output.put_line('Failure to write output to ' || dir_in || '/' || file_in);
+              dbms_output.put_line(SQLERRM);
+              UTL_FILE.fclose(fid);
+        END;
+    END write_to_file;
+
+    PROCEDURE dump_output IS
+    BEGIN
+        IF gb_genLog THEN
+            write_to_file( gc_logsDir,
+                           'AG_CORE-' || TO_CHAR(gd_sysdate, 'MMDDYYHH24MISS') || '.log',
+                           g_log_text);
+
+        END IF;
+        g_log_text.DELETE;
+    END dump_output;
+    ------------------------
+
+    PROCEDURE log_error_and_continue IS
+    BEGIN
+        IF gv_error IS NOT NULL THEN
+            log_ERR_msg(gv_error);
+            RAISE skip_record;
+        END IF;
+    END log_error_and_continue;
+
+    FUNCTION get_reagents_license (
+        unit_id_in   IN VARCHAR2,
+        test_id_in   IN VARCHAR2,
+        test_seq_in  IN NUMBER
+    ) RETURN VARCHAR2 IS
+        lv_lic_flag     VARCHAR2(10);
+    BEGIN
+        -- Check in external configuration first.  
+        -- Use it if found, otherwise proceed with kit_reagents table.  
+        BEGIN
+            SELECT adet.approved_flag
+              INTO lv_lic_flag
+              FROM utrs, valid_ext_ant_approved_det adet
+             WHERE utrs.test_id = adet.test_antigen
+               AND SUBSTR(utrs.tb_id, 8, 2) = adet.test_batch_prefix
+               AND utrs.unit_id = unit_id_in
+               AND utrs.test_id = test_id_in
+               AND utrs.test_seq_no = test_seq_in
+               AND utrs.cancel_flag is NULL
+               AND lifetrack_timezone_convert.get_local_time(utrs.chapter_id, SYSDATE)
+                BETWEEN adet.eff_date AND nvl(adet.term_date, lifetrack_timezone_convert.get_local_time(utrs.chapter_id, SYSDATE) + 10)
+               AND ROWNUM = 1;
+
+            IF NVL(lv_lic_flag,'X') NOT IN ( 'A', 'U', 'L' ) THEN
+                log_DBG_msg('Assuming License Flag as ''U'' for flag ' || lv_lic_flag );
+                lv_lic_flag := 'U';          
+            END IF;
+
+            RETURN lv_lic_flag;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                NULL;
+            WHEN OTHERS THEN
+                log_DBG_msg('Lic flag error from valid_ext_ant_approved_det - ' || SUBSTR(SQLERRM, 1, 500) );
+                NULL;                
+        END;
+
+        -- MLT 6904
+        -- Lic flag moved to test_kits level instead of reagents level.
+        SELECT
+            tk.appr_lic_flag
+        INTO lv_lic_flag            
+        FROM
+            utrs              ut,
+            test_batch_det    tbd,
+            test_kits          tk
+        WHERE
+                ut.unit_id = unit_id_in
+            AND ut.test_id = test_id_in
+            AND ut.test_seq_no = test_seq_in
+            AND ut.tb_id = tbd.tb_id
+            AND ut.test_chapter_id = tbd.test_chapter_id
+            AND ut.test_id = tbd.test_id
+            AND tbd.test_kit_id = tk.test_kit_id
+            AND tbd.test_chapter_id = tk.test_chapter_id;        
+    /*   -- MLT 6904         
+        SELECT
+             --ut.unit_id, 
+             --ut.test_id, 
+             --ut.test_chapter_id, 
+             --ut.tb_id,
+             --tbd.test_kit_id,
+             --tkr.reagent_code,
+             --tkr.supplier_code,
+             --tkr.lot_number,
+            rsm.lic_approve_flag
+        INTO lv_lic_flag
+        FROM
+            utrs              ut,
+            test_batch_det    tbd,
+            test_kit_reagents tkr,
+            reagent_store_mst rsm
+        WHERE
+                ut.unit_id = unit_id_in
+            AND ut.tb_id = tbd.tb_id
+            AND ut.test_chapter_id = tbd.test_chapter_id
+            AND ut.test_id = tbd.test_id
+            AND tbd.test_kit_id = tkr.test_kit_id
+            AND tbd.test_chapter_id = tkr.test_chapter_id
+            AND tkr.reagent_code = rsm.reagent_code
+            AND tkr.lot_number = rsm.lot_number
+            AND tkr.supplier_code = rsm.supplier_code
+            AND tkr.test_chapter_id = rsm.chapter_id
+            AND ut.test_id = test_id_in
+            AND ut.test_seq_no = test_seq_in;
+    */
+        IF NVL(lv_lic_flag,'X') NOT IN ( 'A', 'U', 'L' ) THEN
+            log_DBG_msg('Assuming License Flag as ''U'' for flag ' || lv_lic_flag );
+            lv_lic_flag := 'U';          
+        END IF;
+
+        RETURN lv_lic_flag;
+    EXCEPTION
+        WHEN OTHERS THEN
+            lv_lic_flag := 'U';
+            log_DBG_msg('Assuming License Flag as ''U'' - Err: ' || SUBSTR(SQLERRM, 1, 600));
+            RETURN lv_lic_flag;
+    END get_reagents_license;
+
+    FUNCTION get_test_type (
+        test_id_in    IN VARCHAR2
+        ) RETURN VARCHAR2 IS
+        lv_test_group VARCHAR2(10);
+    BEGIN
+        gv_error := NULL;
+
+        BEGIN
+            SELECT
+                test_group
+            INTO lv_test_group
+            FROM
+                valid_tests_don
+            WHERE
+                test_id = test_id_in;            
+        EXCEPTION
+            WHEN no_data_found THEN
+                gv_error := 'Test id '
+                             || test_id_in
+                             || ' - Not found in VALID_TESTS_DON table';
+                RETURN NULL;                 
+        END;
+
+        IF lv_test_group MEMBER OF g_ag_groups_list THEN
+            IF lv_test_group = 'AG' THEN
+                RETURN 'SER';
+            ELSIF lv_test_group = 'MAG' THEN
+                RETURN 'MOL';
+            END IF;
+        ELSE
+            gv_error := 'Test id '
+                         || test_id_in
+                         || ' - not part of ANTGR group';        
+            RETURN NULL;
+        END IF;
+
+    END get_test_type;
+
+    FUNCTION get_test_ag_group (test_id_in IN VARCHAR2) RETURN VARCHAR2 IS
+        lv_ag_group ag_donor_tests_hdr.antigen_group%TYPE;
+    BEGIN
+        SELECT
+            antigen_group 
+          INTO
+            lv_ag_group
+        FROM
+            valid_antigen_groups
+        WHERE
+            ser_ag_test_id = test_id_in
+            OR mol_ag_test_id = test_id_in
+        AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1)
+        AND ROWNUM = 1;
+
+        RETURN lv_ag_group;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN NULL;
+    END get_test_ag_group;
+
+    FUNCTION get_donor_id (
+        unit_id_in    IN VARCHAR2
+        ) RETURN VARCHAR2 IS
+        lv_donor_id ag_donor_tests_hdr.donor_id%TYPE;
+    BEGIN
+        gv_error := NULL;
+        SELECT
+            donor_id
+        INTO lv_donor_id
+        FROM
+            donations
+        WHERE
+            unit_id = unit_id_in;  
+
+        RETURN lv_donor_id;
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_error := 'GET_DONOR_ID' || ' - ' || SUBSTR(SQLERRM, 1, 800);
+            RETURN NULL;
+    END get_donor_id;
+
+    PROCEDURE check_antigen_on_donor(donor_id_in IN VARCHAR2, 
+                                     antigen_code_in IN VARCHAR2, 
+                                     ag_confirm_out OUT VARCHAR2) IS
+    BEGIN
+        gv_error := NULL;
+        ag_confirm_out := 'N';
+
+        SELECT
+            NVL(confirm_flag, 'N')
+        INTO ag_confirm_out
+        FROM
+            ag_donor_tests_hdr
+        WHERE
+                donor_id = donor_id_in
+            AND antigen_code = antigen_code_in;
+
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            gv_error := 'No record in HDR table';
+        WHEN TOO_MANY_ROWS THEN
+            -- Skip this record 
+            -- log error into a table.
+            gv_error := 'Multiple records in HDR table';
+    END check_antigen_on_donor;
+
+    PROCEDURE insert_hdr(test_rec_in IN test_rec_t) IS
+        nCnt NUMBER;
+    BEGIN
+        gv_error := NULL;
+
+        SELECT COUNT(1) INTO nCnt
+          FROM ag_donor_tests_hdr
+         WHERE donor_id = test_rec_in.donor_id
+           AND antigen_code = test_rec_in.antigen_code;
+
+        IF nCnt = 0 THEN
+            INSERT INTO ag_donor_tests_hdr (
+                donor_id,
+                antigen_code,
+                result_code,
+                confirm_flag,
+                confirm_date,
+                primary_rule_id,
+                result_pending,
+                insert_date,
+                antigen_group
+            ) VALUES (
+                test_rec_in.donor_id,
+                test_rec_in.antigen_code,
+                test_rec_in.result_code,
+                NULL,
+                NULL,
+                NULL, -- Primary rule ID loaded as NULL, will be updated once any rule matches.
+                0,
+                sysdate,
+                test_rec_in.test_ag_group
+            );
+
+            log_DBG_msg('Inserted into ag hdr table');            
+        ELSE
+            log_DBG_msg('Already in ag hdr table');            
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- Skip this record 
+            -- log error into a table.
+            gv_error := 'INSERT_HDR' || ' - ' || SUBSTR(SQLERRM, 1, 800);
+    END insert_hdr;
+
+    PROCEDURE insert_dtl(test_rec_in IN test_rec_t) IS
+        nCnt NUMBER;
+    BEGIN
+
+        SELECT COUNT(1) INTO nCnt
+          FROM ag_donor_tests_det
+         WHERE donor_id = test_rec_in.donor_id
+           AND antigen_code = test_rec_in.antigen_code
+           AND test_id = test_rec_in.test_id
+           AND test_seq_no = test_rec_in.test_seq_no
+           AND unit_id = test_rec_in.unit_id;
+
+        IF nCnt = 0 THEN   
+            -- Insert into detail table.
+            INSERT INTO ag_donor_tests_det (
+                donor_id,
+                antigen_code,
+                primary_rule_id,
+                rule_id,
+                test_id,
+                test_seq_no,
+                test_type,
+                test_date,
+                test_result,
+                licensed_flag,
+                confirm_status,
+                insert_date,
+                unit_id,
+                coll_date,
+                chapter_id,
+                antigen_group
+            ) VALUES (
+                test_rec_in.donor_id,
+                test_rec_in.antigen_code,
+                NULL,
+                NULL,
+                test_rec_in.test_id,
+                test_rec_in.test_seq_no,
+                test_rec_in.test_type,
+                test_rec_in.test_date,
+                test_rec_in.result_code,
+                test_rec_in.lic_flag,
+                NULL,
+                sysdate,
+                test_rec_in.unit_id,
+                test_rec_in.coll_date,
+                test_rec_in.chapter_id,
+                test_rec_in.test_ag_group
+            );  
+            log_DBG_msg('Inserted into ag det table');
+        ELSE
+            log_DBG_msg('Already in ag det table');
+        END IF;
+    EXCEPTION 
+        WHEN OTHERS THEN
+            gv_error := 'INSERT_DTL' || ' - ' || SUBSTR(SQLERRM, 1, 800);
+    END insert_dtl;                
+
+
+
+    FUNCTION is_result_discrepant(donor_id_in IN VARCHAR2,
+                                  antigen_code_in IN VARCHAR2,
+                                  result_code_in IN VARCHAR2)
+    RETURN BOOLEAN IS
+        lb_return BOOLEAN;
+        nCnt NUMBER;
+    BEGIN
+        lb_return := FALSE;
+
+        SELECT COUNT(1) INTO nCnt
+          FROM ag_donor_tests_hdr
+         WHERE donor_id = donor_id_in 
+           AND antigen_code = antigen_code_in
+           AND result_code <> result_code_in;        
+
+        IF nCnt > 0 THEN
+            lb_return := TRUE;
+        END IF;
+
+        RETURN lb_return;
+    END is_result_discrepant;
+
+
+
+    PROCEDURE compute_antigen_status (donor_id_in IN VARCHAR2,
+                                         antigen_code_in IN VARCHAR2,
+                                         primary_rule_id_in IN VARCHAR2,
+                                         no_of_units_in IN VARCHAR2,
+                                         confirm_status_out OUT VARCHAR2
+                                         )
+    IS        
+        l_confirm_status VARCHAR2(1);
+        lv_ag_prid VARCHAR2(50);
+        nCnt NUMBER;
+
+        lv_result VARCHAR2(10);
+        lv_final_result VARCHAR2(10);
+
+        TYPE rule_unit_sets_type IS RECORD(
+            rule_id NUMBER,
+            units_set  t_string_tab,
+            final_result VARCHAR2(10)
+        );
+
+        TYPE rule_unit_sets_aat IS TABLE OF rule_unit_sets_type INDEX BY PLS_INTEGER;        
+        rule_unit_sets rule_unit_sets_aat;        
+
+
+        -- TYPE units_nt IS TABLE OF ag_donor_tests_det.unit_id%TYPE;
+        l_units_set t_string_tab; 
+
+        CURSOR config_rules_cur(p_antigen_code VARCHAR2, p_primary_rule_id NUMBER, p_rule_id NUMBER) IS
+         SELECT ag_det.rule_id,
+                ag_det.test_type,
+                ag_det.test_id,
+                ag_det.lic_approve_flag,
+                ag_det.no_of_tests
+           FROM valid_antigen_config_det ag_det, valid_antigen_config_hdr ag_hdr
+           WHERE ag_hdr.antigen_code = ag_det.antigen_code
+             AND ag_hdr.primary_rule_id = ag_det.primary_rule_id
+             AND ag_det.antigen_code =  p_antigen_code
+             AND ag_det.primary_rule_id = p_primary_rule_id
+             AND ag_det.rule_id = p_rule_id
+             AND lifetrack_timezone_convert.get_local_time(ag_hdr.chapter_id, SYSDATE)
+                BETWEEN ag_hdr.eff_date AND nvl(ag_hdr.term_date, lifetrack_timezone_convert.get_local_time(ag_hdr.chapter_id, SYSDATE) + 1);
+
+        exit_ag_confirm_process EXCEPTION;     
+
+        FUNCTION get_units_set(
+            rule_rec_in IN config_rules_cur%rowtype,
+            donor_id_in IN VARCHAR2,
+            antigen_code_in IN VARCHAR2)        
+        RETURN t_string_tab IS
+            l_units t_string_tab;
+        BEGIN
+            -- use utrs as source of truth.  For each unit, test id combination,
+            -- the ag_donor_tests_det table can have multiple records based on
+            -- the number of rules the test matched.
+            SELECT
+                unit_id
+            BULK COLLECT INTO l_units                
+            FROM
+                utrs
+            WHERE
+                ( unit_id, test_id, test_seq_no ) IN (
+                    SELECT
+                        unit_id, test_id, test_seq_no
+                    FROM
+                        ag_donor_tests_det agtd
+                    WHERE
+                            agtd.donor_id = donor_id_in
+                        AND agtd.antigen_code = antigen_code_in
+                        AND agtd.test_id = rule_rec_in.test_id
+                        AND agtd.test_type = rule_rec_in.test_type
+                        AND agtd.licensed_flag = rule_rec_in.lic_approve_flag
+                        AND NVL(agtd.exclude_flag, 'N') = 'N'
+                )
+             AND cancel_flag IS NULL
+            GROUP BY
+                test_id,
+                unit_id
+            HAVING
+                COUNT(1) >= rule_rec_in.no_of_tests;  
+
+            RETURN l_units;        
+        END get_units_set;
+
+    BEGIN
+        l_confirm_status := 'N';
+
+        lv_ag_prid := antigen_code_in ||'-' || primary_rule_id_in;
+
+        log_DBG_msg('Checking Primary Rule - ' ||  ' | ' 
+                    || antigen_code_in || ' | ' 
+                    || primary_rule_id_in  );
+
+        -- TODO
+        -- check if a terminated rule id can come so far.
+
+        -- populate rule ids in - rule_unit_sets table - rule_id property.
+        DECLARE
+            cntr NUMBER;
+        BEGIN
+            cntr := 1;
+            FOR rec IN (SELECT DISTINCT ag_det.rule_id
+                          FROM valid_antigen_config_det ag_det, valid_antigen_config_hdr ag_hdr
+                        WHERE ag_hdr.antigen_code = ag_det.antigen_code
+                          AND ag_hdr.primary_rule_id = ag_det.primary_rule_id
+                          AND ag_det.antigen_code = antigen_code_in
+                          AND ag_det.primary_rule_id = primary_rule_id_in
+                          AND lifetrack_timezone_convert.get_local_time(ag_hdr.chapter_id, SYSDATE)
+                                    BETWEEN ag_hdr.eff_date AND nvl(ag_hdr.term_date, lifetrack_timezone_convert.get_local_time(ag_hdr.chapter_id, SYSDATE) + 1)
+                        ORDER BY ag_det.rule_id) 
+            LOOP
+                rule_unit_sets(cntr).rule_id := rec.rule_id;             
+                cntr := cntr + 1;              
+            END LOOP;  
+        END;
+        ---------------
+
+        -------
+        IF (no_of_units_in <> rule_unit_sets.COUNT)
+            OR
+           rule_unit_sets.COUNT = 0
+        THEN
+            log_DBG_msg('Rule configuration error ' || ' - ' ||
+            ' | Units Cnt | ' || rule_unit_sets.COUNT ||
+            ' | No. of Units | ' || no_of_units_in);
+            l_confirm_status := 'N';
+            RAISE exit_ag_confirm_process;
+        END IF;
+        --------
+
+        ---------        
+        lv_final_result := NULL;
+        FOR indx IN rule_unit_sets.FIRST .. rule_unit_sets.LAST
+        LOOP
+            DECLARE
+                l_final_units_set t_string_tab := t_string_tab(); 
+                lv_units_csv VARCHAR2(2000) := NULL;
+            BEGIN
+                FOR rule_rec IN ( SELECT ag_det.rule_id,
+                                    ag_det.test_type,
+                                    ag_det.test_id,
+                                    ag_det.lic_approve_flag,
+                                    ag_det.no_of_tests
+                               FROM valid_antigen_config_det ag_det, valid_antigen_config_hdr ag_hdr
+                               WHERE ag_hdr.antigen_code = ag_det.antigen_code
+                                AND ag_hdr.primary_rule_id = ag_det.primary_rule_id
+                                AND ag_det.antigen_code =  antigen_code_in
+                                 AND ag_det.primary_rule_id = primary_rule_id_in
+                                 AND ag_det.rule_id = rule_unit_sets(indx).rule_id
+                                 AND lifetrack_timezone_convert.get_local_time(ag_hdr.chapter_id, SYSDATE)
+                                    BETWEEN ag_hdr.eff_date AND nvl(ag_hdr.term_date, lifetrack_timezone_convert.get_local_time(ag_hdr.chapter_id, SYSDATE) + 1)
+                            )
+                 LOOP
+                    log_DBG_msg('Checking Rule - ' || 
+                    ' | Rule ID | ' || rule_rec.rule_id ||
+                    ' | Test Type | ' || rule_rec.test_type ||
+                    ' | Lic Flag | ' || rule_rec.lic_approve_flag ||
+                    ' | Tests cnt | ' || rule_rec.no_of_tests
+                    );    
+
+                    l_units_set := get_units_set(rule_rec_in => rule_rec,
+                                                donor_id_in => donor_id_in,
+                                                antigen_code_in => antigen_code_in);
+
+                    IF l_units_set.COUNT = 0 THEN 
+                        log_DBG_MSG('   Units Not found - skipping rule');
+                        l_confirm_status := 'N';                                
+                        RAISE exit_ag_confirm_process;            
+                    ELSIF l_units_set.COUNT < 10 THEN
+                        SELECT listagg(column_value, ',')
+                          INTO lv_units_csv
+                          FROM TABLE(l_units_set);
+                        log_DBG_MSG('   Units - ' || lv_units_csv);                          
+                    END IF;   
+
+                    -- Check result discrepancy
+                    -- Same query as get_units_set
+                    BEGIN
+                        lv_result := NULL;
+
+                        SELECT
+                            distinct code_type INTO lv_result
+                        FROM
+                            utrs ut, master_codes mc
+                        WHERE
+                            ( ut.unit_id, ut.test_id, ut.test_seq_no ) IN (
+                                SELECT
+                                    agtd.unit_id, agtd.test_id, agtd.test_seq_no
+                                FROM
+                                    ag_donor_tests_det agtd
+                                WHERE
+                                        agtd.donor_id = donor_id_in
+                                    AND agtd.antigen_code = antigen_code_in
+                                    AND agtd.test_id = rule_rec.test_id
+                                    AND agtd.test_type = rule_rec.test_type
+                                    AND agtd.licensed_flag = rule_rec.lic_approve_flag
+                                   AND NVL(agtd.exclude_flag, 'N') = 'N'
+                            )
+                         AND ut.cancel_flag IS NULL
+                         AND mc.code_type(+) IN ('REAC', 'NREAC')
+                         AND mc.code(+) = ut.result_status_1;
+                    EXCEPTION
+                        WHEN TOO_MANY_ROWS THEN
+                            lv_result := 'DISC';
+                    END;
+
+                    IF lv_final_result IS NOT NULL THEN
+                        IF lv_final_result = 'DISC' OR lv_result = 'DISC' THEN
+                            lv_final_result := 'DISC';
+                        ELSE
+                            IF lv_final_result = lv_result THEN
+                                lv_final_result := lv_result;
+                            ELSE
+                                lv_final_result := 'DISC';
+                            END IF;
+                        END IF;
+                    ELSE
+                        lv_final_result := lv_result;
+                    END IF;
+
+                    IF l_final_units_set.COUNT <> 0 THEN
+                        l_final_units_set := l_units_set MULTISET INTERSECT l_final_units_set;
+                        IF l_final_units_set.COUNT = 0 THEN
+                            log_DBG_MSG('   Common Units not found.');
+                            l_confirm_status := 'N';
+                            RAISE exit_ag_confirm_process;
+                        END IF;
+                    ELSE
+                        l_final_units_set := l_units_set;
+                    END IF;     
+
+                 END LOOP;
+
+                 rule_unit_sets(indx).units_set := l_final_units_set;
+                 log_DBG_msg('  ' || rule_unit_sets(indx).rule_id || ' - units found.');
+             END;
+        END LOOP;
+        --------------------
+        -- 1 unit scenario
+        IF rule_unit_sets.COUNT = 1 THEN
+            IF rule_unit_sets(1).units_set.COUNT <> 0 THEN
+                log_DBG_MSG('1 Unit Scenario - Confirm Status | Y | ' || rule_unit_sets(1).units_set.COUNT ||' units found | ');
+                l_confirm_status := 'Y';
+                RAISE exit_ag_confirm_process;                 
+            END IF;        
+        -- 2 Unit Scenario
+        ELSIF rule_unit_sets.COUNT = 2 THEN
+            -- Assume two sets A, B
+            -- 1) A.count OR B.count = 0 => Not confirmed.
+            -- 2) A = B and A.count > 1 => Confirmed - As there is atleaset one diff. unit.
+            -- 3) A <> B => Confirmed - As there is atleast one diff. unit.
+
+            -- 1 
+                --is taken care of in the above loop.            
+            -- 2 
+            IF rule_unit_sets(1).units_set = rule_unit_sets(2).units_set
+            THEN
+                IF rule_unit_sets(1).units_set.COUNT = 1
+                THEN
+                    l_confirm_status := 'N';
+                    log_DBG_MSG('2 UNIT Scenario - Confirm Status | N | SAME - 1 UNIT ONLY | ');
+                ELSE
+                    l_confirm_status := 'Y';
+                    log_DBG_MSG('2 UNIT Scenario - Confirm Status | Y | SAME - ' || rule_unit_sets(1).units_set.COUNT || ' units found | ');
+                END IF;
+
+                RAISE EXIT_AG_CONFIRM_PROCESS;
+            END IF;
+
+            -- 3 
+            IF rule_unit_sets(1).units_set <> rule_unit_sets(2).units_set
+            THEN
+                l_confirm_status := 'Y';
+                log_DBG_MSG('2 UNIT Scenario - Confirm Status | Y | DIFF - (' || rule_unit_sets(1).units_set.COUNT || ',' || rule_unit_sets(2).units_set.COUNT || ') units found | ');
+                RAISE EXIT_AG_CONFIRM_PROCESS;             
+            END IF;
+        -- 3 Unit Scenario        
+        ELSIF rule_unit_sets.COUNT = 3 THEN
+            /*
+            -- Assume three sets A, B, C.
+            -- Use the below formula
+            -- step 1: A.cnt * B.cnt * C.cnt
+            -- step 2: A.cnt - (B intersect C).cnt
+            -- step 3: B.cnt - (C intersect A).cnt
+            -- step 4: C.cnt - (A intersect B).cnt
+            -- step 5: 2 * (A intersect B intersect C).cnt
+            -- step 6: Add STEP1 to STEP 5   
+            SRC: https://math.stackexchange.com/questions/3666963/combinations-of-elements-from-multiple-sets-with-constraints
+            */
+            DECLARE
+                ln_A_cnt NUMBER;
+                ln_B_cnt NUMBER;
+                ln_C_cnt NUMBER;
+
+                AB_set t_string_tab;
+                BC_set t_string_tab;
+                CA_set t_string_tab;
+                ABC_set t_string_tab;
+
+                ln_step1 NUMBER;
+                ln_step2 NUMBER;
+                ln_step3 NUMBER;
+                ln_step4 NUMBER;
+                ln_step5 NUMBER;
+
+                ln_combinations NUMBER;
+            BEGIN
+
+                l_confirm_status := 'N';   
+
+                ln_A_cnt := rule_unit_sets(1).units_set.COUNT;
+                ln_B_cnt := rule_unit_sets(2).units_set.COUNT;
+                ln_C_cnt := rule_unit_sets(3).units_set.COUNT;
+
+                AB_set   := rule_unit_sets(1).units_set MULTISET INTERSECT rule_unit_sets(2).units_set;
+                BC_set   := rule_unit_sets(2).units_set MULTISET INTERSECT rule_unit_sets(3).units_set;
+                CA_set   := rule_unit_sets(3).units_set MULTISET INTERSECT rule_unit_sets(1).units_set;
+                ABC_set  := rule_unit_sets(1).units_set 
+                            MULTISET INTERSECT rule_unit_sets(2).units_set
+                            MULTISET INTERSECT rule_unit_sets(3).units_set;
+
+
+                ln_step1 := ln_A_cnt * ln_B_cnt * ln_C_cnt;
+                ln_step2 :=  - (BC_set.COUNT) * ln_A_cnt;
+                ln_step3 :=  - (CA_set.COUNT) * ln_B_cnt;
+                ln_step4 :=  - (AB_set.COUNT) * ln_C_cnt;
+                ln_step5 :=  2 * (ABC_SET.COUNT);
+
+                ln_combinations := ln_step1 + ln_step2 + ln_step3 + ln_step4 + ln_step5;
+
+                log_DBG_MSG('3 UNIT Scenario - No. of Matches | ' || ln_combinations);
+
+                IF ln_combinations > 0 THEN
+                    l_confirm_status := 'Y'; 
+                    log_DBG_MSG('3 UNIT Scenario - Confirm Status | Y | units found | ' || ln_combinations || ' | ');
+                    RAISE EXIT_AG_CONFIRM_PROCESS;                 
+                END IF;
+
+            END;
+
+        END IF;
+
+        confirm_status_out := l_confirm_status;
+    EXCEPTION
+        WHEN exit_ag_confirm_process THEN
+            log_DBG_MSG('Final Result ' || lv_final_result);
+            IF l_confirm_status = 'Y' THEN
+
+                IF lv_final_result = 'DISC' THEN
+
+                    log_DBG_MSG('#### Reverting CONFIRM STATUS because RESULTS did not match ####');
+
+                    UPDATE ag_donor_tests_hdr
+                      SET result_code = 'D',
+                          primary_rule_id = primary_rule_id_in
+                     WHERE donor_id = donor_id_in
+                       AND antigen_code = antigen_code_in;
+
+                    l_confirm_status := 'N';
+                ELSE
+
+                    UPDATE ag_donor_tests_hdr
+                    SET
+                        confirm_flag = 'Y',
+                        confirm_date = sysdate,
+                        result_code = DECODE(lv_final_result, 'REAC', '+', 'NREAC', '-', result_code),
+                        primary_rule_id = primary_rule_id_in
+                    WHERE
+                            donor_id = donor_id_in
+                        AND antigen_code = antigen_code_in;
+
+                    UPDATE ag_donor_tests_det agd
+                       SET agd.confirm_status = 'Y',
+                           agd.primary_rule_id = primary_rule_id_in
+                     WHERE agd.donor_id = donor_id_in
+                       AND agd.antigen_code = antigen_code_in
+                       AND NVL(agd.exclude_flag, 'N') = 'N'
+                       AND agd.test_id IN (SELECT agc.test_id
+                                         FROM valid_antigen_config_det agc, valid_antigen_config_hdr agh
+                                        WHERE agh.antigen_code = agc.antigen_code
+                                          AND agh.primary_rule_id = agc.primary_rule_id
+                                          AND agc.antigen_code = antigen_code_in
+                                          AND agc.primary_rule_id = primary_rule_id_in
+                                          AND lifetrack_timezone_convert.get_local_time(agh.chapter_id, SYSDATE)
+                                    BETWEEN agh.eff_date AND nvl(agh.term_date, lifetrack_timezone_convert.get_local_time(agh.chapter_id, SYSDATE) + 1)
+                                          --AND SYSDATE BETWEEN agc.eff_date AND NVL(agc.term_date, SYSDATE+1)
+                                         );
+
+                END IF;
+
+
+                confirm_status_out := l_confirm_status;
+
+            END IF;
+        WHEN OTHERS THEN
+            gv_error := 'GET_ANTIGEN_CONFIRM_STATUS' || ' - ' || SUBSTR(sqlerrm, 1, 800);
+            /*
+            DBMS_OUTPUT.PUT_LINE('***********');
+            DBMS_OUTPUT.PUT_LINE(DBMS_UTILITY.format_call_stack);
+            DBMS_OUTPUT.PUT_LINE('***********');
+            DBMS_OUTPUT.PUT_LINE(DBMS_UTILITY.format_error_stack);
+            DBMS_OUTPUT.PUT_LINE('***********');
+            DBMS_OUTPUT.PUT_LINE(DBMS_UTILITY.format_error_backtrace);
+            DBMS_OUTPUT.PUT_LINE('***********');
+            */
+            confirm_status_out := NULL;
+    END compute_antigen_status;
+
+    PROCEDURE recompute_antigen_status (donor_id_in IN VARCHAR2, antigen_code_in IN VARCHAR2, program_id_IN in VARCHAR2) IS
+    BEGIN
+        IF NOT AG_UTIL.IS_LICENSED THEN
+            RETURN;
+        END IF;
+
+        IF donor_id_in IS NULL OR antigen_code_in IS NULL OR program_id_IN IS NULL THEN
+            RETURN;
+        END IF;
+
+        dbms_output.put_line('In recompute antigen status');
+
+        gd_SYSDATE := SYSDATE;
+        gb_genLog  := TRUE; 
+        gn_rowCnt  := 1;
+
+        check_and_set_debug_level;
+
+        mark_start;    
+
+        log_DBG_msg('-------------------------------------------');
+        log_DBG_msg('Recomputing antigen status from program ' || program_id_IN);
+        log_DBG_msg('Donor ' || donor_id_in);
+        log_DBG_msg('Antigen Code ' || antigen_code_in);
+        log_DBG_msg('-------------------------------------------');        
+
+        -- unconfirm the antigen                 
+        UPDATE ag_donor_tests_hdr
+        SET
+            confirm_flag = NULL,
+            confirm_date = NULL,
+            primary_rule_id = NULL
+        WHERE
+                donor_id = donor_id_in
+            AND antigen_code = antigen_code_in;
+
+
+        UPDATE ag_donor_tests_det
+           SET confirm_status = NULL
+         WHERE donor_id = donor_id_in
+       AND antigen_code = antigen_code_in;        
+
+        recompute_antigen_status(donor_id_in, antigen_code_in);
+
+        mark_end;
+
+        dump_output;         
+    EXCEPTION 
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE('***********');
+            DBMS_OUTPUT.PUT_LINE(DBMS_UTILITY.format_call_stack);
+            DBMS_OUTPUT.PUT_LINE('***********');
+            DBMS_OUTPUT.PUT_LINE(DBMS_UTILITY.format_error_stack);
+            DBMS_OUTPUT.PUT_LINE('***********');
+            DBMS_OUTPUT.PUT_LINE(DBMS_UTILITY.format_error_backtrace);
+            DBMS_OUTPUT.PUT_LINE('***********');
+
+            mark_end;
+            dump_output;    
+    END recompute_antigen_status;
+
+    PROCEDURE recompute_antigen_status (donor_id_in IN VARCHAR2, antigen_code_in IN VARCHAR2) IS
+        lv_confirm_status VARCHAR2(1);
+    BEGIN
+        IF NOT AG_UTIL.IS_LICENSED THEN
+            RETURN;
+        END IF;
+        
+        IF donor_id_in IS NULL OR antigen_code_in IS NULL THEN
+            RETURN;
+        END IF;
+
+        FOR config_rec IN (
+                    SELECT
+                        primary_rule_id,
+                        no_of_units
+                    FROM
+                        valid_antigen_config_hdr
+                    WHERE
+                        antigen_code =  antigen_code_in
+                     AND lifetrack_timezone_convert.get_local_time(chapter_id, SYSDATE)
+                                    BETWEEN eff_date AND nvl(term_date, lifetrack_timezone_convert.get_local_time(chapter_id, SYSDATE) + 1)   
+                    ORDER BY
+                        primary_rule_id
+                     )
+        LOOP
+            compute_antigen_status 
+                                (donor_id_in        => donor_id_in,
+                                 antigen_code_in    => antigen_code_in,
+                                 primary_rule_id_in => config_rec.primary_rule_id,
+                                 no_of_units_in     => config_rec.no_of_units,
+                                 confirm_status_out => lv_confirm_status
+                                 );
+
+            IF lv_confirm_status = 'Y' THEN
+                EXIT;
+            END IF;
+
+        END LOOP;                
+
+    END recompute_antigen_status;
+
+
+    FUNCTION test_cancelled(test_rec_in IN test_rec_t) RETURN BOOLEAN IS
+        nCnt NUMBER;
+    BEGIN
+
+        SELECT COUNT(1) INTO nCnt
+          FROM utrs
+         WHERE unit_id      = test_rec_in.unit_id
+           AND coll_date    = test_rec_in.coll_date
+           AND chapter_id   = test_rec_in.chapter_id
+           AND test_id      = test_rec_in.test_id
+           AND test_seq_no  = test_rec_in.test_seq_no
+           AND NVL(cancel_flag, 'X') IN ('Y', 'D');
+
+        IF nCnt > 0 THEN
+            RETURN TRUE;
+        END IF;
+
+        RETURN FALSE;
+    END test_cancelled;
+
+    PROCEDURE handle_cancelled_test(test_rec_in IN test_rec_t) IS
+    BEGIN
+        /*
+        1) AG already confirmed and this test was part of the confirmation.
+            -- Unconfirm AG (update hdr, update dtl - set confirm flag as N)
+            -- Delete from DET
+            -- Re-evaluate AG
+        2) AG already confirmed but this test was not part of confirmation.
+            -- Delete from DET.
+            -- No need to re-evaluate.
+        3) AG not confirmed
+            -- Delete from DET
+            -- Delete from hdr if the test is the only record in DET for that antigen.
+            -- No need to re-evaluate.    
+        */
+        FOR rec IN (SELECT DISTINCT antigen_code 
+                      FROM ag_donor_tests_det
+                     WHERE donor_id = test_rec.donor_id
+                       AND unit_id = test_rec.unit_id
+                       AND test_id = test_rec.test_id
+                       AND test_seq_no = test_rec.test_seq_no)
+        LOOP
+
+            DECLARE
+                ag_confirm_flag VARCHAR2(1);
+                test_confirm_flag VARCHAR2(1);
+                nCnt NUMBER;
+            BEGIN
+                BEGIN
+                    SELECT NVL(confirm_flag, 'N')
+                     INTO ag_confirm_flag
+                      FROM ag_donor_tests_hdr
+                     WHERE donor_id = test_rec.donor_id
+                       AND antigen_code = rec.antigen_code;
+
+
+                    SELECT NVL(confirm_status, 'N')
+                      INTO test_confirm_flag
+                      FROM ag_donor_tests_det
+                     WHERE  donor_id = test_rec.donor_id
+                        AND unit_id = test_rec.unit_id
+                        AND test_id = test_rec.test_id
+                        AND test_seq_no = test_rec.test_seq_no
+                        AND antigen_code = rec.antigen_code;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        -- treat AG CONFIRM FLAG as Yes and redo the antigen evaluation.
+                        ag_confirm_flag := 'Y';
+                        test_confirm_flag := 'Y';
+                END;
+
+
+                IF ag_confirm_flag = 'Y' and test_confirm_flag = 'Y' THEN
+                    log_DBG_msg('   Re-evaluating antigen '  || rec.antigen_code 
+                            || ' on the donor by unconfirming, deleting from det and recomputing antigen');                
+                    -- unconfirm the antigen                 
+                    UPDATE ag_donor_tests_hdr
+                    SET
+                        confirm_flag = NULL,
+                        confirm_date = NULL,
+                        result_code = NULL,
+                        primary_rule_id = NULL
+                    WHERE
+                            donor_id = test_rec.donor_id
+                        AND antigen_code = rec.antigen_code;
+
+
+                    UPDATE ag_donor_tests_det
+                       SET confirm_status = NULL
+                     WHERE donor_id = test_rec.donor_id
+                   AND antigen_code = rec.antigen_code;     
+
+
+                    -- Delete the test           
+                    DELETE FROM ag_donor_tests_det
+                      WHERE donor_id = test_rec.donor_id
+                        AND unit_id = test_rec.unit_id
+                        AND test_id = test_rec.test_id
+                        AND test_seq_no = test_rec.test_seq_no
+                        AND antigen_code = rec.antigen_code;                   
+
+                    log_DBG_msg('   Recomputing antigen '  || rec.antigen_code 
+                            || ' on the donor.');
+
+                    recompute_antigen_status (test_rec.donor_id, 
+                                              rec.antigen_code);                 
+
+                ELSIF ag_confirm_flag = 'Y' AND test_confirm_flag = 'N' THEN
+                    log_DBG_msg('   Deleting from det.');                
+                    -- Delete the test           
+                    DELETE FROM ag_donor_tests_det
+                      WHERE donor_id = test_rec.donor_id
+                        AND unit_id = test_rec.unit_id
+                        AND test_id = test_rec.test_id
+                        AND test_seq_no = test_rec.test_seq_no
+                        AND antigen_code = rec.antigen_code;                       
+
+                ELSIF ag_confirm_flag = 'N' AND test_confirm_flag = 'N' THEN
+                    log_DBG_msg('   Deleting from det.'); 
+                    -- Delete the test           
+                    DELETE FROM ag_donor_tests_det
+                      WHERE donor_id = test_rec.donor_id
+                        AND unit_id = test_rec.unit_id
+                        AND test_id = test_rec.test_id
+                        AND test_seq_no = test_rec.test_seq_no
+                        AND antigen_code = rec.antigen_code;                       
+
+                    SELECT COUNT(1)
+                      INTO nCnt
+                      FROM ag_donor_tests_det
+                     WHERE  donor_id = test_rec.donor_id
+                      AND antigen_code = rec.antigen_code;
+
+                    IF nCnt = 0 THEN
+                        log_DBG_msg('   AND deleting from hdr.'); 
+                        DELETE FROM ag_donor_tests_hdr
+                         WHERE donor_id = test_rec.donor_id
+                           AND antigen_code = rec.antigen_code;
+                    END IF;
+
+
+                END IF;
+            END;
+
+        END LOOP;
+
+        COMMIT;
+
+    END handle_cancelled_test;
+
+    PROCEDURE handle_edit_test(test_rec_in IN test_rec_t) IS
+    BEGIN
+        /*
+        1) AG already confirmed and this test was part of the confirmation.
+            -- Unconfirm AG (update hdr, update dtl - set confirm flag as N)
+            -- Delete from DET
+            -- insert into job_queue
+        2) AG already confirmed but this test was not part of confirmation.
+            -- Update DET result
+            -- check result discrepancy
+        3) AG not confirmed
+            -- Delete from DET
+            -- Delete from hdr if the test is the only record in DET for that antigen.
+            -- insert into job_queue    
+        */
+        FOR rec IN (SELECT DISTINCT antigen_code 
+                      FROM ag_donor_tests_det
+                     WHERE donor_id = test_rec.donor_id
+                       AND unit_id = test_rec.unit_id
+                       AND test_id = test_rec.test_id
+                       AND test_seq_no = test_rec.test_seq_no)
+        LOOP
+
+            DECLARE
+                ag_confirm_flag VARCHAR2(1);
+                test_confirm_flag VARCHAR2(1);
+                nCnt NUMBER;
+                lb_result_discrepant BOOLEAN;
+            BEGIN
+                BEGIN
+                    SELECT NVL(confirm_flag, 'N')
+                     INTO ag_confirm_flag
+                      FROM ag_donor_tests_hdr
+                     WHERE donor_id = test_rec.donor_id
+                       AND antigen_code = rec.antigen_code;
+
+
+                    SELECT NVL(confirm_status, 'N')
+                      INTO test_confirm_flag
+                      FROM ag_donor_tests_det
+                     WHERE  donor_id = test_rec.donor_id
+                        AND unit_id = test_rec.unit_id
+                        AND test_id = test_rec.test_id
+                        AND test_seq_no = test_rec.test_seq_no
+                        AND antigen_code = rec.antigen_code;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        -- treat AG CONFIRM FLAG as Yes and redo the antigen evaluation.
+                        ag_confirm_flag := 'Y';
+                        test_confirm_flag := 'Y';
+                END;
+
+
+                IF ag_confirm_flag = 'Y' and test_confirm_flag = 'Y' THEN
+                    log_DBG_msg('   Reprocess the job '  || rec.antigen_code 
+                            || ' on the donor by unconfirming, deleting from det and insert in job queue');                
+                    -- unconfirm the antigen                 
+                    UPDATE ag_donor_tests_hdr
+                    SET
+                        confirm_flag = NULL,
+                        confirm_date = NULL,
+                        result_code = NULL,
+                        primary_rule_id = NULL
+                    WHERE
+                            donor_id = test_rec.donor_id
+                        AND antigen_code = rec.antigen_code;
+
+
+                    UPDATE ag_donor_tests_det
+                       SET confirm_status = NULL
+                     WHERE donor_id = test_rec.donor_id
+                   AND antigen_code = rec.antigen_code;     
+
+
+                    -- Delete the test           
+                    DELETE FROM ag_donor_tests_det
+                      WHERE donor_id = test_rec.donor_id
+                        AND unit_id = test_rec.unit_id
+                        AND test_id = test_rec.test_id
+                        AND test_seq_no = test_rec.test_seq_no
+                        AND antigen_code = rec.antigen_code;                   
+
+                    log_DBG_msg('   Inserted into job queue as EDIT-RECOMPUTE ' );
+
+
+                    INSERT INTO ag_donor_tests_job_queue
+                     (unit_id, chapter_id, coll_date, test_id, result_code,
+                      test_date, test_seq_no, action_flag, insert_date, 
+                      status_flag, status_message, program_id)
+                     SELECT unit_id, chapter_id, coll_date, test_id, result_code,
+                           test_date, test_seq_no, NULL, insert_date, 
+                           NULL, NULL, 'EDIT-RECOMPUTE'
+                        FROM ag_donor_tests_job_queue
+                       WHERE job_id = gn_job_id;
+
+                ELSIF ag_confirm_flag = 'Y' AND test_confirm_flag = 'N' THEN
+                    log_DBG_msg('   Updating DET Test result.');                
+                    -- Delete the test           
+                    UPDATE ag_donor_tests_det
+                       SET test_result =  test_rec.result_code
+                      WHERE donor_id = test_rec.donor_id
+                        AND unit_id = test_rec.unit_id
+                        AND test_id = test_rec.test_id
+                        AND test_seq_no = test_rec.test_seq_no
+                        AND antigen_code = rec.antigen_code;     
+
+                    lb_result_discrepant := is_result_discrepant(test_rec.donor_id, 
+                                                                 rec.antigen_code,
+                                                                 test_rec.result_code);
+
+
+                    -- check if result changed from historical result.
+                    IF lb_result_discrepant THEN
+                        -- Unconfirm the antigen and set result code to Discrepant
+                        UPDATE ag_donor_tests_hdr
+                          SET confirm_flag = 'N',
+                              result_code = 'D',
+                              confirm_date = NULL
+                         WHERE donor_id = test_rec.donor_id
+                           AND antigen_code = rec.antigen_code;
+
+                        UPDATE ag_donor_tests_det
+                          SET confirm_status = 'N'
+                         WHERE donor_id = test_rec.donor_id
+                           AND antigen_code = rec.antigen_code
+                           AND confirm_status = 'Y';
+                        log_DBG_msg('AG confirmation reverted due to DISCREPANT results.');
+                    END IF;
+
+
+                ELSIF ag_confirm_flag = 'N' AND test_confirm_flag = 'N' THEN
+                    log_DBG_msg('   Deleting from det AND reinsert into job queue as EDIT-RECOMPUTE'); 
+                    -- Delete the test           
+                    DELETE FROM ag_donor_tests_det
+                      WHERE donor_id = test_rec.donor_id
+                        AND unit_id = test_rec.unit_id
+                        AND test_id = test_rec.test_id
+                        AND test_seq_no = test_rec.test_seq_no
+                        AND antigen_code = rec.antigen_code;                       
+
+                    SELECT COUNT(1)
+                      INTO nCnt
+                      FROM ag_donor_tests_det
+                     WHERE  donor_id = test_rec.donor_id
+                      AND antigen_code = rec.antigen_code;
+
+                    IF nCnt = 0 THEN
+                        log_DBG_msg('   AND deleting from hdr.'); 
+                        DELETE FROM ag_donor_tests_hdr
+                         WHERE donor_id = test_rec.donor_id
+                           AND antigen_code = rec.antigen_code;
+                    END IF;
+
+                    INSERT INTO ag_donor_tests_job_queue
+                     (unit_id, chapter_id, coll_date, test_id, result_code,
+                      test_date, test_seq_no, action_flag, insert_date, 
+                      status_flag, status_message, program_id)
+                     SELECT unit_id, chapter_id, coll_date, test_id, result_code,
+                           test_date, test_seq_no, NULL, insert_date, 
+                           NULL, NULL, 'EDIT-RECOMPUTE'
+                        FROM ag_donor_tests_job_queue
+                       WHERE job_id = gn_job_id;                    
+
+
+                END IF;
+            END;
+
+        END LOOP;
+
+        COMMIT;
+
+    END handle_edit_test;
+
+
+
+    PROCEDURE load_reac_codes_arrays IS
+    BEGIN
+
+        FOR rec IN (    SELECT
+                            code
+                        FROM
+                            master_codes
+                        WHERE
+                                code_type = 'NREAC'
+                            AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate + 1)
+                    )
+        LOOP
+            nreac_codes(rec.code) := TRUE;    
+
+        END LOOP;
+
+        FOR rec IN (    SELECT
+                            code
+                        FROM
+                            master_codes
+                        WHERE
+                                code_type = 'REAC'
+                            AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate + 1)
+                    )
+        LOOP
+            reac_codes(rec.code) := TRUE;    
+
+        END LOOP;
+
+    END load_reac_codes_arrays;
+
+
+    PROCEDURE start_job
+    IS
+        lv_debug_msg    VARCHAR2(1000);
+        lv_sep VARCHAR2(5) := ' | ';
+        lv_locked_flag VARCHAR2(1);
+        ln_locked_mins NUMBER;
+
+        nCnt NUMBER;
+    BEGIN
+        
+        IF NOT AG_UTIL.IS_LICENSED THEN
+            RETURN;
+        END IF;
+
+        SELECT COUNT(1) INTO nCnt
+          FROM ag_donor_tests_job_queue
+         WHERE status_flag IS NULL;
+
+        IF nCnt = 0 THEN
+            RETURN;
+        END IF;
+
+        DON_STD.check_object_lock('AG_CORE', 'START_JOB', lv_locked_flag, ln_locked_mins);
+        IF lv_locked_flag = 'Y' THEN
+            RETURN;    
+        END IF;
+
+        DON_STD.object_lock_unlock('AG_CORE', 'START_JOB', 'AGMGR', 'L');
+
+        gd_SYSDATE := SYSDATE;
+        gb_genLog  := FALSE; -- set when records are found to be processed.
+        gn_rowCnt  := 0;
+
+        -- Check if debug is set in debug controls table.
+        check_and_set_debug_level;
+
+        mark_start;
+
+        SELECT
+            code BULK COLLECT INTO g_ag_groups_list
+        FROM
+            master_codes
+        WHERE
+                code_type = 'ANTGR'
+            AND sysdate BETWEEN eff_date 
+            AND nvl(term_date, sysdate + 1) ;
+
+
+        OPEN ag_tests_cur;
+        LOOP
+            FETCH ag_tests_cur
+            BULK COLLECT INTO ag_tests LIMIT 100;
+            EXIT WHEN ag_tests.count = 0;
+
+            gb_genLog := TRUE;
+            gn_rowCnt := gn_rowCnt + ag_tests.COUNT;
+
+            /*
+            FORALL indx IN ag_tests.first..ag_tests.last
+                -- ID is identity column - unique column.
+                UPDATE ag_donor_tests_job_queue
+                SET
+                    status_flag = 'Q'
+                WHERE
+                        job_id = ag_tests(indx).job_id;
+            COMMIT;
+            */
+
+
+            load_reac_codes_arrays;
+
+            FOR indx IN ag_tests.first..ag_tests.last LOOP
+                DECLARE
+                    next_record EXCEPTION;
+                    cancelled_record EXCEPTION;
+                    edit_record EXCEPTION;
+                BEGIN
+                    -- setup test rec
+                    test_rec.unit_id            :=  ag_tests(indx).unit_id;
+                    test_rec.chapter_id         :=  ag_tests(indx).chapter_id;
+                    test_rec.coll_date          :=  ag_tests(indx).coll_date;
+                    test_rec.test_id            :=  ag_tests(indx).test_id;
+                    test_rec.test_seq_no        :=  ag_tests(indx).test_seq_no;
+                    test_rec.test_date          :=  ag_tests(indx).test_date;
+
+                    log_DBG_msg('-------------------------------------------');
+                    log_DBG_msg('Processing Job ID ' || ag_tests(indx).job_id);
+                    log_DBG_msg('-------------------------------------------');
+
+                    gn_job_id := ag_tests(indx).job_id;
+
+                    log_DBG_msg('Unit: ' || test_rec.unit_id || lv_sep ||
+                                test_rec.chapter_id || lv_sep ||
+                                TO_CHAR(test_rec.coll_date, 'MM-DD-YYYY'));
+
+                    IF nreac_codes.EXISTS(ag_tests(indx).result_code) THEN
+                        test_rec.result_code := lc_negative_res; -- negative
+                    ELSIF reac_codes.EXISTS(ag_tests(indx).result_code) THEN
+                        test_rec.result_code := lc_positive_res; -- Positive
+                    END IF;
+
+
+
+                    log_DBG_msg('Test: ' || test_rec.test_id     || lv_sep ||
+                                test_rec.result_code || lv_sep ||
+                                TO_CHAR(test_rec.test_date, 'MM-DD-YYYY'));
+
+
+                    -- Check REAGENTS used for the testing of the test to determine
+                    -- if it was licensed antisera OR approved testing for molecular
+                    -- OR Unlicensed antisera OR Unapproved testing.
+                    -- Must return 'L', 'A' or 'U'
+                    test_rec.lic_flag := get_reagents_license(
+                                                test_rec.unit_id, 
+                                                test_rec.test_id,
+                                                test_rec.test_seq_no);
+
+                    test_rec.test_type := get_test_type(test_rec.test_id);            
+                    log_error_and_continue;
+
+                    test_rec.test_ag_group := get_test_ag_group(test_rec.test_id);
+
+                    test_rec.donor_id := get_donor_id(test_rec.unit_id);
+                    log_error_and_continue;     
+
+                    log_DBG_msg('Lic. Flag: ' || test_rec.lic_flag ||
+                                ' | Test Type: ' || test_rec.test_type ||
+                                ' | Donor Id: ' || test_rec.donor_id);
+
+                    IF ag_tests(indx).action_flag = 'C' THEN
+                        log_DBG_msg('Cancelled Test... ');
+                        handle_cancelled_test(test_rec_in => test_rec);
+                        RAISE cancelled_record;                        
+                    END IF;
+
+                    IF ag_tests(indx).action_flag = 'E' THEN
+                        log_DBG_msg('Edited Test... ');
+                        handle_edit_test(test_rec_in => test_rec);
+                        RAISE edit_record;                        
+                    END IF;                    
+
+
+                    -- Check if the record is cancelled in UTRS.
+                    IF test_cancelled(test_rec_in => test_rec) THEN
+                        log_DBG_msg('Found that test was already cancelled... ');
+                        RAISE cancelled_record;           
+                    END IF;
+
+                    -- STEP 2: Filter rules by incoming test Id and the license flag.
+
+                    DECLARE
+                        CURSOR ag_id_rules_cur(p_test_id VARCHAR2, p_lic_flag VARCHAR2) IS
+                            SELECT DISTINCT
+                                ag_det.antigen_code,
+                                ag_det.primary_rule_id,
+                                ag_hdr.no_of_units
+                            FROM
+                                valid_antigen_config_hdr ag_hdr,
+                                valid_antigen_config_det ag_det
+                            WHERE
+                                    ag_hdr.antigen_code = ag_det.antigen_code
+                                AND ag_hdr.primary_rule_id = ag_det.primary_rule_id
+                                AND ag_det.test_id = p_test_id
+                                AND ag_det.lic_approve_flag = p_lic_flag
+                                AND lifetrack_timezone_convert.get_local_time(ag_hdr.chapter_id, SYSDATE)
+                                    BETWEEN ag_hdr.eff_date AND nvl(ag_hdr.term_date, lifetrack_timezone_convert.get_local_time(ag_hdr.chapter_id, SYSDATE) + 1)
+                            ORDER BY
+                                ag_det.antigen_code, ag_det.primary_rule_id;   
+
+                        lv_ag_confirm   VARCHAR2(1);      
+
+                        lb_match_found BOOLEAN;
+                        lv_confirm_status VARCHAR2(1);
+                    BEGIN
+                        lb_match_found := FALSE;
+
+                        -- Convert eff date and term date.
+                        -- eff, term dates are stored as local to the chapter id. Use chapter ID for the conversion.
+                        -- term date of 02/01/2024 implies that the rule is terminated from 02/01/2024 00.00.01 in that local chapter.
+                        -- And this datetime will be converted to other chapters for determining if the rule is terminated or not.
+
+
+
+                        FOR ag_id_rule_rec IN ag_id_rules_cur(test_rec.test_id, test_rec.lic_flag) 
+                        LOOP
+                            DECLARE
+                                lb_result_discrepant BOOLEAN;
+                            BEGIN
+                                lb_match_found := TRUE;
+
+                                test_rec.antigen_code       := ag_id_rule_rec.antigen_code;
+                                test_rec.primary_rule_id    := ag_id_rule_rec.primary_rule_id;
+                                test_rec.no_of_units        := ag_id_rule_rec.no_of_units;
+
+                                log_DBG_msg('-- AG Match found: '  ||  test_rec.antigen_code || '|' || test_rec.primary_rule_id || '|' || test_rec.no_of_units);
+
+                                insert_hdr(test_rec_in => test_rec); -- inserts only if rec does not exist.
+                                insert_dtl(test_rec_in => test_rec); -- inserts only if rec does not exist.                           
+
+                                check_antigen_on_donor(donor_id_in       => test_rec.donor_id, 
+                                                     antigen_code_in     => test_rec.antigen_code,
+                                                     ag_confirm_out      => lv_ag_confirm)   ;       
+                                log_error_and_continue;
+
+                                lb_result_discrepant := is_result_discrepant(test_rec.donor_id, 
+                                                                             test_rec.antigen_code,
+                                                                             test_rec.result_code);
+
+                                IF lv_ag_confirm = 'Y' THEN
+                                    -- check if result changed from historical result.
+                                    IF lb_result_discrepant THEN
+                                        -- Unconfirm the antigen and set result code to Discrepant
+                                        UPDATE ag_donor_tests_hdr
+                                          SET confirm_flag = 'N',
+                                              result_code = 'D',
+                                              confirm_date = NULL
+                                         WHERE donor_id = test_rec.donor_id
+                                           AND antigen_code = test_rec.antigen_code;
+
+                                        UPDATE ag_donor_tests_det
+                                          SET confirm_status = 'N'
+                                         WHERE donor_id = test_rec.donor_id
+                                           AND antigen_code = test_rec.antigen_code
+                                           AND confirm_status = 'Y';
+                                        log_DBG_msg('AG confirmation reverted due to DISCREPANT results. SKIP');   
+                                    ELSE
+                                        log_DBG_msg('AG already confirmed. SKIP');
+                                    END IF;
+
+                                    RAISE next_record; -- skip the compute_antigen_status routine.
+                                ELSE
+                                    IF lb_result_discrepant THEN
+                                        -- Update and continue evaluation. (to check if antigen is not confirmed only because of result discrepancy)
+                                        UPDATE ag_donor_tests_hdr
+                                          SET result_code = 'D'
+                                         WHERE donor_id = test_rec.donor_id
+                                           AND antigen_code = test_rec.antigen_code;   
+                                    END IF;
+
+                                END IF;
+
+                                log_DBG_msg('***');
+
+                                compute_antigen_status
+                                    (donor_id_in        => test_rec.donor_id,
+                                     antigen_code_in    => test_rec.antigen_code,
+                                     primary_rule_id_in => test_rec.primary_rule_id,
+                                     no_of_units_in     => test_rec.no_of_units,
+                                     confirm_status_out => lv_confirm_status
+                                     );
+
+                                log_error_and_continue;
+                                log_DBG_msg('Confirm Status: ' || lv_confirm_status);
+
+                                IF lv_confirm_status = 'Y' THEN
+                                    RAISE next_record;
+                                END IF;
+                            EXCEPTION 
+                                WHEN next_record THEN
+                                    NULL;
+                                WHEN skip_record THEN
+                                    UPDATE ag_donor_tests_job_queue
+                                      SET status_flag = 'E',
+                                          status_message = gv_error
+                                      WHERE job_id = ag_tests(indx).job_id;
+                            END;      
+                        END LOOP;
+
+                        IF lb_match_found THEN
+                            log_MSG_msg('COMPLETED ');
+                        ELSE
+                            log_MSG_msg('MATCH NOT FOUND ');
+                        END IF;                    
+
+                    END;
+
+
+
+                EXCEPTION
+                    WHEN cancelled_record THEN
+                        log_MSG_msg('CANCELLED ');
+                    WHEN edit_record THEN
+                        log_MSG_msg('EDITED ');
+                    WHEN skip_record THEN
+                        log_MSG_msg('ERROR ');
+
+                        UPDATE ag_donor_tests_job_queue
+                          SET status_flag = 'E',
+                              status_message = gv_error
+                          WHERE job_id = ag_tests(indx).job_id;
+                END;
+            END LOOP;
+
+            FORALL indx IN ag_tests.first..ag_tests.last
+                -- ID is identity column - unique column.
+                UPDATE ag_donor_tests_job_queue
+                  SET status_flag = 'C'
+                WHERE job_id = ag_tests(indx).job_id
+                  AND status_flag IS NULL;
+            COMMIT;
+
+
+
+        END LOOP; 
+        CLOSE ag_tests_cur;
+
+        mark_end;
+        dump_output; 
+
+        DON_STD.object_lock_unlock('AG_CORE', 'START_JOB', 'AGMGR', 'U');
+
+    EXCEPTION 
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE('***********');
+            DBMS_OUTPUT.PUT_LINE(DBMS_UTILITY.format_call_stack);
+            DBMS_OUTPUT.PUT_LINE('***********');
+            DBMS_OUTPUT.PUT_LINE(DBMS_UTILITY.format_error_stack);
+            DBMS_OUTPUT.PUT_LINE('***********');
+            DBMS_OUTPUT.PUT_LINE(DBMS_UTILITY.format_error_backtrace);
+            DBMS_OUTPUT.PUT_LINE('***********');
+
+            mark_end;
+            dump_output;
+
+            DON_STD.object_lock_unlock('AG_CORE', 'START_JOB', 'AGMGR', 'U');
+    END start_job;
+
+    PROCEDURE handle_merged_donors(primary_donor_in IN VARCHAR2, 
+                                    secondary_donor_in IN VARCHAR2) 
+    IS        
+        PROCEDURE insert_job_queue(primary_donor_in IN VARCHAR2) IS
+        BEGIN
+            INSERT INTO ag_donor_tests_job_queue (
+                unit_id,
+                chapter_id,
+                coll_date,
+                test_id,
+                test_seq_no,
+                result_code,
+                test_date,
+                program_id
+            )
+                SELECT
+                    ut.unit_id,
+                    ut.chapter_id,
+                    ut.coll_date,
+                    ut.test_id,
+                    ut.test_seq_no,
+                    ut.result_status_1,
+                    ut.insert_dats,
+                    'MERGED_DONORS'
+                FROM
+                    utrs      ut,
+                    donations dn
+                WHERE
+                        ut.unit_id = dn.unit_id
+                    AND ut.coll_date = dn.coll_date
+                    AND ut.chapter_id = dn.chapter_id
+                    AND ut.cancel_flag IS NULL
+                    AND dn.donor_id = primary_donor_in
+                    AND ut.test_id IN (
+                        SELECT
+                            cfg.test_id
+                        FROM
+                            valid_antigen_config_det cfg
+                        WHERE
+                            cfg.antigen_code NOT IN (
+                                SELECT
+                                    hdr.antigen_code
+                                FROM
+                                    ag_donor_tests_hdr hdr
+                                WHERE
+                                        hdr.donor_id = primary_donor_in
+                                    AND nvl(hdr.confirm_flag, 'N') = 'Y'
+                            )
+                    );    
+        END insert_job_queue;
+
+        PROCEDURE delete_in_process_donors(donor_in IN VARCHAR2) IS
+        BEGIN
+            -- Delete from hdr
+            DELETE FROM ag_donor_tests_hdr
+             WHERE donor_id = donor_in
+               AND NVL(confirm_flag, 'N') <> 'Y';        
+
+            -- Delete from det
+            DELETE FROM ag_donor_tests_det
+             WHERE donor_id = donor_in
+               AND NVL(confirm_status, 'N') <> 'Y';
+
+        END delete_in_process_donors;
+
+        PROCEDURE delete_donors_by_antigen(donor_in IN VARCHAR2, antigen_in IN VARCHAR2) IS
+        BEGIN
+            DELETE FROM ag_donor_tests_hdr
+              WHERE donor_id = donor_in
+                AND antigen_code =antigen_in;
+
+            DELETE FROM ag_donor_tests_det
+            WHERE donor_id = donor_in
+              AND antigen_code = antigen_in;        
+
+        END delete_donors_by_antigen;
+    BEGIN
+        IF NOT AG_UTIL.IS_LICENSED THEN
+            RETURN;
+        END IF;
+        
+        IF primary_donor_in IS NULL OR secondary_donor_in IS NULL THEN
+            RETURN;
+        END IF;
+        -- Do not change the order of below steps
+
+        -- STEP 1: DELETE in process PD and SD. (without a confirmed antigen).
+        -- It is okay to delete in process, because we are going to repopulate
+        -- the job queue table at the end to re-evaluate the antigen status after
+        -- the merge.
+        delete_in_process_donors(primary_donor_in);
+        delete_in_process_donors(secondary_donor_in);
+
+        -- STEP 2: If PD and SD has the same antigen confirmed, remove the SD 
+        -- donor from the tables.
+        FOR rec in (
+            SELECT antigen_code, COUNT(1) 
+            FROM ag_donor_tests_hdr
+            where NVL(confirm_flag, 'N') = 'Y'
+            AND donor_id IN (primary_donor_in, secondary_donor_in)
+            GROUP BY antigen_code
+            having count(1) > 1 )      
+        LOOP
+            DELETE FROM ag_donor_tests_hdr
+              WHERE donor_id = secondary_donor_in
+                AND antigen_code = rec.antigen_code;
+
+            DELETE FROM ag_donor_tests_det
+            WHERE donor_id = secondary_donor_in
+              AND antigen_code = rec.antigen_code;         
+        END LOOP;
+
+        -- STEP 3: Update SD to PD if SD has confirmed antigen.
+        FOR rec in (
+            SELECT antigen_code
+            FROM ag_donor_tests_hdr
+            where NVL(confirm_flag, 'N') = 'Y'
+            AND donor_id = secondary_donor_in )      
+        LOOP
+            UPDATE ag_donor_tests_hdr
+              SET donor_id = primary_donor_in
+             WHERE donor_id = secondary_donor_in
+               AND antigen_code = rec.antigen_code;
+
+            UPDATE ag_donor_tests_det
+               SET donor_id = primary_donor_in
+             WHERE donor_id = secondary_donor_in
+               AND antigen_code = rec.antigen_code;
+        END LOOP;
+
+
+        -- STEP 4: Re-evaluate the donor for antigens (except the confirmed antigen)
+        -- by populating all the units for the merged donor.
+        insert_job_queue(primary_donor_in);    
+
+        COMMIT;
+    EXCEPTION 
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE(SQLERRM);
+    END handle_merged_donors;
+
+    PROCEDURE handle_attach_detach_units(unit_id_in IN VARCHAR2,
+                                         donor_id_in IN VARCHAR2,
+                                         ad_flag_in IN VARCHAR2
+                                         ) IS
+        nCnt NUMBER;
+
+        TYPE string_aat IS TABLE OF VARCHAR2(25) INDEX BY PLS_INTEGER;
+        l_antigen_codes string_aat;
+
+    BEGIN
+        IF NOT AG_UTIL.IS_LICENSED THEN
+            RETURN;
+        END IF;
+        
+        IF unit_id_in IS NULL OR
+            donor_id_in IS NULL THEN
+            RETURN;
+        END IF;
+
+        IF NVL(ad_flag_in,'X') NOT IN ('A', 'D') THEN
+            RETURN;
+        END IF;
+
+        -- DETACH Scenario
+                -- Unit found in ag_donor_tests_det table.
+                    -- Confirmed.
+                        -- Unconfirm the antigen - in hdr table.
+                        -- Delete the record from det table.  
+                        -- Recompute AG Confirmation for the donor.
+                    -- Not Confirmed.
+                        -- Delete the record from det table.
+                        -- Recompute AG Confirmation for the donor.  -- TODO (CHECK IF WE ARE CAPTURING ALL THE TESTS AFTER CONFIRMATION)
+                -- Unit not found.
+                    -- No changes. EXIT.        
+        IF ad_flag_in = 'D' THEN
+            SELECT COUNT(1) INTO nCnt
+              FROM ag_donor_tests_det
+              WHERE unit_id = unit_id_in;
+
+            -- No matches found. EXIT.  
+            IF nCnt = 0 THEN
+                RETURN;
+            END IF;
+
+            -- Unconfirm the antigen from donor if the unit was used for confirmation.
+            UPDATE ag_donor_tests_hdr
+              SET confirm_flag = 'N'
+             WHERE NVL(confirm_flag, 'X') = 'Y'
+              AND (donor_id, antigen_code)
+              IN (SELECT donor_id, antigen_code
+                    FROM ag_donor_tests_det
+                   WHERE unit_id = unit_id_in
+                     AND donor_id = donor_id_in
+                     AND NVL(confirm_status, 'X') = 'Y')
+              RETURNING antigen_code 
+               BULK COLLECT INTO l_antigen_codes;
+
+            -- Delete the records from ag_donor_tests_det (both confirmed and unconfirmed)         
+            DELETE FROM ag_donor_tests_det
+              WHERE unit_id = unit_id_in;
+
+
+            FOR indx IN 1 .. l_antigen_codes.COUNT
+            LOOP
+                recompute_antigen_status(donor_id_in     => donor_id_in,
+                                         antigen_code_in => l_antigen_codes(indx));             
+            END LOOP;
+
+        END IF;
+
+        -- ATTACH Scenario
+            -- AG tests found
+                -- populate ag_donor_tests_job_queue table.
+
+            -- AG tests not found. EXIT.        
+        IF ad_flag_in = 'A' THEN
+            INSERT INTO ag_donor_tests_JOB_QUEUE (
+                unit_id,
+                chapter_id,
+                coll_date,
+                test_id,
+                test_seq_no,
+                result_code,
+                test_date,
+                status_flag,
+                program_id
+            )
+                SELECT
+                    unit_id,
+                    chapter_id,
+                    coll_date,
+                    test_id,
+                    test_seq_no,
+                    result_status_1,
+                    insert_dats,
+                    NULL, 
+                    'DONATIONS_TRG'
+                FROM
+                    utrs
+                WHERE
+                    unit_id = unit_id_in
+                    AND result_status_1 IS NOT NULL
+                    AND cancel_flag IS NULL
+                    AND test_id IN (
+                        SELECT
+                            ag_det.test_id
+                        FROM
+                            valid_antigen_config_det ag_det, valid_antigen_config_hdr ag_hdr
+                        WHERE ag_hdr.antigen_code = ag_det.antigen_code
+                          AND ag_hdr.primary_rule_id = ag_det.primary_rule_id    
+                          AND lifetrack_timezone_convert.get_local_time(ag_hdr.chapter_id, SYSDATE)
+                                    BETWEEN ag_hdr.eff_date AND nvl(ag_hdr.term_date, lifetrack_timezone_convert.get_local_time(ag_hdr.chapter_id, SYSDATE) + 1)
+                    );            
+        END IF;
+
+
+    END handle_attach_detach_units;
+
+    PROCEDURE handle_hist_antigens(start_date_in        IN DATE, 
+                                   end_date_in          IN DATE,
+                                   increment_months_in  IN NUMBER,
+                                   status_out           OUT VARCHAR2) 
+    IS
+        ld_collDate_start DATE;
+        ld_collDate_end DATE;
+
+        lv_locked_flag VARCHAR2(10);
+        ln_locked_mins NUMBER;
+
+        ld_start_date DATE;
+        ld_end_date   DATE;
+
+        lt_start        PLS_INTEGER;
+        lt_end          PLS_INTEGER;
+        lt_elapsed      PLS_INTEGER;
+
+        total_elapsed   PLS_INTEGER;
+        total_rowCount  NUMBER;
+        nRowsInserted   NUMBER;
+
+        TYPE log_msg_tab IS TABLE OF VARCHAR2(1000) INDEX BY PLS_INTEGER;
+        l_msg_text      log_msg_tab;
+
+        PROCEDURE log_msg(msg_in IN VARCHAR2) IS
+        BEGIN
+            l_msg_text(NVL(l_msg_text.LAST, 0) + 1) := msg_in;      
+        END log_msg;
+
+        PROCEDURE mark_start_process
+        IS
+        BEGIN
+          lt_start := DBMS_UTILITY.get_cpu_time;
+          ld_start_date := SYSDATE;
+        END mark_start_process;
+
+        PROCEDURE mark_end_process
+        IS
+        BEGIN
+            lt_end := DBMS_UTILITY.get_cpu_time;
+            ld_end_date := SYSDATE;
+            lt_elapsed := (lt_end - lt_start) / 100;
+            total_elapsed := total_elapsed + lt_elapsed;
+        END mark_end_process;
+
+        PROCEDURE disp_elapsed_time(msg_in IN VARCHAR2) IS
+        BEGIN
+            log_msg(msg_in);
+            log_msg('      Started            : ' || TO_CHAR(ld_start_date, 'MM-DD-YYYY HH24:MI:SS'));
+            log_msg('      Completed          : ' || TO_CHAR(ld_end_date, 'MM-DD-YYYY HH24:MI:SS'));            
+            log_msg('      Elapsed CPU Time   : ' || TO_CHAR(lt_elapsed) || ' seconds.');     
+        END disp_elapsed_time;
+
+    BEGIN
+
+        status_out := 'OK';
+        
+        IF NOT AG_UTIL.IS_LICENSED THEN
+            raise_application_error(-20000, 'Not licensed to use.');
+        END IF;
+        
+        DON_STD.check_object_lock('AG_CORE', 'START_JOB', lv_locked_flag, ln_locked_mins);
+        IF lv_locked_flag = 'Y' THEN
+            raise_application_error(-20000, 'AG_CORE pkg locked'); 
+        END IF;
+
+
+        IF start_date_in IS NULL OR NVL(increment_months_in, 0) = 0 THEN
+            raise_application_error(-20001, 'Required input parameters missing.');
+        END IF;
+
+        ld_collDate_start := start_date_in;
+        ld_collDate_end   := LEAST(end_date_in, add_months(ld_collDate_start, 12));
+        total_rowCount := 0;
+        total_elapsed := 0;
+
+
+        WHILE(ld_collDate_start < ld_collDate_end)
+        LOOP
+            log_msg('---------------------------------------------------------');
+            log_msg('Date Range:    ' || ld_collDate_start || '    TO  '  || ld_collDate_end);
+            log_msg('---------------------------------------------------------');
+
+            mark_start_process;
+
+            INSERT INTO ag_donor_tests_job_queue(
+                unit_id,
+                chapter_id,
+                coll_date,
+                test_id,
+                test_seq_no,
+                result_code,
+                test_date,
+                status_flag,
+                action_flag,
+                program_id
+            )
+                SELECT
+                    ut.unit_id,
+                    ut.chapter_id,
+                    ut.coll_date,
+                    ut.test_id,
+                    ut.test_seq_no,
+                    ut.result_status_1,
+                    ut.insert_dats,
+                    NULL, -- status_flag
+                    NULL, -- action_flag
+                    'HIST'
+                FROM
+                    utrs ut, donations dn
+                WHERE
+                    ut.coll_date BETWEEN ld_collDate_start AND ld_collDate_end
+                    AND ut.unit_id = dn.unit_id
+                    AND TRUNC(ut.coll_date) = dn.coll_date
+                    AND ut.chapter_id = dn.chapter_id
+                    AND ut.cancel_flag IS NULL
+                    AND ut.test_id IN (
+                        SELECT cfg.test_id
+                          FROM valid_antigen_config_det cfg
+                         WHERE SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE+10)
+                    ) 
+                  ORDER BY coll_date;
+
+            nRowsInserted :=   SQL%ROWCOUNT;
+
+            total_rowCount := total_rowCount + nRowsInserted;
+
+            log_msg('  Rows inserted into queue - ' || nRowsInserted);
+
+            COMMIT;
+
+            mark_end_process;
+
+            disp_elapsed_time('  ***Times for Insert***');            
+
+            IF nRowsInserted > 0 THEN
+                mark_start_process;
+
+                AG_CORE.START_JOB;
+
+                mark_end_process;
+                disp_elapsed_time('  ***Times for CORE pkg***');
+            END IF;
+
+            ld_collDate_start := ld_collDate_end;
+            ld_collDate_end   := LEAST(end_date_in, add_months(ld_collDate_start, 12));            
+
+        END LOOP;  
+
+        -- Write output to a file.        
+        DECLARE
+            fid UTL_FILE.file_type;
+            file_name VARCHAR2(500) := 'AG_CORE-HIST-' || TO_CHAR(SYSDATE, 'MMDDYYHH24MISS') || '.log';
+        BEGIN
+            fid := UTL_FILE.fopen(gc_logsDir, file_name, 'W');
+
+
+            -- Log file Header
+            UTL_FILE.put_line (fid, RPAD('-', 75, '-'));
+            UTL_FILE.put_line (fid, 'File               : ' || 'AG_CORE.pkg');
+            UTL_FILE.put_line (fid, 'Version No         : ' || gv_version_no);
+            UTL_FILE.put_line (fid, 'Rows Processed     : ' || total_rowCount);
+            UTL_FILE.put_line (fid, 'Elapsed CPU Time   : ' || TO_CHAR(total_elapsed) || ' seconds.');              
+            UTL_FILE.put_line (fid, 'Start Date         : ' || TO_CHAR(start_date_in, 'MM-DD-YYYY HH24:MI:SS'));
+            UTL_FILE.put_line (fid, 'End Date           : ' || TO_CHAR(end_date_in, 'MM-DD-YYYY HH24:MI:SS'));            
+            UTL_FILE.put_line (fid, 'Increment months   : ' || increment_months_in);                        
+            UTL_FILE.put_line (fid, RPAD('-', 75, '-'));               
+            ------------
+
+            FOR indx IN l_msg_text.FIRST .. l_msg_text.LAST LOOP
+              UTL_FILE.put_line(fid, RPAD(indx, 6, ' ') || l_msg_text(indx));
+            END LOOP;
+
+            UTL_FILE.fclose(fid);
+        EXCEPTION
+            WHEN OTHERS THEN
+              dbms_output.put_line('Failure to write output to ' || gc_logsDir || '/' || file_name);
+              dbms_output.put_line(SQLERRM);
+              UTL_FILE.fclose(fid);
+        END;        
+
+
+        l_msg_text.DELETE;       
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            status_out := SQLERRM;
+    END handle_hist_antigens;
+
+
+
+    /*
+        create or replace public synonym AG_CORE for AGMGR.AG_CORE;
+        grant execute on AGMGR.AG_CORE to public;    
+    */       
+
+END AG_CORE;
+/

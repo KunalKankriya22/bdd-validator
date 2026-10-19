@@ -1,0 +1,1019 @@
+create or replace PACKAGE              "DONOR_MERGER"
+IS
+   FUNCTION pre_merge_check(p_retained_donor_id VARCHAR2
+                            , p_discarded_donor_id VARCHAR2
+                            , p_check_type VARCHAR2 DEFAULT 'ALL'
+                            , p_chapter_id VARCHAR2 DEFAULT 'WAD'
+                            , p_set_id VARCHAR2 DEFAULT NULL
+                           ) RETURN VARCHAR2;
+
+   FUNCTION pre_unmerge_check(p_current_donor_id VARCHAR2
+                              , p_previous_donor_id VARCHAR2
+                              , p_check_type VARCHAR2 DEFAULT 'ALL'
+                              , p_chapter_id VARCHAR2 DEFAULT 'WAD'
+                              , p_set_id VARCHAR2 DEFAULT NULL
+                             ) RETURN VARCHAR2;
+
+   FUNCTION merge(p_retained_donor_id VARCHAR2
+                  , p_discarded_donor_id VARCHAR2
+                  , p_chapter_id VARCHAR2 DEFAULT 'WAD'
+                  , p_set_id VARCHAR2 DEFAULT NULL
+                 ) RETURN VARCHAR2;
+
+   FUNCTION unmerge(p_current_donor_id VARCHAR2
+                    , p_previous_donor_id VARCHAR2
+                    , p_chapter_id VARCHAR2 DEFAULT 'WAD'
+                    , p_set_id VARCHAR2 DEFAULT NULL
+                   ) RETURN VARCHAR2;
+END donor_merger;
+/
+
+create or replace PACKAGE BODY              "DONOR_MERGER"
+IS
+
+
+   FUNCTION pre_merge_check(p_retained_donor_id VARCHAR2
+                        , p_discarded_donor_id VARCHAR2
+                        , p_check_type VARCHAR2 DEFAULT 'ALL'
+                        , p_chapter_id VARCHAR2 DEFAULT 'WAD'
+                        , p_set_id VARCHAR2 DEFAULT NULL
+                        ) RETURN VARCHAR2
+   -----------------------------------------------------------------------
+   -- Performs comparisons on the data between the donors to ensure that
+   -- no conflicts will occur, that no data will be lost and that the
+   -- resulting Donor is an accurate reflection of known information
+   -- p_check_type (ALL | INFO | WARNING | ERROR)
+   -----------------------------------------------------------------------
+   IS
+      CURSOR c_donat_r (cv_rdid VARCHAR2) IS
+         SELECT * FROM donations
+          WHERE donor_id = cv_rdid;
+      CURSOR c_donat_d (cv_ddid VARCHAR2) IS
+         SELECT * FROM donations
+          WHERE donor_id = cv_ddid;
+      v_donat_r_ct  NUMBER := 0;
+      v_donat_d_ct  NUMBER := 0;
+
+      CURSOR c_hla_r (cv_rdid VARCHAR2) IS
+         SELECT * FROM donor_hla_antigens
+          WHERE donor_id = cv_rdid;
+      CURSOR c_hla_d (cv_ddid VARCHAR2) IS
+         SELECT * FROM donor_hla_antigens
+          WHERE donor_id = cv_ddid;
+      v_hla_r_ct  NUMBER := 0;
+      v_hla_d_ct  NUMBER := 0;
+
+      CURSOR c_rbc_r (cv_rdid VARCHAR2) IS
+         SELECT * FROM donor_rbc_antigens
+          WHERE donor_id = cv_rdid;
+      CURSOR c_rbc_d (cv_ddid VARCHAR2, cp_test_id VARCHAR2)IS
+         SELECT * FROM donor_rbc_antigens
+          WHERE donor_id = cv_ddid;
+      v_rbc_r_ct  NUMBER := 0;
+      v_rbc_d_ct  NUMBER := 0;
+
+      CURSOR c_interd_r (cv_rdid VARCHAR2) IS
+         SELECT * FROM donor_interdictions
+          WHERE donor_id = cv_rdid;
+      CURSOR c_interd_d (cv_ddid VARCHAR2) IS
+         SELECT * FROM donor_interdictions
+          WHERE donor_id = cv_ddid;
+      v_interd_r_ct  NUMBER;
+      v_interd_d_ct  NUMBER;
+
+      CURSOR c_sched_r (cv_rdid VARCHAR2) IS
+         SELECT * FROM donor_schedule
+          WHERE donor_id = cv_rdid;
+      CURSOR c_sched_d (cv_ddid VARCHAR2) IS
+         SELECT * FROM donor_schedule
+          WHERE donor_id = cv_ddid;
+      v_sched_r_ct  NUMBER;
+      v_sched_d_ct  NUMBER;
+
+      CURSOR c_notes_r (cv_rdid VARCHAR2) IS
+         SELECT * FROM donor_notes
+          WHERE donor_id = cv_rdid;
+      CURSOR c_notes_d (cv_ddid VARCHAR2) IS
+         SELECT * FROM donor_notes
+          WHERE donor_id = cv_ddid;
+      v_notes_r_ct  NUMBER;
+      v_notes_d_ct  NUMBER;
+
+      v_dual_recd    VARCHAR2(1) := 'N';
+      v_moving_recd  VARCHAR2(1) := 'N';
+      v_il_error     VARCHAR2(1) := 'N';
+      v_date_r       DATE;
+      v_date_d       DATE;
+      v_error        VARCHAR2(1000);
+      v_warning      VARCHAR2(1000);
+      v_info         VARCHAR2(1000);
+      v_result       VARCHAR2(2000);
+   BEGIN
+      -- Check subordinate record counts
+      SELECT COUNT(donor_id) INTO v_donat_r_ct
+        FROM donations WHERE donor_id = p_retained_donor_id;
+      SELECT COUNT(donor_id) INTO v_donat_d_ct
+        FROM donations WHERE donor_id = p_discarded_donor_id;
+      SELECT COUNT(donor_id) INTO v_hla_r_ct
+        FROM donor_hla_antigens WHERE donor_id = p_retained_donor_id;
+      SELECT COUNT(donor_id) INTO v_hla_d_ct
+        FROM donor_hla_antigens WHERE donor_id = p_discarded_donor_id;
+      SELECT COUNT(donor_id) INTO v_rbc_r_ct
+        FROM donor_rbc_antigens WHERE donor_id = p_retained_donor_id;
+      SELECT COUNT(donor_id) INTO v_rbc_d_ct
+        FROM donor_rbc_antigens WHERE donor_id = p_discarded_donor_id;
+      SELECT COUNT(donor_id) INTO v_interd_r_ct
+        FROM donor_interdictions WHERE donor_id = p_retained_donor_id;
+      SELECT COUNT(donor_id) INTO v_interd_d_ct
+        FROM donor_interdictions WHERE donor_id = p_discarded_donor_id;
+      SELECT COUNT(donor_id) INTO v_sched_r_ct
+        FROM donor_schedule WHERE donor_id = p_retained_donor_id;
+      SELECT COUNT(donor_id) INTO v_sched_d_ct
+        FROM donor_schedule WHERE donor_id = p_discarded_donor_id;
+      SELECT COUNT(donor_id) INTO v_notes_r_ct
+        FROM donor_notes WHERE donor_id = p_retained_donor_id;
+      SELECT COUNT(donor_id) INTO v_notes_d_ct
+        FROM donor_notes WHERE donor_id = p_discarded_donor_id;
+
+      -- Check if any key subordinate data source has records for both Donors
+      IF ((v_donat_r_ct > 0 AND v_donat_d_ct > 0)
+          OR (v_hla_r_ct > 0 AND v_hla_d_ct > 0)
+          OR (v_rbc_r_ct > 0 AND v_rbc_d_ct > 0)
+          OR (v_interd_r_ct > 0 AND v_interd_d_ct > 0)
+          OR (v_sched_r_ct > 0 AND v_sched_d_ct > 0)
+          OR (v_notes_r_ct > 0 AND v_notes_d_ct > 0)
+          ) THEN
+        v_dual_recd := 'Y';
+      END IF;
+      -- Check if any key subordinate data source has records for discarded Donor
+      IF (v_donat_d_ct > 0  OR v_hla_d_ct > 0 OR v_rbc_d_ct > 0
+          OR v_interd_d_ct > 0 OR v_sched_d_ct > 0 OR v_notes_d_ct > 0) THEN
+        v_moving_recd := 'Y';
+      END IF;
+
+      -- Check conditions that will cause the Donor Merge process to fail
+      -- for the listed Donor_IDs
+      IF ((UPPER(p_check_type) = 'ERROR' OR UPPER(p_check_type) = 'ALL')
+          AND v_dual_recd = 'Y') THEN
+         null;
+      END IF;
+
+      -- Check for conditions that require a warning message to be issued
+      -- for the listed Donor_IDs
+      IF ((UPPER(p_check_type) = 'WARNING' OR UPPER(p_check_type) = 'ALL')
+          AND (v_moving_recd = 'Y' OR v_dual_recd = 'Y')) THEN
+         -- Donations conflict; too close together
+         -- Do donations from occur on the same date or close to same date?
+         IF v_donat_r_ct > 0 AND v_donat_d_ct > 0 THEN
+            null;
+         END IF;
+         -- Are there conflicting HLA Antigens?
+         IF v_hla_r_ct > 0 AND v_hla_d_ct > 0 THEN
+            FOR rr IN c_hla_r (p_retained_donor_id) LOOP
+               FOR rd IN c_hla_d (p_discarded_donor_id) LOOP
+                  IF (NVL(rr.a1, ' ') != NVL(rd.a1, ' ') OR NVL(rr.a2, ' ') != NVL(rd.a2, ' ')
+                      OR NVL(rr.b1, ' ') != NVL(rd.b1, ' ') OR NVL(rr.b2, ' ') != NVL(rd.b2, ' ')
+                      OR NVL(rr.c1, ' ') != NVL(rd.c1, ' ') OR NVL(rr.c2, ' ') != NVL(rd.c2, ' ')
+                      OR NVL(rr.d1, ' ') != NVL(rd.d1, ' ') OR NVL(rr.d2, ' ') != NVL(rd.d2, ' ')
+                     ) THEN
+                     v_warning := v_warning||'HLA Antigen mis-match between Merge Candidates: ';
+                     v_il_error := 'Y';
+                     EXIT;
+                  END IF;
+               END LOOP;
+               IF v_il_error = 'Y' THEN
+                  EXIT;
+               END IF;
+            END LOOP;
+         END IF;
+         -- Are there conflicting RBC Antigens?
+         IF v_rbc_r_ct > 0 AND v_rbc_d_ct > 0 THEN
+            FOR rr IN c_rbc_r (p_retained_donor_id) LOOP
+               FOR rd IN c_rbc_d(p_discarded_donor_id, rr.test_id) LOOP
+                  IF NVL(rr.result_code, ' ') != NVL(rd.result_code, ' ') THEN
+                     v_warning := v_warning||'RBC Antigen mis-match between Merge Candidates: ';
+                     v_il_error := 'Y';
+                     EXIT;
+                  END IF;
+               END LOOP;
+               IF v_il_error = 'Y' THEN
+                  EXIT;
+               END IF;
+            END LOOP;
+         END IF;
+      END IF;
+
+      -- Check for conditions where an informational message should be
+      -- displayed for the listed Donor_IDs
+      -- Not performed if errors or warnings have occurred
+      IF ((UPPER(p_check_type) = 'INFO' OR UPPER(p_check_type) = 'ALL')
+          AND (v_moving_recd = 'Y' OR v_dual_recd = 'Y')
+          AND v_error IS NULL AND v_warning IS NULL) THEN
+         -- Subordinate records will be moved from discarded to retained Donor
+         IF v_donat_d_ct > 0 THEN
+            v_info := v_result||'Donation records would be moved from Donor ID '
+                        ||p_discarded_donor_id||': ';
+         END IF;
+         IF v_hla_d_ct > 0 THEN
+            v_info := v_result||'HLA Antigen records would be moved from Donor ID '
+                        ||p_discarded_donor_id||': ';
+         END IF;
+         IF v_rbc_d_ct > 0 THEN
+            v_info := v_result||'RBC Antigen records would be moved from Donor ID '
+                        ||p_discarded_donor_id||': ';
+         END IF;
+         IF v_interd_d_ct > 0 THEN
+            v_info := v_result||'Donor Interdiction records would be moved from Donor ID '
+                        ||p_discarded_donor_id||': ';
+         END IF;
+         IF v_sched_d_ct > 0 THEN
+            v_info := v_result||'Donor Schedule records would be moved from Donor ID '
+                        ||p_discarded_donor_id||': ';
+         END IF;
+      END IF;
+
+      IF v_error IS NOT NULL THEN
+         v_result := '* ERROR: '||v_error;
+      END IF;
+      IF v_warning IS NOT NULL THEN
+         v_result := v_result||'* WARNING: '||v_warning;
+      END IF;
+      IF v_info IS NOT NULL THEN
+         v_result := v_result||'* INFO: '||v_info;
+      END IF;
+      IF v_result IS NULL THEN
+         v_result := 'No Merge Conflict';
+      END IF;
+
+      RETURN v_result;
+
+   END pre_merge_check;
+
+   FUNCTION pre_unmerge_check(p_current_donor_id VARCHAR2
+                              , p_previous_donor_id VARCHAR2
+                              , p_check_type VARCHAR2 DEFAULT 'ALL'
+                              , p_chapter_id VARCHAR2 DEFAULT 'WAD'
+                              , p_set_id VARCHAR2 DEFAULT NULL
+                             ) RETURN VARCHAR2
+   -----------------------------------------------------------------------
+   -- Confirms that the previous donor records are extractible from the
+   -- merged donor record without data loss or data integrity issues
+   -- p_check_type (ALL | INFO | WARNING | ERROR
+   -----------------------------------------------------------------------
+   IS
+      CURSOR c_donat_c (cv_cdid VARCHAR2) IS
+         SELECT * FROM donations
+          WHERE donor_id = cv_cdid;
+      CURSOR c_donat_p (cv_pdid VARCHAR2) IS
+         SELECT * FROM donations
+          WHERE donor_id = cv_pdid;
+      v_donat_c_ct  NUMBER := 0;
+      v_donat_p_ct  NUMBER := 0;
+
+      CURSOR c_hla_p (cv_pdid VARCHAR2) IS
+         SELECT * FROM donor_hla_antigens
+          WHERE donor_id = cv_pdid;
+      CURSOR c_hla_c (cv_cdid VARCHAR2) IS
+         SELECT * FROM donor_hla_antigens
+          WHERE donor_id = cv_cdid;
+      v_hla_c_ct  NUMBER := 0;
+      v_hla_p_ct  NUMBER := 0;
+
+      CURSOR c_rbc_p (cv_pdid VARCHAR2) IS
+         SELECT * FROM donor_rbc_antigens
+          WHERE donor_id = cv_pdid;
+      CURSOR c_rbc_c (cv_cdid VARCHAR2) IS
+         SELECT * FROM donor_rbc_antigens
+          WHERE donor_id = cv_cdid;
+      v_rbc_c_ct  NUMBER := 0;
+      v_rbc_p_ct  NUMBER := 0;
+
+      CURSOR c_interd_p (cv_pdid VARCHAR2) IS
+         SELECT * FROM donor_interdictions
+          WHERE donor_id = cv_pdid;
+      CURSOR c_interd_c (cv_cdid VARCHAR2) IS
+         SELECT * FROM donor_interdictions
+          WHERE donor_id = cv_cdid;
+      v_interd_c_ct  NUMBER;
+      v_interd_p_ct  NUMBER;
+
+      CURSOR c_sched_p (cv_pdid VARCHAR2) IS
+         SELECT * FROM donor_schedule
+          WHERE donor_id = cv_pdid;
+      CURSOR c_sched_c (cv_cdid VARCHAR2) IS
+         SELECT * FROM donor_schedule
+          WHERE donor_id = cv_cdid;
+      v_sched_c_ct  NUMBER;
+      v_sched_p_ct  NUMBER;
+
+      CURSOR c_notes_p (cv_pdid VARCHAR2) IS
+         SELECT * FROM donor_notes
+          WHERE donor_id = cv_pdid;
+      CURSOR c_notes_c (cv_cdid VARCHAR2) IS
+         SELECT * FROM donor_notes
+          WHERE donor_id = cv_cdid;
+      v_notes_c_ct  NUMBER;
+      v_notes_p_ct  NUMBER;
+
+      v_dual_recd    VARCHAR2(1) := 'N';
+      v_moving_recd  VARCHAR2(1) := 'N';
+      v_date_r       DATE;
+      v_date_d       DATE;
+      v_error        VARCHAR2(1000);
+      v_warning      VARCHAR2(1000);
+      v_info         VARCHAR2(1000);
+      v_result       VARCHAR2(2000);
+   BEGIN
+      -- Check subordinate record counts
+      SELECT COUNT(donor_id) INTO v_donat_c_ct
+        FROM donations WHERE donor_id = p_current_donor_id;
+      SELECT COUNT(donor_id) INTO v_donat_p_ct
+        FROM donations WHERE donor_id = p_previous_donor_id;
+      SELECT COUNT(donor_id) INTO v_hla_c_ct
+        FROM donor_hla_antigens WHERE donor_id = p_current_donor_id;
+      SELECT COUNT(donor_id) INTO v_hla_p_ct
+        FROM donor_hla_antigens WHERE donor_id = p_previous_donor_id;
+      SELECT COUNT(donor_id) INTO v_rbc_c_ct
+        FROM donor_rbc_antigens WHERE donor_id = p_current_donor_id;
+      SELECT COUNT(donor_id) INTO v_rbc_p_ct
+        FROM donor_rbc_antigens WHERE donor_id = p_previous_donor_id;
+      SELECT COUNT(donor_id) INTO v_interd_c_ct
+        FROM donor_interdictions WHERE donor_id = p_current_donor_id;
+      SELECT COUNT(donor_id) INTO v_interd_p_ct
+        FROM donor_interdictions WHERE donor_id = p_previous_donor_id;
+      SELECT COUNT(donor_id) INTO v_sched_c_ct
+        FROM donor_schedule WHERE donor_id = p_current_donor_id;
+      SELECT COUNT(donor_id) INTO v_sched_p_ct
+        FROM donor_schedule WHERE donor_id = p_previous_donor_id;
+      SELECT COUNT(donor_id) INTO v_notes_c_ct
+        FROM donor_notes WHERE donor_id = p_current_donor_id;
+      SELECT COUNT(donor_id) INTO v_notes_p_ct
+        FROM donor_notes WHERE donor_id = p_previous_donor_id;
+
+      -- Check if any key subordinate data source has records for both Donors
+      IF ((v_donat_c_ct > 0 AND v_donat_p_ct > 0)
+          OR (v_hla_c_ct > 0 AND v_hla_p_ct > 0)
+          OR (v_rbc_c_ct > 0 AND v_rbc_p_ct > 0)
+          OR (v_interd_c_ct > 0 AND v_interd_p_ct > 0)
+          OR (v_sched_c_ct > 0 AND v_sched_p_ct > 0)
+          OR (v_notes_c_ct > 0 AND v_notes_p_ct > 0)
+          ) THEN
+        v_dual_recd := 'Y';
+      END IF;
+
+      -- Check if any key subordinate data source has records for previous Donor
+      IF (v_donat_p_ct > 0  OR v_hla_p_ct > 0 OR v_rbc_p_ct > 0
+          OR v_interd_p_ct > 0 OR v_sched_p_ct > 0 OR v_notes_p_ct > 0) THEN
+        v_moving_recd := 'Y';
+      END IF;
+
+      -- Check conditions that will cause the Donor Merge process to fail
+      -- for the listed Donor_IDs: Use v_error to store
+      IF ((UPPER(p_check_type) = 'ERROR' OR UPPER(p_check_type) = 'ALL')
+          AND v_dual_recd = 'Y') THEN
+         null;
+      END IF;
+
+      -- Check for conditions that require a warning message to be issued
+      -- for the listed Donor_IDs: Use v_warning to store
+      IF ((UPPER(p_check_type) = 'WARNING' OR UPPER(p_check_type) = 'ALL')
+          AND (v_moving_recd = 'Y' OR v_dual_recd = 'Y')) THEN
+         -- Donations conflict; too close together
+         null;
+      END IF;
+
+      -- Check for conditions where an informational message should be
+      -- displayed for the listed Donor_IDs: Use v_info to store.
+      -- Not processed if errors or warning have been encountered
+      IF ((UPPER(p_check_type) = 'INFO' OR UPPER(p_check_type) = 'ALL')
+          AND (v_moving_recd = 'Y' OR v_dual_recd = 'Y')
+          AND v_error IS NULL AND v_warning IS NULL) THEN
+         -- Donations conflict; multiple on same day
+         null;
+      END IF;
+
+      IF v_error IS NOT NULL THEN
+         v_result := '* ERROR: '||v_error;
+      END IF;
+      IF v_warning IS NOT NULL THEN
+         v_result := v_result||'* WARNING: '||v_warning;
+      END IF;
+      IF v_info IS NOT NULL THEN
+         v_result := v_result||'* INFO: '||v_info;
+      END IF;
+      IF v_result IS NULL THEN
+         v_result := 'No Unmerge Conflict';
+      END IF;
+
+      RETURN v_result;
+
+   END pre_unmerge_check;
+
+   FUNCTION merge(p_retained_donor_id VARCHAR2
+                  , p_discarded_donor_id VARCHAR2
+                  , p_chapter_id VARCHAR2 DEFAULT 'WAD'
+                  , p_set_id VARCHAR2 DEFAULT NULL
+                  ) RETURN VARCHAR2
+   -----------------------------------------------------------------------------
+   -- Reworked 4/28/05 by M Openshaw
+   -- The following table data is 'moved' (New records created, old deleted):
+   --   AUX_DONATIONS, DONOR_ATTRIBUTES, DONOR_COMMUNICATIONS,
+   --   DONOR_HLA_ANTIGENS, DONOR_LETTERS, DONOR_RBC_ANTIGENS,
+   --   HL7_HOLDING_TESTS, HL7_INTERFACE_LOG,HLA_RBC_MATCH_LISTS, HLA_RBC_MATCH_UNITS
+   -- The following table data is modified;
+   --   DONATIONS, DONOR_LETTER_TEXT
+   -- The following table data is deleted:
+   --   DONOR_ADDRESSES, DONOR, LABEL_PRINT_FILE, DONOR_LISTS, DONOR_SPOOL
+   --   DONOR_REEL, DONOR_TYPE_HDR, DONOR_TYPE_PRINT_FILE, DON_INTER_TEMP
+   --   HLA_RBC_MATCH_TEMP, WEB_HH_HEADER, WEB_HH_DETAILS
+   -- The following table data have records added:
+   --   MERGED_DONOR_INTERDICTIONS, MERGE_HOLD_UNITS
+   -- The following tables are treated specifically
+   --   DONOR_INTERDICTIONS, INTER_TRANSACTIONS
+   --
+   -----------------------------------------------------------------------------
+   IS
+      v_inter_code     varchar2(5);
+      i_date           date;
+      v_term_date      date;
+      v_status         varchar2(200);
+      v_program_id     varchar2(10);
+      v_mig_error      VARCHAR2(1) := 'N';
+      v_success_msg    VARCHAR2(2000) := 'Merging of Donor ID '
+				        ||p_discarded_donor_id||' into Donor ID '
+   				     ||p_retained_donor_id||' was successful';
+      v_error_msg      VARCHAR2(2000);
+      v_user_id        VARCHAR2(6):= LT_USER_SESSION.get_userid;
+      CURSOR c_aux IS
+         SELECT * FROM aux_donations
+          WHERE donor_id = p_discarded_donor_id;
+      CURSOR c_attr IS
+         SELECT * FROM donor_attributes
+          WHERE donor_id = p_discarded_donor_id;
+      CURSOR c_comm IS
+         SELECT * FROM donor_communications
+          WHERE donor_id = p_discarded_donor_id;
+      CURSOR c_hla IS
+         SELECT * FROM donor_hla_antigens
+          WHERE donor_id = p_discarded_donor_id;
+      CURSOR c_interd IS
+         SELECT * FROM donor_interdictions
+          WHERE donor_id = p_discarded_donor_id;
+      CURSOR c_lett IS
+         SELECT * FROM donor_letters
+          WHERE donor_id = p_discarded_donor_id;
+      CURSOR c_rbc IS
+         SELECT * FROM donor_rbc_antigens
+          WHERE donor_id = p_discarded_donor_id;
+      CURSOR c_h7h IS
+         SELECT * FROM hl7_holding_tests
+          WHERE donor_id = p_discarded_donor_id;
+      CURSOR c_h7i IS
+         SELECT * FROM hl7_interface_log
+          WHERE donor_id = p_discarded_donor_id;
+      CURSOR c_hrml IS
+         SELECT * FROM hla_rbc_match_lists
+          WHERE donor_id = p_discarded_donor_id;
+      CURSOR c_hrmu IS
+         SELECT * FROM hla_rbc_match_units
+          WHERE donor_id = p_discarded_donor_id;
+
+   BEGIN
+
+     -- LOGGING OF MERGER in merge_donor_interdictions
+     BEGIN
+       INSERT INTO merged_donor_interdictions
+   	(SELECT donor_id, chapter_id, p_retained_donor_id
+		   , inter_code, eff_date, inter_type, transaction_id
+   		, notification_status,  note_id, release_user
+		   , release_date, unit_id, upm_disposition, last_modified_date
+   		, originated_from, reason_code, group_id, letter_seq_no
+		   , group_mode, term_date, term_reason, SUBSTR(program_id,1,8)
+   		, insert_date, insert_user
+	      FROM donor_interdictions
+	     WHERE donor_id = p_discarded_donor_id);
+     EXCEPTION
+       WHEN OTHERS THEN
+         RAISE;
+     END;
+
+     --*** UPGRADE INTERDICTIONS ***
+     -----   Update DONOR_ID column of INTER_TRANSACTIONS and DONOR_INTERDICTION table
+     -----   Place  'MERGE' on primary donor
+     -----   Remove 'MERGE' from primary donor
+
+     UPDATE INTER_TRANSACTIONS SET donor_id = p_retained_donor_id
+	     WHERE DONOR_ID = p_discarded_donor_id;
+     UPDATE DONOR_INTERDICTIONS SET donor_id = p_retained_donor_id
+	     WHERE DONOR_ID = p_discarded_donor_id;
+
+     don_inter.inter_upgrade_place(p_retained_donor_id, p_chapter_id, NULL, NULL
+				   , 'MERGE', NULL, NULL, v_user_id
+   				, NULL, NULL, 'MERGE_DONOR', TRUNC(SYSDATE)
+				   , NULL, NULL, v_status);
+     IF v_status!='OK' THEN
+        v_error_msg := v_error_msg||'Could Not place Interdiction for Donor '||p_retained_donor_id||': ';
+        RETURN v_error_msg;
+     end if;
+     i_date  := null;
+
+     don_inter.inter_upgrade_remove(p_retained_donor_id ,p_chapter_id, NULL, NULL
+				    , 'MERGE', NULL, NULL, v_user_id
+   				 , NULL, NULL, 'MERGE_DONOR', NULL
+				    , i_date, SYSDATE, 'MERGE', NULL
+   				 , v_status);
+     IF v_status!='OK' THEN
+        v_error_msg := v_error_msg||'Could Not remove Interdiction for Donor '||p_retained_donor_id||': ';
+        RETURN v_error_msg;
+     end if;
+
+     don_inter.inter_upgrade_place(p_retained_donor_id , p_chapter_id, NULL, NULL
+				   , 'MERG1', NULL, NULL, v_user_id
+   				, NULL, NULL, 'MERGE_DONOR', TRUNC(SYSDATE)
+				   , NULL, NULL, v_status);
+     IF v_status!='OK' THEN
+        v_error_msg := v_error_msg||'Could Not Upgrade-Place Interdiction for Donor '||p_retained_donor_id||': ';
+        RETURN v_error_msg;
+     end if;
+
+     i_date  := null;
+
+     don_INTER.inter_upgrade_REMOVE(p_retained_donor_id, p_chapter_id, NULL, NULL
+				    , 'MERG1', NULL, NULL,v_user_id
+   				 , NULL, NULL, 'MERGE_DONOR', NULL
+				    , i_date, SYSDATE, 'MERGE', NULL
+   				 , v_status);
+     IF v_status!='OK' THEN
+        v_error_msg := v_error_msg||'Could Not Upgrade-Remove Interdiction for Donor '||p_retained_donor_id||': ';
+        RETURN v_error_msg;
+     end if;
+
+     -- REMOVE ALL INTERDICTION FROM THE SECONDARY DONOR
+     delete donor_interdictions where donor_id = p_discarded_donor_id;
+
+     -- If potential_duplicates set passed, mark set as 'RESOL';
+     -- If not, search potential_duplicates by donor_id and mark as 'RESOL'
+     IF p_set_id IS NOT NULL THEN
+        UPDATE potential_duplicates
+   	SET set_status_code = 'RESOL'
+	       , resolve_user = v_user_id
+   	    , resolve_date = sysdate
+         WHERE set_id = p_set_id;
+     ELSE
+        UPDATE potential_duplicates
+   	SET set_status_code = 'RESOL'
+	       , resolve_user = v_user_id
+   	    , resolve_date = sysdate
+         WHERE (donor_id = p_retained_donor_id
+	        OR donor_id = p_discarded_donor_id)
+	   AND chapter_id = p_chapter_id;
+     END IF;
+
+     --*** MIGRATION OF ESSENTIAL DONOR RECORDS ***
+
+     -- MOVING aux_donations
+     FOR rr IN c_aux LOOP
+        BEGIN
+           INSERT INTO aux_donations
+           (unit_id, coll_date, donor_id, location_id
+            , sponsor_id, old_donor_id, bag_type, start_time
+            , category)
+           VALUES
+           (rr.unit_id, rr.coll_date, p_retained_donor_id, rr.location_id
+            , rr.sponsor_id, rr.old_donor_id, rr.bag_type, rr.start_time
+            , rr.category);
+        EXCEPTION
+           WHEN DUP_VAL_ON_INDEX THEN
+              v_error_msg := 'An AUX_DONATIONS record identical to the Merging Donor already exists for the Retained Donor';
+              v_mig_error := 'E';
+              ROLLBACK;
+           WHEN OTHERS THEN
+              v_error_msg := 'Problem while migrating AUX_DONATIONS records during merge: '||SQLERRM;
+              v_mig_error := 'E';
+              ROLLBACK;
+        END;
+     END LOOP;
+     IF v_mig_error <> 'E' THEN
+        BEGIN
+           DELETE FROM aux_donations
+            WHERE donor_id = p_discarded_donor_id;
+        EXCEPTION
+           WHEN OTHERS THEN
+              v_error_msg := 'Problem while deleting AUX_DONATIONS records during merge: '||SQLERRM;
+              v_mig_error := 'E';
+              ROLLBACK;
+        END;
+     END IF;
+
+     -- MOVING donor_attributes
+     IF v_mig_error <> 'E' THEN
+        FOR rr IN c_attr LOOP
+           BEGIN
+              INSERT INTO donor_attributes
+              (donor_id, chapter_id, attrib_code, attrib_value
+               , program_id, insert_date, insert_user, audit_key)
+              VALUES
+              (p_retained_donor_id, rr.chapter_id, rr.attrib_code, rr.attrib_value
+              , rr.program_id, rr.insert_date, rr.insert_user, rr.audit_key);
+           EXCEPTION
+              WHEN DUP_VAL_ON_INDEX THEN
+                 v_error_msg := 'A DONOR_ATTRIBUTES record identical to the Merging Donors already exists for the Retained Donor';
+                 v_mig_error := 'E';
+                 ROLLBACK;
+             WHEN OTHERS THEN
+                v_error_msg := 'Problem while migrating DONOR_ATTRIBUTES records during merge: '||SQLERRM;
+                v_mig_error := 'E';
+                ROLLBACK;
+           END;
+        END LOOP;
+        IF v_mig_error <> 'E' THEN
+           BEGIN
+              DELETE FROM donor_attributes
+               WHERE donor_id = p_discarded_donor_id;
+           EXCEPTION
+              WHEN OTHERS THEN
+                 v_error_msg := 'Problem while deleting DONOR_ATTRIBUTES records during merge: '||SQLERRM;
+                 v_mig_error := 'E';
+                 ROLLBACK;
+           END;
+        END IF;
+     END IF;
+
+     -- MOVING donor_communications
+     IF v_mig_error <> 'E' THEN
+        FOR rr IN c_comm LOOP
+           BEGIN
+              INSERT INTO donor_communications
+              (donor_id, chapter_id, com_code, com_date
+               , com_type, com_desc, action_code, target_date
+               , action_date, request_code, letter_id, staff_no
+               , program_id, insert_user, insert_date)
+              VALUES
+              (p_retained_donor_id, rr.chapter_id, rr.com_code, rr.com_date
+              , rr.com_type, rr.com_desc, rr.action_code, rr.target_date
+              , rr.action_date, rr.request_code, rr.letter_id, rr.staff_no
+              , rr.program_id, rr.insert_user, rr.insert_date);
+           EXCEPTION
+              WHEN DUP_VAL_ON_INDEX THEN
+                 v_error_msg := 'A DONOR_COMMUNICATIONS record identical to the Merging Donors already exists for the Retained Donor';
+                 v_mig_error := 'E';
+                 ROLLBACK;
+              WHEN OTHERS THEN
+                 v_error_msg := 'Problem while migrating DONOR_COMMUNICATIONS records during merge: '||SQLERRM;
+                 v_mig_error := 'E';
+                 ROLLBACK;
+           END;
+        END LOOP;
+     END IF;
+
+     IF v_mig_error <> 'E' THEN
+        BEGIN
+           DELETE FROM donor_communications
+            WHERE donor_id = p_discarded_donor_id;
+        EXCEPTION
+           WHEN OTHERS THEN
+             v_error_msg := 'Problem while deleting DONOR_COMMUNICATIONS records during merge: '||SQLERRM;
+             v_mig_error := 'E';
+             ROLLBACK;
+        END;
+     END IF;
+
+     -- MOVING donor_hla_antigens
+     IF v_mig_error <> 'E' THEN
+        FOR rr IN c_hla LOOP
+           BEGIN
+              INSERT INTO donor_hla_antigens
+              (donor_id, chapter_id, a1, a2, b1, b2, c1
+               , c2, d1, d2, dr, program_id, insert_user, insert_date)
+              VALUES
+              (p_retained_donor_id, rr.chapter_id, rr.a1, rr.a2, rr.b1, rr.b2, rr.c1
+               , rr.c2, rr.d1, rr.d2, rr.dr, rr.program_id, rr.insert_user, rr.insert_date);
+           EXCEPTION
+              WHEN DUP_VAL_ON_INDEX THEN
+                 v_error_msg := 'A DONOR_HLA_ANTIGENS record identical to the Merging Donors already exists for the Retained Donor';
+                 v_mig_error := 'E';
+                 ROLLBACK;
+              WHEN OTHERS THEN
+                 v_error_msg := 'Problem while migrating DONOR_HLA_ANTIGENS records during merge: '||SQLERRM;
+                 v_mig_error := 'E';
+                 ROLLBACK;
+           END;
+        END LOOP;
+     END IF;
+     IF v_mig_error <> 'E' THEN
+        BEGIN
+           DELETE FROM donor_hla_antigens
+            WHERE donor_id = p_discarded_donor_id;
+        EXCEPTION
+           WHEN OTHERS THEN
+              v_error_msg := 'Problem while deleting DONOR_HLA_ANTIGENS records during merge: '||SQLERRM;
+              v_mig_error := 'E';
+              ROLLBACK;
+        END;
+     END IF;
+
+     -- MOVING DONOR_LETTERS AND DONOR_LETTER_TEXT (MUST BE PROCESSED TOGETHER)
+     IF v_mig_error <> 'E' THEN
+        FOR rr IN c_lett LOOP
+           BEGIN
+              INSERT INTO donor_letters
+              (donor_id, chapter_id, letter_seq_no, letter_code
+               , authorized_by, generate_date, generated_by, last_reprinted_on
+               , last_reprinted_by, program_id, insert_date, insert_user
+               , modify_ind, authorize_date)
+               VALUES
+               (p_retained_donor_id, rr.chapter_id, rr.letter_seq_no, rr.letter_code
+                , rr.authorized_by, rr.generate_date, rr.generated_by, rr.last_reprinted_on
+                , rr.last_reprinted_by, rr.program_id, rr.insert_date, rr.insert_user
+                , rr.modify_ind, rr.authorize_date);
+           EXCEPTION
+              WHEN DUP_VAL_ON_INDEX THEN
+                 v_error_msg := 'A DONOR_LETTERS record identical to the Merging Donors already exists for the Retained Donor';
+                 v_mig_error := 'E';
+                 ROLLBACK;
+              WHEN OTHERS THEN
+                 v_error_msg := 'Problem while migrating DONOR_LETTERS records during merge: '||SQLERRM;
+                 v_mig_error := 'E';
+                 ROLLBACK;
+           END;
+        END LOOP;
+
+        BEGIN
+           UPDATE donor_letter_text
+              SET donor_id = p_retained_donor_id
+            WHERE donor_id = p_discarded_donor_id;
+        EXCEPTION
+           WHEN DUP_VAL_ON_INDEX THEN
+              v_error_msg := 'A DONOR_LETTER_TEXT record identical to the Merging Donors already exists for the Retained Donor';
+              v_mig_error := 'E';
+              ROLLBACK;
+           WHEN OTHERS THEN
+              v_error_msg := 'Problem while migrating DONOR_LETTER_TEXT records during merge: '||SQLERRM;
+              v_mig_error := 'E';
+              ROLLBACK;
+        END;
+     END IF;
+     IF v_mig_error <> 'E' THEN
+        BEGIN
+           DELETE FROM donor_letters
+            WHERE donor_id = p_discarded_donor_id;
+        EXCEPTION
+           WHEN OTHERS THEN
+              v_error_msg := 'Problem while deleting DONOR_LETTERS records during merge: '||SQLERRM;
+              v_mig_error := 'E';
+              ROLLBACK;
+        END;
+     END IF;
+
+     -- MOVING donor_rbc_antigens
+     IF v_mig_error <> 'E' THEN
+        FOR rr IN c_rbc LOOP
+           BEGIN
+              INSERT INTO donor_rbc_antigens
+              (donor_id, chapter_id, test_id, result_code
+               , program_id, insert_user, insert_date)
+              VALUES
+              (p_retained_donor_id, rr.chapter_id, rr.test_id, rr.result_code
+               , rr.program_id, rr.insert_user, rr.insert_date);
+           EXCEPTION
+              WHEN DUP_VAL_ON_INDEX THEN
+                 v_error_msg := 'A DONOR_RBC_ANTIGENS record identical to the Merging Donors already exists for the Retained Donor';
+                 v_mig_error := 'E';
+                 ROLLBACK;
+              WHEN OTHERS THEN
+                 v_error_msg := 'Problem while migrating DONOR_RBC_ANTIGENS records during merge: '||SQLERRM;
+                 v_mig_error := 'E';
+                 ROLLBACK;
+           END;
+        END LOOP;
+     END IF;
+     IF v_mig_error <> 'E' THEN
+        BEGIN
+           DELETE FROM donor_rbc_antigens
+            WHERE donor_id = p_discarded_donor_id;
+        EXCEPTION
+           WHEN OTHERS THEN
+              v_error_msg := 'Problem while deleting DONOR_RBC_ANTIGENS records during merge: '||SQLERRM;
+              v_mig_error := 'E';
+              ROLLBACK;
+        END;
+     END IF;
+
+     -- MOVING hla_rbc_match_lists
+     IF v_mig_error <> 'E' THEN
+       FOR rr IN c_hrml LOOP
+         BEGIN
+   	INSERT INTO hla_rbc_match_lists
+		       (donor_id, chapter_id, request_id, grade_id
+		        , grade, grade_level, rbc_match_count, program_id
+   		     , insert_date, insert_user)
+	        VALUES (p_retained_donor_id, rr.chapter_id, rr.request_id, rr.grade_id
+		        , rr.grade, rr.grade_level, rr.rbc_match_count, rr.program_id
+   		     , rr.insert_date, rr.insert_user);
+         EXCEPTION
+         WHEN DUP_VAL_ON_INDEX THEN
+	   v_error_msg := 'A HLA_RBC_MATCH_LISTS record identical to the Merging Donors already exists for the Retained Donor';
+   	v_mig_error := 'E';
+	   ROLLBACK;
+         WHEN OTHERS THEN
+   	v_error_msg := 'Problem while migrating HLA_RBC_MATCH_LISTS records during merge: '||SQLERRM;
+	   v_mig_error := 'E';
+   	ROLLBACK;
+         END;
+       END LOOP;
+       IF v_mig_error <> 'E' THEN
+         BEGIN
+   	DELETE FROM hla_rbc_match_lists
+	    WHERE donor_id = p_discarded_donor_id;
+         EXCEPTION
+   	WHEN OTHERS THEN
+	     v_error_msg := 'Problem while deleting HLA_RBC_MATCH_LISTS records during merge: '||SQLERRM;
+   	  v_mig_error := 'E';
+	     ROLLBACK;
+         END;
+       END IF;
+     END IF;
+
+     -- MOVING hla_rbc_match_units
+     IF v_mig_error <> 'E' THEN
+       FOR rr IN c_hrmu LOOP
+         BEGIN
+   	INSERT INTO hla_rbc_match_units
+		       (donor_id, chapter_id, request_id, unit_id
+		        , coll_date, grade_id, grade, grade_level
+   		     , abo, warehouse_code, inventory_class, product_type
+		        , cmv_status, antigen_string, rbc_match_count, program_id
+   		     , insert_date, insert_user)
+	        VALUES (p_retained_donor_id, rr.chapter_id, rr.request_id, rr.unit_id
+		        , rr.coll_date, rr.grade_id, rr.grade, rr.grade_level
+   		     , rr.abo, rr.warehouse_code, rr.inventory_class, rr.product_type
+		        , rr.cmv_status, rr.antigen_string, rr.rbc_match_count, rr.program_id
+   		     , rr.insert_date, rr.insert_user);
+         EXCEPTION
+         WHEN DUP_VAL_ON_INDEX THEN
+	   v_error_msg := 'A HLA_RBC_MATCH_UNITS record identical to the Merging Donors already exists for the Retained Donor';
+   	v_mig_error := 'E';
+	   ROLLBACK;
+         WHEN OTHERS THEN
+   	v_error_msg := 'Problem while migrating HLA_RBC_MATCH_UNITS records during merge: '||SQLERRM;
+	   v_mig_error := 'E';
+   	ROLLBACK;
+         END;
+       END LOOP;
+       IF v_mig_error <> 'E' THEN
+         BEGIN
+   	DELETE FROM hla_rbc_match_units
+	    WHERE donor_id = p_discarded_donor_id;
+         EXCEPTION
+   	WHEN OTHERS THEN
+	     v_error_msg := 'Problem while deleting HLA_RBC_MATCH_UNITS records during merge: '||SQLERRM;
+   	  v_mig_error := 'E';
+	     ROLLBACK;
+         END;
+       END IF;
+     END IF;
+
+       -- ###### HL7 TABLES TREATMENT TO BE DTERMINED ###
+
+   /*
+     -- MOVING
+     IF v_mig_error <> 'E' THEN
+       FOR rr IN c_ LOOP
+         BEGIN
+
+         EXCEPTION
+         WHEN DUP_VAL_ON_INDEX THEN
+	   v_error_msg := 'A XX record identical to the Merging Donors already exists for the Retained Donor';
+   	v_mig_error := 'E';
+	   ROLLBACK;
+         WHEN OTHERS THEN
+   	v_error_msg := 'Problem while migrating XX records during merge: '||SQLERRM;
+	   v_mig_error := 'E';
+   	ROLLBACK;
+         END;
+       END LOOP;
+       IF v_mig_error <> 'E' THEN
+         BEGIN
+   	DELETE FROM
+	    WHERE donor_id = p_discarded_donor_id;
+         EXCEPTION
+   	WHEN OTHERS THEN
+	     v_error_msg := 'Problem while deleting XX records during merge: '||SQLERRM;
+   	  v_mig_error := 'E';
+	     ROLLBACK;
+         END;
+       END IF;
+     END IF;
+   */
+
+     --*** DELETION OF NON-ESSENTIAL DONOR-RELATED RECORDS ***
+
+     IF v_mig_error <> 'E' THEN
+       BEGIN
+         DELETE FROM donor_schedule
+          WHERE donor_id = p_discarded_donor_id;
+       EXCEPTION
+         WHEN OTHERS THEN
+   	v_error_msg := 'Problem deleting DONOR_SCHEDULE records during merge: '||SQLERRM;
+	   v_mig_error := 'E';
+   	ROLLBACK;
+       END;
+     END IF;
+
+     IF v_mig_error <> 'E' THEN
+       BEGIN
+         DELETE FROM donor_spool
+          WHERE donor_id = p_discarded_donor_id;
+       EXCEPTION
+         WHEN OTHERS THEN
+   	v_error_msg := 'Problem deleting DONOR_SPOOL records during merge: '||SQLERRM;
+	   v_mig_error := 'E';
+   	ROLLBACK;
+       END;
+     END IF;
+
+     IF v_mig_error <> 'E' THEN
+       BEGIN
+         DELETE FROM donor_lists
+          WHERE donor_id = p_discarded_donor_id;
+       EXCEPTION
+         WHEN OTHERS THEN
+   	v_error_msg := 'Problem deleting DONOR_LISTS records during merge: '||SQLERRM;
+	   v_mig_error := 'E';
+   	ROLLBACK;
+       END;
+     END IF;
+
+     IF v_mig_error <> 'E' THEN
+       BEGIN
+         DELETE FROM donor_addresses
+          WHERE donor_id = p_discarded_donor_id;
+       EXCEPTION
+         WHEN OTHERS THEN
+   	v_error_msg := 'Problem deleting DONOR_ADDRESSES records during merge: '||SQLERRM;
+	   v_mig_error := 'E';
+   	ROLLBACK;
+       END;
+     END IF;
+
+     IF v_mig_error <> 'E' THEN
+       BEGIN
+         -- Remove donor from graded_donors of the secondary donor --- By Edwin
+         DELETE graded_donors
+          WHERE donor_id = p_discarded_donor_id;
+       EXCEPTION
+         WHEN OTHERS THEN
+   	v_error_msg := 'Problem deleting GRADED_DONORS records during merge: '||SQLERRM;
+	   v_mig_error := 'E';
+   	ROLLBACK;
+       END;
+     END IF;
+
+     --*** MODIFICATION OF DONATION RECORDS ***
+
+     UPDATE donations
+        SET original_donor_id = p_discarded_donor_id
+	    , donor_id = p_retained_donor_id
+      WHERE donor_id = p_discarded_donor_id;
+
+
+     IF v_mig_error <> 'E' THEN
+       COMMIT;
+
+       --*** DELETION OF MERGED DONOR RECORD ***
+       DELETE donors WHERE donor_id = p_discarded_donor_id;
+       COMMIT;
+       RETURN v_success_msg;
+     ELSE
+       RETURN v_error_msg;
+     END IF;
+
+   EXCEPTION
+     WHEN OTHERS THEN
+       v_error_msg := SQLERRM;
+       RETURN v_error_msg;
+   END merge;
+
+   FUNCTION unmerge(p_current_donor_id VARCHAR2
+                     , p_previous_donor_id VARCHAR2
+                     , p_chapter_id VARCHAR2 DEFAULT 'WAD'
+                     , p_set_id VARCHAR2 DEFAULT NULL
+                    ) RETURN VARCHAR2
+   -----------------------------------------------------------------------------
+   -- Unmerge routine based on value of previous_donor_id field in all subordinate
+   -- records.  The Donor record is copied intact to a new record with the
+   -- provided previous Donor_ID
+   -----------------------------------------------------------------------------
+   IS
+      v_ct  NUMBER := 0;
+   BEGIN
+     SELECT count(donor_id) INTO v_ct
+       FROM donors where donor_id = p_previous_donor_id;
+     IF v_ct > 0 THEN
+        RETURN('ERROR: Donor already exists for donor_ID '||p_previous_donor_id);
+     END IF;
+
+   END unmerge;
+END donor_merger;
+/
+

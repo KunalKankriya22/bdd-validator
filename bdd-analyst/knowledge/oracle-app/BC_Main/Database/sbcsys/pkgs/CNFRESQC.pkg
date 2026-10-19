@@ -1,0 +1,1047 @@
+create or replace package CNFRESQC is
+
+  -- Author  : ASHOKV
+  -- Created : 9/6/2018 4:51:45 PM
+  -- Purpose : Schedule tests using test series configuration table
+  
+  -- Public type declarations
+  
+  -- Public constant declarations
+
+  -- Public variable declarations
+  --TYPE units_rt IS RECORD(unit_id VARCHAR2(15), chapter_id VARCHAR2(4), coll_date DATE, qc_reason VARCHAR2(200));
+  --TYPE units_aat IS TABLE OF units_rt INDEX BY BINARY_INTEGER; 
+  TYPE units_cnt_rt IS RECORD(total_units NUMBER, skipped_units NUMBER, incomp_res_units NUMBER, SQC_units  NUMBER);
+  
+  /*
+  -- Public function and procedure declarations
+  PROCEDURE compute_qc_test_flag(p_test_series_id IN VARCHAR2, 
+                                p_test_id         IN VARCHAR2, 
+                                p_chapter_id      IN VARCHAR2, 
+                                p_units_qc        OUT units_aat, 
+                                p_units_cnt       OUT units_cnt_rt,
+                                p_status          OUT VARCHAR2  -- status -- 'OK' or error msg.
+                                );
+
+ */                                
+  procedure gen_Exception_log(p_session_id IN VARCHAR2,
+                                 p_chapter_id IN VARCHAR2,
+                                 p_user_id    IN VARCHAR2, 
+                                 p_status OUT VARCHAR2);
+                                 
+
+  PROCEDURE compute_qc( p_session_id    IN VARCHAR2,
+                        p_chapter_id    IN VARCHAR2,
+                        p_series_id     IN VARCHAR2, 
+                        p_test_id       IN VARCHAR2,
+                        p_qc_totals     OUT units_cnt_rt,
+                        p_status        OUT VARCHAR2);
+                        
+                    
+end CNFRESQC;
+/
+create or replace package body CNFRESQC is
+  -- Author  : ASHOKV
+  -- Created : 9/6/2018 4:51:45 PM
+  -- Purpose : Calculate QC flag, Backend pkg for CNFRESQC.fmb
+  -- Versions:
+     -- 01: Initial version
+     -- 02: Error routines added.
+     -- 03: changes made to include checkin units only
+     -- 04: Count queries fixed.
+     -- 05: cnf_checkin_flag can be Y or S.
+     -- 06: New routine compute_qc added.
+     
+  -- Private type declarations
+   --TYPE lines_t IS TABLE OF VARCHAR2(20000) INDEX BY BINARY_INTEGER; 
+   TYPE units_rt IS RECORD(unit_id        VARCHAR2(15), 
+                           chapter_id     VARCHAR2(4), 
+                           coll_date      DATE, 
+                           qc_reason      VARCHAR2(200));
+   TYPE units_aat IS TABLE OF units_rt INDEX BY BINARY_INTEGER; 
+  -- Private constant declarations
+
+  -- Private variable declarations
+  -- output       lines_t;
+  
+  gd_sysdate DATE;
+  gv_chapter_id VARCHAR2(4);
+  
+
+ procedure clean_temp_tables(p_session_id IN VARCHAR2) is
+ begin
+   DELETE FROM cnf_qc_units
+   WHERE session_id = p_session_id;
+   
+   COMMIT;
+ end clean_temp_tables;
+  
+
+  procedure gen_Exception_log(p_session_id IN VARCHAR2,
+                                 p_chapter_id IN VARCHAR2,
+                                 p_user_id    IN VARCHAR2, 
+                                 p_status OUT VARCHAR2) is
+    log_file     utl_file.file_type;
+    lv_file_name VARCHAR2(500);
+    
+    log_loc    master_codes.code_desc%TYPE := NULL;
+    handle_error EXCEPTION;
+    exit_process EXCEPTION;
+  
+    -- Get log directory location
+    procedure get_log_loc is
+    begin
+      begin
+        select code_desc into log_loc
+          from master_codes
+         where code_type = 'LOGDR'
+           and code = 'LOGDR'
+           and SYSDATE between eff_date and nvl(term_date, SYSDATE + 1);
+      exception
+        when no_data_found then
+          p_status := 'Log Dir not maintained';
+          raise handle_error;
+        when others then
+          p_status := 'Error in fetching Log Dir: ' || substr(sqlerrm, 1, 300);
+          raise handle_error;
+      end;
+    end get_log_loc;
+  
+    procedure open_log_file is
+    begin
+      if utl_file.is_open(log_file) then
+        utl_file.fclose(log_file);
+      end if;
+      lv_file_name := 'CFIRESQC_' || TO_CHAR(SYSDATE, 'MMDDYYHH24MISS') || '.log';
+    
+      begin
+        log_file := utl_file.fopen(log_loc, lv_file_name, 'w');      
+      exception
+        when others then
+          p_status := 'Failure to write output to ' || log_loc || '/' || lv_file_name;
+          UTL_FILE.fclose(log_file);          
+          raise handle_error;
+      end;
+    end open_log_file;
+  
+    procedure close_log_file is
+    begin
+      if utl_file.is_open(log_file) then
+        utl_file.fclose(log_file);
+      end if;
+    end close_log_file;
+    
+    procedure write_log_file is
+      cursor qc_cur is
+        select unit_id, chapter_id, coll_date, test_series_id, test_id, qc_reason
+          from cnf_qc_units
+         where session_id = p_session_id
+           and qc_reason <> 'OK'
+           and qc_flag is not null
+        order by coll_date, unit_id;
+     lv_hdr_line1 VARCHAR2(200);
+     lv_hdr_line2 VARCHAR2(200);
+     lv_hdr_line3 VARCHAR2(200);
+     lv_subtitle1 VARCHAR2(200);
+     lv_subtitle2 VARCHAR2(200);
+     lv_line      VARCHAR2(600);   
+     lv_title     VARCHAR2(100);
+     lb_rec_found BOOLEAN;
+    begin
+      
+      lv_title     :=   'QC Exception Log';
+      lv_subtitle1 :=    'Generated Time  : ' || lifetrack_timezone_convert.get_local_time(p_chapter_id, SYSDATE);
+      lv_subtitle2 :=    'File Name       : ' || lv_file_name;   
+      
+      lv_hdr_line1 :=   RPAD('-', 105, '-');
+      lv_hdr_line2 :=   RPAD('Unit ID',15, ' ') || 
+                        RPAD('Chapter ID',15,' ') ||
+                        RPAD('Coll. Date',15, ' ') ||
+                        RPAD('Series ID', 15, ' ') ||
+                        RPAD('Test ID', 15, ' ') ||
+                        RPAD('QC Reason', 50, ' ');
+      lv_hdr_line3 :=   RPAD('-', 105, '-');
+      
+      UTL_FILE.PUT_LINE(log_file, lv_title);
+      UTL_FILE.PUT_LINE(log_file, lv_subtitle1);
+      UTL_FILE.PUT_LINE(log_file, lv_subtitle2);
+      UTL_FILE.PUT_LINE(log_file, lv_hdr_line1);
+      UTL_FILE.PUT_LINE(log_file, lv_hdr_line2);
+      UTL_FILE.PUT_LINE(log_file, lv_hdr_line3);     
+      lb_rec_found := FALSE;
+                  
+      for qc_rec in qc_cur loop
+        lb_rec_found := TRUE;
+        lv_line  :=       RPAD(qc_rec.unit_id, 18, ' ')   || 
+                          RPAD(qc_rec.chapter_id, 13, ' ') || 
+                          RPAD(TO_CHAR(qc_rec.coll_date,'MM-DD-YYYY'), 15, ' ') ||
+                          RPAD(NVL(qc_rec.test_series_id, ' '), 15, ' ') ||
+                          RPAD(NVL(qc_rec.test_id, ' '), 15, ' ') ||
+                          qc_rec.qc_reason;
+                              
+         UTL_FILE.PUT_LINE(log_file, lv_line);     
+      end loop;                
+      
+      if lb_rec_found then
+        NULL;
+      else
+         UTL_FILE.PUT_LINE(log_file, 'No Exceptions found.'); 
+      end if;
+      
+    end write_log_file;
+
+      -- Insert record into report parameters for retrieval of log file
+    procedure insert_parm_id is
+      rpt_parm_cnt NUMBER;
+      lv_parm_id   VARCHAR2(50);
+    begin
+      lv_parm_id := 'CNFQC_EXCP_' || p_session_id;
+      --lv_parm_id := p_session_id;
+      begin
+        select count(*)
+          into rpt_parm_cnt
+          from rpt_parm
+         where appl_id = 'DON'
+           and report_name = 'CFIRESQC'
+           and user_name = p_user_id 
+           and chapter_id = p_chapter_id
+           and parm_id = lv_parm_id;
+      end;
+      
+      if rpt_parm_cnt > 0 then
+        -- Check if record already exists in RPT_PARM table
+        begin
+          update rpt_parm
+             set submit_date   = sysdate,
+                 report_status = 'C',
+                 output_file   = lv_file_name 
+           where appl_id = 'DON'
+             and report_name = 'CFIRESQC'
+             and user_name = p_user_id 
+             and chapter_id = p_chapter_id
+             and parm_id = lv_parm_id;
+        end;
+      else
+        begin
+          insert into rpt_parm (appl_id, user_name, report_name, parm_id,
+                              parm_date, submit_date, report_status, output_file,
+                               chapter_id) 
+          values
+            ('DON', p_user_id, 'CFIRESQC', lv_parm_id,
+             sysdate, sysdate, 'C', lv_file_name,
+             p_chapter_id
+             ); 
+        end;
+      end if;
+      
+    end insert_parm_id;
+    
+
+  begin
+    get_log_loc;
+    open_log_file;
+    write_log_file;
+    close_log_file;
+  
+    insert_parm_id;
+    --clean_temp_tables(p_session_id);
+    COMMIT;
+    p_status := 'OK';
+  exception
+    when handle_error then
+      null;
+    when exit_process then
+      p_status := 'OK';  
+    when others then
+      p_status := SUBSTR(SQLERRM, 1, 400);  
+  end gen_Exception_log;
+
+/*  
+  PROCEDURE pl(str IN VARCHAR2) IS
+  BEGIN
+    output(NVL(output.LAST, 0) + 1) := str;
+  END;
+
+  PROCEDURE dump_output IS
+    PROCEDURE send_output_to_file IS
+      fid UTL_FILE.file_type;
+      lv_logDir master_codes.code_desc%TYPE := NULL;
+      lv_fileName VARCHAR2(200);
+    BEGIN
+      SELECT code_desc into lv_logDir
+        FROM master_codes
+       WHERE code_type = 'LOGDR'
+         AND code = 'LOGDR'
+         AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1)
+         AND rownum = 1;
+
+      IF lv_logDir IS NULL THEN
+        pl('Error in log file location - check master codes (LOGDR, LOGDR). Exiting now.');
+      END IF;
+        
+      lv_fileName := 'CF_TR_' || TO_CHAR(SYSDATE, 'MMDDYYHH24MISS') || '.log';
+
+      fid := UTL_FILE.fopen(lv_logDir, lv_fileName, 'W');
+
+      FOR indx IN output.FIRST .. output.LAST LOOP
+        UTL_FILE.put_line(fid, output(indx));
+      END LOOP;
+
+      UTL_FILE.fclose(fid);
+    EXCEPTION
+      WHEN OTHERS THEN
+        pl('Failure to write output to ' || lv_logDir || '/' || lv_fileName);
+        UTL_FILE.fclose(fid);
+    END send_output_to_file;    
+  BEGIN
+    --Table: debug_controls 
+    --Col: debug_mode (Y - debug enabled)
+    --object_name = 'CONFIRM_TEST_RESULTS'
+    --object_type = 'PKG'
+    
+    if lab_common.is_debug_msg_displayed ('CNFRESQC', 'PKG') then 
+      -- Send output to the specified file.
+      --send_output_to_file;
+            
+      -- Print output to screen.
+      FOR indx IN output.FIRST .. output.LAST LOOP
+        dbms_output.put_line(output(indx));
+      END LOOP;
+    end if;
+
+    -- Clean output after dumping.
+    output.DELETE;
+
+  END dump_output;  
+*/
+
+  PROCEDURE compute_qc_test_flag(p_test_series_id IN VARCHAR2, 
+                                p_test_id         IN VARCHAR2, 
+                                p_chapter_id      IN VARCHAR2, 
+                                p_units_qc        OUT units_aat, 
+                                p_units_cnt       OUT units_cnt_rt,
+                                p_status          OUT VARCHAR2  -- status -- 'OK' or error msg.
+                                ) IS
+    /* 
+       Pass either test series id or test id to this routine
+       Returns table with unit ID as index and value as qc reason.
+       
+       QC Reasons where flag is calculated as N.
+          Test(s) not resulted in UTRS
+          Unit on Hold
+          Test(s) found in UTB
+          Test(s) found in holding_tests
+          Repeat Test count mismatch             
+    */                                
+    nCnt NUMBER;
+    lv_final_flag VARCHAR2(1);
+    lv_qc_reason  VARCHAR2(200);
+    nResPendCnt   NUMBER;
+    nHoldCnt      NUMBER;
+    nUTBCnt       NUMBER;
+    nHoldTests    NUMBER;
+    indx          BINARY_INTEGER;
+    exit_error EXCEPTION;
+    qc_fail    EXCEPTION;  
+    gv_status_msg VARCHAR2(2000) := 'OK';                              
+  BEGIN
+     gv_chapter_id := p_chapter_id; -- NULL value indicates across chapters.     
+     
+     gd_sysdate := lifetrack_timezone_convert.get_local_time(NVL(p_chapter_id, lt_user_session.get_chapter_id), SYSDATE);    
+     
+     if p_test_series_id is null and p_test_id is null then
+        gv_status_msg := 'Any of the test series id or test id must be paassed as input parameter';
+        raise exit_error;
+     end if;
+     
+     -- check input parameters.
+     if p_test_series_id is not null then
+        if p_test_id is not null then
+          gv_status_msg := 'Either test series ID or test ID must be passed to this routine';
+          raise exit_error;
+        end if;
+        select COUNT(1) into nCnt
+          from valid_series_test_config
+         where test_series_id = p_test_series_id
+           and gd_sysdate between eff_date and NVL(term_date, gd_sysdate + 1);  
+        if nCnt = 0 then
+          gv_status_msg := 'Invalid test series ID';
+          raise exit_error;           
+        end if;
+     end if;
+     
+     if p_test_id is not null then
+        select COUNT(1) INTO nCnt
+          from valid_tests
+         where test_id = p_test_id 
+           and test_group in --('CNFRM', 'SUPP')
+                          ( SELECT mc.code
+                              FROM master_codes mc
+                             WHERE mc.code_type = 'TSTGP'
+                               AND gd_sysdate between mc.eff_date and nvl(mc.term_date, gd_sysdate+1)
+                          )              
+           and sysdate between eff_date and nvl(term_date, sysdate + 1);
+        
+        if nCnt = 0 then
+          gv_status_msg := 'Invalid test ID - must be from TSTGP master code group ';
+          raise exit_error;
+        end if;   
+     end if;
+     ---------------------------------------------------  
+      --pl('starting process...');
+      -- Start processing. 
+      FOR rec in (
+        select distinct unit_id, chapter_id, coll_date
+          from utrs
+         where chapter_id = NVL(gv_chapter_id, chapter_id)
+           and qc_test_date IS NULL
+          and ( (test_series_id is not null and test_series_id = p_test_series_id)
+                OR 
+                (test_series_id is null and test_id = p_test_id)
+               )
+           and result_status_1 is not null  -- V06  
+           and cancel_flag is null    
+           and (unit_id, coll_date, chapter_id) not in
+               (select unit_id, coll_date, chapter_id
+                  from RGT_CONFIRM_SKIP_SAMPLES
+                 where reset_date is null
+                   and reason_code != 'SQC')
+           and exists (
+               select 1
+                  from units
+                 where unit_id = utrs.unit_id
+                   and cnf_checkin_flag IN ('Y','S')
+                 )
+           order by utrs.coll_date desc, utrs.unit_id desc        
+          )
+      LOOP
+        BEGIN
+         --pl('Unit ID ' || rec.unit_id);
+         --pl('Chapter ID ' || rec.chapter_id);
+         --pl('Coll Date ' || to_char(rec.coll_date, 'MMDDYYYY'));                  
+         lv_qc_reason := 'OK';
+
+        -- for test series id only, call the confirm_test_Results pkg and get the final status;
+        if p_test_series_id is not null then
+          --pl('Calling confirm test series pkg to get final flag');
+          -- check if test series is completed.
+          confirm_test_results.check_series_config
+                                   (p_unit_id        => rec.unit_id,
+                                    p_chapter_id     => rec.chapter_id,
+                                    p_test_series_id => p_test_series_id,
+                                    p_program_id     => 'CNFRESQC',
+                                    p_final_flag     => lv_final_flag,
+                                    p_status         => gv_status_msg
+                                    );
+          --PL('CTR PKG status ' || gv_status_msg);
+          if gv_status_msg <> 'OK' then
+            --pl('Error in confirm_test_results pkg - status ' || gv_status_msg); 
+            RAISE exit_error;
+          end if;      
+          
+          if NVL(lv_final_flag,'N') = 'N' then
+            -- set qc reason to test series pending (TPEND) -- QC FLAG TO N
+            lv_qc_reason := 'Incomplete test series';
+            RAISE qc_fail;
+          end if;
+        end if;
+
+        -- check all tests are resulted or not. 
+        select COUNT(1) into nResPendCnt
+          from utrs
+         where unit_id = rec.unit_id
+           and chapter_id = rec.chapter_id
+           and coll_date = rec.coll_date
+           and qc_test_date IS NULL
+          and ( (test_series_id is not null and test_series_id = p_test_series_id)
+                OR 
+                (test_series_id is null and test_id = p_test_id)
+               )
+           and result_status_1 is null
+           and cancel_flag is null;
+           /*
+           and not exists (select 'x'
+                             from rgt_interim_results
+                            where unit_id = rec.unit_id
+                              and coll_date = rec.coll_date
+                              and chapter_id = rec.chapter_id
+                              and test_id = utrs.test_id);
+          */     
+            
+        if nResPendCnt <> 0 then
+          lv_qc_reason := 'Results not reconciled';
+          RAISE qc_fail;            
+        end if;
+
+        
+        -- all tests are resulted. -- check for HOLDS.
+        select count(1) into nHoldCnt
+          from unit_interdictions
+         where unit_id =rec.unit_id
+           and coll_date = rec.coll_date
+           and chapter_id = rec.chapter_id
+           and inter_code in
+               (select inter_code
+                  from valid_interdictions_lab
+                 where inter_type = 'H');        
+        
+        if nHoldCnt <> 0 then
+          lv_qc_reason := 'Unit on Hold';
+          RAISE qc_fail;
+        end if;
+
+       
+        -- check EXTRA TEST UTRS
+        
+        if p_test_series_id is not null then
+          -- check if any test from the test series is present outside the series.
+          select count(1) into nCnt
+            from utrs
+           where unit_id = rec.unit_id
+             and coll_date = rec.coll_date
+             and chapter_id = rec.chapter_id 
+             and nvl(cancel_flag, 'N') = 'N'
+             and nvl(test_series_id,'@#') <> p_test_series_id
+             and test_id in (select test_id
+                               from utrs
+                              where unit_id =  rec.unit_id
+                                and coll_date = rec.coll_date
+                                and chapter_id = rec.chapter_id 
+                                and test_series_id = p_test_series_id
+                                and nvl(cancel_flag,'N') = 'N'
+                             );
+        elsif p_test_id is not null then
+         -- check if any stand alone test is present in any other test series.
+         select count(1) into nCnt
+            from utrs
+           where unit_id = rec.unit_id
+             and coll_date = rec.coll_date
+             and chapter_id = rec.chapter_id 
+             and nvl(cancel_flag, 'N') = 'N'
+             and test_series_id is not null
+             and test_id = p_test_id;          
+        end if;
+        
+        if nCnt <> 0 then
+           lv_qc_reason := 'Extra Test in UTRS'; 
+          RAISE qc_fail;          
+        end if;
+                                                                
+
+        -- All tests resulted and no holds., check for extra test.
+        select count(1) into nUTBCnt
+          from unit_test_base
+         where unit_id = rec.unit_id
+           and coll_date = rec.coll_date
+           and chapter_id = rec.chapter_id 
+           and nvl(cancel_flag, 'N') = 'N'
+           and test_id in (select test_id
+                             from utrs
+                            where unit_id = rec.unit_id
+                              and coll_date = rec.coll_date
+                              and chapter_id = rec.chapter_id
+                              and ( (test_series_id is not null and test_series_id = p_test_series_id)
+                                    OR 
+                                    (test_series_id is null and test_id = p_test_id)
+                                   )
+                              and nvl(cancel_flag,'N') = 'N'
+                           );
+        
+        if nUTBCnt <> 0 then
+          lv_qc_reason := 'Unscheduled tests found'; 
+          RAISE qc_fail;          
+        end if;        
+        
+        -- check for holding tests.
+        select count(1) into nHoldTests
+          from holding_tests
+         where unit_id = rec.unit_id
+           and chapter_id = rec.chapter_id
+           and result_status_1 is not null 
+           and holding_status is null
+           and test_id in (select test_id
+                             from utrs
+                            where unit_id = rec.unit_id
+                              and coll_date = rec.coll_date
+                              and chapter_id = rec.chapter_id
+                              and ( (test_series_id is not null and test_series_id = p_test_series_id)
+                                    OR 
+                                    (test_series_id is null and test_id = p_test_id)
+                                   )
+                              and nvl(cancel_flag,'N') = 'N'
+                           );
+
+        if nHoldTests <> 0 then
+          lv_qc_reason := 'Holding Tests found';
+          RAISE qc_fail;
+        end if;   
+      
+        -- check for repeat counts
+        declare
+           lv_reac_res      VARCHAR2(4); 
+           nRepeatRqdCnt    NUMBER;
+           nRepeatCnt       NUMBER;
+           nNonReact        NUMBER;
+           nIntRes          NUMBER;
+           cursor utrs_cur is
+             select distinct unit_id, test_id
+               from utrs
+              where unit_id = rec.unit_id
+                and cancel_flag is null
+                and chapter_id = rec.chapter_id
+                and ( (test_series_id is not null and test_series_id = p_test_series_id)
+                      OR 
+                      (test_series_id is null and test_id = p_test_id)
+                     )
+                and exists (
+                       select 1
+                          from units
+                         where unit_id = utrs.unit_id
+                           and cnf_checkin_flag IN ('Y','S')
+                         );        
+        begin
+           for utrs_rec in utrs_cur
+           loop
+             begin
+               -- check if the test has reactive result;
+               select distinct result_status_1 into lv_reac_res
+                 from utrs
+                where unit_id = rec.unit_id
+                  and chapter_id = rec.chapter_id
+                  and test_id = utrs_rec.test_id
+                  and cancel_flag is null
+                  and ( (test_series_id is not null and test_series_id = p_test_series_id)
+                        OR 
+                        (test_series_id is null and test_id = p_test_id)
+                       )                  
+                  and result_status_1 in (select code 
+                                            from master_codes 
+                                           where code_type = 'REAC'
+                                             and gd_sysdate between eff_date and NVL(term_date, gd_sysdate+1)
+                                          );
+             
+               -- check the number of repeats required.
+               select SUM(nvl(number_of_repeats,0)) into nRepeatRqdCnt
+                 from valid_test_results
+                where test_id = utrs_rec.test_id
+                  and result_status = lv_reac_res
+                  and gd_sysdate between eff_date and NVL(term_date, gd_sysdate+1);
+                  
+               -- check the number of repeats done.
+               select COUNT(1) into nRepeatCnt
+                 from utrs
+                where unit_id = rec.unit_id
+                  and test_id = utrs_rec.test_id
+                  and chapter_id = rec.chapter_id
+                  and result_status_1 is not null
+                  and cancel_flag is null
+                  and ( (test_series_id is not null and test_series_id = p_test_series_id)
+                        OR 
+                        (test_series_id is null and test_id = p_test_id)
+                       );                  
+                 
+               if nRepeatRqdCnt + 1 <> nRepeatCnt then -- (added 1 to include original test as well)
+                 lv_qc_reason := 'Repeat Test count mismatch for ' || utrs_rec.test_id;
+                 raise qc_fail;
+               end if;
+             exception
+               when no_data_found then
+                 SELECT COUNT(1) INTO nNonReact
+                   FROM utrs
+                  WHERE unit_id = rec.unit_id
+                    AND test_id =  utrs_rec.test_id
+                    AND chapter_id = rec.chapter_id
+                    AND result_status_1 IS NOT NULL
+                    AND cancel_flag IS NULL
+                    and ( (test_series_id is not null and test_series_id = p_test_series_id)
+                          OR 
+                          (test_series_id is null and test_id = p_test_id)
+                         ) ;
+                  if nNonReact <> 1 then
+                    SELECT COUNT(1) INTO nIntRes
+                      FROM RGT_INTERIM_RESULTS
+                     WHERE unit_id = rec.unit_id
+                       AND test_id = utrs_rec.test_id
+                       AND chapter_id = rec.chapter_id
+                       AND result_code IS NOT NULL;
+                       
+                     if nIntRes = 0 then
+                       lv_qc_reason := 'Repeat Test count mismatch for ' || utrs_rec.test_id || '. Not found in rgt_interim_results';
+                       raise qc_fail;
+                     end if;  
+                  end if;   
+               when too_many_rows then
+                 lv_qc_reason := 'Repeat Test count mismatch for ' || utrs_rec.test_id || '. Multiple results';
+                 raise qc_fail;
+             end;
+           end loop;
+        end;      
+          
+         indx := NVL(p_units_qc.LAST,0) + 1;
+         p_units_qc(indx).unit_id   := rec.unit_id;
+         p_units_qc(indx).chapter_id := rec.chapter_id;
+         p_units_qc(indx).coll_date := rec.coll_date;       
+         p_units_qc(indx).qc_reason := lv_qc_reason;  --'OK'
+         
+      EXCEPTION
+        WHEN qc_fail THEN
+          --pl(lv_qc_reason);
+         -- populate out table with NULL qc reasons.
+         indx := NVL(p_units_qc.LAST,0) + 1;
+         p_units_qc(indx).unit_id   := rec.unit_id;
+         p_units_qc(indx).chapter_id := rec.chapter_id;
+         p_units_qc(indx).coll_date := rec.coll_date;       
+         p_units_qc(indx).qc_reason := lv_qc_reason;            
+      END;    
+    END LOOP; 
+    
+
+      -- Skip Count             
+      select count(distinct unit_id) into p_units_cnt.skipped_units
+        from utrs
+       where chapter_id = NVL(gv_chapter_id, chapter_id)
+         and qc_test_date IS NULL
+         and cancel_flag is null
+        and ( (test_series_id is not null and test_series_id = p_test_series_id)
+              OR 
+              (test_series_id is null and test_id = p_test_id)
+             )
+         and result_status_1 is not null  -- V06     
+         and exists (select 'x'
+                from RGT_CONFIRM_SKIP_SAMPLES
+               where unit_id = utrs.unit_id
+                 and coll_date = utrs.coll_date
+                 and chapter_id = utrs.chapter_id
+                 and reset_date is null
+                 and reason_code != 'SQC')
+         and exists (
+               select 1
+                  from units
+                 where unit_id = utrs.unit_id
+                   and cnf_checkin_flag IN ('Y','S')
+                 );
+        
+      -- Total unit count       
+      select count(distinct unit_id) into p_units_cnt.total_units
+        from utrs
+       where chapter_id = NVL(gv_chapter_id, chapter_id)
+         and qc_test_date IS NULL
+         and cancel_flag is null
+         and result_status_1 is not null  -- V06 
+        and ( (test_series_id is not null and test_series_id = p_test_series_id)
+              OR 
+              (test_series_id is null and test_id = p_test_id)
+             )
+            and exists (
+               select 1
+                  from units
+                 where unit_id = utrs.unit_id
+                   and cnf_checkin_flag IN ('Y','S')
+                 );
+        
+      -- SQC count   
+      select count(distinct unit_id) into p_units_cnt.SQC_units
+        from utrs
+       where chapter_id = NVL(gv_chapter_id, chapter_id)
+         and qc_test_date IS NULL
+         and cancel_flag is NULL
+         and result_status_1 is not null  -- V06 
+        and ( (test_series_id is not null and test_series_id = p_test_series_id)
+              OR 
+              (test_series_id is null and test_id = p_test_id)
+             )
+         and exists (select 'x'
+                from rgt_confirm_skip_samples
+               where unit_id = utrs.unit_id
+                 and coll_date = utrs.coll_date
+                 and chapter_id = utrs.chapter_id
+                 and reset_date is null
+                 and reason_code = 'SQC')
+        and exists (
+               select 1
+                  from units
+                 where unit_id = utrs.unit_id
+                   and cnf_checkin_flag IN ('Y','S')
+                 );           
+
+
+      -- No results count           
+      select count(distinct unit_id) into p_units_cnt.incomp_res_units
+        from utrs
+       where chapter_id = NVL(gv_chapter_id, chapter_id)
+         and qc_test_date IS NULL
+         and cancel_flag is NULL
+          and ( (test_series_id is not null and test_series_id = p_test_series_id)
+                OR 
+                (test_series_id is null and test_id = p_test_id)
+               )
+         and (
+              result_status_1 is null and cancel_flag is null
+              OR
+              result_status_1 is not null and cancel_flag is not null
+              )
+         and not exists (select 'x'
+                          from rgt_confirm_skip_samples
+                         where unit_id = utrs.unit_id
+                           and coll_date = utrs.coll_date
+                           and chapter_id = utrs.chapter_id
+                           and reset_date is null)
+          and exists (
+             select 1
+                from units
+               where unit_id = utrs.unit_id
+                 and cnf_checkin_flag IN ('Y','S')
+               )  ;                         
+                           
+        /*                   
+         and not exists (select 'x'
+                           from rgt_interim_results
+                          where unit_id = utrs.unit_id
+                            and coll_date = utrs.coll_date
+                            and chapter_id = utrs.chapter_id
+                            and test_id = utrs.test_id);  
+        */                                                         
+      ----------------
+        
+    --pl('Close process..');
+    p_status := 'OK';
+    --dump_output;
+    
+  EXCEPTION
+    WHEN exit_error THEN
+      --pl(gv_status_msg);
+      p_status := gv_status_msg;
+      --dump_output;
+    WHEN OTHERS THEN
+      p_status := SUBSTR(sqlerrm,1, 200);
+      --pl(p_status);
+      --dump_output;
+  END compute_qc_test_flag;                               
+
+
+ 
+ PROCEDURE compute_qc( p_session_id    IN VARCHAR2,
+                        p_chapter_id    IN VARCHAR2,
+                        p_series_id     IN VARCHAR2, 
+                        p_test_id       IN VARCHAR2,
+                        p_qc_totals     OUT units_cnt_rt,
+                        p_status        OUT VARCHAR2) IS
+
+    CURSOR qc_cur IS    
+        select distinct 'SRSID' lbl, test_series_id ts_id
+          from utrs
+         where chapter_id = NVL(p_chapter_id, chapter_id)
+           and qc_test_date IS NULL
+           and test_series_id is not null 
+           and cancel_flag is null
+           and result_status_1 is not null    
+           and (unit_id, coll_date, chapter_id) not in
+               (select unit_id, coll_date, chapter_id
+                  from RGT_CONFIRM_SKIP_SAMPLES
+                 where reset_date is null
+                   and reason_code != 'SQC')
+           and exists (
+               select 1
+                  from units
+                 where unit_id = utrs.unit_id
+                   and cnf_checkin_flag IN ('Y','S')
+                 )
+         UNION
+        select distinct 'TSTID' lbl, test_id ts_id
+          from utrs
+         where chapter_id = NVL(p_chapter_id, chapter_id)
+           and qc_test_date IS NULL
+           and test_series_id is null 
+           and cancel_flag is null    
+           and result_status_1 is not null   
+           and (unit_id, coll_date, chapter_id) not in
+               (select unit_id, coll_date, chapter_id
+                  from RGT_CONFIRM_SKIP_SAMPLES
+                 where reset_date is null
+                   and reason_code != 'SQC')
+           and exists (
+               select 1
+                  from units
+                 where unit_id = utrs.unit_id
+                   and cnf_checkin_flag IN ('Y','S')
+                 )
+           and exists(
+               select 1
+                 from valid_tests vt
+                where vt.test_id = utrs.test_id 
+                 and vt.test_group in --('CNFRM', 'SUPP')
+                                    ( SELECT mc.code
+                                        FROM master_codes mc
+                                       WHERE mc.code_type = 'TSTGP'
+                                         AND gd_sysdate between mc.eff_date and nvl(mc.term_date, gd_sysdate+1)
+                                    )                    
+                 and sysdate between vt.eff_date and nvl(vt.term_date, sysdate + 1)
+               ) ;
+    lp_series_id     VARCHAR2(10);
+    lp_test_id        VARCHAR2(10);
+    lp_chapter_id     VARCHAR2(4);
+    lp_status         VARCHAR2(2000);
+    units_qc_tab      units_aat;
+    units_cnt_rec     units_cnt_rt;
+    exit_Err        EXCEPTION;
+    report_err      EXCEPTION;
+    lv_rep_status   VARCHAR2(2000);
+    procedure init_variables is
+    begin
+       units_qc_tab.DELETE;
+       units_cnt_rec. total_units := 0;
+       units_cnt_rec.skipped_units := 0;
+       units_cnt_rec.incomp_res_units := 0;
+       units_cnt_rec.SQC_units := 0;      
+    end init_variables;
+    
+    procedure cnf_qc_units_insert is   
+      --lc_5_spaces VARCHAR2(5)     := RPAD(' ', 5, ' ');
+      --lc_10_spaces  VARCHAR2(10)  := RPAD(' ', 10, ' ');
+    begin
+      for i in 1 .. units_qc_tab.COUNT loop
+        insert into cnf_qc_units(session_id, unit_id, chapter_id, 
+                                 coll_date, test_series_id, test_id, 
+                                 qc_reason)
+        values (p_session_id, units_qc_tab(i).unit_id, units_qc_tab(i).chapter_id,
+                units_qc_tab(i).coll_date, lp_series_id, lp_test_id,
+                units_qc_tab(i).qc_reason);
+        
+        /*
+        if units_qc_tab(i).qc_reason <> 'OK' then
+            if lv_hdr_line1 is null then
+              lv_hdr_line1 := RPAD('-', 105, '-');
+              lv_hdr_line2 :=   RPAD('Unit ID',15, ' ') || 
+                                RPAD('Chapter ID',15,' ') ||
+                                RPAD('Coll. Date',15, ' ') ||
+                                RPAD('Series ID', 15, ' ') ||
+                                RPAD('Test ID', 15, ' ') ||
+                                RPAD('QC Reason', 50, ' ');
+              lv_hdr_line3 :=  RPAD('-', 105, '-');
+            end if;
+              
+            rep_output(NVL(rep_output.LAST,0)+1) := 
+                              units_qc_tab(i).unit_id   || lc_5_spaces ||
+                              units_qc_tab(i).chapter_id || lc_10_spaces ||
+                              TO_CHAR(units_qc_tab(i).coll_date,'MM-DD-YYYY') || lc_5_spaces ||
+                              nvl(RPAD(lp_series_id, 10, ' '), lc_10_spaces) || lc_5_spaces ||
+                              nvl(RPAD(lp_test_id, 10, ' '), lc_10_spaces)  || lc_5_spaces ||
+                              units_qc_tab(i).qc_reason;
+        end if;
+        */ 
+      end loop;       
+      
+    end cnf_qc_units_insert;    
+  BEGIN
+    lp_series_id      := p_series_id;
+    lp_test_id        := p_test_id;
+    lp_chapter_id     := p_chapter_id;
+    
+    -- if test series ID only needs to be processed.
+    if p_series_id is not null then
+         init_variables;          
+	       compute_qc_test_flag( 	p_test_series_id  => lp_series_id,
+                                p_test_id         => NULL,
+                                p_chapter_id			=> lp_chapter_id,
+                                p_units_qc        => units_qc_tab, 
+                                p_units_cnt				=> units_cnt_rec,
+                                p_status          => lp_status
+                             );      
+        if lp_status = 'OK' then
+          cnf_qc_units_insert;
+          p_status    := 'OK';
+          p_qc_totals := units_cnt_rec;          
+        else
+          raise exit_Err;
+        end if;                         
+    end if;
+    
+    -- if test_id only needs to be precessed.
+    if p_test_id is not null then
+	       init_variables;
+         compute_qc_test_flag( 	p_test_series_id  => NULL,
+                                p_test_id         => lp_test_id,
+                                p_chapter_id			=> lp_chapter_id,
+                                p_units_qc        => units_qc_tab, 
+                                p_units_cnt				=> units_cnt_rec,
+                                p_status          => lp_status
+                             );            
+        if lp_status = 'OK' then
+          cnf_qc_units_insert;
+          p_status    := 'OK';
+          p_qc_totals := units_cnt_rec;           
+        else
+          raise exit_Err;
+        end if; 
+    end if;    
+    
+    -- check if all test series id and test ID needs to be processed.
+    if p_series_id is null and p_test_id is null then
+
+       gd_sysdate := lifetrack_timezone_convert.get_local_time(NVL(p_chapter_id, lt_user_session.get_chapter_id), SYSDATE);        
+       
+    
+       for qc_rec in qc_cur loop
+           init_variables;                     
+           if qc_rec.lbl = 'SRSID' then
+             lp_series_id := qc_rec.ts_id;
+             lp_test_id   := null;
+             compute_qc_test_flag( 	p_test_series_id  => lp_series_id,
+                                    p_test_id         => NULL,
+                                    p_chapter_id			=> lp_chapter_id,
+                                    p_units_qc        => units_qc_tab, 
+                                    p_units_cnt				=> units_cnt_rec,
+                                    p_status          => lp_status
+                                 );  
+           elsif qc_rec.lbl = 'TSTID' then
+             lp_series_id := null;
+             lp_test_id   := qc_rec.ts_id;
+             compute_qc_test_flag( 	p_test_series_id  => NULL,
+                                    p_test_id         => lp_test_id,
+                                    p_chapter_id			=> lp_chapter_id,
+                                    p_units_qc        => units_qc_tab, 
+                                    p_units_cnt				=> units_cnt_rec,
+                                    p_status          => lp_status
+                                 );   
+           end if;            
+ 
+           --pl('Status ' || lp_Status);   
+           --pl('count ' || units_qc_tab.count);
+           if lp_status = 'OK' then
+             cnf_qc_units_insert;
+             p_status    := 'OK';
+             p_qc_totals.total_units       :=  NVL(p_qc_totals.total_units,0) + units_cnt_rec.total_units;
+             p_qc_totals.skipped_units     :=  NVL(p_qc_totals.skipped_units,0) + units_cnt_rec.skipped_units;
+             p_qc_totals.incomp_res_units  :=  NVL(p_qc_totals.incomp_res_units,0) + units_cnt_rec.incomp_res_units;
+             p_qc_totals.SQC_units         :=  NVL(p_qc_totals.SQC_units ,0) + units_cnt_rec.SQC_units;
+           else
+             raise exit_Err;
+           end if;              
+       end loop;
+    end if;
+    
+    /*
+    COMMIT;
+    
+    gen_exception_report(lv_rep_status);
+    
+    IF lv_rep_status <> 'OK' THEN
+      lv_rep_status := 'Err in generating log ' || lv_rep_status;
+      RAISE report_err;
+    END IF;
+    */
+    --dump_output;
+  EXCEPTION 
+    WHEN exit_Err THEN
+      ROLLBACK;
+      p_status := lp_status;
+      --dump_output;
+    WHEN report_err THEN
+      p_status := lv_rep_status;
+  END compute_qc;
+
+begin
+  -- Initialization
+  null;
+end CNFRESQC;
+/

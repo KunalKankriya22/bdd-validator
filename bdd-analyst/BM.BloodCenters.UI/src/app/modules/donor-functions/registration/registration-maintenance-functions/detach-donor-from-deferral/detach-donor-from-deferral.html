@@ -1,0 +1,247 @@
+<app-page-header-with-breadcrumb [config]="headerConfig" />
+
+<!-- WCAG 4.1.3: persistent live region — polite avoids spurious assertive empty-string announcements when error clears -->
+<div class="cdk-visually-hidden" aria-live="polite" aria-atomic="true">
+  {{ error() }}
+</div>
+
+<section class="detach-deferral-container" [attr.aria-label]="'Detach Donor from Deferral'">
+  <!-- Search Bar -->
+  <!-- WCAG 1.3.1: aria-label describes the search/filter section to AT -->
+  <section class="search-bar" [formGroup]="searchForm" [attr.aria-label]="'Search filters'">
+    <mat-form-field appearance="fill" class="deferral-id-field">
+      <mat-label>Deferral ID</mat-label>
+      <!-- WCAG 4.1.2: aria-invalid must be boolean true or absent (null) — not string "false" -->
+      <input
+        matInput
+        type="text"
+        formControlName="deferralId"
+        id="deferralIdInput"
+        placeholder="Enter Deferral ID"
+        maxlength="10"
+        [attr.aria-invalid]="(f['deferralId'].invalid && f['deferralId'].touched) ? true : null"
+        (blur)="onDeferralIdBlur($event)"
+        (keydown.enter)="onDeferralIdEnter($event)"
+        (keydown.tab)="onDeferralIdTab($event)">
+      @if (deferralIdDoubleEntry === 'pending') {
+        <mat-hint>Re-enter Deferral ID</mat-hint>
+      }
+      @if (f['deferralId'].hasError('serverError')) {
+        <mat-error>{{ f['deferralId'].getError('serverError') }}</mat-error>
+      } @else if (f['deferralId'].invalid && f['deferralId'].touched) {
+        <mat-error>Deferral ID is required</mat-error>
+      }
+    </mat-form-field>
+
+    <mat-form-field appearance="fill" class="collection-date-field">
+      <mat-label>Collection Date</mat-label>
+      <!-- WCAG 2.5.3: aria-label removed — mat-label provides the accessible name via mat-form-field -->
+      <mat-select
+        formControlName="collectionDate"
+        [disabled]="availableDeferrals().length === 0"
+        (selectionChange)="onCollectionDateChange($event.value)">
+        @for (deferral of availableDeferrals(); track deferral.transactionId) {
+          <mat-option [value]="deferral.transactionId">
+            {{ formatCollDate(deferral.collDate) }}
+          </mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+
+    <dl class="readonly-field">
+      <dt class="field-label">Donor ID</dt>
+      <dd class="field-value">{{ donorId() }}</dd>
+    </dl>
+
+    <dl class="readonly-field">
+      <dt class="field-label">Entered by</dt>
+      <dd class="field-value">{{ enteredBy() }}</dd>
+    </dl>
+  </section>
+
+  <!-- Error Message — visual only; AT announcement handled by persistent live region above -->
+  @if (error()) {
+    <div class="error-container" aria-hidden="true">
+      <mat-icon aria-hidden="true">error</mat-icon>
+      <p>{{ error() }}</p>
+    </div>
+  }
+
+  <!-- Loading State -->
+  @if (loading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <app-loading-spinner size="large" message="Loading..." color="#228189"></app-loading-spinner>
+    </div>
+  }
+
+  <!-- Empty State -->
+  @if (!hasSearched() && !loading() && !isDataLoaded()) {
+    <div class="empty-state-container" role="status">
+      <mat-icon class="empty-icon" aria-hidden="true">search</mat-icon>
+      <p class="empty-title">No Results to Display</p>
+      <p class="empty-subtitle">Please enter search criteria to view Results</p>
+    </div>
+  }
+
+  <!-- No Results After Search -->
+  @if (hasSearched() && !loading() && !isDataLoaded()) {
+    <div class="empty-state-container" role="status">
+      <mat-icon class="empty-icon" aria-hidden="true">search_off</mat-icon>
+      <p class="empty-title">No Results Found</p>
+      <p class="empty-subtitle">No deferral found for the entered Deferral ID</p>
+    </div>
+  }
+
+  <!-- Donor Information (after successful search) -->
+  @if (isDataLoaded() && !loading()) {
+    <section class="donor-information" aria-labelledby="donor-info-heading">
+      <h2 id="donor-info-heading">Deferral & Donor Information</h2>
+
+      <div class="fields-grid">
+        <!-- Row 1 -->
+        <dl class="field-row">
+          <dt class="field-label">Last Name</dt>
+          <dd class="field-value">{{ deferralData()?.lastName || '--' }}</dd>
+        </dl>
+        <dl class="field-row">
+          <dt class="field-label">First Name</dt>
+          <dd class="field-value">{{ deferralData()?.firstName || '--' }}</dd>
+        </dl>
+        <dl class="field-row">
+          <dt class="field-label">Middle Initial</dt>
+          <dd class="field-value">{{ deferralData()?.middleName || '--' }}</dd>
+        </dl>
+        <dl class="field-row">
+          <dt class="field-label">DOB</dt>
+          <dd class="field-value">{{ formattedDob() }}</dd>
+        </dl>
+
+        <!-- Row 2 -->
+        <dl class="field-row">
+          <dt class="field-label">Sex</dt>
+          <dd class="field-value">{{ formattedGender() }}</dd>
+        </dl>
+        <dl class="field-row">
+          <dt class="field-label">ABO</dt>
+          <dd class="field-value">{{ formattedAbo() }}</dd>
+        </dl>
+        <dl class="field-row">
+          <dt class="field-label">Home Address</dt>
+          <dd class="field-value">{{ deferralData()?.streetName || '--' }}</dd>
+        </dl>
+        <dl class="field-row">
+          <dt class="field-label">Apartment Number</dt>
+          <dd class="field-value">{{ deferralData()?.suiteApt || '--' }}</dd>
+        </dl>
+
+        <!-- Row 3 -->
+        <dl class="field-row">
+          <dt class="field-label">City</dt>
+          <dd class="field-value">{{ deferralData()?.city || '--' }}</dd>
+        </dl>
+        <dl class="field-row">
+          <dt class="field-label">State</dt>
+          <dd class="field-value">{{ deferralData()?.state || '--' }}</dd>
+        </dl>
+        <dl class="field-row">
+          <dt class="field-label">Zip</dt>
+          <dd class="field-value">{{ deferralData()?.zip || '--' }}</dd>
+        </dl>
+
+        <!-- Row 4 -->
+        <dl class="field-row row-start">
+          <dt class="field-label">Home Phone</dt>
+          <dd class="field-value">{{ deferralData()?.homeAreaCode ? '(' + deferralData()?.homeAreaCode + ') ' + (deferralData()?.homePhone || '') : (deferralData()?.homePhone || '--') }}</dd>
+        </dl>
+        <dl class="field-row">
+          <dt class="field-label">Business Phone</dt>
+          <dd class="field-value">{{ deferralData()?.businessAreaCode ? '(' + deferralData()?.businessAreaCode + ') ' + (deferralData()?.businessPhone || '') : (deferralData()?.businessPhone || '--') }}</dd>
+        </dl>
+        <dl class="field-row span-2">
+          <dt class="field-label">International Address</dt>
+          <dd class="field-value">{{ deferralData()?.intlAddress || '--' }}</dd>
+        </dl>
+      </div>
+
+      <!-- Alternate Address Button -->
+      <div class="alternate-address-row">
+        <!-- WCAG 2.5.3: aria-label removed — visible text "ALTERNATE ADDRESS" is the accessible name -->
+        <button
+          mat-stroked-button
+          type="button"
+          class="alternate-address-btn"
+          (click)="openAlternateAddress()">
+          ALTERNATE ADDRESS
+        </button>
+      </div>
+
+      <div class="fields-grid">
+        <!-- Row 5 -->
+        <dl class="field-row">
+          <dt class="field-label">Employer / School</dt>
+          <dd class="field-value">{{ deferralData()?.employerName || '--' }}</dd>
+        </dl>
+        <dl class="field-row">
+          <dt class="field-label">City and State of Employer or School</dt>
+          <dd class="field-value">{{ (deferralData()?.employerCity && deferralData()?.employerState) ? deferralData()?.employerCity + ', ' + deferralData()?.employerState : (deferralData()?.employerCity || deferralData()?.employerState || '--') }}</dd>
+        </dl>
+        <dl class="field-row">
+          <dt class="field-label">Zip</dt>
+          <dd class="field-value">{{ deferralData()?.employerZip || '--' }}</dd>
+        </dl>
+        <dl class="field-row">
+          <dt class="field-label">Ethnic Group</dt>
+          <dd class="field-value">{{ deferralData()?.ethnicGroup || '--' }}</dd>
+        </dl>
+      </div>
+
+      <!-- Action Bar -->
+      <div class="fields-grid action-bar">
+        <dl class="field-row span-2">
+          <dt class="field-label">International Address</dt>
+          <dd class="field-value">{{ deferralData()?.employerIntlAddress || '--' }}</dd>
+        </dl>
+
+        <div class="action-input">
+          <mat-form-field appearance="fill" class="verify-deferral-id-field">
+            <mat-label>Verify Deferral ID</mat-label>
+            <input
+              matInput
+              type="text"
+              [formControl]="verifyDeferralIdControl"
+              placeholder="Re-enter Deferral ID"
+              maxlength="10"
+              id="verifyDeferralIdInput"
+              (blur)="onVerifyDeferralIdBlur($event)"
+              (keydown.enter)="onVerifyDeferralIdEnter($event)"
+              (keydown.tab)="onVerifyDeferralIdTab($event)"
+              [attr.aria-invalid]="(verifyDeferralIdControl.invalid && verifyDeferralIdControl.touched) ? true : null">
+            @if (verifyDeferralIdDoubleEntry === 'pending') {
+              <mat-hint>Re-enter Deferral ID</mat-hint>
+            }
+            @if (verifyDeferralIdControl.hasError('serverError')) {
+              <mat-error>{{ verifyDeferralIdControl.getError('serverError') }}</mat-error>
+            } @else if (verifyDeferralIdControl.hasError('required') && verifyDeferralIdControl.touched) {
+              <mat-error>Deferral ID is required</mat-error>
+            } @else if (verifyDeferralIdControl.hasError('mismatch')) {
+              <mat-error>Deferral ID does not match</mat-error>
+            }
+          </mat-form-field>
+        </div>
+
+        <div class="action-button">
+          <!-- WCAG 2.5.3: aria-label removed — visible text "DETACH DEFERRAL" is the accessible name -->
+          <button
+            mat-raised-button
+            color="primary"
+            type="button"
+            class="detach-btn"
+            [disabled]="loading()"
+            (click)="onDetachDeferral()">
+            DETACH DEFERRAL
+          </button>
+        </div>
+      </div>
+    </section>
+  }
+</section>

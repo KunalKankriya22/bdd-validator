@@ -1,0 +1,38 @@
+---
+tags:
+  - trigger
+  - SBCSYS
+---
+# RGT_RESULT_PARMS_BD
+
+**Schema**: [[schemas/SBCSYS/SBCSYS|SBCSYS]]
+**Table**: [[schemas/SBCSYS/Tables/RGT_RESULT_PARMS|RGT_RESULT_PARMS]]
+**Type**: BEFORE EACH ROW
+**Event**: DELETE
+**Status**: ENABLED
+
+## Trigger Body
+
+```plsql
+begin
+
+	insert into RGT_RESULT_PARMS_AUDIT
+    (
+	CHAPTER_ID, CONTRACT_ID, RESULT_PARM_ID,
+	FROM_DATE, TO_DATE, INSERT_DATS,
+	INSERT_USER_ID, BATCH_ID, UNIT_LIST,
+	STAT_TESTS, RESULT_TYPE, OTHER_BATCHES,
+	UNIT_COUNT, UNDER_EXTRACT_FLAG, RE_EXTRACT_FLAG,
+	AUDIT_KEY, AUDIT_INSERT_DATS, AUDIT_INSERT_USER
+    )
+    values
+    (
+	:old.CHAPTER_ID, :old.CONTRACT_ID, :old.RESULT_PARM_ID,
+	:old.FROM_DATE, :old.TO_DATE, :old.INSERT_DATS,
+	:old.INSERT_USER_ID, :old.BATCH_ID, :old.UNIT_LIST,
+	:old.STAT_TESTS, :old.RESULT_TYPE, :old.OTHER_BATCHES,
+	:old.UNIT_COUNT, :old.UNDER_EXTRACT_FLAG, :old.RE_EXTRACT_FLAG,
+	:old.AUDIT_KEY, sysdate, lt_user_session.get_userid
+    );
+end;
+```

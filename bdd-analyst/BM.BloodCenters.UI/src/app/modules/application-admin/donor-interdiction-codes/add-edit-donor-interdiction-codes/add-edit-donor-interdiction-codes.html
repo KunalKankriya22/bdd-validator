@@ -1,0 +1,479 @@
+<div class="side-panel-wrapper">
+    <!-- PANEL HEADER -->
+    <div class="panel-header" [ngClass]="mode === 'edit' ? 'panel-header--edit' : 'panel-header--add'">
+        <div class="header-content">
+            <h2 class="panel-title">{{ mode === 'edit' ? 'Edit Code' : 'Add New Code' }}</h2>
+            <div *ngIf="mode === 'edit'" class="header-subtitle"><span>{{ form.value.code }} - {{ form.value.type }}</span><span *ngIf="lastUpdated" class="last-updated">{{ lastUpdated }}</span></div>
+        </div>
+        <button type="button" mat-icon-button class="close-btn" (click)="onCancel()" aria-label="Close panel">
+            <mat-icon>close</mat-icon>
+        </button>
+    </div>
+
+    <!-- PANEL BODY -->
+    <form class="panel-body" [formGroup]="form" (ngSubmit)="onSave()">
+        <!-- Donor / Lab -->
+        <mat-radio-group formControlName="panelMode" class="radio-row" aria-label="Select scope: Donor or Lab">
+            <mat-radio-button value="Donor">Donor</mat-radio-button>
+            <mat-radio-button value="Lab" (click)="goToAddLab()">Lab</mat-radio-button>
+        </mat-radio-group>
+
+        <!-- BASIC INFO -->
+        <h3>Basic Information</h3>
+        <div class="grid-3">
+            <!-- CODE: always read-only in edit mode -->
+            <ng-container *ngIf="mode === 'edit'; else addCode">
+                <div class="field-display-card" role="group" aria-label="Code">
+                    <div class="field-label">Code</div>
+                    <div class="field-value">{{ form.value.code }}</div>
+                </div>
+            </ng-container>
+            <ng-template #addCode>
+                <mat-form-field appearance="fill">
+                    <mat-label>Code</mat-label>
+                    <input matInput formControlName="code" maxlength="5"
+                           (keydown)="preventSpaceInput($event)" />
+                    <mat-error *ngIf="form.get('code')?.hasError('required')">
+                        Code is required
+                    </mat-error>
+                    <mat-error *ngIf="form.get('code')?.hasError('noSpaces')">
+                        Code cannot contain spaces
+                    </mat-error>
+                    <mat-error *ngIf="form.get('code')?.hasError('maxlength')">
+                        Code cannot exceed 5 characters
+                    </mat-error>
+                </mat-form-field>
+            </ng-template>
+
+            <!-- TYPE: read-only in S-mode edit, editable otherwise -->
+            <ng-container *ngIf="mode === 'edit' && isSystemControlled; else editType">
+                <div class="field-display-card" role="group" aria-label="Type">
+                    <div class="field-label">Type</div>
+                    <div class="field-value">{{ form.value.type || '-' }}</div>
+                </div>
+            </ng-container>
+            <ng-template #editType>
+                <mat-form-field appearance="fill">
+                    <mat-label>Type</mat-label>
+                    <mat-select formControlName="type">
+                        <mat-option>
+                            <ngx-mat-select-search
+                                [formControl]="typeSearchControl"
+                                placeholderLabel="Search types..."
+                                noEntriesFoundLabel="No matching types">
+                            </ngx-mat-select-search>
+                        </mat-option>
+                        <mat-option *ngFor="let t of types()" [value]="t.code">
+                            {{ t.code }} - {{ t.description }}
+                        </mat-option>
+                        <mat-option *ngIf="types().length === 0" disabled>
+                            No Data Available
+                        </mat-option>
+                    </mat-select>
+                    <mat-error *ngIf="form.get('type')?.hasError('required')">
+                        Type is required
+                    </mat-error>
+                </mat-form-field>
+            </ng-template>
+
+            <!-- OWNER: read-only in S-mode edit, editable otherwise -->
+            <ng-container *ngIf="mode === 'edit' && isSystemControlled; else editOwner">
+                <div class="field-display-card" role="group" aria-label="Owner">
+                    <div class="field-label">Owner (D/U/B)</div>
+                    <div class="field-value">{{ getOwnerDisplayName(form.value.owner) }}</div>
+                </div>
+            </ng-container>
+            <ng-template #editOwner>
+                <mat-form-field appearance="fill">
+                    <mat-label>Owner (D/U/B)</mat-label>
+                    <mat-select formControlName="owner">
+                        <mat-option>
+                            <ngx-mat-select-search
+                                [formControl]="ownerSearchControl"
+                                placeholderLabel="Search owners..."
+                                noEntriesFoundLabel="No matching owners">
+                            </ngx-mat-select-search>
+                        </mat-option>
+                        <mat-option *ngFor="let o of owners()" [value]="o">
+                            {{ getOwnerDisplayName(o) }}
+                        </mat-option>
+                        <mat-option *ngIf="owners().length === 0" disabled>
+                            No Data Available
+                        </mat-option>
+                    </mat-select>
+                    <mat-error *ngIf="form.get('owner')?.hasError('required')">
+                        Owner is required
+                    </mat-error>
+                    <mat-error *ngIf="form.get('owner')?.hasError('pattern')">
+                        Interdiction owner must be 'U' (Unit), 'D' (Donor), or 'B' (Both)
+                    </mat-error>
+                </mat-form-field>
+            </ng-template>
+        </div>
+
+        <!-- DESCRIPTION: read-only in S-mode edit, editable otherwise -->
+        <ng-container *ngIf="mode === 'edit' && isSystemControlled; else editDescription">
+            <div class="field-display-card full">
+                <div class="field-label">Description</div>
+                <div class="field-value">{{ form.value.description || '-' }}</div>
+            </div>
+        </ng-container>
+        <ng-template #editDescription>
+            <mat-form-field appearance="fill" class="full">
+                <mat-label>Description</mat-label>
+                <input matInput formControlName="description" maxlength="50"
+                       (keydown)="preventLeadingAndMultipleSpaces($event, 'description')"
+                       (blur)="trimTrailingSpaces('description')" />
+                <mat-hint>characters remaining: {{ 50 - (form.get('description')?.value?.length || 0) }}</mat-hint>
+                <mat-error *ngIf="form.get('description')?.hasError('required')">
+                    Description is required
+                </mat-error>
+                <mat-error *ngIf="form.get('description')?.hasError('whitespaceOnly')">
+                    Description cannot contain only spaces
+                </mat-error>
+                <mat-error *ngIf="form.get('description')?.hasError('leadingTrailingWhitespace')">
+                    Description must not have leading or trailing spaces
+                </mat-error>
+                <mat-error *ngIf="form.get('description')?.hasError('multipleSpaces')">
+                    Description must not have multiple consecutive spaces
+                </mat-error>
+                <mat-error *ngIf="form.get('description')?.hasError('maxlength')">
+                    Description cannot exceed 50 characters
+                </mat-error>
+            </mat-form-field>
+        </ng-template>
+
+        <!-- DEFERRAL SETTINGS -->
+        <h3>Deferral Settings</h3>
+        <ng-container *ngIf="mode === 'edit' && isSystemControlled; else defaultDeferralLayout">
+            <!-- S-mode: grid-3 (Deferral | Fixed Period | Period) then grid-2 (Value | Min Value) -->
+            <div class="grid-3">
+                <div class="field-display-card">
+                    <div class="field-label">Deferral</div>
+                    <div class="field-value">{{ getYesNoDisplay(form.value.deferral) }}</div>
+                </div>
+                <div class="field-display-card">
+                    <div class="field-label">Fixed Period</div>
+                    <div class="field-value">{{ getYesNoDisplay(form.value.fixedPeriod) }}</div>
+                </div>
+                <div class="field-display-card">
+                    <div class="field-label">Period</div>
+                    <div class="field-value">{{ form.value.period || '-' }}</div>
+                </div>
+            </div>
+            <div class="grid-2">
+                <div class="field-display-card">
+                    <div class="field-label">Value</div>
+                    <div class="field-value">{{ form.value.value ?? '-' }}</div>
+                </div>
+                <div class="field-display-card">
+                    <div class="field-label">Min Value</div>
+                    <div class="field-value">{{ form.value.minValue ?? '-' }}</div>
+                </div>
+            </div>
+        </ng-container>
+        <ng-template #defaultDeferralLayout>
+            <!-- Default layout (add / D-mode edit): original grid-2 + grid-3 -->
+            <div class="grid-2">
+                <mat-form-field appearance="fill">
+                    <mat-label>Deferral</mat-label>
+                    <mat-select formControlName="deferral">
+                        <mat-option *ngFor="let o of yesNoOptions" [value]="o.value">
+                            {{ o.label }}
+                        </mat-option>
+                    </mat-select>
+                    <mat-error *ngIf="form.get('deferral')?.hasError('required')">
+                        Deferral is required
+                    </mat-error>
+                </mat-form-field>
+                <mat-form-field appearance="fill">
+                    <mat-label>Fixed Period</mat-label>
+                    <mat-select formControlName="fixedPeriod">
+                        <mat-option *ngFor="let fp of fixedPeriods" [value]="fp">
+                            {{ fp === 'Y' ? 'Yes' : 'No' }}
+                        </mat-option>
+                    </mat-select>
+                </mat-form-field>
+            </div>
+            <div class="grid-3">
+                <mat-form-field appearance="fill">
+                    <mat-label>Period</mat-label>
+                    <mat-select formControlName="period">
+                        <mat-option>
+                            <ngx-mat-select-search
+                                [formControl]="periodSearchControl"
+                                placeholderLabel="Search periods..."
+                                noEntriesFoundLabel="No matching periods">
+                            </ngx-mat-select-search>
+                        </mat-option>
+                        <mat-option *ngFor="let p of periods()" [value]="p.code">
+                            {{ p.code }} - {{ p.description }}
+                        </mat-option>
+                        <mat-option *ngIf="periods().length === 0" disabled>
+                            No Data Available
+                        </mat-option>
+                    </mat-select>
+                </mat-form-field>
+                <mat-form-field appearance="fill">
+                    <mat-label>Value</mat-label>
+                    <input matInput type="number" formControlName="value" min="0" max="9999" (keydown)="onIntegerKeyDown($event)" (input)="limitDigits($event, 'value', 4)" />
+                    <mat-error *ngIf="form.get('value')?.hasError('required')">
+                        Value is required
+                    </mat-error>
+                    <mat-error *ngIf="form.get('value')?.hasError('min')">
+                        Value must be at least 0
+                    </mat-error>
+                    <mat-error *ngIf="form.get('value')?.hasError('max')">
+                        Value cannot exceed 9999
+                    </mat-error>
+                </mat-form-field>
+                <mat-form-field appearance="fill">
+                    <mat-label>Min Value</mat-label>
+                    <input matInput type="number" formControlName="minValue" min="0" max="9999" (keydown)="onIntegerKeyDown($event)" (input)="limitDigits($event, 'minValue', 4)" />
+                    <mat-error *ngIf="form.get('minValue')?.hasError('required')">
+                        Min Value is required
+                    </mat-error>
+                    <mat-error *ngIf="form.get('minValue')?.hasError('min')">
+                        Min Value must be at least 0
+                    </mat-error>
+                    <mat-error *ngIf="form.get('minValue')?.hasError('max')">
+                        Min Value cannot exceed 9999
+                    </mat-error>
+                </mat-form-field>
+            </div>
+        </ng-template>
+
+        <!-- FLAGS & SETTINGS -->
+        <h3>Flags & Settings</h3>
+        <ng-container *ngIf="mode === 'edit' && isSystemControlled; else defaultFlagsLayout">
+            <!-- S-mode: grid-3 (Termination Reason | Multiple Flag | Upgrade Flag)
+                         grid-2 (Manual Flag | Lab Flag)
+                         grid-3 single (View Level) -->
+            <div class="grid-3">
+                <div class="field-display-card">
+                    <div class="field-label">Termination Reason</div>
+                    <div class="field-value">{{ getYesNoDisplay(form.value.terminationReason) }}</div>
+                </div>
+                <div class="field-display-card">
+                    <div class="field-label">Multiple Flag</div>
+                    <div class="field-value">{{ getYesNoDisplay(form.value.multipleFlag) }}</div>
+                </div>
+                <div class="field-display-card">
+                    <div class="field-label">Upgrade Flag</div>
+                    <div class="field-value">{{ getYesNoDisplay(form.value.upgradeFlag) }}</div>
+                </div>
+            </div>
+            <div class="grid-2">
+                <div class="field-display-card">
+                    <div class="field-label">Manual Flag</div>
+                    <div class="field-value">{{ getYesNoDisplay(form.value.manualFlag) }}</div>
+                </div>
+                <div class="field-display-card">
+                    <div class="field-label">Lab Flag</div>
+                    <div class="field-value">{{ form.value.labFlag || '-' }}</div>
+                </div>
+            </div>
+            <div class="grid-3">
+                <mat-form-field appearance="fill">
+                    <mat-label>View Level</mat-label>
+                    <mat-select formControlName="viewLevel">
+                        <mat-option>
+                            <ngx-mat-select-search
+                                [formControl]="viewLevelSearchControl"
+                                placeholderLabel="Search view levels..."
+                                noEntriesFoundLabel="No matching levels">
+                            </ngx-mat-select-search>
+                        </mat-option>
+                        <mat-option *ngFor="let level of filteredViewLevels" [value]="level">
+                            {{ level }}
+                        </mat-option>
+                    </mat-select>
+                    <mat-error *ngIf="form.get('viewLevel')?.hasError('required')">
+                        View Level is required
+                    </mat-error>
+                </mat-form-field>
+            </div>
+        </ng-container>
+        <ng-template #defaultFlagsLayout>
+            <!-- Default layout (add / D-mode edit): original grid-2 with all 6 fields -->
+            <div class="grid-2">
+                <mat-form-field appearance="fill">
+                    <mat-label>Termination Reason</mat-label>
+                    <mat-select formControlName="terminationReason">
+                        <mat-option *ngFor="let o of yesNoOptions" [value]="o.value">
+                            {{ o.label }}
+                        </mat-option>
+                    </mat-select>
+                    <mat-error *ngIf="form.get('terminationReason')?.hasError('required')">
+                        Termination Reason is required
+                    </mat-error>
+                </mat-form-field>
+                <mat-form-field appearance="fill">
+                    <mat-label>View Level</mat-label>
+                    <mat-select formControlName="viewLevel">
+                        <mat-option>
+                            <ngx-mat-select-search
+                                [formControl]="viewLevelSearchControl"
+                                placeholderLabel="Search view levels..."
+                                noEntriesFoundLabel="No matching levels">
+                            </ngx-mat-select-search>
+                        </mat-option>
+                        <mat-option *ngFor="let level of filteredViewLevels" [value]="level">
+                            {{ level }}
+                        </mat-option>
+                    </mat-select>
+                    <mat-error *ngIf="form.get('viewLevel')?.hasError('required')">
+                        View Level is required
+                    </mat-error>
+                </mat-form-field>
+                <mat-form-field appearance="fill">
+                    <mat-label>Multiple Flag</mat-label>
+                    <mat-select formControlName="multipleFlag">
+                        <mat-option *ngFor="let o of yesNoOptions" [value]="o.value">
+                            {{ o.label }}
+                        </mat-option>
+                    </mat-select>
+                    <mat-error *ngIf="form.get('multipleFlag')?.hasError('required')">
+                        Multiple Flag is required
+                    </mat-error>
+                    <mat-error *ngIf="form.get('multipleFlag')?.hasError('pattern')">
+                        Value must be Y or N
+                    </mat-error>
+                </mat-form-field>
+                <mat-form-field appearance="fill">
+                    <mat-label>Upgrade Flag</mat-label>
+                    <mat-select formControlName="upgradeFlag">
+                        <mat-option *ngFor="let o of yesNoOptions" [value]="o.value">
+                            {{ o.label }}
+                        </mat-option>
+                    </mat-select>
+                    <mat-error *ngIf="form.get('upgradeFlag')?.hasError('pattern')">
+                        Value must be Y or N
+                    </mat-error>
+                </mat-form-field>
+                <mat-form-field appearance="fill">
+                    <mat-label>Manual Flag</mat-label>
+                    <mat-select formControlName="manualFlag">
+                        <mat-option *ngFor="let o of yesNoOptions" [value]="o.value">
+                            {{ o.label }}
+                        </mat-option>
+                    </mat-select>
+                </mat-form-field>
+                <mat-form-field appearance="fill">
+                    <mat-label>Lab Flag</mat-label>
+                    <mat-select formControlName="labFlag">
+                        <mat-option>
+                            <ngx-mat-select-search
+                                [formControl]="labFlagSearchControl"
+                                placeholderLabel="Search lab flags..."
+                                noEntriesFoundLabel="No matching lab flags">
+                            </ngx-mat-select-search>
+                        </mat-option>
+                        <mat-option *ngFor="let labFlag of labFlagOptions()" [value]="labFlag.code">
+                            {{ labFlag.code }} - {{ labFlag.description }}
+                        </mat-option>
+                        <mat-option *ngIf="labFlagOptions().length === 0" disabled>
+                            No Data Available
+                        </mat-option>
+                    </mat-select>
+                </mat-form-field>
+            </div>
+        </ng-template>
+
+        <!-- LIFECYCLE -->
+        <h3>Lifecycle Control</h3>
+        <div class="grid-2">
+            <!-- ADD mode: Editable effective date -->
+            <mat-form-field *ngIf="mode === 'add'" appearance="fill">
+                <mat-label>Effective Date</mat-label>
+                <input
+                    #effDateNativeInput
+                    matInput
+                    [matDatepicker]="ed"
+                    formControlName="effectiveDate"
+                    aria-label="Effective Date"
+                    placeholder="DD-MMM-YYYY"
+                    autocomplete="off"
+                    [min]="minDate"
+                    (input)="onEffDateInput()"
+                    (keydown)="preventSpaceInput($event)">
+                <mat-datepicker-toggle matIconSuffix [for]="ed"></mat-datepicker-toggle>
+                <mat-datepicker #ed></mat-datepicker>
+                <mat-error *ngIf="getEffectiveDateError()">{{ getEffectiveDateError() }}</mat-error>
+            </mat-form-field>
+
+            <!-- EDIT mode: Read-only display card -->
+            <div *ngIf="mode === 'edit'" class="field-display-card">
+                <div class="field-label">Effective Date</div>
+                <div class="field-value">{{ editModeValues.effectiveDate || '-' }}</div>
+            </div>
+
+            <mat-form-field appearance="fill">
+                <mat-label>Termination Date</mat-label>
+                <input
+                    #termDateNativeInput
+                    matInput
+                    [matDatepicker]="td"
+                    formControlName="terminationDate"
+                    [errorStateMatcher]="termDateErrorMatcher"
+                    aria-label="Termination Date"
+                    placeholder="DD-MMM-YYYY"
+                    autocomplete="off"
+                    [matDatepickerFilter]="terminationDateFilter"
+                    (input)="onTermDateInput()"
+                    (keydown)="preventSpaceInput($event)">
+                <mat-datepicker-toggle matIconSuffix [for]="td"></mat-datepicker-toggle>
+                <mat-datepicker #td></mat-datepicker>
+                <mat-error *ngIf="getTerminationDateError()">{{ getTerminationDateError() }}</mat-error>
+            </mat-form-field>
+        </div>
+
+        <!-- RELATED INTERDICTIONS -->
+        <h3 id="section-related-interdictions">Related Interdictions</h3>
+        <div class="grid-2">
+            <mat-form-field appearance="fill">
+                <mat-label>Lab Interdiction</mat-label>
+                <input matInput formControlName="labInterdiction" maxlength="5"
+                       (keydown)="preventLeadingAndMultipleSpaces($event, 'labInterdiction')"
+                       (blur)="trimTrailingSpaces('labInterdiction')" />
+                <mat-error *ngIf="form.get('labInterdiction')?.hasError('leadingTrailingWhitespace')">
+                    Lab Interdiction must not have leading or trailing spaces
+                </mat-error>
+                <mat-error *ngIf="form.get('labInterdiction')?.hasError('multipleSpaces')">
+                    Lab Interdiction must not have multiple consecutive spaces
+                </mat-error>
+                <mat-error *ngIf="form.get('labInterdiction')?.hasError('maxlength')">
+                    Lab Interdiction cannot exceed 5 characters
+                </mat-error>
+            </mat-form-field>
+            <mat-form-field appearance="fill">
+                <mat-label>Old Interdiction</mat-label>
+                <input matInput formControlName="oldInterdiction" maxlength="5"
+                       (keydown)="preventLeadingAndMultipleSpaces($event, 'oldInterdiction')"
+                       (blur)="trimTrailingSpaces('oldInterdiction')" />
+                <mat-error *ngIf="form.get('oldInterdiction')?.hasError('leadingTrailingWhitespace')">
+                    Old Interdiction must not have leading or trailing spaces
+                </mat-error>
+                <mat-error *ngIf="form.get('oldInterdiction')?.hasError('multipleSpaces')">
+                    Old Interdiction must not have multiple consecutive spaces
+                </mat-error>
+                <mat-error *ngIf="form.get('oldInterdiction')?.hasError('maxlength')">
+                    Old Interdiction cannot exceed 5 characters
+                </mat-error>
+            </mat-form-field>
+        </div>
+    </form>
+
+    <!-- PANEL FOOTER -->
+    <div class="panel-footer">
+        <div class="footer-actions">
+            <button type="button" mat-button class="cancel-btn" (click)="onCancel()" [disabled]="isSaving">
+                CANCEL
+            </button>
+            <button type="button" mat-raised-button class="primary-btn" (click)="onSave()"
+                [disabled]="isSaving || hasVisibleDateError || hasVisibleFormErrors || (mode === 'edit' && form.pristine) || (mode === 'add' && form.invalid)">
+                {{ isSaving ? 'SAVING...' : (mode === 'add' ? 'ADD' : 'SAVE') }}
+            </button>
+        </div>
+    </div>
+</div>

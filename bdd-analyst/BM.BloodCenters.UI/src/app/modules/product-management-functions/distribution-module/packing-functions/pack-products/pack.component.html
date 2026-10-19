@@ -1,0 +1,278 @@
+<section class="pack-container" role="region">
+
+  <!-- Full-screen loading overlay — shown while pack API is in flight -->
+  @if (packingLoading()) {
+    <div class="pack-overlay" role="status" aria-live="polite" aria-label="Packing product, please wait">
+      <div class="pack-overlay__spinner">
+        <mat-spinner diameter="52" color="primary"></mat-spinner>
+        <span class="pack-overlay__msg">Packing product...</span>
+      </div>
+    </div>
+  }
+
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <div class="pack-body">
+
+    <!-- ── Section 1: Filter Card ──────────────────────────────────────────── -->
+    <div class="filter-card">
+      <form [formGroup]="headerForm" class="filter-form">
+        <!-- Order Number -->
+        <mat-form-field appearance="fill" class="ff ff--order">
+          <mat-label>Order Number</mat-label>
+          <mat-select formControlName="orderNo"
+                      panelClass="pack-order-panel"
+                      (selectionChange)="onOrderSelected($event.value)">
+            <!-- Selected value shows only order number -->
+            <mat-select-trigger>{{ headerForm.get('orderNo')?.value || '' }}</mat-select-trigger>
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="orderSearchControl"
+                placeholderLabel="Type to search..."
+                noEntriesFoundLabel="No orders found">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (o of filteredOrders(); track o.orderNo) {
+              <mat-option [value]="o.orderNo"
+                style="height:auto!important;min-height:48px;white-space:normal!important;line-height:normal;padding-top:6px;padding-bottom:6px;">
+                <div class="mat-body-2">{{ o.orderNo }}</div>
+                <div class="mat-caption" style="margin-top:2px;opacity:.8;">
+                  {{ o.orderClass ?? '' }}{{ o.orderClassDescription ? ' · ' + o.orderClassDescription : '' }}{{ o.consigneeName ? ' · ' + o.consigneeName : '' }}{{ o.estArrivalTime ? ' · ' + formatDateTime(o.estArrivalTime) : '' }}
+                </div>
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Pack Slip ID (read-only mat-form-field) -->
+        <mat-form-field appearance="fill" class="ff ff--slip">
+          <mat-label>Pack Slip ID</mat-label>
+          <input matInput [value]="currentPickSlipId() ?? '-'" readonly>
+        </mat-form-field>
+
+        <!-- Box ID dropdown (searchable) -->
+        <mat-form-field appearance="fill" class="ff ff--box">
+          <mat-label>Box ID <span class="req">*</span></mat-label>
+          <mat-select (selectionChange)="onBoxSelected($event.value)">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="boxIdSearchControl"
+                placeholderLabel="Search box..."
+                noEntriesFoundLabel="No boxes found">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option value="">–</mat-option>
+            @for (b of filteredBoxes(); track b.boxId) {
+              <mat-option [value]="b.boxId">{{ b.boxId }}</mat-option>
+            }
+          </mat-select>
+          <span matSuffix class="scan-suffix" aria-hidden="true">
+            <mat-icon class="scan-icon">qr_code_scanner</mat-icon>
+          </span>
+        </mat-form-field>
+
+        <!-- Type dropdown (searchable) — shows code+description in both trigger and options -->
+        <mat-form-field appearance="fill" class="ff ff--type">
+          <mat-label>Type</mat-label>
+          <mat-select (selectionChange)="onTypeSelected($event.value)">
+            <mat-select-trigger>
+              @if (currentBoxType()) {
+                {{ currentBoxType() }}{{ currentBoxTypeDesc() ? ' — ' + currentBoxTypeDesc() : '' }}
+              }
+            </mat-select-trigger>
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="typeSearchControl"
+                placeholderLabel="Search type..."
+                noEntriesFoundLabel="No types found">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (bt of filteredBoxTypes(); track bt.code) {
+              <mat-option [value]="bt.code">{{ bt.code }} — {{ bt.description }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+      </form>
+    </div>
+
+    <!-- ── Loading ───────────────────────────────────────────────────────────── -->
+    @if (orderLoading()) {
+      <div class="loading-row">
+        <mat-spinner diameter="32"></mat-spinner>
+        <span>Loading order...</span>
+      </div>
+    }
+
+    <!-- ── Empty State ────────────────────────────────────────────────────────── -->
+    @if (isEmpty() && !orderLoading()) {
+      <div class="empty-state">
+        <div class="empty-state__icon-wrap">
+          <mat-icon>search</mat-icon>
+        </div>
+        <p class="empty-state__msg">No Results to Display</p>
+        <p class="empty-state__hint">Enter Order Number ID or Box ID to begin.</p>
+      </div>
+    }
+
+    <!-- ── Order Data ─────────────────────────────────────────────────────────── -->
+    @if (hasOrderData() && !orderLoading()) {
+
+      <!-- Ship To / Estimated Delivery -->
+      <div class="ship-card">
+        <div class="ship-item">
+          <span class="ship-label">Ship To</span>
+          <span class="ship-value">{{ orderDetails()?.shipToAddress ?? '–' }}</span>
+        </div>
+        @if (orderDetails()?.estArrivalTime) {
+          <div class="ship-item">
+            <span class="ship-label">Estimated Delivery</span>
+            <span class="ship-value">{{ formatDateTime(orderDetails()?.estArrivalTime) }}</span>
+          </div>
+        }
+      </div>
+
+      <!-- Items table -->
+      <div class="items-card">
+        <app-data-table
+          [config]="orderItemsTableConfig()"
+          [data]="orderItems()"
+          [loading]="false">
+        </app-data-table>
+      </div>
+
+      <!-- ── Unified bottom card: box ID row + scan row + packed table ─────── -->
+      <div class="bottom-card">
+
+        <!-- Row 1: Box ID + action buttons -->
+        <div class="bottom-card__header">
+          <span class="bottom-card__box-id">Box ID: {{ currentBoxId() ?? '–' }}</span>
+          <div class="bottom-card__actions">
+            <button mat-stroked-button color="primary" type="button"
+              [disabled]="!currentPickSlipId() || packStatusLoading()"
+              (click)="onPackStatus()">
+              @if (packStatusLoading()) { <mat-spinner diameter="16"></mat-spinner> } @else { PACK STATUS }
+            </button>
+            <button mat-stroked-button color="primary" type="button"
+              [disabled]="!currentBoxId() || boxContentsLoading()"
+              (click)="onViewBoxContents()">
+              @if (boxContentsLoading()) { <mat-spinner diameter="16"></mat-spinner> } @else { BOX CONTENTS }
+            </button>
+            <button mat-stroked-button color="warn" type="button"
+              [disabled]="!currentBoxId() || loading()"
+              (click)="onCloseCurrentBox()">
+              @if (loading()) { <mat-spinner diameter="16"></mat-spinner> } @else { CLOSE BOX }
+            </button>
+            <button mat-raised-button color="primary" type="button"
+              (click)="onCreateNewBox()"
+              [disabled]="!hasOrderData() || loading()">
+              @if (loading()) {
+                <mat-spinner diameter="18"></mat-spinner>
+              } @else {
+                CREATE NEW BOX
+              }
+            </button>
+          </div>
+        </div>
+
+        <!-- Row 2: Scan form -->
+        <div class="bottom-card__scan">
+          <form [formGroup]="packForm" (ngSubmit)="onPackProduct()" class="scan-row">
+
+            <mat-form-field appearance="fill" class="sf sf--item">
+              <mat-label>Item</mat-label>
+              <mat-select formControlName="itemNo">
+                @for (it of orderItems(); track it.itemNo) {
+                  <mat-option [value]="it.itemNo">{{ it.itemNo }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+
+            <!-- Unit ID — shared component handles validate-unit API, Tab/Enter/blur, scan vs manual -->
+            <app-unit-id-field
+              [validateFfValue]="'N'"
+              [label]="'Unit ID'"
+              [required]="true"
+              class="sf sf--unit"
+              (validated)="onUnitValidated($event)"
+              (cleared)="onUnitCleared()">
+            </app-unit-id-field>
+
+            <!-- Product Code — dropdown populated after Unit ID entered -->
+            <mat-form-field appearance="fill" class="sf sf--product" subscriptSizing="dynamic">
+              <mat-label>Product Code</mat-label>
+              <mat-select formControlName="productCode"
+                          (selectionChange)="onProductCodeChange($event.value)">
+                @for (opt of productCodeOptions(); track opt.value) {
+                  <mat-option [value]="opt.value">{{ opt.value }}</mat-option>
+                }
+              </mat-select>
+              <span matSuffix class="scan-suffix"><mat-icon class="scan-icon">qr_code_scanner</mat-icon></span>
+              @if (isFieldInvalid('productCode')) {
+                <mat-error>Product Code is required</mat-error>
+              }
+            </mat-form-field>
+
+            <!-- ABO/Rh — scan-select field supports ISBT (=%XXPP, 6 chars) and Codabar (DXXOB, 5 chars) scans -->
+            <app-scan-select-field
+              #aboRhField
+              label="ABORh"
+              placeholder="Scan or type..."
+              [required]="true"
+              [showBarcodeIcon]="true"
+              [showDropdown]="true"
+              [options]="aboRhSelectOptions()"
+              [parseFn]="parseAboRh"
+              (valueChanged)="onAboRhChanged($event)"
+              (cleared)="onAboRhCleared()"
+              class="sf sf--abo">
+            </app-scan-select-field>
+
+            <!-- Expiry Date + Time — accepts manual entry (DD-MMM-YYYY HH:mm) or ISBT scan (&>YYYDDDHH24MI) -->
+            <mat-form-field appearance="fill" class="sf sf--expiry" subscriptSizing="dynamic">
+              <mat-label>Expiration</mat-label>
+              <input matInput
+                     formControlName="expirationDate"
+                     placeholder="DD-MMM-YYYY HH:mm or scan"
+                     (blur)="onExpirationDateBlur()"
+                     (keydown.enter)="onPackProduct()">
+              @if (expiryProcessing()) {
+                <mat-spinner matSuffix diameter="16" strokeWidth="2"></mat-spinner>
+              }
+              @if (getExpirationDateError()) {
+                <mat-error>{{ getExpirationDateError() }}</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" class="sf sf--qc">
+              <mat-label>Quality Check</mat-label>
+              <mat-select formControlName="qualityCheck"
+                          placeholder="Select..."
+                          (keydown.enter)="onPackProduct()"
+                          (keydown.tab)="onQcTab($event)"
+                          (closed)="onPackProduct()">
+                <mat-option value="">–</mat-option>
+                <mat-option value="Y">Yes</mat-option>
+                <mat-option value="N">No</mat-option>
+              </mat-select>
+            </mat-form-field>
+
+
+          </form>
+        </div>
+
+        <!-- Row 3: Packed products table -->
+        <div class="bottom-card__table">
+          <app-data-table
+            [config]="packedProductsTableConfig"
+            [data]="packedProducts()"
+            [loading]="false">
+          </app-data-table>
+        </div>
+
+      </div>
+
+    }
+
+  </div>
+</section>

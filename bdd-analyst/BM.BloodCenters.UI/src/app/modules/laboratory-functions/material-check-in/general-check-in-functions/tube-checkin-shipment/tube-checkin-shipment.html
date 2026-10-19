@@ -1,0 +1,298 @@
+<main class="tube-checkin-shipment" [class.is-saving]="isSaving()" aria-label="Tube Check-In / Shipment">
+
+  <!-- Page Header with Breadcrumb -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Form Card -->
+  <div class="tube-checkin-shipment__form-card">
+    <!-- Box Details Form -->
+    <form [formGroup]="boxForm" class="box-details-form">
+      <div class="form-row form-row--all-fields">
+        <!-- Box ID - Optional: Leave blank to create new box -->
+        <mat-form-field class="form-field form-field--boxid" appearance="fill" floatLabel="always">
+          <mat-label>Box ID</mat-label>
+          <mat-select formControlName="boxId" aria-label="Box ID — select an existing open box or leave blank to create a new one" (selectionChange)="onBoxIdSelected($event)">
+            <mat-select-trigger>{{ boxForm.get('boxId')?.value }}</mat-select-trigger>
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="boxIdSearchControl"
+                placeholderLabel="Search boxes..."
+                noEntriesFoundLabel="No boxes found">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option *ngFor="let box of filteredOpenBoxes()" [value]="box.boxId">
+              {{ box.boxId }} | {{ box.collDate | date:'dd-MMM-yyyy' | uppercase }} | {{ box.extractType }} | {{ box.donorType }} | {{ box.destinationCode }}
+            </mat-option>
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Collection Date - Auto-populated with chapter-local date for new boxes -->
+        <mat-form-field class="form-field form-field--colldate" appearance="fill" floatLabel="always">
+          <mat-label>Collection Date</mat-label>
+          <input
+            matInput
+            [matDatepicker]="pickerCollDate"
+            formControlName="collectionDate"
+            aria-label="Collection Date"
+            aria-required="true">
+          <mat-datepicker-toggle matIconSuffix [for]="pickerCollDate" aria-label="Open collection date calendar"></mat-datepicker-toggle>
+          <mat-datepicker #pickerCollDate></mat-datepicker>
+          <mat-error>{{ getCollectionDateError() }}</mat-error>
+        </mat-form-field>
+
+        <!-- Viral Marker/Nat or Both -->
+        <!-- BUG FIX #3: Remove required attribute (per Figma) -->
+        <mat-form-field class="form-field form-field--extracttype" appearance="fill" floatLabel="always">
+          <mat-label>Viral Marker/Nat or Both</mat-label>
+          <mat-select formControlName="extractType" aria-label="Extract type: Viral Marker, NAT, or Both" aria-required="true">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="extractTypeSearchControl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="No options found">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option *ngFor="let option of filteredExtractTypeOptions()" [value]="option.value">
+              {{ option.value }} - {{ option.label }}
+            </mat-option>
+          </mat-select>
+          <mat-error *ngIf="boxForm.get('extractType')?.hasError('required')">
+            Viral Marker/Nat or Both is required
+          </mat-error>
+        </mat-form-field>
+
+        <!-- Repeat/Initial/Others - conditional filtering -->
+        <!-- BUG FIX #3: Remove required attribute (per Figma) -->
+        <mat-form-field class="form-field form-field--donortype" appearance="fill" floatLabel="always">
+          <mat-label>Repeat/Initial/Others</mat-label>
+          <mat-select formControlName="donorType" aria-label="Donor type: Repeat, Initial, or Others" aria-required="true">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="donorTypeSearchControl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="No options found">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option *ngFor="let option of filteredDonorTypeOptionsWithSearch()" [value]="option.value">
+              {{ option.value }} - {{ option.label }}
+            </mat-option>
+          </mat-select>
+          <mat-error *ngIf="boxForm.get('donorType')?.hasError('required')">
+            Repeat/Initial/Others is required
+          </mat-error>
+        </mat-form-field>
+
+        <!-- Send to - Code only (always visible) -->
+        <!-- BUG FIX #3: Remove required attribute (per Figma) -->
+        <mat-form-field class="form-field form-field--sendto-code" appearance="fill" floatLabel="always">
+          <mat-label>Send to</mat-label>
+          <mat-select formControlName="destinationCode" aria-label="Destination testing laboratory" aria-required="true">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="destinationLabSearchControl"
+                placeholderLabel="Search labs..."
+                noEntriesFoundLabel="No labs found">
+              </ngx-mat-select-search>
+            </mat-option>
+            <!-- Show only code in dropdown, description in search results -->
+            <mat-option *ngFor="let lab of filteredDestinationLabs()" [value]="lab.testingLabId">
+              {{ lab.testingLabId }}
+            </mat-option>
+          </mat-select>
+          <mat-error *ngIf="boxForm.get('destinationCode')?.hasError('required')">
+            Send to is required
+          </mat-error>
+        </mat-form-field>
+
+        <!-- Send to - Description (Read-only, shown after retrieve) -->
+        <mat-form-field *ngIf="showScanningSection()" class="form-field form-field--sendto-desc" appearance="fill" floatLabel="always">
+          <mat-label>Send to</mat-label>
+          <input
+            matInput
+            [value]="getSelectedLabName()"
+            aria-label="Selected destination laboratory name"
+            readonly
+            tabindex="-1">
+        </mat-form-field>
+
+        <!-- Action Buttons Container -->
+        <div class="action-buttons">
+          <!-- Retrieve Button -->
+          <button
+            type="button"
+            mat-stroked-button
+            class="retrieve-button"
+            [disabled]="boxForm.invalid"
+            (click)="onRetrieve()"
+            aria-label="Retrieve or create sample pack box">
+            RETRIEVE
+          </button>
+
+          <!-- Clear Button (shown after retrieve) -->
+          <button
+            *ngIf="showScanningSection()"
+            type="button"
+            mat-button
+            class="clear-button-inline"
+            (click)="onClear()"
+            aria-label="Clear form and reset">
+            CLEAR
+          </button>
+        </div>
+      </div>
+
+      <!-- BUG FIX #7: Removed PRINT PACK LIST button per Figma -->
+      <div *ngIf="showScanningSection()" class="view-units-button-container">
+        <button
+          type="button"
+          mat-stroked-button
+          class="view-units-button"
+          (click)="onViewUnitsInBox()"
+          aria-label="View all units in current box">
+          VIEW UNITS IN BOX
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Scanning Card - Only shown after RETRIEVE -->
+  <div *ngIf="showScanningSection()" class="tube-checkin-shipment__scan-card">
+
+    <!-- Scanning Section -->
+    <form [formGroup]="scanForm" class="scan-section">
+      <!-- Red Top - Using shared unit-id-field component -->
+      <div class="scan-input-wrapper" [class.disabled]="scanForm.get('redTop')?.disabled">
+        <app-unit-id-field
+          #redTopField
+          [label]="'Red Top'"
+          [hintDefault]="'Scan or type'"
+          [required]="false"
+          [validateFfValue]="'N'"
+          [showBarcodeIcon]="true"
+          (validated)="onRedTopValidated($event)"
+          (cleared)="onRedTopCleared()"
+          (emptyEnter)="onEmptyFieldEnter()"
+          class="scan-input">
+        </app-unit-id-field>
+      </div>
+
+      <!-- Purple Top 1 - Using shared unit-id-field component -->
+      <div class="scan-input-wrapper" [class.disabled]="scanForm.get('purpleTop1')?.disabled">
+        <app-unit-id-field
+          #purpleTop1Field
+          [label]="'Purple Top 1'"
+          [hintDefault]="'Scan or type'"
+          [required]="false"
+          [validateFfValue]="'N'"
+          [showBarcodeIcon]="true"
+          (validated)="onPurpleTop1Validated($event)"
+          (cleared)="onPurpleTop1Cleared()"
+          (emptyEnter)="onEmptyFieldEnter()"
+          class="scan-input">
+        </app-unit-id-field>
+      </div>
+
+      <!-- Purple Top 2 - Using shared unit-id-field component -->
+      <div class="scan-input-wrapper" [class.disabled]="scanForm.get('purpleTop2')?.disabled">
+        <app-unit-id-field
+          #purpleTop2Field
+          [label]="'Purple Top 2'"
+          [hintDefault]="'Scan or type'"
+          [required]="false"
+          [validateFfValue]="'N'"
+          [showBarcodeIcon]="true"
+          (validated)="onPurpleTop2Validated($event)"
+          (cleared)="onPurpleTop2Cleared()"
+          (emptyEnter)="onEmptyFieldEnter()"
+          class="scan-input">
+        </app-unit-id-field>
+      </div>
+    </form>
+  </div>
+
+  <!-- Table Card - Only shown after RETRIEVE -->
+  <div *ngIf="showScanningSection()" class="tube-checkin-shipment__table-card">
+    <!-- Data Table -->
+    <div class="tube-checkin-shipment__table-wrapper">
+      <!-- Empty State - When no tubes scanned yet -->
+      <div
+        *ngIf="tubeEntries().length === 0 && !hasError()"
+        class="tube-checkin-shipment__initial-state"
+        role="status"
+        aria-label="Initial state">
+        <div class="initial-icon-wrapper">
+          <mat-icon class="initial-icon" aria-hidden="true">search</mat-icon>
+        </div>
+        <p class="initial-message">No Results to Display</p>
+        <p class="initial-submessage">Scan or enter a Unit ID to begin</p>
+      </div>
+
+      <app-data-table
+        *ngIf="tubeEntries().length > 0 && !hasError()"
+        [config]="tableConfig"
+        [data]="tubeEntries()"
+        [loading]="isLoading()"
+        (pageChange)="onPageChange($event)"
+        (sortChange)="onSortChange($event)" />
+
+      <!-- Error State -->
+      <div
+        *ngIf="hasError() && !isLoading()"
+        class="tube-checkin-shipment__error"
+        role="alert"
+        aria-label="Error loading data">
+        <mat-icon class="error-icon" aria-hidden="true">error_outline</mat-icon>
+        <p class="error-message">Unable to load data. Please try again.</p>
+        <button type="button" mat-raised-button color="primary" (click)="loadInitialData()" aria-label="Retry loading data">
+          Retry
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Initial State - Before RETRIEVE -->
+  <div
+    *ngIf="!showScanningSection() && !hasError()"
+    class="tube-checkin-shipment__initial-state"
+    role="status"
+    aria-label="Initial state">
+    <div class="initial-icon-wrapper">
+      <mat-icon class="initial-icon" aria-hidden="true">search</mat-icon>
+    </div>
+    <p class="initial-message">No Results to Display</p>
+    <p class="initial-submessage">Enter a Box ID or Collection Date</p>
+  </div>
+
+  <!-- Footer Actions - Only shown after RETRIEVE -->
+  <!-- BUG FIX #5: All buttons on right side per Figma -->
+  <div *ngIf="showScanningSection()" class="tube-checkin-shipment__actions">
+    <div class="right-actions">
+      <button
+        type="button"
+        mat-button
+        class="cancel-button"
+        (click)="onCancel()"
+        aria-label="Cancel and return to initial state">
+        CANCEL
+      </button>
+      <button
+        type="button"
+        mat-raised-button
+        color="primary"
+        class="close-print-button"
+        [disabled]="!currentBox()"
+        (click)="onCloseAndPrint()"
+        aria-label="Close box and print pack list">
+        CLOSE AND PRINT
+      </button>
+    </div>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div *ngIf="isSaving()" class="saving-overlay" role="status" aria-live="polite" aria-busy="true">
+    <mat-spinner diameter="50" aria-hidden="true"></mat-spinner>
+    <p>Saving...</p>
+    <span class="sr-only">Saving, please wait...</span>
+  </div>
+
+</main>

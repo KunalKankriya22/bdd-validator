@@ -1,0 +1,778 @@
+CREATE OR REPLACE PACKAGE AG_TF_INTERFACE AS 
+
+/*-----------------------------------------------------------------------------------
+|| Author       : WellSky BC.
+|| Description  : Core pkg that deals with tietag labels
+||              : 
+|| Requirements : 
+|| Call Syntax  :
+|| Version
+|| 01   07/11/2024  MLT-6995 - New pkg creation.
+|| 02   07/30/2024  MLT-7060
+||------2024.1.0 Release version 02----------------------------------------------------------------------------
+||
+*/-----------------------------------------------------------------------------------
+
+    PROCEDURE process_tf_api(job_id_in      IN NUMBER DEFAULT NULL,
+                             start_date_in  IN DATE DEFAULT NULL, 
+                             end_date_in    IN DATE DEFAULT NULL) ;
+
+    FUNCTION version_no RETURN VARCHAR2;
+
+END AG_TF_INTERFACE;
+
+/
+
+
+CREATE OR REPLACE PACKAGE BODY AG_TF_INTERFACE AS
+    /*
+        create or replace public synonym AG_TF_INTERFACE for AGMGR.AG_TF_INTERFACE;
+        grant execute on AGMGR.AG_TF_INTERFACE to public;
+
+        -- Required Config
+        -- 
+    */  
+    
+    gv_version_no VARCHAR2(03) := '02';
+
+    FUNCTION version_no RETURN VARCHAR2 IS
+    BEGIN
+        RETURN gv_version_no;
+    END version_no;
+
+
+    PROCEDURE process_tf_api(job_id_in      IN NUMBER DEFAULT NULL,
+                             start_date_in  IN DATE DEFAULT NULL, 
+                             end_date_in    IN DATE DEFAULT NULL) IS
+
+        CURSOR units_cur IS
+            SELECT
+                TRUNC(insert_date) AS result_date,
+                unit_id,
+                COUNT(unit_id) AS unit_count
+            FROM
+                ag_tf_api
+            WHERE 
+                bc_read_date IS NULL    
+            GROUP BY
+                trunc(insert_date),
+                unit_id
+            ORDER BY
+                1,2 ;        
+
+        CURSOR ag_tf_api_cur(p_unit_id VARCHAR2, p_result_date DATE) IS
+            SELECT  unit_id, 
+                    antigen_code, 
+                    result_code,
+                    insert_date, 
+                    cancel_date, 
+                    invalidate_date, 
+                    tf_status
+              FROM ag_tf_api 
+             WHERE ( bc_read_date IS NULL OR bc_status = 'ERROR')
+              AND unit_id = p_unit_id
+              AND TRUNC(insert_date) = p_result_date
+              ORDER BY insert_date ASC;
+
+        TYPE bc_status_t IS RECORD (
+            bc_read_date    ag_tf_api.bc_status%TYPE,
+            bc_status       ag_tf_api.bc_status%TYPE,
+            bc_comments     ag_tf_api.bc_comments%TYPE,
+            bc_tb_id        ag_tf_api.bc_tb_id%TYPE,
+            bc_job_id       ag_tf_api.bc_job_id%TYPE
+        );
+        bc_status_rec bc_status_t;
+
+        TYPE units_aat IS TABLE OF units_cur%ROWTYPE INDEX BY PLS_INTEGER;
+        units_list units_aat;
+
+        ln_test_seq             NUMBER;
+        lv_result_status        VARCHAR2(10);
+        utrs_rec                UTRS%ROWTYPE;
+        nCnt                    NUMBER;
+
+        ld_local_date           DATE;
+        ld_sysdate              DATE;
+        lv_temp_tb_id           VARCHAR2(15);
+
+        lv_prev_unit_id         VARCHAR2(15);
+
+        gn_job_id               NUMBER;
+
+        unit_not_found          EXCEPTION;
+        invalid_facility_identifier EXCEPTION;
+        exit_process    EXCEPTION;
+
+        lv_status               VARCHAR2(500);
+        lv_job_error            VARCHAR2(1000);
+
+
+        FUNCTION insert_job RETURN NUMBER IS
+            ln_job_id NUMBER;
+        BEGIN
+            INSERT INTO ag_tf_controller(job_id, upload_status, job_date) 
+                VALUES (audit_seq.NEXTVAL, 'P', SYSDATE)
+            RETURNING job_id INTO ln_job_id;
+
+            RETURN ln_job_id;
+        END insert_job;
+
+        PROCEDURE update_upload_status(status_in IN VARCHAR2, error_in IN VARCHAR2 DEFAULT NULL) IS
+            nSuccess            NUMBER;
+            nError              NUMBER;
+            ld_max_insert_date  DATE;
+        BEGIN
+            SELECT COUNT(1) INTO nSuccess
+             FROM ag_tf_api
+            WHERE bc_job_id = gn_job_id
+             AND bc_status = 'OK';
+
+            SELECT COUNT(1) INTO nError
+             FROM ag_tf_api
+            WHERE bc_job_id = gn_job_id
+             AND NVL(bc_status,'ERROR') = 'ERROR';             
+
+            SELECT MAX(insert_date)
+              INTO ld_max_insert_date
+              FROM ag_tf_api
+             WHERE bc_job_id = gn_job_id;
+
+            UPDATE ag_tf_controller
+              SET upload_status    = status_in,
+                  error_cnt     = nError,
+                  success_cnt   = nSuccess,
+                  until_date    = ld_max_insert_date,
+                  job_error    = NVL(error_in, job_error)
+            WHERE job_id = gn_job_id;
+        END update_upload_status;
+
+        PROCEDURE archive_records IS
+        BEGIN
+            INSERT INTO ag_tf_api_arch
+            SELECT * 
+              FROM ag_tf_api
+             WHERE bc_job_id = gn_job_id; 
+
+            DELETE FROM ag_tf_api
+             WHERE bc_job_id = gn_job_id
+              AND bc_status = 'OK';
+
+        END archive_records;
+
+        PROCEDURE update_api_rec_status(bc_status_rec_in    IN bc_status_t,
+                                        unit_rec_in         IN ag_tf_api_cur%ROWTYPE) IS
+        BEGIN
+            UPDATE ag_tf_api
+              SET bc_read_date  = bc_status_rec_in.bc_read_date,
+                  bc_status     = bc_status_rec_in.bc_status,
+                  bc_comments   = bc_status_rec_in.bc_comments,
+                  bc_tb_id      = bc_status_rec_in.bc_tb_id,
+                  bc_job_id     = bc_status_rec_in.bc_job_id
+             WHERE unit_id      = unit_rec_in.unit_id
+               AND insert_date  = unit_rec_in.insert_date
+               AND NVL(antigen_code,'@#@#') = NVL(unit_rec_in.antigen_code, '@#@#');              
+        END update_api_rec_status;   
+
+        PROCEDURE update_api_rec_status(bc_status_rec_in    IN bc_status_t,
+                                        rec_in              IN units_cur%ROWTYPE) IS
+        BEGIN
+            UPDATE ag_tf_api
+              SET bc_read_date  = bc_status_rec_in.bc_read_date,
+                  bc_status     = bc_status_rec_in.bc_status,
+                  bc_comments   = bc_status_rec_in.bc_comments,
+                  bc_job_id     = bc_status_rec_in.bc_job_id
+             WHERE unit_id = rec_in.unit_id
+               AND TRUNC(insert_date) = rec_in.result_date;         
+        END update_api_rec_status;     
+
+        PROCEDURE get_chapter_id(unit_id_in     IN VARCHAR2,
+                                 chapter_id_out OUT VARCHAR2) IS
+        BEGIN
+            SELECT DECODE(COUNT(1), 0, NULL, MAX(CHAPTER_ID))
+              INTO chapter_id_out
+              FROM valid_facility_identifiers
+             WHERE facility_identifier = SUBSTR(unit_id_in, 0, 5)
+               AND ld_local_date BETWEEN eff_date AND NVL(term_date, ld_local_date + 1);
+        END get_chapter_id;
+
+        PROCEDURE get_coll_date(unit_id_in      IN VARCHAR2,
+                                chapter_id_in   IN VARCHAR2,
+                                coll_date_out   OUT DATE) IS
+        BEGIN
+            SELECT DECODE(COUNT(1), 0, NULL, MAX(coll_date))
+              INTO coll_date_out
+              FROM units
+             WHERE unit_id = unit_id_in
+               AND chapter_id = chapter_id_in;                
+        END get_coll_date;
+
+        FUNCTION get_batch_seq(p_chapter_id IN VARCHAR2) RETURN VARCHAR2 IS
+            lv_batch_id          VARCHAR2(15);
+            ln_curr_slno         NUMBER;
+        BEGIN
+            /*--- The DECODE ensures : if inadvertently the max_number is
+                  set to a value below the starting number, the starting
+                  number is used to generate the ID  -----*/
+
+            SELECT
+                decode(sign(nvl(max_number, 0) - nvl(starting_number, 0)),
+                       - 1,
+                       nvl(starting_number, 0),
+                       nvl(max_number, 0)) + 1
+            INTO ln_curr_slno
+            FROM
+                number_generation
+            WHERE
+                    chapter_id = p_chapter_id
+                AND number_type = 'TB_ID'
+            FOR UPDATE OF max_number;
+
+            UPDATE number_generation
+            SET
+                max_number = ln_curr_slno
+            WHERE
+                    chapter_id = p_chapter_id
+                AND number_type = 'TB_ID';    
+
+            SELECT
+                ( to_char(ld_local_date, 'mmddyy')
+                  || '-TF'
+                  || lpad(to_char(ln_curr_slno),
+                          4,
+                          '0') )
+            INTO lv_batch_id
+            FROM
+                dual;
+
+           RETURN lv_batch_id;   
+        END get_batch_seq;
+
+        FUNCTION get_test_seq_no(unit_id_in IN VARCHAR2,
+                                 test_id_in IN VARCHAR2)
+            RETURN NUMBER IS
+            ln_test_seq NUMBER;
+        BEGIN
+            SELECT NVL(MAX(test_seq_no),0) + 1
+              INTO ln_test_seq
+              FROM utrs
+             WHERE unit_id = unit_id_in
+               AND test_id = test_id_in;
+
+            RETURN ln_test_seq;
+        END get_test_seq_no;
+
+        FUNCTION convert_test_id(tf_test_id_in IN VARCHAR2) RETURN VARCHAR2 IS
+            lv_test_id VARCHAR2(100);
+        BEGIN            
+            lv_test_id := tf_test_id_in;
+
+            SELECT target_value INTO lv_test_id
+              FROM idp_conv_ref_values
+             WHERE source_id = 'TF'
+               AND target_id = 'LFTRK'
+               AND source_code_type = 'TEST'
+               AND target_code_type = 'TEST'
+               AND source_value = tf_test_id_in
+               AND ld_local_date BETWEEN eff_date AND NVL(term_date, ld_local_date+1)
+               AND ROWNUM = 1;            
+
+            RETURN lv_test_id;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN lv_test_id;
+        END convert_test_id;
+
+        PROCEDURE validate_test_id(test_id_in   IN VARCHAR2,
+                                   status_out   OUT VARCHAR2) IS             
+        BEGIN
+            status_out := 'OK';
+
+            -- Validate donor side result.
+            SELECT COUNT(1) INTO nCnt
+              FROM valid_tests_don 
+              WHERE test_group in ('AG', 'MAG')
+               AND test_id = test_id_in
+               AND ld_local_date BETWEEN eff_date AND nvl(term_date, ld_local_date+1);
+
+            IF nCnt = 0 THEN
+                status_out := test_id_in || ' test not found in Donor Blood Center''s system.';
+            END IF;      
+
+
+            -- Validate lab side result.
+            SELECT COUNT(1) INTO nCnt
+              FROM valid_tests
+              WHERE test_group in ('AG', 'MAG')
+               AND test_id = test_id_in
+               AND ld_local_date BETWEEN eff_date AND nvl(term_date, ld_local_date+1);
+
+            IF nCnt = 0 THEN
+                status_out  := test_id_in || ' test not found in Lab Blood Center''s system.';
+            END IF;          
+        END validate_test_id;
+
+        FUNCTION convert_test_result(tf_test_result_in IN VARCHAR2) RETURN VARCHAR2 IS
+            lv_test_result VARCHAR2(10);
+        BEGIN
+            lv_test_result := tf_test_result_in;
+
+            SELECT target_value INTO lv_test_result
+              FROM idp_conv_ref_values
+             WHERE source_id = 'TF'
+               AND target_id = 'LFTRK'
+               AND source_code_type = 'RESUL'
+               AND target_code_type = 'RESUL'
+               AND source_value = tf_test_result_in
+               AND ld_local_date BETWEEN eff_date AND NVL(term_date, ld_local_date+1)
+               AND ROWNUM = 1; 
+
+            RETURN lv_test_result;     
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN lv_test_result;
+        END convert_test_result;
+
+        PROCEDURE validate_test_result(test_id_in   IN VARCHAR2,
+                                       result_id_in IN VARCHAR2,
+                                       status_out   OUT VARCHAR2) IS             
+        BEGIN
+            status_out := 'OK';
+
+            -- Validate donor side result.
+            SELECT COUNT(1) INTO nCnt
+              FROM valid_test_results_don
+             WHERE test_id = test_id_in
+               AND result_code = result_id_in
+               AND ld_local_date BETWEEN eff_date AND NVL(term_date, ld_local_date+1);
+
+            IF nCnt = 0 THEN
+                status_out := test_id_in || ',' || result_id_in || ' Result not found in Donor Blood Center''s system.';
+            END IF;      
+
+
+            -- Validate lab side result.
+            SELECT COUNT(1) INTO nCnt
+              FROM valid_test_results
+             WHERE test_id = test_id_in
+               AND result_status = result_id_in
+               AND ld_local_date BETWEEN eff_date AND NVL(term_date, ld_local_date+1);
+
+            IF nCnt = 0 THEN
+                status_out  := test_id_in || ',' || result_id_in || ' Result not found in Lab Blood Center''s system.';
+            END IF;          
+        END validate_test_result;
+
+        PROCEDURE validate_test_utrs(unit_id_in IN VARCHAR2,
+                                     test_id_in IN VARCHAR2,
+                                     status_out OUT VARCHAR2) IS
+        BEGIN
+            status_out := 'OK';
+
+            SELECT
+                COUNT(1)
+            INTO ncnt
+            FROM
+                utrs
+            WHERE
+                    unit_id = unit_id_in
+                AND test_id = test_id_in
+                AND cancel_flag IS NULL;                                
+
+            IF nCnt = 0 THEN
+                status_out := unit_id_in || ', ' || test_id_in || ' test not found in Blood Center''s system.';
+            END IF;
+
+        END validate_test_utrs;
+
+        PROCEDURE insert_utrs(rec_in IN UTRS%ROWTYPE) IS
+        BEGIN
+            /*
+            dbms_output.put_line('tbid ' || utrs_rec.tb_id);
+            dbms_output.put_line('test_seq no ' || utrs_rec.test_seq_no);
+            dbms_output.put_line('Before insert into utrs');
+            */
+            INSERT INTO utrs(unit_id, coll_date, test_id, chapter_id,
+                             test_seq_no, result_status_1, 
+                             result_user_id, result_dats, 
+                             tb_id,
+                             program_id, insert_user_id, 
+                             insert_dats)
+              VALUES(rec_in.unit_id, rec_in.coll_date, rec_in.test_id, rec_in.chapter_id,
+                     rec_in.test_seq_no, rec_in.result_status_1,
+                     rec_in.result_user_id, rec_in.result_dats,
+                     rec_in.tb_id,
+                     rec_in.program_id, rec_in.insert_user_id,
+                     rec_in.insert_dats);            
+        END;
+
+        PROCEDURE handle_cancel_records(unit_id_in IN VARCHAR2, test_id_in IN VARCHAR2) IS
+            lv_void_cancel_id       VARCHAR2(30);
+        BEGIN
+            lv_void_cancel_id := 'CANCEL' ||'-' || 'TFUSR' || '-'||to_char(SYSDATE,'MMDDYYHH24MISS');
+
+            UPDATE utrs
+            SET
+                cancel_flag = 'Y',
+                void_cancel_id = lv_void_cancel_id
+            WHERE
+                    unit_id = unit_id_in
+                AND test_id = test_id_in
+                AND cancel_flag IS NULL;
+
+            INSERT INTO test_voids (
+                unit_id,
+                coll_date,
+                chapter_id,
+                test_seq_no,
+                test_id,
+                test_state,
+                test_mode,
+                result_status_1,
+                result_status_2,
+                tb_id,
+                test_chapter_id,
+                tb_seq_no,
+                well_number,
+                absorbance,
+                ratio,
+                result_dats,
+                result_user_id,
+                testing_lab_code,
+                insert_dats,
+                insert_user_id,
+                void_type,
+                void_reason_code,
+                void_dats,
+                void_user_id,
+                void_cancel_id
+            )
+                SELECT
+                    unit_id,
+                    coll_date,
+                    chapter_id,
+                    test_seq_no,
+                    test_id,
+                    test_state,
+                    test_mode,
+                    result_status_1,
+                    result_status_2,
+                    tb_id,
+                    test_chapter_id,
+                    tb_seq_no,
+                    well_number,
+                    absorbance,
+                    ratio,
+                    result_dats,
+                    result_user_id,
+                    testing_lab_code,
+                    sysdate,
+                    insert_user_id,
+                    'C',
+                    'TFCA',
+                    sysdate,
+                    'TFUSR',
+                    lv_void_cancel_id
+                FROM
+                    utrs
+                WHERE
+                        unit_id = unit_id_in
+                    AND test_id = test_id_in
+                    AND void_cancel_id = lv_void_cancel_id;
+
+        END handle_cancel_records;
+
+        FUNCTION get_units_list(start_date_in IN DATE, end_date_in IN DATE) RETURN units_aat IS
+            units_aa        units_aat;
+            ld_start_date   DATE;
+            ld_end_date     DATE;
+        BEGIN  
+            ld_start_date   := TRUNC(start_date_in);
+            ld_end_date     := TRUNC(end_date_in);
+
+            IF ld_start_date IS NULL AND ld_end_date IS NULL THEN
+                SELECT
+                    TRUNC(insert_date) AS result_date,
+                    unit_id,
+                    COUNT(unit_id) AS unit_count
+                BULK COLLECT INTO units_aa
+                FROM ag_tf_api
+                WHERE (bc_read_date IS NULL OR bc_status = 'ERROR')    
+                GROUP BY trunc(insert_date), unit_id
+                ORDER BY 1,2 ; 
+            ELSIF start_date_in IS NOT NULL AND end_date_in IS NULL THEN
+                SELECT
+                    TRUNC(insert_date) AS result_date,
+                    unit_id,
+                    COUNT(unit_id) AS unit_count
+                BULK COLLECT INTO units_aa
+                FROM ag_tf_api
+                WHERE (bc_read_date IS NULL OR bc_status = 'ERROR') 
+                  AND TRUNC(INSERT_DATE) >= ld_start_date 
+                GROUP BY trunc(insert_date), unit_id
+                ORDER BY 1,2 ;         
+            ELSIF start_date_in IS NULL AND end_date_in IS NOT NULL THEN
+                SELECT
+                    TRUNC(insert_date) AS result_date,
+                    unit_id,
+                    COUNT(unit_id) AS unit_count
+                BULK COLLECT INTO units_aa
+                FROM ag_tf_api
+                WHERE (bc_read_date IS NULL OR bc_status = 'ERROR') 
+                  AND TRUNC(INSERT_DATE) <= ld_end_date 
+                GROUP BY trunc(insert_date), unit_id
+                ORDER BY 1,2 ;           
+            ELSE
+                SELECT
+                    TRUNC(insert_date) AS result_date,
+                    unit_id,
+                    COUNT(unit_id) AS unit_count
+                BULK COLLECT INTO units_aa
+                FROM ag_tf_api
+                WHERE (bc_read_date IS NULL OR bc_status = 'ERROR') 
+                  AND TRUNC(INSERT_DATE) BETWEEN ld_start_date AND ld_end_date
+                GROUP BY trunc(insert_date), unit_id
+                ORDER BY 1,2 ;               
+            END IF;    
+            RETURN units_aa;
+        END get_units_list;
+    BEGIN
+
+        IF NOT AG_UTIL.IS_LICENSED THEN
+            RETURN;
+        END IF;
+        -- init variables
+
+        -- Defaults
+        ld_sysdate      := SYSDATE;
+        ld_local_date   := SYSDATE; -- Default (is changed to local date when chapter is available)        
+        
+        IF job_id_in IS NULL THEN
+            gn_job_id   := insert_job;
+        ELSE
+            gn_job_id   := job_id_in;
+            UPDATE ag_tf_controller
+              SET upload_status = 'P'
+            WHERE job_id = gn_job_id;
+        END IF;
+
+        -- Defaults for utrs_rec insert.
+        utrs_rec.program_id     := 'TF_API';
+        utrs_rec.insert_user_id := 'AGMGR';
+        utrs_rec.insert_dats    :=  ld_sysdate;
+
+        -- Defaults for bc_status insert in ag_tf_api table.
+        bc_status_rec.bc_read_date  := ld_sysdate;
+        bc_status_rec.bc_job_id     := gn_job_id;        
+        ------------------
+
+        -- Loop by result date 
+        units_list.DELETE;
+        units_list := get_units_list(start_date_in, end_date_in);
+
+        IF units_list.COUNT = 0 THEN
+            update_upload_status('C');
+            COMMIT;
+            RAISE exit_process;        
+        END IF;
+
+        FOR indx IN units_list.FIRST .. units_list.LAST
+        LOOP
+            -- Process units by result_date.
+            BEGIN
+                ld_local_date := SYSDATE; -- Changed to local date when chapter is available.
+
+                -- Defaults for bc_status insert in ag_tf_api table.            
+                bc_status_rec.bc_status     := NULL;
+                bc_status_rec.bc_comments   := NULL;
+                bc_status_rec.bc_tb_id      := NULL;
+
+                utrs_rec.unit_id        := units_list(indx).unit_id;
+
+                -- check if unit is from a valid facility identifier.
+                get_chapter_id(unit_id_in       => utrs_rec.unit_id,
+                               chapter_id_out   => utrs_rec.chapter_id);
+
+                IF utrs_rec.chapter_id IS NULL THEN
+                    bc_status_rec.bc_status     := 'ERROR';
+                    bc_status_rec.bc_comments   := 'Invalid Facility Identifier';
+                    RAISE invalid_facility_identifier;                
+                END IF;                 
+
+                ld_local_date := LIFETRACK_TIMEZONE_CONVERT.GET_LOCAL_TIME(utrs_rec.chapter_id, SYSDATE);
+
+                -- Check if unit is registered in Blood Centers.
+                get_coll_date(unit_id_in    => utrs_rec.unit_id,
+                              chapter_id_in => utrs_rec.chapter_id,
+                              coll_date_out => utrs_rec.coll_date);
+
+
+                IF utrs_rec.coll_date IS NULL THEN
+                    bc_status_rec.bc_status     := 'ERROR';
+                    bc_status_rec.bc_comments   := 'Unit not found in Blood Center''s system.';
+                    RAISE unit_not_found;
+                END IF;  
+
+                -- Loop records by unit_id and result date
+                FOR unit_rec IN ag_tf_api_cur(units_list(indx).unit_id, units_list(indx).result_date)
+                LOOP
+                   -- dbms_output.put_line(unit_rec.unit_id);
+                    DECLARE
+                        next_record     EXCEPTION;
+                        invalid_error   EXCEPTION;
+                        lv_errMsg       VARCHAR2(500);
+                    BEGIN
+                        -- Defaults for bc_status insert in ag_tf_api table.
+                        bc_status_rec.bc_status     := NULL;
+                        bc_status_rec.bc_comments   := NULL;
+                        bc_status_rec.bc_tb_id      := NULL;
+                        
+                        DBMS_OUTPUT.PUT_LINE(unit_rec.unit_id);
+                    
+
+                        -- basic null checks
+                        IF unit_rec.antigen_code IS NULL THEN
+                            bc_status_rec.bc_status     := 'ERROR';
+                            bc_status_rec.bc_comments   := 'Antigen Code is required.';
+                            RAISE invalid_error;                          
+                        END IF;
+                        IF unit_rec.result_code IS NULL THEN
+                            bc_status_rec.bc_status     := 'ERROR';
+                            bc_status_rec.bc_comments   := 'Result Code is required.';
+                            RAISE invalid_error;                           
+                        END IF;
+                        ----
+
+                        -- Test ID conversion and validation.
+                        utrs_rec.test_id := convert_test_id(unit_rec.antigen_code);
+
+                        validate_test_id(test_id_in => utrs_rec.test_id,
+                                         status_out => lv_status);                                          
+                        IF lv_status <> 'OK' THEN
+                            bc_status_rec.bc_status     := 'ERROR';
+                            bc_status_rec.bc_comments   := lv_status;
+                            RAISE invalid_error;                             
+                        END IF;
+                        ---
+
+                        -- check if incoming test is a cancelled or invalidated test.
+                        IF unit_rec.tf_status = 'HistoricalCancel' OR
+                            unit_rec.cancel_date IS NOT NULL OR 
+                            unit_rec.invalidate_date IS NOT NULL THEN
+
+                            validate_test_utrs( unit_id_in => utrs_rec.unit_id,
+                                                test_id_in => utrs_rec.test_id,
+                                                status_out => lv_status);
+
+                            IF lv_status <> 'OK' THEN
+                                bc_status_rec.bc_status     := 'ERROR';
+                                bc_status_rec.bc_comments   := lv_status;
+                                RAISE invalid_error;
+                            ELSE
+                                handle_cancel_records(utrs_rec.unit_id, utrs_rec.test_id);
+                                bc_status_rec.bc_status     := 'OK';
+                                bc_status_rec.bc_comments   := 'Cancelled Test.';
+                                RAISE next_record;                            
+                            END IF;
+                        END IF;
+                        ------
+
+                        -- For valid antigen records.                        
+                        -- Get the test_seq_no
+                        utrs_rec.test_seq_no := get_test_seq_no(unit_id_in => utrs_rec.unit_id,
+                                                                test_id_in => utrs_rec.test_id);                                                                
+
+                        -- Result code conversion and validation
+                        utrs_rec.result_status_1  := convert_test_result(unit_rec.result_code); 
+
+                        validate_test_result(test_id_in     => utrs_rec.test_id,
+                                             result_id_in   => utrs_rec.result_status_1,
+                                             status_out     => lv_status);                        
+                        IF lv_status <> 'OK' THEN
+                            bc_status_rec.bc_status     := 'ERROR';
+                            bc_status_rec.bc_comments   := lv_status;
+                            RAISE invalid_error;
+                        END IF;
+                        --------
+
+                        utrs_rec.result_user_id     := 'TFUSR';
+                        utrs_rec.result_dats        := unit_rec.insert_date;
+
+
+                        -- Associate same batch id for multiple tests on a unit.
+                        -- Batch ID is unique for a unit ID and same for multiple tests with the same result date.
+                        IF units_list(indx).unit_count > 1 THEN
+                            --dbms_output.put_line('prev unit ' || lv_prev_unit_id);
+                            IF NVL(lv_prev_unit_id,'X') <> utrs_rec.unit_id THEN
+                                utrs_rec.tb_id := get_batch_seq(utrs_rec.chapter_id);
+                                lv_temp_tb_id := utrs_rec.tb_id;
+                            ELSE
+                                utrs_rec.tb_id := lv_temp_tb_id;
+                            END IF;
+                        ELSE
+                            utrs_rec.tb_id := get_batch_seq(utrs_rec.chapter_id);
+                        END IF;
+
+                        lv_prev_unit_id := utrs_rec.unit_id;   
+
+
+                        insert_utrs(utrs_rec);
+
+                        bc_status_rec.bc_status := 'OK';
+                        bc_status_rec.bc_tb_id  := utrs_rec.tb_id;
+                        update_api_rec_status(bc_status_rec_in  => bc_status_rec, 
+                                              unit_rec_in       => unit_rec);
+
+                    EXCEPTION
+                        WHEN invalid_error THEN
+                            update_api_rec_status(  bc_status_rec_in  => bc_status_rec, 
+                                                    unit_rec_in       => unit_rec);
+                        WHEN next_record THEN
+                            update_api_rec_status(bc_status_rec_in  => bc_status_rec, 
+                                                  unit_rec_in       => unit_rec);
+                        WHEN OTHERS THEN
+                            bc_status_rec.bc_status     := 'ERROR';
+                            bc_status_rec.bc_comments   := SUBSTR(DBMS_UTILITY.format_error_stack, 1, 500);
+
+                            update_api_rec_status(bc_status_rec_in  => bc_status_rec, 
+                                                  unit_rec_in       => unit_rec);
+                    END;
+                END LOOP;
+                --------------
+            EXCEPTION
+                WHEN unit_not_found THEN
+                    update_api_rec_status(bc_status_rec_in  => bc_status_rec, 
+                                          rec_in            => units_list(indx));                
+                WHEN invalid_facility_identifier THEN
+                    update_api_rec_status(bc_status_rec_in  => bc_status_rec, 
+                                          rec_in            => units_list(indx));                
+                WHEN OTHERS THEN
+                    bc_status_rec.bc_status     := 'ERROR';
+                    bc_status_rec.bc_comments   := SUBSTR(DBMS_UTILITY.format_error_stack, 1, 500);
+
+                    update_api_rec_status(bc_status_rec_in  => bc_status_rec, 
+                                          rec_in            => units_list(indx));                
+            END;
+
+        END LOOP;
+        ---------------------
+
+
+        -- Final steps to update status and archive records.
+
+        update_upload_status('C');
+
+        archive_records;
+        -----------------------
+
+
+        COMMIT;
+    EXCEPTION
+        WHEN exit_process THEN
+            NULL;
+        WHEN OTHERS THEN
+            lv_job_error := SUBSTR(SQLERRM, 1, 1000);
+            update_upload_status('E', lv_job_error);
+    END process_tf_api;
+
+END AG_TF_INTERFACE;    
+/

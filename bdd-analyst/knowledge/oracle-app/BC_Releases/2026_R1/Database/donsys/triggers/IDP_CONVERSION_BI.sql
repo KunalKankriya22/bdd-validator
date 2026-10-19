@@ -1,0 +1,14 @@
+--------------------------------------------------------
+--  DDL for Trigger IDP_CONVERSION_BI
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "DONSYS"."IDP_CONVERSION_BI" 
+ BEFORE INSERT ON IDP_CONV_REF_VALUES
+ FOR EACH ROW
+BEGIN
+
+SELECT CONVERSION_SEQ.NEXTVAL INTO :NEW.CONV_REF_VALUE_ID FROM DUAL;
+
+END;
+/
+ALTER TRIGGER "DONSYS"."IDP_CONVERSION_BI" ENABLE;

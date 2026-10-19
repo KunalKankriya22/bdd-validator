@@ -1,0 +1,1406 @@
+
+create or replace package product_checkin is
+
+/*****************************************************************************
+Developed By :  
+Create Date  :  
+Purpose      :  
+Date Mod     :  
+Version      : 01
+Date Mod     : 04.18.2011 
+Version      : 02      by: Hussein; replace user by lt_session_user.get_userid 
+             : 03 - Modified by Kishore on 04/15/2011. SCR 18047
+             : 04 - Modified by Kishore on 07/01/2015. Added code to display debug
+                    messages based on a value in the DEBUG_CONTROLS tale.
+             : 05 - Seshu 05/11/2016 -- Renamed Below tables for merging database work
+              DRIVES	as	DRIVES_LAB
+             : 06 -- valid_interdictions to valid_interdictions_lab table
+               07  -- MLT- 3396 by Edwin
+
+**************************************************************************** */
+
+
+
+
+     procedure get_inventory_class (p_unit_id in varchar2,
+                                     p_coll_date in date,
+                                     p_chapter_id in varchar2,
+                                     p_product_code in varchar2,
+                                     p_aliquot in varchar2,
+                                     p_update_prd_category in varchar2,
+                                     p_blood_type in varchar2,
+                                       p_code_scheme in varchar2,
+                                     p_inven_class in out varchar2,
+                                     p_storage_class in out varchar2);
+      procedure product_antigen_categories;
+      procedure product_rarity;
+      procedure generate_location_id (p_product_code in varchar2,
+                                      p_blood_type in varchar2,
+                                      p_chapter_id in varchar2,
+                                      p_storage_class in varchar2,
+                                      p_tray_no in varchar2,
+                                      p_location_id out varchar2);
+      procedure auto_interface (p_types varchar2,
+                                p_from  date,
+                                p_to    date);
+end product_checkin;
+/
+
+create or replace package body product_checkin IS
+        temp_statement_no               varchar2(10):='';
+        temp_unit_id                    varchar2(15):='';
+        temp_coll_date                  date:='';
+        temp_chapter_id                 varchar2(4):='';
+        temp_product_code               varchar2(8):='';
+        temp_aliquot                    varchar2(2):='';
+        temp_update_prd_category        varchar2(1):='';
+        temp_inven_class                varchar2(2):='';
+        temp_x                          varchar2(10):='';
+        pcur_antigen_group              varchar2(5):='';
+        appl_error                      exception;
+        rack_error                      exception;
+        procedure get_inventory_class (p_unit_id in varchar2,
+                                       p_coll_date in date,
+                                       p_chapter_id in varchar2,
+                                       p_product_code in varchar2,
+                                       p_aliquot in varchar2,
+                                       p_update_prd_category in varchar2,
+                                       p_blood_type in varchar2,
+                                       p_code_scheme in varchar2,
+                                       p_inven_class in out varchar2,
+                                       p_storage_class in out varchar2 ) is
+          temp_decision                varchar2(4) := '';
+          temp_location_id             varchar2(12):= '';
+          temp_storage_class           varchar2(2) := '';
+          temp_special_product         varchar2(2) := '';
+          temp_v_identifier_code        varchar2(2) :=  '';
+          no_unit_antigen_flag         varchar2(1) := '';
+          temp_product_type            varchar2(5) := '';
+          err_num                      number := '';
+          err_msg                      varchar2(80) := '';
+          t_is_debug_msg_displayed     boolean; -- Added by Kishore on 07/01/2015
+        begin
+            -- Added by Kishore on 07/01/2015
+            if lab_common.is_debug_msg_displayed ('PRODUCT_CHECKIN', 'PKG') then
+              t_is_debug_msg_displayed := TRUE;
+            else
+              t_is_debug_msg_displayed := FALSE;
+            end if;
+            -- End of change
+            
+            temp_inven_class := '';
+            temp_storage_class := '';
+            temp_location_id := '';
+            temp_unit_id :='';
+            temp_coll_date :='';
+            temp_chapter_id :='';
+            temp_product_code :='';
+            temp_aliquot :='';
+            temp_update_prd_category :='';
+            temp_x :='';
+            temp_decision :='';
+            no_unit_antigen_flag := '';
+            temp_product_type := '';
+            err_num :='';
+            err_msg :='';
+            pcur_antigen_group :='';
+            --
+            -- Assign passed values to global variables
+            --
+            --
+            temp_unit_id := p_unit_id ;
+            temp_coll_date := p_coll_date ;
+            temp_chapter_id := p_chapter_id ;
+            temp_product_code := p_product_code ;
+            temp_aliquot := p_aliquot ;
+            temp_update_prd_category := p_update_prd_category ;
+            --
+            if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+              dbms_output.put_line('Started get_inventory_class');
+            end if; -- Added by Kishore on 07/01/2015
+	--
+              -- Modified for code 128 and codabar
+              --Get the donation type from table vserv_abo
+              SELECT identifier_code
+              INTO temp_v_identifier_code
+	FROM vserv_abo
+	WHERE abo_code = p_blood_type
+		and unit_scheme_type = p_code_scheme ;
+	IF (p_blood_type = 'Mb' and  p_code_scheme = ' I') or
+ 		(p_blood_type = '58'  and p_code_scheme = 'C')	-- check for biohazarad for both 		schemes
+	THEN
+		temp_inven_class := 'BI' ;
+	ELSIF (p_blood_type = 'Mx' and p_code_scheme = 'I') or
+ 		(p_blood_type = '47' and p_code_scheme = 'C')	-- check for NFT for both schemes
+	THEN
+		temp_inven_class := 'DI' ;
+	ELSIF
+	--check for any type of autologous donation codes  for code128 units
+		(( temp_v_identifier_code = 'AE' or temp_v_identifier_code = 'AO' )
+		and  p_code_scheme = 'I' )  --Check for code 128
+		or (p_blood_type = '40' and p_code_scheme = 'C')	-- Check for codabar
+	THEN
+		temp_inven_class := 'AD' ;
+		temp_storage_class := 'AU' ;
+               ELSIF
+	--check for directed donation codes  for code128 units
+		(temp_v_identifier_code = 'DE' or temp_v_identifier_code = 'DO' )		
+		and ( p_code_scheme = 'I') 
+	THEN
+		temp_inven_class := 'AD' ;
+		temp_storage_class := 'DR' ;
+	-- Also check for DR storage class (directed)		-- Existing functionality must be checking that
+	ELSIF
+	--check for autologous  biohazard donation codes  for code128 units
+		( temp_v_identifier_code = 'AB' and  p_code_scheme = 'I')
+	THEN
+		temp_inven_class := 'AD' ;
+		temp_storage_class := 'AB' ;
+	ELSIF
+	--check for any type of  directed biohazard donation codes  for code128 units
+		(temp_v_identifier_code = 'DB'  and  p_code_scheme = 'I')
+	THEN
+		temp_inven_class := 'AD' ;
+		temp_storage_class := 'DB' ;
+
+	ELSIF
+	--check for any type of Emergency use code   for code 128 units
+		(temp_v_identifier_code  = 'EM' and  p_code_scheme = 'I') 
+		or ( p_blood_type = '71' and p_code_scheme = 'C’')
+                THEN
+	-- Check for codabar
+		--temp_inv_class := ‘'SP'’ ;
+                                 temp_inven_class := 'SP';
+		temp_storage_class := 'ER' ;
+	--Modifications end for code 128 and codabar
+            elsif p_blood_type = 'PO'
+            then
+               --
+               -- POOL unit
+               --
+               temp_inven_class := 'SP';
+               temp_storage_class := 'PO';
+            end if;    
+            if temp_inven_class is null
+            then
+               --
+               -- check for directed unit
+               --
+               if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                 dbms_output.put_line('Checking for directed attribute');
+               end if; -- Added by Kishore on 07/01/2015
+               --
+               Begin
+                   temp_statement_no := '20';
+                   select distinct 'x' into temp_x
+                   from   unit_attributes
+                   where  unit_id = temp_unit_id
+                     and  trunc(coll_date) = trunc(temp_coll_date)
+                     and  chapter_id = temp_chapter_id
+                     and  attrib_group = 'DON'
+                     and  attrib_code between '07' and '12';
+                   --
+                       
+                   -- Directed unit
+                   --
+                   begin
+                       temp_statement_no := '30';
+                       --
+                       -- Select statement removed:
+                       --      ALL components currently to go to AU,
+                       --      those not needed go to class transfer
+                       --
+                       --  select 'x' into temp_x
+                       --  from   surgery_component_link
+                       --  where  blood_unitno = temp_unit_id
+                       --   and  blood_component = temp_product_code;
+                       temp_inven_class := 'AD';
+                       temp_storage_class := 'DR';
+                       exception
+                          when NO_DATA_FOUND then
+                            null;
+                          when OTHERS 
+                          then
+                             if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                               dbms_output.put_line('Statement - 2.0');
+                             end if; -- Added by Kishore on 07/01/2015
+                             raise appl_error;
+                   end;
+
+               Exception
+                  when NO_DATA_FOUND then 
+                        begin
+                               select distinct 'x' into temp_x
+                                from   component_attributes
+                                where  unit_id = temp_unit_id
+                                and product_code=temp_product_code
+                                and  trunc(coll_date) = trunc(temp_coll_date)
+                                and  chapter_id = temp_chapter_id
+                                and  attrib_group = 'DON'
+                                and  attrib_code between '07' and '12'; 
+
+                                  temp_inven_class := 'AD';
+                                 temp_storage_class := 'DR';
+ 
+                        exception when others then 
+                          null;
+                        end;
+
+                  when OTHERS then
+                         if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                           dbms_output.put_line('Statement - 2');
+                         end if; -- Added by Kishore on 07/01/2015
+                         raise appl_error;
+               End;
+               --
+               if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                 dbms_output.put_line('Checked for directed attribute');
+               end if; -- Added by Kishore on 07/01/2015
+               --
+            end if;
+            --
+            -- Check for product type
+            --
+            if temp_inven_class is null
+            then
+              begin
+                if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                  dbms_output.put_line('Checking product_type');
+                end if; -- Added by Kishore on 07/01/2015
+                temp_statement_no := '40';
+                select p.product_type, p.inventory_class
+                into   temp_product_type, temp_special_product
+                from   vserv_products p, vserv_product_types t
+                where  product_code = substr(temp_product_code,1,5)
+--	    and  unit_scheme_type = p_code_scheme
+                  and  sysdate between p.eff_date and nvl(p.term_date,sysdate)
+                  and  t.product_type = p.inv_product_type
+                  and  sysdate between t.eff_date and nvl(t.term_date,sysdate);
+                exception
+                   when NO_DATA_FOUND
+                   then
+                      null;
+                   when OTHERS
+                   then
+                      if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                        dbms_output.put_line('Error in selecting product type');
+                      end if; -- Added by Kishore on 07/01/2015
+                      raise appl_error;
+              end;
+              if temp_special_product = 'SP'
+              then
+                temp_inven_class := 'SP';
+              end if;
+            end if;
+            --
+            -- Check for inventory categories
+            --
+            if temp_inven_class is null
+            then
+              begin
+                temp_statement_no := '50';
+                if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                  dbms_output.put_line('Checking if unit has antigens');
+                end if; -- Added by Kishore on 07/01/2015
+                select distinct 'x' into temp_x
+                from   unit_antigens
+                where  unit_id = temp_unit_id
+                  and  coll_date = temp_coll_date
+                  and  chapter_id = temp_chapter_id
+                  and  test_id not in ('ABORH');
+                --
+                -- this unit has antigens. Therefore, we will first try to
+                -- identify the product categories to which it belongs
+                --
+                if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                  dbms_output.put_line('Unit has antigens - 1');
+                end if; -- Added by Kishore on 07/01/2015
+                no_unit_antigen_flag := 'N';
+                --
+                exception
+                  when NO_DATA_FOUND
+                  then
+                    no_unit_antigen_flag := 'Y';
+                    if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                      dbms_output.put_line('Unit has no antigens');
+                    end if; -- Added by Kishore on 07/01/2015
+                    --
+                    -- Since this is not a BIO or NFT or AUTO or DIR and
+                    -- there are no antigens on the unit, this is a
+                    -- REG unit
+                    --
+                    if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                      dbms_output.put_line('Determined inventory class as REG');
+                    end if; -- Added by Kishore on 07/01/2015
+                    temp_inven_class := 'RE';
+                  when OTHERS
+                  then
+                    if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                      dbms_output.put_line('Statement - 3');
+                    end if; -- Added by Kishore on 07/01/2015
+                    raise appl_error;
+              end;
+              --
+              -- Product is Red Blood Cell or Whole Blood then
+              -- check for antigens and rarity of the product
+              --
+              if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                dbms_output.put_line('No Unit Antigen Flag: '
+                              ||no_unit_antigen_flag);
+                dbms_output.put_line('Temp Storage Class: '||temp_storage_class);
+              end if; -- Added by Kishore on 07/01/2015
+              if no_unit_antigen_flag = 'N'
+              then
+                ----
+                if temp_product_type in ('RBC','WB')
+                then
+                   if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                     dbms_output.put_line('Unit has antigens - 2');
+                   end if; -- Added by Kishore on 07/01/2015
+                   product_antigen_categories;
+                   if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                     dbms_output.put_line('Unit has been checked for categories');
+                   end if; -- Added by Kishore on 07/01/2015
+                   --
+                   product_rarity;
+                   if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                     dbms_output.put_line('Unit has been checked for rarity');
+                   end if; -- Added by Kishore on 07/01/2015
+                   --
+                end if;
+              end if;
+              --
+              if temp_inven_class is null
+              then
+                --
+                -- By this time, unit must have been checked for SP
+                -- even if antigens are present. Therefore, assigning
+                -- it a REGULAR inventory class
+                --
+                if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                  dbms_output.put_line
+                  ('Unit has no inventory class inspite of antigens');
+                end if; -- Added by Kishore on 07/01/2015
+                temp_inven_class := 'RE';
+              end if;
+            end if;
+            --
+            if temp_storage_class is null
+            then
+              temp_storage_class := temp_inven_class;
+            end if;
+            /*generate_location_id (p_product_code,
+                                  p_blood_type,
+                                  p_chapter_id,
+                                  temp_storage_class,
+                                  p_tray_no,
+                                  temp_location_id);
+            --*/
+            if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+              dbms_output.put_line('****** Returned Inventory Class: '||
+                                   temp_inven_class);
+              dbms_output.put_line('****** Returned Storage Class: '||
+                                   temp_storage_class);
+            end if; -- Added by Kishore on 07/01/2015
+            --
+            p_storage_class := temp_storage_class;
+            p_inven_class := temp_inven_class;
+            return;
+          exception
+             when appl_error
+             then
+                err_num := SQLCODE;
+                err_msg := SQLERRM(err_num);
+               raise_application_error(-20000,to_char(err_num)||'***'||
+  				substr(err_msg,1,50));
+        end get_inventory_class;
+        --
+        --
+        -- ******************
+        --
+        --
+       procedure product_antigen_categories is
+                type  catg is table of varchar2(5) not null
+                                              index by binary_integer;
+                prod_catg                 catg;
+                group_string              varchar2(2000):='';
+                unit_string               varchar2(2000):='';
+                no_of_groups              number:=0;
+                category_found            varchar2(1):='';
+                t_is_debug_msg_displayed  boolean; -- Added by Kishore on 07/01/2015
+                --
+                -- this cursor is used to select only those groups which
+                -- have atleast one antigen test result matching with
+                -- the current unit's antigen test results
+                --
+                cursor c1 is
+                     select distinct antigen_group
+                     from   fr_vantigen_groups
+                     where  sysdate between eff_date and
+                        nvl(term_date, sysdate+1)
+        and  exists (select 'x'
+                                    from   unit_antigens
+                                    where  unit_id = temp_unit_id and
+                                           coll_date = temp_coll_date and
+                                           chapter_id = temp_chapter_id and
+                                           test_id != 'ABORH' and
+                                           unit_antigens.test_id =
+                                                fr_vantigen_groups.test_id and
+                                           unit_antigens.test_result =
+                                                fr_vantigen_groups.test_result);
+                --
+                -- this cursor is used to make a concatenated string
+                -- of the antigen test and their results for the current
+                -- antigen group
+                --
+                cursor c2 (pcur_antigen_group in varchar2) is
+                     select test_id||'-'||test_result||':' test_string
+                       from fr_vantigen_groups
+                      where antigen_group = pcur_antigen_group
+                        and sysdate between eff_date and
+                                nvl(term_date, sysdate+1)
+                        and test_id != 'ABORH'
+                      order by 1; -- Added ORDER BY clause. Added by Kishore on 04/15/2011. SCR 18047
+                --
+                -- this cursor is used to make a concatenated string
+                -- of the unit antigen test and their results for only
+                -- those tests in the current antigen group
+                --
+                cursor c3 (pcur_antigen_group in varchar2) is
+                     select distinct test_id||'-'||test_result||':' test_string
+                       from unit_antigens
+                      where unit_id = temp_unit_id 
+                        and coll_date = temp_coll_date 
+                        and chapter_id = temp_chapter_id 
+                        and test_id != 'ABORH' 
+                        and exists (select 'x'
+                                      from fr_vantigen_groups
+                                     where antigen_group = pcur_antigen_group
+                                       and fr_vantigen_groups.test_id = unit_antigens.test_id
+                                       and fr_vantigen_groups.test_result = unit_antigens.test_result
+                                       and sysdate between fr_vantigen_groups.eff_date 
+                                       and nvl(fr_vantigen_groups.term_date, sysdate+1))
+                      order by 1; -- Added ORDER BY clause. Added by Kishore on 04/15/2011. SCR 18047
+                --
+                -- this cursor selects current categories for the product
+                --
+                cursor c4 is
+                     select category_code
+                     from   product_categories
+                     where  unit_id = temp_unit_id and
+                            coll_date = temp_coll_date and
+                            chapter_id = temp_chapter_id and
+                            product_code = temp_product_code and
+                            aliquot = temp_aliquot;
+        begin
+            -- Added by Kishore on 07/01/2015
+            if lab_common.is_debug_msg_displayed ('PRODUCT_CHECKIN', 'PKG') then
+              t_is_debug_msg_displayed := TRUE;
+            else
+              t_is_debug_msg_displayed := FALSE;
+            end if;
+            -- End of change
+
+            --
+            if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+              dbms_output.put_line('Entered the product_categories procedure');
+            end if; -- Added by Kishore on 07/01/2015
+            --
+            temp_statement_no := '60';
+            for c1_rec in c1
+            loop
+               --
+               group_string := '';
+               unit_string  := '';
+               --
+               if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                 dbms_output.put_line('Selected group: '||c1_rec.antigen_group);
+               end if; -- Added by Kishore on 07/01/2015
+               --
+               temp_statement_no := '70';
+               for c2_rec in c2 (c1_rec.antigen_group)
+               loop
+                  --
+                  group_string := group_string||c2_rec.test_string;
+                  --
+               end loop;
+               --
+               if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                 dbms_output.put_line('Group String: '||group_string);
+               end if; -- Added by Kishore on 07/01/2015
+               --
+               temp_statement_no := '80';
+               for c3_rec in c3 (c1_rec.antigen_group)
+               loop
+                  --
+                  unit_string := unit_string||c3_rec.test_string;
+                  --
+               end loop;
+               --
+               if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                 dbms_output.put_line('Unit String: '||unit_string);
+               end if; -- Added by Kishore on 07/01/2015
+               --
+               if group_string = unit_string
+               then
+                  --
+                  no_of_groups := no_of_groups+1;
+                  --
+                  if substr(c1_rec.antigen_group,length(c1_rec.antigen_group),1)
+                     = '*' and
+                     temp_inven_class is null
+                  then
+                     temp_inven_class := 'SP';
+                  end if;
+                  prod_catg(no_of_groups) :=  c1_rec.antigen_group;
+               end if;
+            end loop;
+            if no_of_groups != 0
+            then
+               if temp_update_prd_category = 'Y'
+               then
+                  --
+                  -- by now, all selected categories have been inserted in the
+                  -- prod_catg table. We now check these against the product
+                  -- categories table and accordingly delete or insert
+                  --
+                  temp_statement_no := '90';
+                  for c4_rec in c4
+                  loop
+                     --
+                     -- this loop check whether all categories presenty before
+                     -- are still reqd; if not, it deletes them
+                     --
+                     category_found := 'N';
+                     --
+                     temp_statement_no := '100';
+                     for i in 1..no_of_groups
+                     loop
+                        --
+                        if prod_catg(i) = c4_rec.category_code
+                        then
+                           category_found := 'Y';
+                        end if;
+                     end loop;
+                     if category_found = 'N'
+                     then
+                        begin
+                            temp_statement_no := '110';
+                            delete from product_categories
+                            where  unit_id = temp_unit_id and
+                                   coll_date = temp_coll_date and
+                                   chapter_id = temp_chapter_id and
+                                   product_code = temp_product_code and
+                                   aliquot = temp_aliquot and
+                                   category_code = c4_rec.category_code;
+                            exception
+                                when OTHERS
+                                then
+                                   if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                                     dbms_output.put_line('Statement - 4');
+                                   end if; -- Added by Kishore on 07/01/2015
+                                   raise appl_error;
+                        end;
+                     end if;
+                     --
+                  end loop;
+                  temp_statement_no := '120';
+                  for i in 1..no_of_groups
+                  loop
+                     --
+                     -- Insert categories which have been selected before but
+                     -- are not already present in product_categories
+                     --
+                     begin
+                         select 'x' into temp_x
+                         from   product_categories
+                         where  unit_id = temp_unit_id and
+                                coll_date = temp_coll_date and
+                                chapter_id = temp_chapter_id and
+                                product_code = temp_product_code and
+                                aliquot = temp_aliquot and
+                                category_code = prod_catg(i);
+                         exception
+                             when NO_DATA_FOUND
+                             then
+                                if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                                  dbms_output.put_line('Catg Inserted: '||
+                                                           prod_catg(i));
+                                end if; -- Added by Kishore on 07/01/2015
+                                begin
+                                    temp_statement_no := '130';
+                                    insert into product_categories
+                                    (unit_id, coll_date, chapter_id,
+                                     product_code, aliquot, category_code)
+                                    values
+                                    (temp_unit_id, temp_coll_date,
+                                     temp_chapter_id, temp_product_code,
+                                     temp_aliquot, prod_catg(i));
+                                    exception
+                                        when OTHERS
+                                        then
+                                          if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                                            dbms_output.put_line('Statement-4.5');
+                                          end if; -- Added by Kishore on 07/01/2015
+                                          raise appl_error;
+                                end;
+                            when OTHERS
+                            then
+                               if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                                 dbms_output.put_line('Statement - 5');
+                               end if; -- Added by Kishore on 07/01/2015
+                               raise appl_error;
+                     end;
+                  end loop;
+               end if;
+            end if;
+        end product_antigen_categories;
+        --
+        --
+        -- ******************
+        --
+        --
+        procedure product_rarity is
+                type  catg is table of varchar2(5) not null
+                                index by binary_integer;
+                prod_catg               catg;
+                group_string              varchar2(2000):='';
+                unit_string               varchar2(2000):='';
+                no_of_groups              number:=1;
+                category_found            varchar2(1):='';
+                rare_flag                 varchar2(1):='';
+                vrare_flag                varchar2(1):='';
+                temp_rarity_percent       number(6,4) := 0;
+                temp_vrarity_percent      number(6,4) := 0;
+                temp_comb_rarity          number(6,4) := 0;
+                t_is_debug_msg_displayed  boolean; -- Added by Kishore on 07/01/2015
+                --
+                -- this cursor is used to select only those matrix
+                -- combinations which have atleast one antigen test result
+                -- matching with the current unit's antigen test results
+                -- and the rarity of the combination is lesser than
+                -- equal the chapter set parameter
+                --
+                cursor c1 is
+                     select matrix_id, rarity_percent
+                     from   fr_vrarity_matrix_hdr
+                     where  sysdate between eff_date and  nvl(term_date,sysdate)
+                       and  exists (select 'x'
+                                    from   unit_antigens, fr_vrarity_matrix_det
+                                    where  unit_id = temp_unit_id
+                                      and  coll_date = temp_coll_date
+                                      and  chapter_id = temp_chapter_id
+                                      and  fr_vrarity_matrix_det.matrix_id =
+                                             fr_vrarity_matrix_hdr.matrix_id
+                                      and  unit_antigens.test_id =
+                                             fr_vrarity_matrix_det.test_id
+                                      and  unit_antigens.test_result =
+                                             fr_vrarity_matrix_det.test_result
+           and  sysdate between fr_vrarity_matrix_det.eff_date and
+             nvl(fr_vrarity_matrix_det.term_date, sysdate+1))
+                       and  rarity_percent <= temp_rarity_percent
+                     order by rarity_percent asc;
+                --
+                -- this cursor is used to make a concatenated string
+                -- of the antigen test and their results for the current
+                -- matrix combination
+                --
+                cursor c2 (pcur_matrix_id in number) is
+        select test_id||'-'||test_result||':' test_string
+                     from   fr_vrarity_matrix_det
+                     where  matrix_id = pcur_matrix_id
+                       and  sysdate between eff_date and
+                            nvl(term_date, sysdate+1);
+                --
+                -- this cursor is used to make a concatenated string
+                -- of the unit antigen test and their results for only
+                -- those tests in the current matrix combination
+                --
+                cursor c3 (pcur_matrix_id in number) is
+                     select distinct test_id||'-'||test_result||':' test_string
+                     from   unit_antigens
+                     where  unit_id = temp_unit_id and
+                            coll_date = temp_coll_date and
+                            chapter_id = temp_chapter_id and
+                            exists (select 'x'
+                                    from   fr_vrarity_matrix_det
+                                    where  matrix_id = pcur_matrix_id
+                                      and  fr_vrarity_matrix_det.test_id =
+                                              unit_antigens.test_id
+                                      and  fr_vrarity_matrix_det.test_result =
+                                              unit_antigens.test_result
+           and  sysdate between fr_vrarity_matrix_det.eff_date and
+             nvl(fr_vrarity_matrix_det.term_date, sysdate+1));
+        begin
+            -- Added by Kishore on 07/01/2015
+            if lab_common.is_debug_msg_displayed ('PRODUCT_CHECKIN', 'PKG') then
+              t_is_debug_msg_displayed := TRUE;
+            else
+              t_is_debug_msg_displayed := FALSE;
+            end if;
+            -- End of change 
+
+            --
+            if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+              dbms_output.put_line('*** Started rarity check');
+            end if; -- Added by Kishore on 07/01/2015
+            --
+            begin
+                temp_statement_no := 'l40';
+                select rarity_percent, vrarity_percent
+                into   temp_rarity_percent, temp_vrarity_percent
+                from   vserv_chapters
+                where  chapter_id = temp_chapter_id
+                  and  sysdate between eff_date and nvl(term_date,sysdate);
+                exception
+                   when OTHERS
+                   then
+                      if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                        dbms_output.put_line('Statement - 6');
+                      end if; -- Added by Kishore on 07/01/2015
+                      raise appl_error;
+            end;
+            --
+            rare_flag := 'N';
+            vrare_flag := 'N';
+            --
+            temp_statement_no := '150';
+            for c1_rec in c1
+            loop
+               --
+               if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                 dbms_output.put_line('*** Inside first cursor');
+               end if; -- Added by Kishore on 07/01/2015
+               --
+               group_string := '';
+               unit_string  := '';
+               temp_comb_rarity := c1_rec.rarity_percent;
+               --
+               temp_statement_no := '160';
+               for c2_rec in c2 (c1_rec.matrix_id)
+               loop
+                  --
+                  group_string := group_string||c2_rec.test_string;
+                  --
+               end loop;
+               --
+               temp_statement_no := '170';
+               for c3_rec in c3 (c1_rec.matrix_id)
+               loop
+                  --
+                  unit_string := unit_string||c3_rec.test_string;
+                  --
+               end loop;
+               --
+               if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                 dbms_output.put_line('*** Matrix ID: '||to_char(c1_rec.matrix_id)
+);
+                 dbms_output.put_line('*** Group String: '||group_string);
+                 dbms_output.put_line('*** Unit String: '||unit_string);
+               end if; -- Added by Kishore on 07/01/2015
+               if group_string = unit_string
+               then
+                  --
+                  if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                    dbms_output.put_line('*** Unit has a rarity_match');
+                  end if; -- Added by Kishore on 07/01/2015
+                  --
+                  if temp_comb_rarity < temp_vrarity_percent
+                  then
+                     vrare_flag := 'Y';
+                  else
+                     rare_flag := 'Y';
+                  end if;
+                  --
+                  -- Product being a rare/very rare product automatically
+                  -- makes it a special product
+                  --
+                  temp_inven_class := 'SP';
+                  exit;
+               end if;
+               --
+            end loop;
+            --
+            if temp_update_prd_category = 'Y'
+            then
+               if vrare_flag = 'N' or rare_flag = 'Y'
+               then
+                  begin
+                      temp_statement_no := '180';
+                      delete from product_categories
+                      where  unit_id = temp_unit_id and
+                             coll_date = temp_coll_date and
+                             chapter_id = temp_chapter_id and
+                             product_code = temp_product_code and
+                             aliquot = temp_aliquot and
+                             category_code = 'VRAR';
+                      exception
+                          when OTHERS
+                          then
+                             if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                               dbms_output.put_line('Statement - 7');
+                             end if; -- Added by Kishore on 07/01/2015
+                             raise appl_error;
+                  end;
+		  begin
+		    select 'x'
+		     into temp_x
+                    from product_categories
+		    where unit_id = temp_unit_id
+		    and coll_date = temp_coll_date
+		    and chapter_id = temp_chapter_id
+		    and product_code = temp_product_code
+		    and aliquot = temp_aliquot
+		    and category_code = 'RARE';
+                  exception
+		    when no_data_found then
+                     begin
+                      temp_statement_no := '190';
+                      insert into product_categories
+                      (unit_id, coll_date, chapter_id, product_code,
+                       aliquot, category_code)
+                      values
+                      (temp_unit_id, temp_coll_date,temp_chapter_id,
+                       temp_product_code, temp_aliquot, 'RARE');
+                     exception
+                          when OTHERS
+                          then
+                             if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                               dbms_output.put_line('Statement -7.5');
+                             end if; -- Added by Kishore on 07/01/2015
+                             raise appl_error;
+                     end;
+                   when others then
+                      if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+		        dbms_output.put_line('Error in selecting from product categories');
+                      end if; -- Added by Kishore on 07/01/2015
+		      raise appl_error;
+                   end;
+               end if;
+               if rare_flag = 'N' or vrare_flag = 'Y'
+               then
+                  begin
+                      temp_statement_no := '200';
+                      delete from product_categories
+                      where  unit_id = temp_unit_id and
+                             coll_date = temp_coll_date and
+                             chapter_id = temp_chapter_id and
+                             product_code = temp_product_code and
+                             aliquot = temp_aliquot and
+                             category_code = 'RARE';
+                      exception
+                          when OTHERS
+                          then
+                             if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                               dbms_output.put_line('Statement - 7');
+                             end if; -- Added by Kishore on 07/01/2015
+                             raise appl_error;
+                  end;
+		  begin
+		    select 'x'
+		     into temp_x
+                    from product_categories
+		    where unit_id = temp_unit_id
+		    and coll_date = temp_coll_date
+		    and chapter_id = temp_chapter_id
+		    and product_code = temp_product_code
+		    and aliquot = temp_aliquot
+		    and category_code = 'VRAR';
+                  exception
+		   when no_data_found then
+                    begin
+                      temp_statement_no := '210';
+                      insert into product_categories
+                      (unit_id, coll_date, chapter_id, product_code,
+                       aliquot, category_code)
+                      values
+                      (temp_unit_id, temp_coll_date,temp_chapter_id,
+                       temp_product_code, temp_aliquot, 'VRAR');
+                    exception
+                      when OTHERS
+                      then
+                          if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                            dbms_output.put_line('Statement -7.5');
+                          end if; -- Added by Kishore on 07/01/2015
+                          raise appl_error;
+                    end;
+                   when others then
+                     if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+		       dbms_output.put_line('Error in selecting from product_categories');
+                     end if; -- Added by Kishore on 07/01/2015
+		     raise appl_error;
+                  end; 
+               end if;
+            end if;
+        end product_rarity;
+ procedure generate_location_id (p_product_code in varchar2,
+                                      p_blood_type in varchar2,
+                                      p_chapter_id in varchar2,
+                                      p_storage_class in varchar2,
+                                      p_tray_no in varchar2,
+                                      p_location_id out varchar2) is
+          temp_dev_type            varchar2(1);
+          temp_dev_no              varchar2(2);
+          temp_tray_number         varchar2(4);
+          temp_rck_no              varchar2(2);
+          temp_shlf_no             varchar2(2);
+          temp_warehouse           varchar2(1);
+          prd_type                 varchar2(5);
+          temp_tray_capacity       number;
+          temp_count               number;
+          err_num                  number:='';
+          err_msg                  varchar2(80):='';
+          t_is_debug_msg_displayed boolean; -- Added by Kishore on 07/01/2015
+      begin
+          -- Added by Kishore on 07/01/2015
+          if lab_common.is_debug_msg_displayed ('PRODUCT_CHECKIN', 'PKG') then
+            t_is_debug_msg_displayed := TRUE;
+          else
+            t_is_debug_msg_displayed := FALSE;
+          end if;
+          -- End of change
+
+          --
+          -- Get warehouse ID
+          --
+          begin
+              temp_statement_no := '220';
+              select warehouse_id
+              into   temp_warehouse
+              from   system_users
+              where  chapter_id = p_chapter_id
+                and  user_id = LT_USER_SESSION.get_userid;
+          end;
+          --
+          -- Determine the product type base on the product code.
+          --
+          if p_storage_class not in ('ER','PO')
+          then
+          begin
+              temp_statement_no := '230';
+              select distinct inv_product_type
+              into   prd_type
+              from   vserv_products
+              where  product_code = substr(p_product_code,1,5)
+--Modified for both schemes to coexist.
+		 and  unit_scheme_type in  (select decode(length(p_product_code),8,'’I','’C') from dual )
+                and  sysdate between eff_date and nvl(term_date,sysdate);
+              exception
+                 when OTHERS
+                 then
+                    if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                      dbms_output.put_line('Statement - 10');
+                    end if; -- Added by Kishore on 07/01/2015
+                    raise rack_error;
+          end;
+          temp_dev_no      := substr(p_tray_no,1,2);
+          temp_tray_number := substr(p_tray_no,3,4);
+          --
+          -- Get device_type, and tray_capacity
+          -- base on the product type
+          --
+          begin
+              temp_statement_no := '240';
+              select device_type
+              into   temp_dev_type
+              from   product_storage
+              where  chapter_id = p_chapter_id
+                and  warehouse_id = temp_warehouse
+                and  product_type = prd_type
+                and  device_number = temp_dev_no
+                and  sysdate between effective_date
+                and  nvl(term_date,sysdate);
+              exception
+                 when OTHERS
+                 then
+                    if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                      dbms_output.put_line('Statement - 11');
+                    end if; -- Added by Kishore on 07/01/2015
+                    raise rack_error;
+          end;
+          --
+          -- Get the rack number base on product type, storage class,
+          -- blood_type, warehouse ID, device_type, and device_number.
+          --
+                  if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                    dbms_output.put_line('chapter_id ' || p_chapter_id);
+                    dbms_output.put_line('warehouse ' || temp_warehouse);
+                    dbms_output.put_line('storage_class ' || p_storage_class);
+                    dbms_output.put_line('prd_type ' || prd_type);
+                    dbms_output.put_line('dev_type ' || temp_dev_type);
+                    dbms_output.put_line('dev_no ' || temp_dev_no);
+                    dbms_output.put_line('tray_no ' || temp_tray_number);
+                    dbms_output.put_line('bld type ' || p_blood_type);
+                  end if; -- Added by Kishore on 07/01/2015
+          begin
+              temp_statement_no := '250';
+              select rack_number
+              into   temp_rck_no
+              from   rack_details
+              where  nvl(blood_type,'**') = nvl(p_blood_type,'**')
+                and  chapter_id = p_chapter_id
+                and  warehouse_id = temp_warehouse
+                and  storage_class = p_storage_class
+                and  product_type = prd_type
+                and  device_type = temp_dev_type
+                and  device_number = temp_dev_no
+                and  sysdate between effective_date and nvl(term_date,sysdate);
+              exception
+                 when OTHERS
+                 then
+                    if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                      dbms_output.put_line('Statement - 12');
+                    end if; -- Added by Kishore on 07/01/2015
+                    raise rack_error;
+          end;
+          if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+            dbms_output.put_line('rack# ' || temp_rck_no);
+          end if; -- Added by Kishore on 07/01/2015
+          --
+          -- Assigned shelf number to zero.  Since, phase I does not
+          -- required shelf definition.
+          --
+          temp_shlf_no := '00';
+          --
+          -- Check if tray already defined for this product type.
+          -- If defined then no update else update the tray table.
+          --
+          begin
+              temp_statement_no := '260';
+              select item_count into temp_count
+              from   trays
+              where  tray_number = temp_tray_number
+                and  tray_status = 'IN'
+                and  product_type = prd_type
+                and  rack_number = temp_rck_no
+                and  chapter_id = p_chapter_id
+                and  warehouse_id = temp_warehouse
+                and  device_type = temp_dev_type
+                and  device_number = temp_dev_no
+                and  sysdate between effective_date
+                and  nvl(term_date,sysdate);
+              if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                dbms_output.put_line('temp count ' || to_char(temp_count));
+              end if; -- Added by Kishore on 07/01/2015
+              exception
+                when NO_DATA_FOUND
+                then
+                  begin
+                     temp_statement_no := '280';
+                     update trays
+                     set    warehouse_id  = temp_warehouse,
+                            device_type   = temp_dev_type,
+                            device_number = temp_dev_no,
+                            rack_number   = temp_rck_no,
+                            shelf_number  = temp_shlf_no,
+                            product_type  = prd_type,
+                            tray_status   = 'IN'
+                     where  tray_number = temp_tray_number
+                       and  chapter_id = p_chapter_id;
+                     exception
+                        when OTHERS
+                        then
+                           if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                             dbms_output.put_line('Statement - 14');
+                           end if; -- Added by Kishore on 07/01/2015
+                           raise rack_error;
+                 end;
+          end;
+          p_location_id := temp_warehouse || temp_dev_type || temp_dev_no ||
+                         temp_rck_no || temp_shlf_no || temp_tray_number;
+          else
+          p_location_id := 'NONE';
+          end if;
+          exception
+             when rack_error
+             then
+                err_num := SQLCODE;
+                err_msg := SQLERRM(err_num);
+--                raise_application_error(-20000,to_char(err_num)||'-'||
+--                                  temp_statement_no||'-'|| 'Storage dev, prod storage,
+--		      rack, tray not defined'|| substr(err_msg,1,30));
+      end;
+procedure auto_interface (p_types varchar2,
+                          p_from  date,
+                          p_to    date) is
+  good                         number := 0;
+  bad                          number := 0;
+  type_x                       number := 0;
+  total                        number := 0;
+  statement                    number := 0;
+  expire                       date;
+  location                     varchar2(6);
+  prod_type                    varchar2(5);
+  osok                         varchar2(1);
+  driveid                      varchar2(6);   
+  temp_yesno                   varchar2(1);
+  contract                     varchar2(2);
+  gr_site                      varchar2(7);
+  t_is_debug_msg_displayed     boolean; -- Added by Kishore on 07/01/2015
+
+  cursor components1 is
+    select chapter_id,
+           unit_id,
+           coll_date,
+           product_code,
+           component_prefix,
+           system_label_decision,
+           expiry_date,
+           label_dats,
+           rowid
+    from  components c
+    where label_dats between p_from and p_to
+      and component_status = 'L'
+      and reject_reason_code is null
+      and ((nvl(system_label_decision,'39') not in ('21','39','47','58') and length(product_code) = 5 )
+-- Modified for both schemes to coexists
+      or  (nvl(system_label_decision,'Mb') not in ('Mb','Mq','Mx','Md') and length(product_code) = 8)) ;
+begin
+  -- Added by Kishore on 07/01/2015
+  if lab_common.is_debug_msg_displayed ('PRODUCT_CHECKIN', 'PKG') then
+    t_is_debug_msg_displayed := TRUE;
+  else
+    t_is_debug_msg_displayed := FALSE;
+  end if;
+  -- End of change
+
+  dbms_output.enable(200000);
+  if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+    dbms_output.put_line(
+         '# Interface Units From Lab*Care to Serve*Care');
+    dbms_output.put_line('#  ');
+    dbms_output.put_line('# Product types '||p_types);
+    dbms_output.put_line('# from '||to_char(p_from,'mm/dd/yy hh24:mi:ss')||
+                          ' to '||to_char(p_to,'mm/dd/yy hh24:mi:ss')||'.');
+    dbms_output.put_line('#  ');
+    dbms_output.put_line('# Interface Starts: '
+              ||to_char(sysdate,'mm/dd/yy hh24:mi:ss'));
+    dbms_output.put_line('#  ');
+  end if; -- Added by Kishore on 07/01/2015
+  for comp in components1
+  loop
+    total := total + 1;
+    begin
+      --
+      --  check unit_interdiction
+      --
+      select decode(count(*),0,'N','Y') into temp_yesno
+      from   unit_interdictions ui, valid_interdictions_lab vi
+      where  chapter_id    = comp.chapter_id
+        and  unit_id       = comp.unit_id
+        and  coll_date     = comp.coll_date
+        and  ui.inter_code = vi.inter_code
+        and  vi.inter_type != 'I'
+        and  (vi.inter_type != 'B' or comp.system_label_decision
+              not in ('40','71'))
+        and  sysdate between eff_date and nvl(term_date,sysdate)
+        and  insert_dats > comp.label_dats;
+      if temp_yesno = 'Y'
+      then
+        bad := bad + 1;
+        if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+          dbms_output.put_line('# '||comp.unit_id||' '||comp.product_code||
+                               ' : Unit Interdiction(s) exists.');
+        end if; -- Added by Kishore on 07/01/2015
+      else
+        --
+        --  check component interdiction
+        --
+        select decode(count(*),0,'N','Y') into temp_yesno
+        from   component_interdictions
+        where  chapter_id   = comp.chapter_id
+          and  unit_id      = comp.unit_id
+          and  coll_date    = comp.coll_date
+          and  product_code = comp.product_code
+          and  insert_dats > comp.label_dats;
+        if temp_yesno = 'Y'
+        then
+          bad := bad + 1;
+          if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+            dbms_output.put_line('# '||comp.unit_id||' '||comp.product_code||
+                                 ' : Component Interdiction(s) exists.');
+          end if; -- Added by Kishore on 07/01/2015
+        else
+          --
+          --  check quarantine
+          --
+          select decode(count(*),0,'N','Y') into temp_yesno
+          from   quarantine_products
+          where  chapter_id   = comp.chapter_id
+            and  unit_id      = comp.unit_id
+            and  product_code = comp.product_code
+            and  aliquot      = comp.component_prefix;
+          if temp_yesno = 'Y'
+          then
+            bad := bad + 1;
+            if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+              dbms_output.put_line('# '||comp.unit_id||' '||comp.product_code||
+                                   ' : Quarantine Reason(s) exists.');
+            end if; -- Added by Kishore on 07/01/2015
+          else
+            --
+            --  prepare for insert
+            --
+            begin
+              --
+              statement := 1;
+              select inv_product_type, out_of_state_flag,
+                     decode(comp.system_label_decision, '49',
+                            decode(life_span_ind,
+                                   'Y',add_months(comp.coll_date,
+                                       12 * life_span) + 1439/1440,
+                                   'D',comp.coll_date + life_span + 1439/1440,
+                                   'H',comp.coll_date + 1439/1440),
+                            comp.expiry_date)
+              into   prod_type, osok, expire
+              from   valid_products
+              where  product_code = comp.product_code;
+              --
+              if ','||p_types||',' like '%,'||prod_type||',%'
+              then
+                statement := 2;
+                select substr(contract_id,4,2),
+                        driveid,
+                       group_site_id
+                into   contract,
+                        driveid,
+                       gr_site
+                from   units
+                where  chapter_id = comp.chapter_id
+                  and  unit_id = comp.unit_id
+                  and  coll_date = comp.coll_date;
+                --
+                if osok != 'N' and gr_site is not null
+                then
+                  --
+                  statement := 3;
+                  select osok_flag
+                  into   osok
+                  from   group_sites
+                  where  group_site_id = gr_site
+                    and  chapter_id = comp.chapter_id;
+                  --
+                end if;
+                 if osok != 'N' and driveid is not null
+                then
+                  --
+                  statement := 31;
+                  select osok_flag
+                  into   osok
+                  from   drives_lab
+                  where  drive_id = driveid
+                    and  chapter_id = comp.chapter_id;
+                  --
+                end if;
+   
+                if osok = 'Y' then osok := ''; end if;
+                --
+                if comp.system_label_decision in ('PO','71')
+                then
+                  location := comp.system_label_decision;
+                else
+                  --
+                  statement := 5;
+                  select min(device_number)||'0000'
+                  into   location
+                  from   product_storage
+                  where  warehouse_id = 1
+                    and  chapter_id = comp.chapter_id
+                    and  product_type = prod_type
+                    and  sysdate between effective_date
+                                 and nvl(term_date,sysdate);
+                end if;
+                --
+                -- perform updates
+                --
+                savepoint a;
+                --
+                statement := 10;
+                dbms_output.disable;
+                insert into active_products
+                       (UNIT_ID, COLL_DATE, CHAPTER_ID, PRODUCT_CODE, ALIQUOT,
+                       BLOOD_TYPE, EXP_DATE, PRODUCT_TYPE, INSERT_DATE,
+                       APPL_CUSTODY, STOCK_STATE, LOCATION_ID, IMPORT_FLAG,
+                       OSOK_FLAG, PROGRAM_ID)
+                values
+                       (comp.UNIT_ID, comp.COLL_DATE, comp.CHAPTER_ID,
+                       comp.PRODUCT_CODE, comp.COMPONENT_PREFIX,
+                       comp.SYSTEM_LABEL_DECISION, expire,
+                       prod_type, sysdate, 'SV', 'AV', location,
+                       decode(contract,'IM','Y',''), osok, 'IMBCHKIN');
+                dbms_output.enable(200000);
+                --
+                statement := 11;
+                update components
+                  set    component_status = 'S',
+                         out_of_system_dats = sysdate,
+                       program_id = 'IMBCHKIN'
+                where  rowid = comp.rowid;
+                --
+                good := good + 1;
+              else
+                type_x := type_x +1;
+              end if;
+            exception
+              when others
+              then
+              bad := bad + 1;
+                if statement >= 10
+                then
+                  dbms_output.enable(200000);
+                  rollback to savepoint a;
+                end if;
+                if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                  dbms_output.put_line('#');
+                  dbms_output.put_line('# ' || comp.unit_id || ' ' || comp.product_code);-- || statement || '.');
+                  dbms_output.put_line('#  '||sqlerrm);
+                  dbms_output.put_line('#');
+                end if; -- Added by Kishore on 07/01/2015
+            end;
+          end if;
+        end if;
+      end if;
+    exception
+      when others
+      then
+        bad := bad + 1;
+        if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+          dbms_output.put_line('# '||comp.unit_id||' '||comp.product_code||
+                               ' : Error in checking availability.');
+          dbms_output.put_line('#  '||sqlerrm);
+          dbms_output.put_line('#');
+        end if; -- Added by Kishore on 07/01/2015
+    end;
+  end loop;
+  commit;
+  if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+    dbms_output.put_line('# ');
+    dbms_output.put_line('# Interface Ends  : '
+              ||to_char(sysdate,'mm/dd/yy hh24:mi:ss'));
+    dbms_output.put_line('#  ');
+    dbms_output.put_line('# Products inserted:         '|| to_char(good));
+    dbms_output.put_line('# Product type not correct:  '||to_char(type_x));
+    dbms_output.put_line('# Products rejected:         '||to_char(bad));
+    dbms_output.put_line('# Products processed:        '||to_char(total));
+  end if; -- Added by Kishore on 07/01/2015
+exception
+  when others
+  then
+    rollback;
+    if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+      dbms_output.put_line('#');
+      dbms_output.put_line('# Interface ABORTS: '
+                ||to_char(sysdate,'mm/dd/yy hh24:mi:ss'));
+      dbms_output.put_line('#');
+      dbms_output.put_line('# '||sqlerrm);
+      dbms_output.put_line('#');
+      dbms_output.put_line('# Interface ABORTED !!! Rollback Performed.');
+    end if; -- Added by Kishore on 07/01/2015
+end;
+end  product_checkin ;
+/
+
+Create or Replace Public Synonym PRODUCT_CHECKIN for PRODUCT_CHECKIN;
+
+Show errors
+

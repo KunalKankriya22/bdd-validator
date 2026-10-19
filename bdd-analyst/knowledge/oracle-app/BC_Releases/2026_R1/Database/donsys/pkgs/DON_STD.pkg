@@ -1,0 +1,2361 @@
+CREATE OR REPLACE PACKAGE don_std IS
+/*
+** This package encapsulates all stored functions identified
+** forward declaration can be found here along with function
+** purity declarations to make these functions as pure as possible.
+** hopefully we never have to modify any package state to achieve
+** WNPS and RNPS State.
+** Minimum requirement of WNDS is always maintained and occassionally WNPS.
+**
+** VER   DATE   BY    COMMENTS
+** ---------------------------------------------------------------------
+** 1.0  072497  RAJ   Initial version
+** 1.1  102397  RAJ   Consolidated functions
+** 1.2  011499  EDWIN function modification
+** 1.3  021899  EDWIN modification on claimed donations
+** 4    042209  EDWIN Adding the generate_new_id function
+** 5    111209  EDWIN  Adding the generate_temp_id funcation
+** 6    012310  EDWIN Adding the RBC - PLASMA loss count
+** 7    031210  EDWIN IM # 3089 (Regarding RBC/PLASMA loss)
+** 8    031210  EDWIN IM # 5048 (Regarding RBC/PLASMA loss) added chapter parameter and local timezone for sysdate
+** 9    030813  EDWIN: To lock the record if the same donor is being accessed in 2 sessions of the HHPF screen. (UPDATE_UNDER_PROCESSING_FLAG)
+*****Restting the verion number for 2018********
+**01    020218  ASHOK: donor_weight function added (accessed in eligibility window) -- IM 693
+**02    091218  RAMP: added new function comment_req_check for Audit forms to enforce comment filling) -- MLT# 756
+**03    092118  RAMP: modified to_number logic for min val and max val -- MLT# 756
+**04   020419  EDWIN: Added a routine to place the male and female interdiction
+**05   060319  ASHOK: donro_life_counts and donor_ytd_count modified (removed chapter id condition)
+**06   04192020  ASHOK: pop_reason routine added to determine inter_code, comments_req and out_of_range calculation for PHYRULE.
+**07   06302020  SYNC from LT2015R2SP1 project -- ASHOK: CHECK_OBJECT_LOCK and OBJECT_LOCK_UNLOCK added.
+**08   10112023 Ashok - MLT-6334 - DUPI ids are now generated with 'DP' code instead of 'DUPLI'. 
+                This allows more range of numbers for DUPLICATE set ids.
+                generate_new_id routine modified.
+*/ 
+
+/*
+** this function calculates various lifetime counts on donations
+*/
+FUNCTION donor_life_counts
+         (p_what      IN varchar2,
+          szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type)
+          RETURN NUMBER;
+
+/*
+** Donors lifetime donations credit count is calculated and returned.
+*/
+FUNCTION donor_life_credit_count
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN NUMBER;
+
+/*
+** Donors lifetime gallon count is calculated and returned.
+*/
+FUNCTION donor_life_gallon_count
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN NUMBER;
+
+/*
+** Donors lifetime donations unit count is calculated and returned.
+*/
+FUNCTION donor_life_unit_count
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN NUMBER;
+
+/* Added by Lakshmi on 01/19/98 as requested by Gouder
+** Donors lifetime donations unit count is calculated and returned.
+*/
+FUNCTION donor_life_deferral_count
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN NUMBER;
+
+/*
+** this function calculates various YTD counts on donations
+*/
+FUNCTION donor_ytd_count
+         (p_what      IN varchar2,
+          szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type)
+          RETURN NUMBER;
+
+/*
+** This function RETURN 'TRUE' value, if donor had completed a
+** pre-defined number of Apheresis procedures in the lifetime
+** donations, else 'FALSE' is returned.
+*/
+FUNCTION active_apheresis_donor
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** Donors lifetime donations credit count for a specified procedure
+** code is calculated and returned.
+*/
+FUNCTION donor_life_proc_count
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type,
+          szProcCode  IN valid_proc_codes.procedure_code%type) RETURN NUMBER;
+
+/*
+** Donors YTD donations credit count is calculated and returned.
+*/
+FUNCTION donor_ytd_credit_count
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN NUMBER;
+
+/*
+** Donors YTD gallon count is calculated and returned.
+*/
+FUNCTION donor_ytd_gallon_count
+        (szDonorID   IN donors.donor_id%type,
+         szChapterID IN donors.chapter_id%type) RETURN NUMBER;
+
+/*
+** Donors YTD donations credit count for a specified procedure
+** code is calculated and returned.
+*/
+FUNCTION donor_ytd_proc_count
+        (szDonorID   IN donors.donor_id%type,
+         szChapterID IN donors.chapter_id%type,
+         szProcCode  IN valid_proc_codes.procedure_code%type) RETURN NUMBER;
+
+/*
+** Donors lifetime donations unit count is calculated and returned.
+*/
+FUNCTION donor_ytd_unit_count
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN NUMBER;
+
+/*
+** Total RETURN NUMBER of donations attempts is returned, this excludes
+** successful donations.
+*/
+FUNCTION donations_attempted
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN NUMBER;
+
+/*
+** Donor age is calculated as on SYSDATE and is returned in years
+** (may be fractional).
+*/
+FUNCTION donor_age
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN NUMBER;
+
+/*
+** Return 'TRUE' if current donor has donated at any fixed
+** site at-least once, else 'FALSE' is returned.
+*/
+FUNCTION fixed_site_donor
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+
+/*
+** Date of last successful donation is returned.
+*/
+FUNCTION last_donation_date
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN DATE;
+
+/*
+** Procedure code for last successful donation is returned.
+*/
+FUNCTION last_donation_proc_code
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** Unit ID of last successful donation is returned.
+*/
+FUNCTION last_donation_unit_id
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** this function is used to retrieve donor information
+*/
+FUNCTION donor_std_info (p_what      IN varchar2,
+                         szDonorID   IN donors.donor_id%type,
+                         szChapterID IN donors.chapter_id%type)
+                         RETURN VARCHAR2;
+
+/*
+** City of donor residence is returned.
+*/
+FUNCTION donor_city
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** State of donor residence is returned.
+*/
+FUNCTION donor_state
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** County of donor residence is returned.
+*/
+FUNCTION donor_county
+        (szDonorID   IN donors.donor_id%type,
+         szChapterID IN donors.chapter_id%type)  RETURN VARCHAR2;
+
+/*
+** Zip code for donor address is returned.
+*/
+FUNCTION donor_zip
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** Area code of donor's home phone number
+*/
+FUNCTION donor_home_area_code
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** Area code of donor's business phone number
+*/
+FUNCTION donor_work_area_code
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+
+/*
+** Donor full name
+*/
+FUNCTION donor_name
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** donor date of birth
+*/
+FUNCTION donor_dob
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN DATE;
+
+/*
+** donor abo
+*/
+FUNCTION donor_abo
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** donor email
+*/
+FUNCTION donor_email
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** donor gender
+*/
+FUNCTION donor_sex
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** donor ssn
+*/
+FUNCTION donor_ssn
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN number;
+
+/*
+** donor weight
+*/
+FUNCTION donor_weight
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN number;
+
+/*
+** donor address
+*/
+FUNCTION donor_address
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** donor home phone number
+*/
+FUNCTION donor_home_phone
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** donor work phone number
+*/
+FUNCTION donor_work_phone
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type) RETURN VARCHAR2;
+
+/*
+** calculates counts for a date range
+*/
+FUNCTION donor_range_counts
+         (p_what      IN varchar2,
+          szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type,
+          szStartDate IN date,
+          szEndDate   IN date)
+          RETURN NUMBER;
+
+/*
+** Donors date range credit count is calculated and returned.
+*/
+FUNCTION donor_range_credit_count
+         (szDonorID   IN donors.donor_id%type,
+         szChapterID  IN donors.chapter_id%type,
+          szStartDate IN date,
+          szEndDate   IN date) RETURN NUMBER;
+
+/*
+** Donors date range gallon count is calculated and returned.
+*/
+FUNCTION donor_range_gallon_count
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type,
+          szStartDate IN date,
+          szEndDate   IN date) RETURN NUMBER;
+
+
+/*
+** Donors date range unit count is calculated and returned.
+*/
+FUNCTION donor_range_unit_count
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type,
+          szStartDate IN date,
+          szEndDate   IN date) RETURN NUMBER;
+
+
+/*
+** Donors date range credit count for a specified procedure
+** code is calculated and returned.
+*/
+FUNCTION donor_range_proc_count
+         (szDonorID   IN donors.donor_id%type,
+          szChapterID IN donors.chapter_id%type,
+          szProcCode  IN valid_proc_codes.procedure_code%type,
+          szStartDate IN date,
+          szEndDate   IN date)
+         RETURN NUMBER;
+/* procedure to generate the new id. This is called from the
+   create_ids routine from the donorlib.pll */
+
+PROCEDURE GENERATE_NEW_ID (PARAM_ID_TYPE IN VARCHAR2,
+                           NEW_ID OUT VARCHAR2,
+                           ERR_FLAG OUT VARCHAR2,
+                           ERR_MSG OUT VARCHAR2) ;
+
+/* this routine will be used to generate the temp IDS from the
+  laptop, for non laptop users this function will not be used
+*/
+
+PROCEDURE GENERATE_TEMP_ID (NEW_TEMP_ID OUT VARCHAR2,
+                           ERR_FLAG OUT VARCHAR2,
+                           ERR_MSG OUT VARCHAR2) ;
+
+/* routine to calculate the rbc-plasma loss for the past one year */
+
+PROCEDURE DONOR_PLASMA_RBC_LOSS(p_donor_id   IN  VARCHAR2,
+                                 p_plasma    OUT NUMBER,
+                                 p_rbc       out NUMBER,
+				 p_chapter_id IN VARCHAR2);
+
+/* to update the under processing flag to prevent the locking from HHPF */
+
+PROCEDURE UPDATE_UNDER_PROCESSING_FLAG (p_donor_id  IN VARCHAR2,
+                                        p_drive_id  IN VARCHAR2,
+                                        p_lock_flag  IN VARCHAR2);
+
+
+
+FUNCTION COMMENT_REQ_CHECK(P_DONATION_TYPE  IN VARCHAR2,
+                                       P_PROCEDURE_CODE IN VARCHAR2,
+                                       P_PHYSICAL_CODE  IN VARCHAR2,
+                                       P_VALUE          IN VARCHAR2,
+                                       P_GENDER         IN VARCHAR2
+                                      )
+RETURN VARCHAR2;
+
+PROCEDURE INSERT_MALE_FEMALE_INTER (pl_donor      in varchar2,
+                                    pl_chapter_id in varchar2,
+                                    pl_gender     in varchar2,
+                                    pl_trans_id   in varchar2,
+                                    pl_program_id in varchar2,
+                                    pl_user_id    in varchar2,
+                                    pl_out        out varchar2) ;
+
+  -- Public type declarations
+    TYPE vpr_rec_type IS RECORD (
+        item_value        valid_physical_rules.item_value%TYPE,
+        item_value_max    valid_physical_rules.item_value_max%TYPE,
+        item_operator     valid_physical_rules.item_operator%TYPE,
+        comment_req_flag  valid_physical_rules.comment_req_flag%TYPE,
+        inter_code        valid_physical_rules.inter_code%TYPE,
+        equip_type        valid_physical_rules.equip_type%TYPE,
+        from_age          NUMBER,
+        to_age            NUMBER,
+        age               NUMBER,
+        don_equip_type    VARCHAR2(10)
+    );
+
+    TYPE vpr_tab_type IS
+        TABLE OF vpr_rec_type;
+
+  -- Public function and procedure declarations
+    PROCEDURE pop_reason (
+        p_transaction_id  IN   VARCHAR2,
+        p_phy_code        IN   VARCHAR2,
+        p_phy_value       IN   VARCHAR2,
+        p_out_of_range    OUT  VARCHAR2,
+        p_comment_req     OUT  VARCHAR2,
+        p_inter_code      OUT  VARCHAR2,
+        p_status          OUT  VARCHAR2
+    );
+
+PROCEDURE CHECK_OBJECT_LOCK (p_pkg_name     IN VARCHAR2, 
+                             p_fcn_name     IN VARCHAR2, 
+                             p_flag_YN      OUT VARCHAR2, 
+                             p_lock_min     OUT NUMBER);
+
+PROCEDURE OBJECT_LOCK_UNLOCK (p_pkg_name IN VARCHAR2, 
+                              p_fcn_name IN VARCHAR2, 
+                              p_user IN VARCHAR2, 
+                              p_flag_UL IN VARCHAR2);
+/*
+** to keep oracle happy, and of course for correct functioning,
+** we must meet the minimum purity level for all these functions
+** so, here are the directives for purity level WNDS and WNPS
+**
+*/
+
+PRAGMA RESTRICT_REFERENCES (active_apheresis_donor, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_life_counts, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_life_credit_count, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_life_gallon_count, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_life_proc_count, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_life_unit_count, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_ytd_count, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_ytd_credit_count, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_ytd_gallon_count, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_ytd_proc_count, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_ytd_unit_count, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donations_attempted, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (fixed_site_donor, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (last_donation_date, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (last_donation_proc_code, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (last_donation_unit_id, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_std_info, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_age, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_city, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_county, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_state, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_zip, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_name, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_address, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_email, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_abo, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_dob, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_sex, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_ssn, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_home_phone, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_work_phone, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_home_area_code, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_work_area_code, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_range_counts, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_range_credit_count, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_range_gallon_count, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_range_proc_count, WNDS, WNPS);
+PRAGMA RESTRICT_REFERENCES (donor_range_unit_count, WNDS, WNPS);
+
+END don_std;
+/
+CREATE OR REPLACE PACKAGE BODY don_std IS
+
+
+   -- following constant will be used to identify errors generated
+   -- in this package as they will be logged in PROGRAM_ERRORS table.
+
+   PACKAGE_NAME   CONSTANT varchar2(10)   := 'DON_STD'; -- ideitify package
+
+
+/*
+** This function RETURN 'TRUE' value, if donor had completed a
+** pre-defined number of Apheresis procedures in the lifetime
+** donations, else 'FALSE' is returned.
+*/
+   FUNCTION active_apheresis_donor
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN VARCHAR2 IS
+
+      UNIT_NAME             varchar2(32)   := null;
+      szErrorMsg            varchar2(500)  := null;
+      nApheresisDonations   NUMBER;
+      nActiveStatusCount    NUMBER;
+      szReturnStatus        VARCHAR2(6);
+
+      cursor cur_apher_count (p_donor_id varchar2, p_chapter_id varchar2) is
+             select count(*) aph_count
+               from donations
+              where donor_id   = p_donor_id
+                --and chapter_id = p_chapter_id     --  IM5237
+                and DECODE(chapter_id,'ALL',p_chapter_id,chapter_id) = p_chapter_id
+                and procedure_code in (select code
+                                         from valid_master_codes
+                                        where code_type = 'APHER');
+
+      cursor cur_limit (p_chapter_id varchar2) is
+             select to_number(parameter_value)
+               from valid_parameters
+              where --chapter_id = p_chapter_id       --   IM5237
+                DECODE(chapter_id,'ALL',p_chapter_id,chapter_id) = p_chapter_id
+                and parameter_type = 'ALL'
+                and parameter_code = 'APHACTIVST';
+
+   BEGIN
+      UNIT_NAME := 'active_apheresis_donor';
+      open cur_apher_count(szDonorID, szChapterID);
+      fetch cur_apher_count
+       into nApheresisDonations;
+      if cur_apher_count%NOTFOUND then
+         nApheresisDonations := 0;
+      end if;
+      if cur_apher_count%ISOPEN then
+         close cur_apher_count;
+      end if;
+
+      if nApheresisDonations > 0 then
+         open cur_limit(szChapterID);
+         fetch cur_limit
+          into nActiveStatusCount;
+         if cur_limit%NOTFOUND then
+            nActiveStatusCount := 3;  -- if we dont find, the default value is 3
+         end if;
+         if cur_limit%ISOPEN then
+            close cur_limit;
+         end if;
+         if nApheresisDonations > nActiveStatusCount then
+            szReturnStatus := 'TRUE';
+         else
+            szReturnStatus := 'FALSE';
+         end if;
+      else
+         szReturnStatus := 'FALSE';
+      end if;
+      return szReturnStatus;
+
+      -- exception handing
+      exception
+         when others then
+            null;
+
+   END;
+
+
+/*
+** Donors date range counts are calculated and returned.
+**
+** parameter    Description
+** --------------------------------------------------
+** 'CREDIT'             date range credit counts
+** 'GALLON'             date range gallon count
+** 'UNIT'               date range unit count
+**
+*/
+   FUNCTION donor_range_counts
+            (p_what      IN varchar2,
+             szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type,
+             szStartDate IN date,
+             szEndDate   IN date)
+             RETURN NUMBER IS
+
+      UNIT_NAME             varchar2(32)   := null;
+      szErrorMsg            varchar2(500)  := null;
+      nDonorCount           NUMBER;
+      nUnitCount            NUMBER;
+      nCreditCount          NUMBER;
+      nClaimedDons          NUMBER;
+      szdonor               varchar2(10);
+
+      cursor cur_donation (p_donor_id varchar2, p_chapter_id varchar2) is
+             select donor_id, count(unit_id), sum(donations.credit_count)
+               from donations
+              where donor_id   = p_donor_id
+                and --chapter_id = p_chapter_id   --  IM5237
+                DECODE(chapter_id,'ALL',p_chapter_id,chapter_id) = p_chapter_id
+                and unit_id    is not null
+                and coll_date  between szStartDate
+                                   and szEndDate
+              group by donor_id;
+
+      cursor cur_claimed (p_donor_id varchar2, p_chapter_id varchar2) is
+             select nvl(donors.claimed_donation, 0)
+               from donors
+              where donor_id      = p_donor_id
+                and --chapter_id    = p_chapter_id      --  IM5237
+                DECODE(chapter_id,'ALL',p_chapter_id,chapter_id) = p_chapter_id;
+
+   BEGIN
+      UNIT_NAME := 'donor_range_counts';
+      open cur_donation(szDonorID, szChapterID);
+      fetch cur_donation
+       into szdonor, nUnitCount, nCreditCount;
+      if cur_donation%NOTFOUND then
+         nUnitCount   := 0;
+         nCreditCount := 0;
+      end if;
+      if cur_donation%ISOPEN then
+         close cur_donation;
+      end if;
+
+      open cur_claimed(szDonorID, szChapterID);
+      fetch cur_claimed
+       into nClaimedDons;
+      if cur_claimed%NOTFOUND then
+         nClaimedDons := 0;
+      end if;
+      if cur_claimed%ISOPEN then
+         close cur_claimed;
+      end if;
+
+      if p_what = 'CREDIT' then
+         nDonorCount := nCreditCount + nClaimedDons;
+      elsif p_what = 'GALLON' then
+         nDonorCount := FLOOR((nCreditCount + nClaimedDons)/8);
+      elsif p_what = 'UNIT' then
+         nDonorCount := nUnitCount;
+      end if;
+      return nDonorCount;
+
+      -- exception handing
+      exception
+         when others then
+            null;
+
+   END;
+
+
+/*
+** Donors date range credit count is calculated and returned.
+*/
+   FUNCTION donor_range_credit_count
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID  IN donors.chapter_id%type,
+             szStartDate IN date,
+             szEndDate   IN date) RETURN NUMBER IS
+   BEGIN
+      return donor_range_counts('CREDIT', szDonorID, szChapterID,
+                                 szStartDate, szEndDate);
+   END;
+
+
+/*
+** Donors date range gallon count is calculated and returned.
+*/
+   FUNCTION donor_range_gallon_count
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type,
+             szStartDate IN date,
+             szEndDate   IN date) RETURN NUMBER IS
+   BEGIN
+      return donor_range_counts('GALLON', szDonorID, szChapterID,
+                                 szStartDate, szEndDate);
+   END;
+
+
+/*
+** Donors date range unit count is calculated and returned.
+*/
+   FUNCTION donor_range_unit_count
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type,
+             szStartDate IN date,
+             szEndDate   IN date) RETURN NUMBER IS
+   BEGIN
+      return donor_range_counts('UNIT', szDonorID, szChapterID,
+                                 szStartDate, szEndDate);
+   END;
+
+
+/*
+** Donors date range credit count for a specified procedure
+** code is calculated and returned.
+*/
+   FUNCTION donor_range_proc_count
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type,
+             szProcCode  IN valid_proc_codes.procedure_code%type,
+             szStartDate IN date,
+             szEndDate   IN date)
+            RETURN NUMBER IS
+
+   cursor cur_proc_donation (p_donor_id varchar2,
+                             p_chapter_id varchar2,
+                             p_proc_code varchar2) is
+          select donor_id,
+                 sum(donations.credit_count)
+            from donations
+           where donor_id       = p_donor_id
+             and --chapter_id     = p_chapter_id      --  IM5237
+             DECODE(chapter_id,'ALL',p_chapter_id,chapter_id) = p_chapter_id
+             and unit_id    is not null
+             and procedure_code = p_proc_code
+             and coll_date  between szStartDate
+                                and szEndDate
+           group by donor_id;
+
+   szdonor         varchar2(10);
+   nCreditCount      NUMBER;
+
+   BEGIN
+      open cur_proc_donation(szDonorID, szChapterID, szProcCode);
+      fetch cur_proc_donation
+       into szdonor, nCreditCount;
+      if cur_proc_donation%NOTFOUND then
+         nCreditCount := 0;
+      end if;
+      if cur_proc_donation%ISOPEN then
+         close cur_proc_donation;
+      end if;
+
+      return nCreditCount;
+   END;
+
+
+/*
+** Donors lifetime counts are calculated and returned.
+**
+** parameter    Description
+** --------------------------------------------------
+** 'CREDIT'             Lifetime credit counts
+** 'GALLON'             Lifetime gallon count
+** 'UNIT'               LifeTime unit count
+**
+*/
+   FUNCTION donor_life_counts
+            (p_what      IN varchar2,
+             szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type)
+             RETURN NUMBER IS
+
+      UNIT_NAME         varchar2(32)   := null;
+      szErrorMsg        varchar2(500)  := null;
+      nDonorCount       NUMBER;
+      nUnitCount        NUMBER;
+      nDeferralCount    NUMBER; --Added by Lakshmi on 01/19/98
+      nCreditCount      NUMBER;
+      nClaimedDons      NUMBER;
+      szdonor           varchar2(10);
+
+      cursor cur_donation (p_donor_id varchar2, p_chapter_id varchar2) is
+             select donor_id, count(unit_id), nvl(sum(donations.credit_count),0)
+               from donations
+              where donor_id   = p_donor_id
+                --and --chapter_id = p_chapter_id     --    IM5237
+                --DECODE(chapter_id,'ALL',p_chapter_id,chapter_id) = p_chapter_id
+                and unit_id    is not null
+                and donation_type!='SM'
+              group by donor_id;
+
+      -- Added by Lakshmi on 01/19/98 as req by Goudar
+
+      cursor cur_deferral (p_donor_id varchar2, p_chapter_id varchar2) is
+             select donor_id, count(*)
+               from donations
+              where donor_id   = p_donor_id
+                --and --chapter_id = p_chapter_id         --  IM5237
+                --DECODE(chapter_id,'ALL',p_chapter_id,chapter_id) = p_chapter_id
+                and unit_id    is null
+              group by donor_id;
+
+      cursor cur_claimed (p_donor_id varchar2, p_chapter_id varchar2) is
+             select nvl(donors.claimed_donation, 0)
+               from donors
+              where donor_id      = p_donor_id;
+                --and --chapter_id    = p_chapter_id        --  IM5237
+                --DECODE(chapter_id,'ALL',p_chapter_id,chapter_id) = p_chapter_id;
+
+   BEGIN
+      UNIT_NAME := 'donor_life_count';
+      open cur_donation(szDonorID, szChapterID);
+      fetch cur_donation
+       into szdonor, nUnitCount, nCreditCount;
+      if cur_donation%NOTFOUND then
+         nUnitCount   := 0;
+         nCreditCount := 0;
+      end if;
+      if cur_donation%ISOPEN then
+         close cur_donation;
+      end if;
+
+      open cur_deferral(szDonorID, szChapterID);
+      fetch cur_deferral
+       into szdonor, nDeferralCount;
+      if cur_deferral%NOTFOUND then
+         nDeferralCount   := 0;
+      end if;
+      if cur_deferral%ISOPEN then
+         close cur_deferral;
+      end if;
+
+      open cur_claimed(szDonorID, szChapterID);
+      fetch cur_claimed
+       into nClaimedDons;
+      if cur_claimed%NOTFOUND then
+         nClaimedDons := 0;
+      end if;
+      if cur_claimed%ISOPEN then
+         close cur_claimed;
+      end if;
+
+      if p_what = 'CREDIT' then
+         nDonorCount := nCreditCount + nClaimedDons;
+      elsif p_what = 'GALLON' then
+         nDonorCount := FLOOR((nCreditCount + nClaimedDons)/8);
+      elsif p_what = 'UNIT' then
+         nDonorCount := nUnitCount;
+      elsif p_what ='DEFER' then
+         nDonorCount := nDeferralCount;
+      end if;
+      return nDonorCount;
+
+      -- exception handing
+      exception
+         when others then
+            null;
+
+   END;
+
+
+
+/*
+** Donors lifetime donations credit count is calculated and returned.
+*/
+   FUNCTION donor_life_credit_count
+            (szDonorID IN donors.donor_id%type,
+            szChapterID IN donors.chapter_id%type) RETURN NUMBER IS
+   BEGIN
+      return donor_life_counts('CREDIT', szDonorID, szChapterID);
+   END;
+
+
+/*
+** Donors lifetime gallon count is calculated and returned.
+*/
+   FUNCTION donor_life_gallon_count
+            (szDonorID IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN NUMBER IS
+   BEGIN
+      return donor_life_counts('GALLON', szDonorID, szChapterID);
+   END;
+
+
+/*
+** Donors lifetime donations unit count is calculated and returned.
+*/
+   FUNCTION donor_life_unit_count
+            (szDonorID IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN NUMBER IS
+   BEGIN
+      return donor_life_counts('UNIT', szDonorID, szChapterID);
+   END;
+
+/*  Added by Lakshmi on 01/19/98 as req by Goudar
+** Donors lifetime donations deferral count is calculated and returned.
+*/
+   FUNCTION donor_life_deferral_count
+            (szDonorID IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN NUMBER IS
+   BEGIN
+      return donor_life_counts('DEFER', szDonorID, szChapterID);
+   END;
+
+/*
+** Donors lifetime donations credit count for a specified procedure
+** code is calculated and returned.
+*/
+   FUNCTION donor_life_proc_count
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type,
+             szProcCode  IN valid_proc_codes.procedure_code%type)
+            RETURN NUMBER IS
+
+      UNIT_NAME         varchar2(32)   := null;
+      szErrorMsg        varchar2(500)  := null;
+      szdonor           varchar2(10);
+      nCreditCount      NUMBER;
+
+      cursor cur_proc_donation (p_donor_id varchar2,
+                                p_chapter_id varchar2,
+                                p_proc_code varchar2) is
+             select donor_id,
+                    sum(donations.credit_count)
+               from donations
+              where donor_id       = p_donor_id
+                and --chapter_id     = p_chapter_id         --      IM5237
+                DECODE(chapter_id,'ALL',p_chapter_id,chapter_id) = p_chapter_id
+                and procedure_code = p_proc_code
+              group by donor_id;
+
+   BEGIN
+      UNIT_NAME := 'donor_life_proc_count';
+      open cur_proc_donation(szDonorID, szChapterID, szProcCode);
+      fetch cur_proc_donation
+       into szdonor, nCreditCount;
+      if cur_proc_donation%NOTFOUND then
+         nCreditCount := 0;
+      end if;
+      if cur_proc_donation%ISOPEN then
+         close cur_proc_donation;
+      end if;
+
+      return nCreditCount;
+
+      -- exception handing
+      exception
+         when others then
+            null;
+
+   END;
+
+
+
+/*
+** Donors ytd counts are calculated and returned.
+**
+** parameter    Description
+** --------------------------------------------------
+** 'CREDIT'             Lifetime credit counts
+** 'GALLON'             Lifetime gallon count
+** 'UNIT'               LifeTime unit count
+**
+*/
+   FUNCTION donor_ytd_count
+            (p_what      IN varchar2,
+             szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type)
+             RETURN NUMBER IS
+
+      UNIT_NAME             varchar2(32)   := null;
+      szErrorMsg            varchar2(500)  := null;
+      nDonorCount           NUMBER;
+      nUnitCount            NUMBER;
+      nCreditCount          NUMBER;
+      nClaimedDons          NUMBER;
+
+      cursor cur_donation (p_donor_id varchar2, p_chapter_id varchar2) is
+             select count(unit_id), sum(donations.credit_count),
+                    nvl(donors.claimed_donation, 0)
+               from donations, donors
+              where donors.donor_id      = p_donor_id
+                and donations.donor_id   = donors.donor_id
+                and donations.coll_date between trunc(sysdate, 'YYYY')
+                                            and trunc(sysdate)
+                and donations.unit_id    is not null
+                and donations.donation_type!='SM'
+                --and --donors.chapter_id    = p_chapter_id     --  IM5237
+                --DECODE(donors.chapter_id,'ALL',p_chapter_id,donors.chapter_id) = p_chapter_id
+                --and --donations.chapter_id = p_chapter_id     --  IM5237
+                --DECODE(donations.chapter_id,'ALL',p_chapter_id,donations.chapter_id) = p_chapter_id
+              group by donors.claimed_donation;
+
+   BEGIN
+      UNIT_NAME  := 'donor_ytd_count';
+      open cur_donation(szDonorID, szChapterID);
+      fetch cur_donation
+       into nUnitCount, nCreditCount, nClaimedDons;
+      if cur_donation%NOTFOUND then
+         nUnitCount   := 0;
+         nCreditCount := 0;
+         nClaimedDons := 0;
+      end if;
+      if cur_donation%ISOPEN then
+         close cur_donation;
+      end if;
+
+      if p_what = 'CREDIT' then
+         nDonorCount := nCreditCount ;
+      elsif p_what = 'GALLON' then
+         nDonorCount := FLOOR((nCreditCount + nClaimedDons)/8);
+      elsif p_what = 'UNIT' then
+         nDonorCount := nUnitCount;
+      end if;
+      return nDonorCount;
+      -- exception handing
+      exception
+         when others then
+            null;
+
+   END;
+
+
+/*
+** Donors YTD donations credit count is calculated and returned.
+*/
+   FUNCTION donor_ytd_credit_count
+            (szDonorID IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN NUMBER IS
+   BEGIN
+      return donor_ytd_count('CREDIT', szDonorID, szChapterID);
+   END;
+
+
+/*
+** Donors YTD gallon count is calculated and returned.
+*/
+   FUNCTION donor_ytd_gallon_count
+            (szDonorID IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN NUMBER IS
+   BEGIN
+      return donor_ytd_count('GALLON', szDonorID, szChapterID);
+   END;
+
+
+/*
+** Donors lifetime donations unit count is calculated and returned.
+*/
+   FUNCTION donor_ytd_unit_count
+            (szDonorID IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN NUMBER IS
+   BEGIN
+      return donor_ytd_count('UNIT', szDonorID, szChapterID);
+   END;
+
+
+/*
+** Donors YTD donations credit count for a specified procedure
+** code is calculated and returned.
+*/
+   FUNCTION donor_ytd_proc_count
+            (szDonorID  IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type,
+             szProcCode IN valid_proc_codes.procedure_code%type)
+             RETURN NUMBER IS
+
+      UNIT_NAME         varchar2(32)   := null;
+      szErrorMsg        varchar2(500)  := null;
+      szdonor           varchar2(10);
+      nCreditCount      NUMBER;
+
+      cursor cur_proc_donation (p_donor_id varchar2,
+                                p_chapter_id varchar2,
+                                p_proc_code varchar2) is
+             select donor_id,
+                    sum(donations.credit_count)
+               from donations
+              where donor_id       = p_donor_id
+                and --  chapter_id     = p_chapter_id     --  IM5237
+                DECODE(chapter_id,'ALL',p_chapter_id,chapter_id) = p_chapter_id
+                and coll_date between trunc(sysdate, 'YYYY')
+                                  and trunc(sysdate)
+                and unit_id    is not null
+                and procedure_code = p_proc_code
+              group by donor_id;
+
+   BEGIN
+      UNIT_NAME  := 'donor_ytd_proc_count';
+      open cur_proc_donation(szDonorID, szChapterID, szProcCode);
+      fetch cur_proc_donation
+       into szdonor, nCreditCount;
+      if cur_proc_donation%NOTFOUND then
+         nCreditCount := 0;
+      end if;
+      if cur_proc_donation%ISOPEN then
+         close cur_proc_donation;
+      end if;
+
+      return nCreditCount;
+      -- exception handing
+      exception
+         when others then
+            null;
+
+   END;
+
+
+/*
+** Total RETURN NUMBER of donations attempts is returned, this excludes
+** successful donations.
+*/
+   FUNCTION donations_attempted
+            (szDonorID IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN NUMBER IS
+
+      UNIT_NAME            varchar2(32)   := null;
+      szErrorMsg           varchar2(500)  := null;
+      nAttemptCount        NUMBER;
+
+      cursor cur_don_attempts (p_donor_id varchar2, p_chapter_id varchar2) is
+             select count(*)
+               from donations
+              where donor_id   = p_donor_id
+                and --chapter_id = p_chapter_id
+                DECODE(chapter_id,'ALL',p_chapter_id,chapter_id) = p_chapter_id
+                and unit_id is NULL;
+
+   BEGIN
+      UNIT_NAME  := 'donations_attempted';
+      open cur_don_attempts(szDonorID, szChapterID);
+      fetch cur_don_attempts
+       into nAttemptCount;
+      if cur_don_attempts%NOTFOUND then
+         nAttemptCount   := 0;
+      end if;
+      if cur_don_attempts%ISOPEN then
+         close cur_don_attempts;
+      end if;
+
+      return nAttemptCount;
+
+      -- exception handing
+      exception
+         when others then
+            null;
+
+   END;
+
+
+/*
+** Donor age is calculated as on SYSDATE and is returned in years
+** and returns age in years (is fractional)
+*/
+   FUNCTION donor_age (szDonorID IN donors.donor_id%type,
+                       szChapterID IN donors.chapter_id%type)
+                       RETURN NUMBER IS
+
+      UNIT_NAME       varchar2(32)   := null;
+      szErrorMsg      varchar2(500)  := null;
+      nDonorAge       NUMBER;
+
+   BEGIN
+      UNIT_NAME := 'donor_age';
+      select /*+ index(donors donors_pk) */
+             months_between(sysdate, date_of_birth) / 12
+        into nDonorAge
+        from donors
+       where donor_id   = szDonorID
+         and --chapter_id = szChapterID;      --IM5237
+         DECODE(chapter_id,'ALL',szChapterID,chapter_id) = szChapterID;
+
+      return round(nDonorAge, 2);
+
+      -- exception handing
+      exception
+         when others then
+            null;
+
+   END;
+
+/*
+** Return 'TRUE' if current donor has donated at any fixed
+** site at-least once, else 'FALSE' is returned.
+*/
+   FUNCTION fixed_site_donor
+            (szDonorID IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN VARCHAR2 IS
+
+      UNIT_NAME             varchar2(32)   := null;
+      szErrorMsg            varchar2(500)  := null;
+      szReturnValue         VARCHAR2(5);
+
+      cursor cur_fixed_site is
+             select count(drives.drive_id)
+               from drives, donations
+              where donations.donor_id = szDonorID
+                and donations.unit_id  is not null
+                and drives.drive_id    = donations.drive_id
+                and drives.location_id in (select site_id
+                                             from fixed_sites);
+
+   BEGIN
+      UNIT_NAME := 'fixed_site_donor';
+      open cur_fixed_site;
+      fetch cur_fixed_site
+       into szReturnValue;
+      if cur_fixed_site%NOTFOUND then
+         szReturnValue := 0;
+      end if;
+      if cur_fixed_site%ISOPEN then
+         close cur_fixed_site;
+      end if;
+
+      if szReturnValue > 0 then
+         return 'TRUE';
+      else
+         return 'FALSE';
+      end if;
+
+      -- exception handing
+      exception
+         when others then
+            null;
+
+   END;
+
+
+/*
+** Date of last successful donation is returned.
+*/
+   FUNCTION last_donation_date
+            (szDonorID IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN DATE IS
+
+      UNIT_NAME             varchar2(32)   := null;
+      szErrorMsg            varchar2(500)  := null;
+      szLastDonationDate    date;
+
+   cursor cur_last_donation (p_donor_id varchar2, p_chapter_id varchar2) is
+          select max(coll_date)
+            from donations
+           where donor_id    = p_donor_id
+             and --chapter_id  = p_chapter_id       --  IM5237
+             DECODE(chapter_id,'ALL',p_chapter_id,chapter_id) = p_chapter_id
+             and unit_id is not null;
+
+   BEGIN
+      UNIT_NAME := 'last_donation_date';
+      open cur_last_donation(szDonorID, szChapterID);
+      fetch cur_last_donation
+       into szLastDonationDate;
+      if cur_last_donation%NOTFOUND then
+         szLastDonationdate := NULL;
+      end if;
+      if cur_last_donation%ISOPEN then
+         close cur_last_donation;
+      end if;
+
+      return szLastDonationDate;
+
+      -- exception handing
+      exception
+         when others then
+            null;
+
+   END;
+
+
+/*
+** Procedure code for last successful donation is returned.
+*/
+   FUNCTION last_donation_proc_code
+            (szDonorID IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN VARCHAR2 IS
+
+      UNIT_NAME       varchar2(32)   := null;
+      szErrorMsg      varchar2(500)  := null;
+      szProcedureCode varchar2(5);
+      szLastCollDate  date := last_donation_date(szDonorID, szChapterID);
+
+   cursor cur_last_donation (p_coll_date date) is
+          select procedure_code
+            from donations
+           where donor_id    = szDonorID
+             and -- chapter_id  = szChapterID       --  IM5237
+             DECODE(chapter_id,'ALL',szChapterID,chapter_id) = szChapterID
+             and coll_date   = p_coll_date;
+
+   BEGIN
+      UNIT_NAME  := 'last_donation_proc_code';
+      open cur_last_donation(szLastCollDate);
+      fetch cur_last_donation
+       into szProcedurecode;
+      if cur_last_donation%NOTFOUND then
+         szProcedureCode := NULL;
+      end if;
+      if cur_last_donation%ISOPEN then
+         close cur_last_donation;
+      end if;
+
+      return szProcedureCode;
+
+      -- exception handing
+      exception
+         when others then
+            null;
+
+   END;
+
+
+/*
+** Unit ID of last successful donation is returned.
+*/
+   FUNCTION last_donation_unit_id
+            (szDonorID IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN VARCHAR2 IS
+
+      UNIT_NAME       varchar2(32)   := null;
+      szErrorMsg      varchar2(500)  := null;
+      szLastUnitID    varchar2(15);
+      szLastCollDate  date := last_donation_date(szDonorID, szChapterID);
+
+      cursor cur_last_donation (p_donor_id varchar2,
+                                p_chapter_id varchar2,
+                                p_coll_date  date) is
+             select unit_id
+               from donations
+              where donor_id    = p_donor_id
+                and --chapter_id  = p_chapter_id      --  IM5237
+                DECODE(chapter_id,'ALL',p_chapter_id,chapter_id) = p_chapter_id
+                and coll_date   = p_coll_date;
+
+
+   BEGIN
+      UNIT_NAME  := 'last_donation_unit_id';
+      open cur_last_donation(szDonorID, szChapterID, szLastCollDate);
+      fetch cur_last_donation
+       into szLastUnitID;
+      if cur_last_donation%NOTFOUND then
+         szLastUnitID := NULL;
+      end if;
+      if cur_last_donation%ISOPEN then
+         close cur_last_donation;
+      end if;
+
+      return szLastUnitID;
+
+      -- exception handing
+      exception
+         when others then
+            null;
+
+   END;
+
+
+   /*
+   ** Returns donor information based on first parameter
+   ** NAME    -> last_name + ', ' + suffix + ', ' + first_name + ', ' +
+   **            middle_initial
+   ** DOB     -> date of birth in MM-DD-YYYY format but as a char string
+   ** ABO     -> abo group with code and desc
+   ** EMAIL   -> returns email if available
+   ** GENDER  -> returns M for Male and F for Female
+   ** SSN     -> returns social security no
+   ** ADDR    -> Street Address + ' ' + city + ', ' + state + ' ' + zip
+   ** HOME    -> formatted home number
+   ** WORK    -> formatted work phone number
+   ** HAREA   -> home phone area code
+   ** WAREA   -> work phone area code
+   ** CITY    -> formatted work phone number
+   ** STATE   -> formatted work phone number
+   ** ZIP     -> formatted work phone number
+   **
+   ** in the case of unknown value of p_what fixed char string 'NULL'
+   ** is returned. This is a good check too. If this is displayed on the
+   ** screen, check the parameter passed
+   */
+   FUNCTION donor_std_info (p_what      IN varchar2,
+                            szDonorID   IN donors.donor_id%type,
+                            szChapterID IN donors.chapter_id%type)
+                            RETURN VARCHAR2 IS
+
+      UNIT_NAME             varchar2(32)  := null;
+      szErrorMsg            varchar2(500)  := null;
+      szFirstName           varchar2(50)  := null;
+      szMiddleName          varchar2(50)  := null;
+      szLastName            varchar2(50)  := null;
+      szLastNameSuffix      varchar2(50)  := null;
+      szDateOfBirth         varchar2(25)  := null;
+      szGender              varchar2(10)  := null;
+      nSSN                  number        := 0;
+      szABODesc             varchar2(50)  := null;
+      szStreetName          varchar2(50)  := null;
+      szSuiteApt            varchar2(50)  := null;
+      szCity                varchar2(50)  := null;
+      szState               varchar2(50)  := null;
+      szZip                 varchar2(50)  := null;
+      szCounty              varchar2(50)  := null;
+      szEmail               varchar2(128) := null;
+      szReturnValue         varchar2(250) := 'NULL';
+      szHAreaCode           varchar2(10)  := null;
+      szHPhoneNumber        varchar2(10)  := null;
+      szWAreaCode           varchar2(10)  := null;
+      szWPhoneNumber        varchar2(10)  := null;
+      nDonorWeight          NUMBER        := NULL;
+   szExtension        varchar2(10) := null;
+
+
+   cursor cur_donor is
+          select /*+ index(donors donors_pk) */
+                 a.first_name, a.middle_name, a.last_name,
+                 nvl(a.last_name_suffix, ''), a.gender, a.ssn,
+                 to_char(a.date_of_birth, 'MM-DD-YYYY'),
+                 b.description, a.donor_weight
+            from donors a, valid_master_codes b
+           where a.donor_id     = szDonorID
+             and b.code_type    = 'ABO'
+             and b.code         = nvl(a.blood_type, 'NONE')
+             and -- a.chapter_id   = szChapterID          --  IM5237
+             DECODE(chapter_id,'ALL',szChapterID,chapter_id) = szChapterID
+             and sysdate  between b.eff_date
+                              and nvl(b.term_date, sysdate+1);
+
+   cursor donor_address is
+          select /*+ index(valid_city_state valid_city_state_pk) */
+                 a.street_name, a.suite_apt,
+                 a.h_area_code, a.h_phone_no,
+                 a.d_area_code, a.d_phone_no, a.extension,
+                 a.email,
+                 b.city, b.state, b.zip, b.county
+            from donor_addresses a, valid_city_state b
+           where a.donor_id     = szDonorID
+             and --a.chapter_id   = szChapterID         --  IM5237
+             DECODE(chapter_id,'ALL',szChapterID,chapter_id) = szChapterID
+             and a.address_type = 'RES'
+             and b.usps_id      = a.usps_id
+             and sysdate between b.eff_date
+                             and nvl(b.term_date, sysdate+1);
+
+   BEGIN
+      UNIT_NAME  := 'don_std_info[' || p_what || ']';
+      if p_what in ('NAME', 'ABO', 'GENDER', 'DOB', 'SSN', 'WEIGHT') then
+         open cur_donor;
+         fetch cur_donor
+          into szFirstName,      szMiddleName, szLastName,
+               szLastNameSuffix, szGender,     nSSN,
+               szDateOfBirth,    szABODesc, nDonorWeight;
+         if cur_donor%NOTFOUND then
+            close cur_donor;
+         end if;
+         if cur_donor%isopen then
+            close cur_donor;
+         end if;
+      elsif p_what in ('ADDR', 'HOME', 'WORK', 'EMAIL',
+                       'CITY', 'STATE', 'ZIP', 'COUNTY',
+                       'WAREA', 'HAREA') then
+         open donor_address;
+         fetch donor_address
+          into szStreetName, szSuiteApt,
+               szHAreaCode,  szHPhoneNumber,
+               szWAreaCode,  szWPhoneNumber,
+               szExtension,  szEmail,
+               szCity, szState, szZip, szCounty;
+         if donor_address%NOTFOUND then
+            close donor_address;
+         end if;
+         if donor_address%isopen then
+            close donor_address;
+         end if;
+      else
+         szReturnValue := 'NULL';
+         return szReturnValue;
+      end if;
+      if    p_what = 'NAME'   then
+         -- return donor name
+         szReturnValue := rtrim(szLastName);
+         if szLastNameSuffix is not null then
+            szReturnValue := szReturnValue || ' ' ||
+                             rtrim(szLastNameSuffix);
+         end if;
+         szReturnValue := szReturnValue || ', ' ||
+                          szfirstName   || ' ' ||
+                          szMiddleName;
+      elsif p_what = 'ABO'    then
+         -- return donor abo
+         szReturnValue := upper(substr(rtrim(szABODesc), 1, 6));
+      elsif p_what = 'DOB'    then
+         -- return donor date of birth
+         szReturnValue := szDateOfBirth;
+      elsif p_what = 'SSN'    then
+         -- return donor ssn
+         szReturnValue := to_char(nSSN);
+      elsif p_what = 'WEIGHT'    then
+         -- return donor weight
+         szReturnValue := to_char(nDonorWeight);
+      elsif p_what = 'GENDER' then
+         -- return donor gender
+         szReturnValue := szGender;
+      elsif p_what = 'CITY' then
+         -- return donor city
+         szReturnValue := szCity;
+      elsif p_what = 'STATE' then
+         -- return donor State
+         szReturnValue := szState;
+      elsif p_what = 'ZIP' then
+         -- return donor zip
+         szReturnValue := szZip;
+      elsif p_what = 'COUNTY' then
+         -- return donor county
+         szReturnValue := szCounty;
+      elsif p_what = 'HAREA' then
+         -- return donor home area code
+         szReturnValue := szHAreaCode;
+      elsif p_what = 'WAREA' then
+         -- return donor work area code
+         szReturnValue := szWAreaCode;
+      elsif p_what = 'ADDR'   then
+         -- return donor address
+         szReturnValue := rtrim(szStreetName) || ' ' ||
+                          rtrim(szSuiteApt)   || ' ' ||
+                          szCity || ', ' || szState || ' ' || szZip;
+      elsif p_what = 'HOME'   then
+         -- return donor home number
+         if szHPhoneNumber is not null and
+            szHAreaCode is not null then
+            szReturnValue := '(H)' || szHAreaCode || '-' ||
+                                      substr(szHPhoneNumber, 1,3) || '-' ||
+                                      substr(szHPhoneNumber, 4);
+         else
+            szReturnValue := 'Not Available';
+         end if;
+      elsif p_what = 'WORK'   then
+         -- return donor work number
+         if szWPhoneNumber is not null and
+            szWAreaCode is not null then
+            szReturnValue := '(B)' || szWAreaCode || '-' ||
+                                      substr(szWPhoneNumber, 1,3) || '-' ||
+                                      substr(szWPhoneNumber, 4);
+            if szExtension is not null then
+               szReturnValue := szReturnValue || ' #' || szExtension;
+            end if;
+         else
+            szReturnValue := 'Not Available';
+         end if;
+      elsif p_what = 'EMAIL'  then
+         -- return donor email adderess
+         szReturnValue := rtrim(szEmail);
+      else
+         -- return NULL
+         szReturnValue := 'NULL';
+      end if;
+
+      return szReturnValue;
+
+      -- exception handing
+      exception
+         when others then
+            null;
+
+   END;
+
+
+/*
+** City of donor residence is returned.
+*/
+   FUNCTION donor_city (szDonorID IN donors.donor_id%type,
+                        szChapterID IN donors.chapter_id%type)
+                        RETURN VARCHAR2 IS
+   BEGIN
+      return donor_std_info('CITY', szDonorID, szChapterID);
+   END;
+
+
+/*
+** County of donor residence is returned.
+*/
+   FUNCTION donor_county (szDonorID IN donors.donor_id%type,
+                          szChapterID IN donors.chapter_id%type)
+                         RETURN VARCHAR2 IS
+   BEGIN
+      return donor_std_info('COUNTY', szDonorID, szChapterID);
+   END;
+
+
+/*
+** Zip code for donor address is returned.
+*/
+   FUNCTION donor_zip (szDonorID IN donors.donor_id%type,
+                       szChapterID IN donors.chapter_id%type)
+                       RETURN VARCHAR2 IS
+   BEGIN
+      return donor_std_info('ZIP', szDonorID, szChapterID);
+   END;
+
+
+/*
+** state for donor address is returned.
+*/
+   FUNCTION donor_state (szDonorID IN donors.donor_id%type,
+                         szChapterID IN donors.chapter_id%type)
+                         RETURN VARCHAR2 IS
+   BEGIN
+      return donor_std_info('STATE', szDonorID, szChapterID);
+   END;
+
+/*
+** Area Code for donor's Home telephone is returned.
+*/
+   FUNCTION donor_home_area_code
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN VARCHAR2 IS
+   BEGIN
+      return donor_std_info('HAREA', szDonorID, szChapterID);
+   END;
+
+/*
+** Area Code for donor's Work telephone is returned.
+*/
+   FUNCTION donor_work_area_code
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN VARCHAR2 IS
+   BEGIN
+      return donor_std_info('WAREA', szDonorID, szChapterID);
+   END;
+
+/*
+** Donor full name
+*/
+   FUNCTION donor_name
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN VARCHAR2 IS
+   BEGIN
+      return donor_std_info('NAME', szDonorID, szChapterID);
+   END;
+
+/*
+** donor full address
+*/
+   FUNCTION donor_address
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN VARCHAR2 IS
+   BEGIN
+      return donor_std_info('ADDR', szDonorID, szChapterID);
+   END;
+
+/*
+** donor abo
+*/
+   FUNCTION donor_abo
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN VARCHAR2 IS
+   BEGIN
+      return donor_std_info('ABO', szDonorID, szChapterID);
+   END;
+
+/*
+** donor email
+*/
+   FUNCTION donor_email
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN VARCHAR2 IS
+   BEGIN
+      return donor_std_info('EMAIL', szDonorID, szChapterID);
+   END;
+
+/*
+** donor sex
+*/
+   FUNCTION donor_sex
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN VARCHAR2 IS
+   BEGIN
+      return donor_std_info('GENDER', szDonorID, szChapterID);
+   END;
+
+/*
+** donor work phone
+*/
+   FUNCTION donor_work_phone
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN VARCHAR2 IS
+   BEGIN
+      return donor_std_info('WORK', szDonorID, szChapterID);
+   END;
+
+/*
+** donor home_phone
+*/
+   FUNCTION donor_home_phone
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN VARCHAR2 IS
+   BEGIN
+      return donor_std_info('HOME', szDonorID, szChapterID);
+   END;
+
+/*
+** donor ssn
+*/
+   FUNCTION donor_ssn
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN NUMBER IS
+   BEGIN
+      return to_number(donor_std_info('SSN', szDonorID, szChapterID));
+   END;
+
+/*
+** donor dob
+*/
+   FUNCTION donor_dob
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN date IS
+   BEGIN
+      return to_date(donor_std_info('DOB', szDonorID, szChapterID),
+                     'MM-DD-YYYY');
+   END;
+
+/*
+** donor weight
+*/
+   FUNCTION donor_weight
+            (szDonorID   IN donors.donor_id%type,
+             szChapterID IN donors.chapter_id%type) RETURN NUMBER IS
+   BEGIN
+      return to_number(donor_std_info('WEIGHT', szDonorID, szChapterID));
+   END;
+
+/* generating the new ID- Added by edwin for the 4.2 on 042209
+*/
+    PROCEDURE generate_new_id (
+        param_id_type IN VARCHAR2,
+        new_id        OUT VARCHAR2,
+        err_flag      OUT VARCHAR2,
+        err_msg       OUT VARCHAR2
+    ) IS
+        string_len   NUMBER;
+        new_sequence NUMBER;
+        lv_id_type VARCHAR2(20);
+    BEGIN
+        lv_id_type := param_id_type;
+        
+        IF param_id_type = 'DUPLI' THEN
+            lv_id_type := 'DP';        
+        END IF;
+        
+        SELECT
+            nvl(last_sequence, 0) + 1
+        INTO new_sequence
+        FROM
+            all_donor_ids
+        WHERE
+            id_type = lv_id_type
+        FOR UPDATE OF last_sequence;
+
+
+        
+        string_len := length(lv_id_type);
+        new_id := lv_id_type
+                  || lpad(to_char(new_sequence), 10 - string_len, '0');
+
+        BEGIN
+            UPDATE all_donor_ids
+            SET
+                last_sequence = new_sequence,
+                last_modified_date = sysdate
+            WHERE
+                id_type = lv_id_type;
+
+            COMMIT;
+        EXCEPTION
+            WHEN OTHERS THEN
+                IF sqlcode != -100501 THEN
+                    err_flag := 'Y';
+                    err_msg := substr(sqlerrm, 1, 75);
+                END IF;
+        END;
+
+    EXCEPTION
+        WHEN no_data_found THEN
+            err_flag := 'Y';
+            err_msg := 'ID type not found in ALL_DONOR_IDS, contact IS';
+        WHEN OTHERS THEN
+            IF sqlcode != -100501 THEN
+                err_flag := 'Y';
+                err_msg := substr(sqlerrm, 1, 75);
+            END IF;
+    END generate_new_id;
+
+PROCEDURE GENERATE_TEMP_ID(new_temp_id out varchar2,
+                         err_flag out varchar2,
+                         err_msg out varchar2) IS
+  string_len number ;
+  new_sequence number ;
+  szTempID    varchar2(10);
+
+BEGIN
+
+  err_flag:='N';
+
+  select LT_TEMP_ID,nvl(counter_value,0) + 1
+  into szTempID,new_sequence
+  from LAPTOP_ID_DETAILS
+  where rownum <2
+  for update of counter_value;
+
+  string_len := length(szTempID) ;
+  new_temp_id := szTempID||lpad(to_char(new_sequence),10-string_len,'0') ;
+
+  begin
+    update LAPTOP_ID_DETAILS
+    set counter_value= new_sequence;
+  exception
+      when others then
+        if sqlcode != -100501 then
+            err_flag := 'Y' ;
+            err_msg  := 'Temp ID-'||substr(sqlerrm,1,75) ;
+        end if;
+  end ;
+
+  commit;
+
+EXCEPTION
+    when no_data_found then
+        err_flag := 'Y' ;
+        err_msg  := 'LAPTOP_ID_DETAILS  table does not have entires '||
+                    ' to generate temp IDs' ;
+     when others then
+       if  sqlcode != -100501
+       then
+          err_flag := 'Y' ;
+          err_msg  := 'Temp ID-'||substr(sqlerrm,1,75) ;
+       end if;
+
+END GENERATE_TEMP_ID;
+
+PROCEDURE DONOR_PLASMA_RBC_LOSS(p_donor_id   IN  VARCHAR2,
+                                p_plasma     OUT NUMBER,
+                                p_rbc        out NUMBER,
+                                p_chapter_id IN varchar2)   IS
+  CURSOR curr_loss(p_local_date in date) is select actual_plasma_loss,actual_rbc_loss,
+                    donation_type, procedure_code from donations where
+                    donor_id=p_donor_id and unit_id is not null and
+                    coll_date between p_local_date-365 and p_local_date and
+                    (BLEED_START_TIME_L1 is not null or
+                    BLEED_START_TIME_L2 is not null or
+                    BLEED_START_TIME_R1 is not null or
+                    BLEED_START_TIME_R2 is not null) ;
+
+ cum_rbc_loss     NUMBER:=0;
+ cum_plasma_loss  NUMBER:=0;
+ s_rbc_loss       NUMBER:=0;
+ s_plasma_loss    NUMBER:=0;
+ e_rbc_loss       NUMBER:=0;
+ e_plasma_loss    NUMBER:=0;
+ v_local_time date;
+ v_local_date date;
+v_timezone_active char(1);
+BEGIN
+
+ begin
+  SELECT  NVL(time_zone_enabled,'N')
+    INTO    v_timezone_active
+    FROM    lt_application_config;
+ exception
+   when no_data_found then
+     v_timezone_active := 'N';
+ end;
+
+
+   if v_timezone_active ='Y' then
+
+   Lifetrack_timezone_convert.get_local_time(p_chapter_id,sysdate,v_local_time);
+   v_local_date := v_local_time;
+  else
+         v_local_date := sysdate;
+
+  end if;
+
+ FOR Z in CURR_LOSS(v_local_date) loop
+
+   select STANDARD_RBC_LOSS,STANDARD_PLASMA_LOSS ,ECV_RBC_LOSS,
+          ECV_PLASMA_LOSS into s_rbc_loss,s_plasma_loss,
+          e_rbc_loss,e_plasma_loss from valid_proc_codes where
+          procedure_code=Z.procedure_code and
+          v_local_date between eff_date and nvl(term_date,v_local_date+1);
+
+    cum_rbc_loss:=cum_rbc_loss +
+                  nvl(Z.actual_rbc_loss,(s_rbc_loss+e_rbc_loss));
+    cum_plasma_loss:=cum_plasma_loss + nvl(Z.actual_plasma_loss,
+                       (s_plasma_loss+e_plasma_loss));
+ End Loop;
+
+ p_plasma:=cum_plasma_loss;
+ p_rbc   :=cum_rbc_loss;
+
+END DONOR_PLASMA_RBC_LOSS;
+
+PROCEDURE UPDATE_UNDER_PROCESSING_FLAG (p_donor_id in varchar2,
+                                        p_drive_id in varchar2,
+                                        p_lock_flag in varchar2) is
+
+Begin
+
+  If p_lock_flag='L'  then   -- lock it
+
+    UPDATE ONLINE_STATUS set UNDER_PROCESSING_FLAG='L' where
+   donor_id=p_donor_id and drive_id=p_drive_id and
+    status_flag!='W' and under_processing_flag is null and rownum=1;
+
+  Else
+     UPDATE ONLINE_STATUS set UNDER_PROCESSING_FLAG=null where
+    donor_id=p_donor_id and drive_id=p_drive_id and
+    under_processing_flag='L';
+  End If;
+
+     commit;
+End UPDATE_UNDER_PROCESSING_FLAG;
+
+FUNCTION COMMENT_REQ_CHECK(P_DONATION_TYPE  IN VARCHAR2,
+                                       P_PROCEDURE_CODE IN VARCHAR2,
+                                       P_PHYSICAL_CODE  IN VARCHAR2,
+                                       P_VALUE          IN VARCHAR2,
+                                       P_GENDER         IN VARCHAR2
+                                      )
+RETURN VARCHAR2 IS
+  ln_p_value  NUMBER;
+  lv_data_type VARCHAR2(10);
+  ln_dummy PLS_INTEGER;
+  lv_return VARCHAR2(10) := 'FALSE';
+BEGIN
+
+  -- Determine value data type - C or N (Decimal is also considered as N)
+  BEGIN
+    select to_number(P_VALUE) into ln_p_value
+     from dual;
+    lv_data_type := 'N';
+  EXCEPTION
+    WHEN OTHERS THEN
+      lv_data_type := 'C';
+  END;
+
+  -- Check if comment is required.
+  BEGIN
+    IF lv_data_type = 'C' THEN
+      select 1 into ln_dummy
+        from valid_physical_rules
+       where donation_type = p_donation_type
+         and procedure_code = p_procedure_code
+         and physical_code = p_physical_code
+         and gender in ('A', p_gender)
+         and item_value = p_value
+         and nvl(comment_req_flag, 'X') = 'Y'
+         and sysdate between eff_date and nvl(term_date, sysdate + 1);
+
+      lv_return := 'TRUE';
+    ELSIF lv_data_type IN ('N', 'D') THEN
+      FOR rec in
+        (
+          select item_operator, item_value, item_value_max
+            from valid_physical_rules
+           where donation_type = p_donation_type
+             and procedure_code = p_procedure_code
+             and physical_code = p_physical_code
+             and gender in ('A', p_gender)
+             and nvl(comment_req_flag,'X') = 'Y'
+             and sysdate between eff_date and nvl(term_date, sysdate + 1)
+             )
+      LOOP
+        IF rec.item_operator = 'BETWEEN' THEN
+          IF ln_p_value NOT BETWEEN TO_NUMBER(rec.item_value) AND TO_NUMBER(rec.item_value_max) THEN
+            lv_return := 'TRUE';
+            EXIT;
+          END IF;
+        END IF;
+
+        IF rec.item_operator = 'MORE' THEN
+          IF ln_p_value > TO_NUMBER(rec.item_value) THEN
+            lv_return := 'TRUE';
+            EXIT;
+          END IF;
+        END IF;
+
+        IF rec.item_operator = 'LESS' THEN
+          IF ln_p_value < TO_NUMBER(rec.item_value) THEN
+            lv_return := 'TRUE';
+            EXIT;
+          END IF;
+        END IF;
+      END LOOP;
+    END IF;
+    RETURN lv_return;
+  EXCEPTION
+    WHEN OTHERS THEN
+      RETURN 'FALSE';
+  END;
+END COMMENT_REQ_CHECK;
+
+PROCEDURE INSERT_MALE_FEMALE_INTER (pl_donor      in varchar2,
+                                    pl_chapter_id in varchar2,
+                                    pl_gender     in varchar2,
+                                    pl_trans_id   in varchar2,
+                                    pl_program_id in varchar2,
+                                    pl_user_id    in varchar2,
+                                    pl_out        out varchar2) is
+
+  P_DONOR_ID        varchar2(10);
+  P_CHAPTER_ID      varchar2(4);
+  P_UNIT_ID         varchar2(10);
+  P_TRANSACTION_ID  varchar2(10);
+  P_INTER_CODE      varchar2(5);
+  P_ORIGINATED_FROM varchar2(10);
+  P_REASON_CODE     varchar2(5);
+  P_USER_ID         varchar2(6);
+  P_GROUP_MODE      varchar2(5);
+  P_GROUP_ID        varchar2(5);
+  P_PROGRAM_ID      varchar2(10);
+  P_INCIDENT_DATE   date;
+  P_TERM_DATE       date;
+  P_COMMENTS        varchar2(100);
+  P_STATUS          varchar2(200);
+  nCount            NUMBER:=0;
+  v_local_time			date;
+  t_chp_id					chapters.chapter_id%type;
+Begin
+	-- Added by Kishore on 05/05/2011
+ begin
+    select chapter_id
+      into t_chp_id
+      from system_users
+     where user_id = pl_user_id;
+  exception
+    when others then
+      pl_out:='Could not retrieve data from the SYSTEM USERS table';
+      return;
+  end;
+
+
+    v_local_time:=Lifetrack_timezone_convert.get_local_time(t_chp_id, sysdate);
+
+  --get the intercode from the RHOLDS table
+  p_status:='OK';
+
+  If pl_gender='M' then
+    P_ORIGINATED_FROM:='INTRMALE';
+  Else
+    P_ORIGINATED_FROM:='INTRFEMALE';
+  End if;
+
+  select nvl(count(*),0) into nCount from valid_regint_reasons where inter_reason=P_ORIGINATED_FROM and
+  sysdate between eff_date and nvl(term_date,sysdate+1);
+
+  If nCount > 0 then
+    select inter_code into P_INTER_CODE from valid_regint_reasons where inter_reason=P_ORIGINATED_FROM and
+    sysdate between eff_date and nvl(term_date,sysdate+1) and rownum=1;
+
+    P_DONOR_ID:=pl_donor;
+    --P_CHAPTER_ID:='WAD';
+    P_CHAPTER_ID:=pl_chapter_id;
+    P_TRANSACTION_ID:=pl_trans_id;
+    p_REASON_CODE:=P_INTER_CODE;
+    p_USER_ID:=pl_user_id;
+    p_GROUP_MODE:=null;
+    p_GROUP_ID:=NULL;
+    p_PROGRAM_ID:=pl_program_id;
+    p_INCIDENT_DATE:=trunc(v_local_time); --effective date as system date -- Changed "sysdate" to "v_local_time. Changed by Kishore on 05/05/2011
+    p_TERM_DATE:=null;
+    p_unit_id:=null;
+    p_COMMENTS:='Gender related Interdiction';
+
+    don_inter.inter_upgrade_place(P_DONOR_ID,
+                        P_CHAPTER_ID,
+                        P_UNIT_ID,
+                        P_TRANSACTION_ID,
+                        P_INTER_CODE,
+                        NULL,
+                        NULL,
+                        P_USER_ID,
+                        NULL,
+                        NULL,
+                        P_PROGRAM_ID,
+                        P_INCIDENT_DATE,
+                        P_TERM_DATE,
+                        P_COMMENTS,
+                        P_STATUS);
+
+    pl_out:=p_status;
+
+  End If;
+
+EXCEPTION when others then
+  pl_out:='Unable to place the gender realted interdiction-'||sqlerrm;
+End INSERT_MALE_FEMALE_INTER;
+
+    PROCEDURE pop_reason (
+        p_transaction_id  IN   VARCHAR2,
+        p_phy_code        IN   VARCHAR2,
+        p_phy_value       IN   VARCHAR2,
+        p_out_of_range    OUT  VARCHAR2,
+        p_comment_req     OUT  VARCHAR2,
+        p_inter_code      OUT  VARCHAR2,
+        p_status          OUT  VARCHAR2
+    ) IS
+
+        vpr_tab            vpr_tab_type;
+        vpr_tab_equip      vpr_tab_type;
+        vpr_tab_equip_age  vpr_tab_type;
+        lb_multi_rule      BOOLEAN := false;
+        lb_value_in_range  BOOLEAN := false;
+        ln_min             NUMBER;
+        ln_max             NUMBER;
+        ln_value           NUMBER;
+        lv_equip_type      VARCHAR2(10);
+        ln_age             NUMBER;
+    BEGIN
+        p_status := 'OK';
+        p_out_of_range := NULL;
+        p_comment_req := 'N';
+
+        IF p_phy_value IS NULL THEN
+            RETURN;
+        END IF;
+
+
+        -- Get rules for N,D datatype.
+        SELECT
+            vpr.item_value,
+            vpr.item_value_max,
+            vpr.item_operator,
+            vpr.comment_req_flag,
+            vpr.inter_code,
+            vpr.equip_type,
+            vpr.from_age,
+            vpr.to_age,
+            floor(months_between(sysdate, d.date_of_birth) / 12)           age,
+            dn.equip_type                                                  AS don_equip_type
+        BULK COLLECT
+        INTO vpr_tab
+        FROM
+            valid_physical_rules  vpr,
+            donations             dn,
+            donors                d
+        WHERE
+                vpr.donation_type = dn.donation_type
+            AND vpr.procedure_code = dn.procedure_code
+            AND dn.donor_id = d.donor_id
+            AND d.chapter_id = 'ALL'
+            AND dn.transaction_id = p_transaction_id
+            AND vpr.physical_code = p_phy_code
+            AND vpr.gender IN (
+                d.gender,
+                'A'
+            )
+            AND vpr.data_type IN (
+                'N',
+                'D'
+            )
+            AND dn.coll_date BETWEEN vpr.eff_date AND nvl(vpr.term_date, dn.coll_date + 1);
+
+        IF vpr_tab.count = 0 THEN
+            p_status := 'INVALID';
+            return;
+        END IF;
+        -- Filter by equipment.
+        lv_equip_type := vpr_tab(vpr_tab.first).don_equip_type;
+        ln_age := vpr_tab(vpr_tab.first).age;
+        SELECT
+            *
+        BULK COLLECT
+        INTO vpr_tab_equip
+        FROM
+            TABLE ( vpr_tab )
+        WHERE
+            equip_type IS NULL
+            OR equip_type = lv_equip_type;
+
+        lb_multi_rule := vpr_tab_equip.count > 1;
+
+        -- Filter by equipment and age.
+        SELECT
+            *
+        BULK COLLECT
+        INTO vpr_tab_equip_age
+        FROM
+            TABLE ( vpr_tab_equip )
+        WHERE
+            from_age IS NULL
+            OR ( ln_age BETWEEN from_age AND to_age );
+
+        IF vpr_tab_equip_age.count = 0 THEN
+            p_status := 'INVALID';
+            return;
+        END IF;
+
+       ln_value := to_number(p_phy_value);
+
+        FOR cur_rec IN (
+            SELECT
+                *
+            FROM
+                TABLE ( vpr_tab_equip_age )
+        ) LOOP
+            BEGIN
+                IF cur_rec.item_operator = 'BETWEEN' THEN
+                    ln_min := to_number(cur_rec.item_value);
+                    ln_max := to_number(cur_rec.item_value_max);
+                    lb_value_in_range := ln_value BETWEEN ln_min AND ln_max;
+
+                    -- BETWEEN OPERATOR
+                        -- In multi rule setup
+                            -- in-range value with inter code is considered OUT OF RANGE.
+                            -- in-range value without inter code is considered IN RANGE.
+                        -- In single rule setup, out-of-range value is considered OUT OF RANGE.
+                    IF lb_multi_rule THEN
+                        IF
+                            lb_value_in_range AND cur_rec.inter_code IS NOT NULL
+                        THEN
+                            p_out_of_range := 'Y';
+                            p_comment_req := cur_rec.comment_req_flag;
+                            p_inter_code := cur_rec.inter_code;
+                        ELSIF
+                            lb_value_in_range AND cur_rec.inter_code IS NULL
+                        THEN
+                            p_out_of_range := 'N';
+                            p_comment_req := cur_rec.comment_req_flag;
+                            p_inter_code := cur_rec.inter_code;
+                        END IF;
+                    ELSE
+                        IF NOT lb_value_in_range THEN
+                            p_out_of_range := 'Y';
+                            p_comment_req := cur_rec.comment_req_flag;
+                            p_inter_code := cur_rec.inter_code;
+                        END IF;
+                    END IF;
+
+                ELSIF cur_rec.item_operator = 'INRANGE' THEN
+                    ln_min := to_number(cur_rec.item_value);
+                    ln_max := to_number(cur_rec.item_value_max);
+                    lb_value_in_range := ln_value BETWEEN ln_min AND ln_max;
+
+                    -- INRANGE OPERATOR
+                        -- In multi rule setup
+                            -- in-range value (with or without intercode) is considered IN RANGE.
+                        -- In single rule setup, out-of-range value is considered OUT OF RANGE.
+                    IF lb_multi_rule THEN
+                        IF lb_value_in_range THEN
+                            p_out_of_range := 'N';
+                            p_comment_req := cur_rec.comment_req_flag;
+                            p_inter_code := cur_rec.inter_code;
+                        END IF;
+                    ELSE
+                        IF NOT lb_value_in_range THEN
+                            p_out_of_range := 'Y';
+                            p_comment_req := cur_rec.comment_req_flag;
+                            p_inter_code := cur_rec.inter_code;
+                        END IF;
+                    END IF;
+
+                ELSIF cur_rec.item_operator = 'MORE' THEN
+                    -- MORE OPERATOR
+                        -- In multi rule setup AND single rule setup
+                            -- value GREATER than MIN value is considered OUT OF RANGE.
+                    IF ln_value > to_number(cur_rec.item_value) THEN
+                        p_out_of_range := 'Y';
+                        p_comment_req := cur_rec.comment_req_flag;
+                        p_inter_code := cur_rec.inter_code;
+                    END IF;
+                ELSIF cur_rec.item_operator = 'LESS' THEN
+                    -- LESS OPERATOR
+                        -- In multi rule setup AND single rule setup
+                            -- value LESS than MIN value is considered OUT OF RANGE.
+                    IF ln_value < to_number(cur_rec.item_value) THEN
+                        p_out_of_range := 'Y';
+                        p_comment_req := cur_rec.comment_req_flag;
+                        p_inter_code := cur_rec.inter_code;
+                    END IF;
+                END IF;
+
+                -- EXIT if out_of_range is calculated.
+                IF p_out_of_range IS NOT NULL THEN
+                    EXIT;
+                END IF;
+            EXCEPTION
+                WHEN value_error THEN
+                    NULL;
+            END;
+        END LOOP;
+
+    END pop_reason;
+    
+    FUNCTION object_lock_time (
+        p_pkg_name  IN  VARCHAR2,
+        p_fcn_name  IN  VARCHAR2
+    ) RETURN NUMBER IS
+
+        CURSOR pkg_lock_cur IS
+        SELECT
+            locked_on
+        FROM
+            db_package_lock
+        WHERE
+                package_name = p_pkg_name
+            AND function_name = nvl(p_fcn_name, function_name);
+
+        l_locked_on    DATE;
+        l_elapsed_min  NUMBER := 0;
+    BEGIN
+        OPEN pkg_lock_cur;
+        FETCH pkg_lock_cur INTO l_locked_on;
+        CLOSE pkg_lock_cur;
+        IF l_locked_on IS NOT NULL THEN
+            l_elapsed_min := ( sysdate - l_locked_on ) * 24 * 60;
+        END IF;
+
+        RETURN l_elapsed_min;
+    END object_lock_time;
+
+    FUNCTION is_object_locked (
+        p_pkg_name  IN  VARCHAR2,
+        p_fcn_name  IN  VARCHAR2
+    ) RETURN BOOLEAN IS
+        l_cnt NUMBER;
+    BEGIN
+        SELECT
+            COUNT(1)
+        INTO l_cnt
+        FROM
+            db_package_lock
+        WHERE
+                package_name = p_pkg_name
+            AND function_name = nvl(p_fcn_name, function_name);
+
+        IF l_cnt <> 0 THEN
+            RETURN true;
+        ELSE
+            RETURN false;
+        END IF;
+    END is_object_locked;    
+    
+    PROCEDURE check_object_lock (
+        p_pkg_name  IN   VARCHAR2,
+        p_fcn_name  IN   VARCHAR2,
+        p_flag_yn   OUT  VARCHAR2,
+        p_lock_min  OUT  NUMBER
+    ) IS
+    BEGIN
+        IF is_object_locked(p_pkg_name, p_fcn_name) THEN
+            p_flag_yn := 'Y';
+            p_lock_min := object_lock_time(p_pkg_name, p_fcn_name);
+        ELSE
+            p_flag_yn := 'N';
+            p_lock_min := 0;
+        END IF;
+    END check_object_lock;
+
+    PROCEDURE object_lock_unlock (
+        p_pkg_name  IN  VARCHAR2,
+        p_fcn_name  IN  VARCHAR2,
+        p_user      IN  VARCHAR2,
+        p_flag_ul   IN  VARCHAR2
+    ) IS
+        l_cnt NUMBER;
+    BEGIN
+        IF p_flag_ul = 'L' THEN
+            INSERT INTO db_package_lock (
+                package_name,
+                function_name,
+                locked_on,
+                locked_by
+            ) VALUES (
+                p_pkg_name,
+                p_fcn_name,
+                sysdate,
+                p_user
+            );
+
+        ELSIF p_flag_ul = 'U' THEN
+            DELETE FROM db_package_lock
+            WHERE
+                    package_name = p_pkg_name
+                AND function_name = nvl(p_fcn_name, function_name);
+
+        END IF;
+
+        COMMIT;
+    END object_lock_unlock;
+END don_std;
+/

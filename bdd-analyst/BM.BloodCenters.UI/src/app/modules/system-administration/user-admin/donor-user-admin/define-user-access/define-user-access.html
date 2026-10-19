@@ -1,0 +1,203 @@
+<div class="user-access-page">
+  <div class="page-wrapper">
+    <!-- Visually hidden h1 for proper heading hierarchy -->
+    <h1 class="cdk-visually-hidden">Define User Access</h1>
+
+    <!-- PAGE HEADER WITH BREADCRUMB -->
+    <app-page-header-with-breadcrumb [config]="pageHeaderConfig"></app-page-header-with-breadcrumb>
+
+    <!-- SEARCH CARD -->
+    <div class="search-card">
+      <form (ngSubmit)="onRetrieve()" class="search-user">
+        <mat-form-field appearance="fill" class="user-id-select">
+          <mat-label>Search by User ID</mat-label>
+          <mat-select [(ngModel)]="userId" name="userId" placeholder="Select User ID">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="userSearchControl"
+                placeholderLabel="Search users..."
+                noEntriesFoundLabel="No matching users">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option *ngFor="let user of filteredUserOptions" [value]="user.userId">
+              {{ user.userId }}{{ user.userName ? ' — ' + user.userName : '' }}
+            </mat-option>
+          </mat-select>
+        </mat-form-field>
+
+        <button mat-raised-button type="submit" class="btn-retrieve" [disabled]="isRetrieveDisabled">
+          RETRIEVE
+        </button>
+      </form>
+    </div>
+
+    <!-- ACCESS CLASS PANEL -->
+    <div class="access-class-panel">
+      <!-- Panel Header -->
+      <div class="panel-header">
+        <div class="panel-title-section">
+          <!-- Before search: Show Access Class title -->
+          <ng-container *ngIf="!userInfo">
+            <h2 class="panel-title">Access Class</h2>
+            <p class="panel-subtitle">
+              User permissions and access classes will display here.
+            </p>
+          </ng-container>
+
+          <!-- After successful search: Show User Info -->
+          <ng-container *ngIf="userInfo">
+            <h2 class="panel-title user-name-title">{{ userInfo.userName }}</h2>
+            <p class="panel-subtitle user-meta-subtitle">
+              {{ displayUserId }}<span class="separator" *ngIf="userInfo.department"></span><span
+                *ngIf="userInfo.department">{{ userInfo.department }}</span>
+            </p>
+          </ng-container>
+        </div>
+
+        <div class="panel-actions">
+          <button type="button" class="btn-outline" [disabled]="!userInfo" (click)="onOverlappingInterdictions()">
+            OVERLAPPING INTERDICTIONS
+          </button>
+          <button type="button" class="btn-primary" [disabled]="!userInfo" (click)="onAssignAccessClass()">
+            <mat-icon aria-hidden="true">add</mat-icon>
+            ASSIGN ACCESS CLASS
+          </button>
+        </div>
+      </div>
+
+      <!-- EMPTY STATE (Before search) -->
+      <div *ngIf="!hasSearched" class="empty-state-container">
+        <div class="empty-state-icon" aria-hidden="true">
+          <mat-icon>edit</mat-icon>
+        </div>
+        <h3 class="empty-state-title">Get Started</h3>
+        <p class="empty-state-message">
+          Use the Search bar above to locate a user and to manage<br />
+          his/her access classes &amp; permissions.
+        </p>
+      </div>
+
+      <!-- ERROR STATE -->
+      <div *ngIf="hasError" class="inline-error" role="alert" aria-live="assertive">
+        {{ errorMessage }}
+      </div>
+
+      <!-- NO RESULTS STATE -->
+      <div *ngIf="hasSearched && !isLoading && !hasError && !userInfo" class="empty-state-container"
+           role="status" aria-live="polite">
+        <p class="no-results-message">No results found</p>
+      </div>
+
+      <!-- TABLE (After successful search) -->
+      <ng-container *ngIf="hasSearched && userInfo && !hasError">
+
+        <!-- Table -->
+        <div class="table-wrapper" *ngIf="accessClasses.length > 0">
+          <div class="table-scroll-container">
+            <table class="access-table" [attr.aria-label]="'Access classes for ' + (userInfo?.userName || 'user')">
+              <thead>
+                <tr>
+                  <th scope="col" class="sortable" (click)="onSort('accessClass')"
+                    [attr.aria-sort]="sortDirection === 'asc' ? 'ascending' : sortDirection === 'desc' ? 'descending' : 'none'">
+                    <span class="th-content-sortable">
+                      Class
+                      <mat-icon *ngIf="sortDirection === 'asc'" class="sort-icon" aria-hidden="true">arrow_upward</mat-icon>
+                      <mat-icon *ngIf="sortDirection === 'desc'" class="sort-icon" aria-hidden="true">arrow_downward</mat-icon>
+                      <mat-icon *ngIf="!sortDirection" class="sort-icon unfold" aria-hidden="true">unfold_more</mat-icon>
+                    </span>
+                  </th>
+                  <th scope="col" class="description-col">Description</th>
+                  <th scope="col">Access Level</th>
+                  <th scope="col">Effective Date</th>
+                  <th scope="col">Termination Date</th>
+                  <th scope="col" class="action-column"><span class="cdk-visually-hidden">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr *ngFor="let row of pagedAccessClasses"
+                    [class.selected]="selectedRow === row">
+                  <td>{{ formatTableValue(row.accessClass) }}</td>
+                  <td class="description-col">{{ formatTableValue(row.description) }}</td>
+                  <td>{{ formatTableValue(row.level) }}</td>
+                  <td>{{ formatTableDate(row.effectiveDate) }}</td>
+                  <td>{{ formatTableDate(row.terminationDate) }}</td>
+                  <td class="action-column">
+                    <div class="action-icons">
+                      <button
+                        type="button"
+                        class="edit-btn"
+                        (click)="onEditRow(row)"
+                        [attr.aria-label]="'Edit access class ' + row.accessClass">
+                        <mat-icon class="edit-icon" aria-hidden="true">edit</mat-icon>
+                      </button>
+                      <button type="button" class="menu-trigger" [matMenuTriggerFor]="actionsMenu"
+                        [attr.aria-label]="'Actions menu for ' + row.accessClass">
+                        <mat-icon aria-hidden="true">more_vert</mat-icon>
+                      </button>
+                      <mat-menu #actionsMenu="matMenu"
+                        (opened)="selectedRow = row"
+                        (closed)="onMenuClosed()">
+                        <button mat-menu-item (click)="onViewAttachedUsers(row)">
+                          View Attached Users List
+                        </button>
+                        <button mat-menu-item (click)="onViewAssociatedInterdictions(row)">
+                          View Associated Interdictions
+                        </button>
+                      </mat-menu>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Pagination (only show if more than 50 rows) -->
+          <div class="pagination" *ngIf="accessClasses.length > 50">
+            <div class="page-size">
+              <label for="pageSizeSelect" class="visually-hidden">Rows per page</label>
+              <span aria-hidden="true">Rows per page:</span>
+              <select id="pageSizeSelect" [(ngModel)]="pageSize" (change)="onPageSizeChange()">
+                <option *ngFor="let size of pageSizeOptions" [value]="size">
+                  {{ size }}
+                </option>
+              </select>
+            </div>
+
+            <div class="page-range" role="status" aria-live="polite"
+                 [attr.aria-label]="'Showing rows ' + startRow + ' to ' + endRow + ' of ' + accessClasses.length">
+              {{ startRow }} – {{ endRow }} of {{ accessClasses.length }}
+            </div>
+
+            <div class="page-actions">
+              <button (click)="goToFirst()" [disabled]="pageIndex === 0" aria-label="Go to first page">
+                <mat-icon aria-hidden="true">first_page</mat-icon>
+              </button>
+              <button (click)="prevPage()" [disabled]="pageIndex === 0" aria-label="Go to previous page">
+                <mat-icon aria-hidden="true">chevron_left</mat-icon>
+              </button>
+              <button (click)="nextPage()" [disabled]="(pageIndex + 1) * pageSize >= accessClasses.length" aria-label="Go to next page">
+                <mat-icon aria-hidden="true">chevron_right</mat-icon>
+              </button>
+              <button (click)="goToLast()" [disabled]="(pageIndex + 1) * pageSize >= accessClasses.length" aria-label="Go to last page">
+                <mat-icon aria-hidden="true">last_page</mat-icon>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- No Access Classes -->
+        <div *ngIf="accessClasses.length === 0" class="empty-state-container">
+          <p class="no-results-message">No access classes found for this user.</p>
+        </div>
+      </ng-container>
+    </div>
+  </div>
+
+  <!-- Associated Interdictions Side Panel -->
+  <app-view-associated-interdiction
+    [isOpen]="isPanelOpen"
+    [accessClassCode]="selectedAccessClass"
+    [accessClassDescription]="selectedAccessClassDescription"
+    (closePanel)="closeInterdictionPanel()">
+  </app-view-associated-interdiction>
+</div>

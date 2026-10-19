@@ -1,0 +1,426 @@
+CREATE OR REPLACE package email_util as 
+/* ************************************************************
+  Name              : EMAIL_UTIL.pkg
+  Created By        : Ashok
+  Date Of Creation  : 02/20/2023
+  Purpose           : Email utility to send emails..
+  Pre-Req           : 1) Network ACL must be setup for UTL user
+                      2) UTL_MAIL pkg must be installed.
+                      3) SMTP_OUT_SERVER parameter (localhost:25)
+                      4) Tested with POSTFIX mail relay on DB server with GMAIL
+                        account using APP password.
+                      5) VALID_MAIL_CONFIG, VALID_MAIL_USERS, VALID_MOBILE_PROVIDERS
+                      6) Any errors are logged to EMAIL_UTIL.log in LOGDR.
+
+  Version History
+
+  Date         Version  Description
+  --------------------------------------------------------------------
+  02/20/2023   01       Initial Developement
+  
+ **********************************************************************   */
+
+  /*
+    Routine to send email. Uses UTL_MAIL pkg to send email.
+  */
+    PROCEDURE send_email
+        (   fcn_code_in     IN VARCHAR2,
+            msg_text_in     IN VARCHAR2,
+            att_text_in     IN VARCHAR2,
+            att_fname_in    IN VARCHAR2,
+            status_out      OUT VARCHAR2
+        ) ;
+    
+    /*
+      Called after MAIN UPLOAD JOB completion.
+    */
+    PROCEDURE send_main_upload_status(upload_id_in IN VARCHAR2);
+    
+    /*
+      Called after API UPLOAD JOB completion.
+    */
+    PROCEDURE send_api_upload_status(upload_id_in IN VARCHAR2);    
+
+END email_util;
+
+/
+
+
+CREATE OR REPLACE PACKAGE BODY email_util AS
+
+    gc_logDir   CONSTANT VARCHAR2(20)   := 'LOGDR';
+    gc_logFile  CONSTANT VARCHAR2(200)  := 'email_util.log';
+    gv_logUser  VARCHAR2(30)            := 'UTIL';
+
+    PROCEDURE log_error(msg_in IN VARCHAR2) IS
+    BEGIN
+
+        -- Send output to the specified file.
+        DECLARE
+            fid UTL_FILE.file_type;
+        BEGIN
+            fid := UTL_FILE.fopen(gc_logDir, gc_logFile, 'A');
+
+            UTL_FILE.put_line(fid, gv_logUser 
+                                    || CHR(9)
+                                    || TO_CHAR(SYSDATE, 'MM-DD-YYYY HH24:MI:SS')
+                                    || CHR(9)
+                                    || msg_in);
+
+
+            UTL_FILE.fclose(fid);
+        EXCEPTION
+            WHEN OTHERS THEN
+              dbms_output.put_line('Failure to write output to ' || gc_logDir || '/' || gc_logFile);
+              UTL_FILE.fclose(fid);
+        END;
+    END log_error;
+
+    PROCEDURE get_main_upload_messages(upload_id_in IN VARCHAR2, 
+                                        msg_out      OUT VARCHAR2, 
+                                        att_txt_out  OUT VARCHAR2) IS
+        muc_row     mobile_upload_completed%ROWTYPE;
+        ln_rowno    NUMBER;
+        ln_rowcount NUMBER;
+        crlf        VARCHAR2( 2 ):= CHR( 13 ) || CHR( 10 );
+        
+        lv_header   VARCHAR2(1000);
+        
+        TYPE log_text_tab IS TABLE OF VARCHAR2(2000) INDEX BY PLS_INTEGER;
+        g_log_output log_text_tab;        
+        
+        lb_ErrorsFound BOOLEAN;
+        lc_UploadCompleteSuccess VARCHAR2(100) := 'Upload Completed. No Errors Found.';
+        lc_UploadCompleteError   VARCHAR2(100) := 'Upload Completed With Errors. Check Logs.';
+        
+        PROCEDURE log_msg(str IN VARCHAR2) IS
+        BEGIN    
+            g_log_output(NVL(g_log_output.LAST, 0) + 1) := str;
+        END log_msg;
+        
+        PROCEDURE dump_output IS
+        BEGIN
+          /*
+          FOR indx IN g_log_output.FIRST .. g_log_output.LAST LOOP
+            dbms_output.put_line(g_log_output(indx));
+          END LOOP;
+          */
+          
+          IF lb_ErrorsFound THEN
+            lv_header := REPLACE(lv_header, '@#@#', lc_UploadCompleteError);
+          ELSE
+            lv_header := REPLACE(lv_header, '@#@#', lc_UploadCompleteSuccess);
+          END IF;
+          
+          att_txt_out := lv_header || crlf;
+          
+          FOR indx IN g_log_output.FIRST .. g_log_output.LAST LOOP
+            att_txt_out := att_txt_out || g_log_output(indx) || crlf;   
+          END LOOP;  
+          
+          msg_out := lv_header;
+        END dump_output;
+    BEGIN
+        lb_ErrorsFound := FALSE;
+        g_log_output.DELETE;
+        
+        SELECT
+            *
+        INTO muc_row
+        FROM
+            mobile_upload_completed
+        WHERE
+            upload_id = upload_id_in;
+         
+        lv_header := RPAD('-', 40, '-') || crlf;
+        lv_header := lv_header || RPAD('Drive Id', 12)   || ': ' || muc_row.drive_id || ' (Seq: ' || muc_row.extract_seq || ')' || crlf;
+        lv_header := lv_header || RPAD('Upload Id', 12)  || ': ' || muc_row.upload_id || crlf;
+        lv_header := lv_header || RPAD('Submit Time', 12)|| ': ' || TO_CHAR(muc_row.submit_time, 'MM-DD-YYYY HH24:MI:SS') || crlf;
+        lv_header := lv_header || RPAD('End Time', 12)   || ': ' || TO_CHAR(muc_row.end_time, 'MM-DD-YYYY HH24:MI:SS') || crlf; 
+        lv_header := lv_header || RPAD('Status', 12)     || ': ' || '@#@#' || crlf;
+        lv_header := lv_header || RPAD('-', 40, '-');
+        
+        -- log_msg(lv_header);
+        
+        ln_rowno := 0;
+        
+        FOR rec IN (
+                    SELECT
+                        rownum, unit_id, deferral_id
+                    FROM
+                        mobile_upload_unit_log
+                        
+                    WHERE
+                        upload_id = upload_id_in
+                    AND log_type = 'M'
+                    ORDER BY
+                        log_seq ASC
+                )
+        LOOP
+            -- print only once - header record.
+            IF ln_rowno = 0 THEN
+                log_msg ('         **********NO ERRORS**************            ');       
+                log_msg (RPAD('-', 40, '-'));     
+                log_msg (RPAD('No.', 3) ||  '  |  ' ||  RPAD('Unit/Deferral Id', 16)); 
+                log_msg (RPAD('-', 40, '-'));            
+            END IF;
+            
+            log_msg (RPAD(rec.ROWNUM,3) || '  |  ' || RPAD(NVL(rec.unit_id, rec.deferral_id), 16));
+            ln_rowno := rec.ROWNUM;
+        END LOOP;
+      
+        ln_rowcount := ln_rowno;
+        
+        FOR rec IN (                
+                    SELECT
+                        unit_id, deferral_id, LISTAGG(table_name, ', ') WITHIN GROUP (ORDER BY table_name) AS log_text
+                    FROM
+                        mobile_upload_unit_log                    
+                    WHERE
+                        upload_id = upload_id_in
+                        AND log_type = 'E'
+                    GROUP BY unit_id, deferral_id
+                )
+        LOOP
+            lb_ErrorsFound := TRUE;
+            IF ln_rowno = ln_rowcount THEN 
+                log_msg (RPAD('-', 40, '-')); 
+                log_msg ('         **********ERRORS BELOW**************            ');   
+                log_msg (RPAD('-', 40, '-'));               
+                log_msg (RPAD('No.', 3) ||  '  |  ' ||  RPAD('Unit/Deferral Id', 16) ||  '  |  ' || RPAD('Message', 25)); 
+                log_msg (RPAD('-', 40, '-')); 
+            END IF;
+            ln_rowno := ln_rowno + 1;
+            log_msg (RPAD(ln_rowno,3) || '  |  ' || RPAD(NVL(rec.unit_id, rec.deferral_id), 16) || '  |  ' || RPAD(rec.log_text, 250));
+        END LOOP;
+        
+        log_msg (RPAD('-', 40, '-'));
+        
+        
+        dump_output;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            NULL;
+        
+    END get_main_upload_messages;
+
+    PROCEDURE get_api_upload_messages(upload_id_in IN VARCHAR2,
+                                      msg_out      OUT VARCHAR2, 
+                                      att_txt_out  OUT VARCHAR2) IS
+        nLogSeq NUMBER;                                      
+    BEGIN
+        msg_out := NULL;
+        att_txt_out := NULL;
+        
+        SELECT MAX(log_seq) INTO nLogSeq
+          FROM mobile_upload_log
+        WHERE upload_id = upload_id_in
+          AND table_name = 'API_UPLOAD';
+        
+        IF nLogSeq IS NOT NULL THEN
+            SELECT upload_id_in || ' : ' || log_text INTO msg_out
+              FROM mobile_upload_log
+             WHERE upload_id = upload_id_in
+               AND table_name = 'API_UPLOAD'
+               AND log_seq = nLogSeq;        
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            NULL;
+    END get_api_upload_messages;
+
+    PROCEDURE send_email
+        (   fcn_code_in     IN VARCHAR2,
+            msg_text_in     IN VARCHAR2,
+            att_text_in     IN VARCHAR2,
+            att_fname_in    IN VARCHAR2,
+            status_out      OUT VARCHAR2
+        ) IS
+        
+        mail_config_rec VALID_MAIL_CONFIG%ROWTYPE;
+        lv_to_email     VARCHAR2(20000);
+        lv_to_mobile    VARCHAR2(20000);
+        crlf            VARCHAR2( 2 ):= CHR( 13 ) || CHR( 10 );
+        
+        FUNCTION get_mail_config(fcn_code_in IN VARCHAR2) RETURN valid_mail_config%ROWTYPE IS
+            temp_rec valid_mail_config%ROWTYPE;
+        BEGIN        
+            -- Check if alerts are defined.
+            SELECT *
+              INTO temp_rec
+              FROM valid_mail_config
+             WHERE fcn_code = fcn_code_in
+               AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE+1);
+            
+            RETURN temp_rec;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN NULL;                
+        END get_mail_config;
+
+        FUNCTION get_email_addresses(fcn_code_in IN VARCHAR2) RETURN VARCHAR2 IS
+            temp_string VARCHAR2(20000);
+        BEGIN
+            SELECT listagg(to_email, ',') 
+              INTO temp_string
+              FROM valid_mail_users
+             WHERE fcn_code = fcn_code_in
+               AND mail_type IN ('B', 'E');  
+            
+            RETURN temp_string;
+        
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN NULL;
+        END get_email_addresses;
+
+        FUNCTION get_mobile_addresses(fcn_code_in IN VARCHAR2) RETURN VARCHAR2 IS
+            temp_string VARCHAR2(20000);
+        BEGIN
+            SELECT LISTAGG(vmu.phone_no || '@' || vmp.mms_gateway, ',')
+              INTO temp_string
+              FROM valid_mail_users vmu, valid_mobile_providers vmp
+             WHERE vmu.provider_code = vmp.provider_code
+               AND vmu.fcn_code = fcn_code_in
+               AND vmu.phone_no IS NOT NULL
+               AND vmu.provider_code IS NOT NULL
+               AND vmp.mms_gateway IS NOT NULL               
+               AND vmu.mail_type IN ('P', 'B');
+            
+            RETURN temp_string;
+        
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN NULL;
+        END get_mobile_addresses;
+    BEGIN
+        status_out := 'OK';
+        
+        mail_config_rec := get_mail_config(fcn_code_in);
+        
+        IF mail_config_rec.fcn_code IS NULL THEN
+            -- status_out := 'Function not configured - ' || fcn_code_in;
+            -- Do not proceed.
+            RETURN;
+        END IF;
+        
+        lv_to_email := get_email_addresses(fcn_code_in);
+        
+        IF lv_to_email IS NOT NULL THEN
+            BEGIN
+            
+                UTL_MAIL.send_attach_varchar2(
+                    sender       => mail_config_rec.from_email,
+                    recipients   => lv_to_email,
+                    cc           => NULL,
+                    bcc          => NULL,
+                    subject      => mail_config_rec.subject,
+                    message      => msg_text_in,
+                    attachment   => att_text_in,
+                    att_filename => att_fname_in
+                    );            
+                    
+            EXCEPTION
+                WHEN OTHERS THEN
+                    --DBMS_OUTPUT.PUT_LINE('IN EMAIL OTHERS ' || SQLERRM);
+                    status_out := 'UTL_MAIL 1 - check param smtp_out_server :: ' || SUBSTR(SQLERRM,1,500);
+            END;
+            
+            IF status_out <> 'OK' THEN
+                log_error(fcn_code_in || '-' || status_out);
+                RETURN;
+            END IF;
+        END IF;
+        
+        lv_to_mobile := get_mobile_addresses(fcn_code_in);
+           
+        IF lv_to_mobile IS NOT NULL THEN            
+            BEGIN
+              UTL_MAIL.send(
+                sender       => mail_config_rec.from_email,
+                recipients   => lv_to_mobile,
+                cc           => NULL,
+                bcc          => NULL,
+                subject      => mail_config_rec.subject,
+                message      => msg_text_in
+                );
+            EXCEPTION
+                WHEN OTHERS THEN
+                    --DBMS_OUTPUT.PUT_LINE('IN PHONE OTHERS ' || SQLERRM);
+                    status_out := 'UTL_MAIL 2 - check param smtp_out_server :: ' || SUBSTR(SQLERRM,1,500);
+            END;
+            
+            IF status_out <> 'OK' THEN
+                log_error(fcn_code_in || '-' || status_out);
+                RETURN;
+            END IF;
+        END IF;                
+    END send_email;
+
+    PROCEDURE send_main_upload_status(upload_id_in IN VARCHAR2) IS
+        lv_msg_text     VARCHAR2(30000);
+        lv_att_text     VARCHAR2(30000);
+        lv_att_fname    VARCHAR2(200);
+        lv_status       VARCHAR2(2000);  
+        lc_fcn_code     VARCHAR2(100) := 'MOBILE-MAIN-UPLOAD';
+    BEGIN
+        get_main_upload_messages(upload_id_in, lv_msg_text, lv_att_text);
+    
+        lv_att_fname := upload_id_in || '.log';
+        
+        IF lv_msg_text IS NULL THEN
+            RETURN;
+        END IF;
+                
+        send_email
+            (   fcn_code_in     => lc_fcn_code,
+                msg_text_in     => lv_msg_text,
+                att_text_in     => lv_att_text,
+                att_fname_in    => lv_att_fname,
+                status_out      => lv_status
+            );
+            
+        -- DBMS_OUTPUT.PUT_LINE('Status ' || lv_status);  
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error(lc_fcn_code || ':' || upload_id_in || ':' || SUBSTR(SQLERRM,1,1000));
+            RETURN;
+    END send_main_upload_status;
+
+    PROCEDURE send_api_upload_status(upload_id_in IN VARCHAR2) IS
+        lv_msg_text     VARCHAR2(30000);
+        lv_att_text     VARCHAR2(30000);
+        lv_att_fname    VARCHAR2(200);
+        lv_status       VARCHAR2(2000); 
+        lc_fcn_code     CONSTANT VARCHAR2(100) := 'MOBILE-API-UPLOAD';
+    BEGIN
+        get_api_upload_messages(upload_id_in, lv_msg_text, lv_att_text);
+    
+        lv_att_fname := upload_id_in || '.log';
+        
+        IF lv_msg_text IS NULL THEN
+            RETURN;
+        END IF;
+        
+        send_email
+            (   fcn_code_in     => lc_fcn_code,
+                msg_text_in     => lv_msg_text,
+                att_text_in     => lv_att_text,
+                att_fname_in    => lv_att_fname,
+                status_out      => lv_status
+            );
+            
+        -- DBMS_OUTPUT.PUT_LINE('Status ' || lv_status);            
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error(lc_fcn_code || ':' || upload_id_in || ':' || SUBSTR(SQLERRM,1,1000));
+            RETURN;
+    END send_api_upload_status;
+
+END email_util;
+
+/
+/*
+Create or replace public synonym EMAIL_UTIL for UTIL.EMAIL_UTIL; 
+GRANT EXECUTE ON UTIL.EMAIL_UTIL TO PUBLIC;
+*/

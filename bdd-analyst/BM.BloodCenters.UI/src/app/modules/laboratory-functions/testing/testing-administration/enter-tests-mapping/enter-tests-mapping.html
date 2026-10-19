@@ -1,0 +1,305 @@
+<div class="page-container">
+  <div class="layout-wrapper">
+    <div class="main-content">
+      <h1 class="cdk-visually-hidden">{{ headerConfig().title }}</h1>
+      <app-page-header-with-breadcrumb [config]="headerConfig()" />
+
+      <!-- ── Contract selection card ── -->
+      <div class="search-card">
+        <div class="search-card__fields">
+          <div class="search-card__fields-inner">
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="search-card__field search-card__field--contract">
+              <mat-label>Contract ID</mat-label>
+              <mat-select [formControl]="contractControl"
+                          [compareWith]="compareContract"
+                          (selectionChange)="onContractChanged()"
+                          (openedChange)="onContractSelectOpened($event)"
+                          [attr.aria-required]="true">
+
+                <mat-select-trigger>
+                  {{ contractControl.value?.contractId || '' }}
+                </mat-select-trigger>
+
+                @if (isLoadingContracts) {
+                  <mat-option [value]="'__loading__'" disabled class="panel-option--status">
+                    <span class="panel-loading">
+                      <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+                      <span>Loading...</span>
+                    </span>
+                  </mat-option>
+                } @else if (contractOptions().length === 0) {
+                  <mat-option [value]="'__empty__'" disabled class="panel-option--status">
+                    No data available
+                  </mat-option>
+                } @else if (contractOptions().length <= 3) {
+                  @for (c of filteredContracts(); track c.contractId) {
+                    <mat-option [value]="c">
+                      {{ c.contractId }} - {{ c.company }}
+                    </mat-option>
+                  }
+                } @else {
+                  <mat-option>
+                    <ngx-mat-select-search [formControl]="contractSearchControl"
+                      placeholderLabel="Search..." noEntriesFoundLabel=""
+                      [autofocus]="false"
+                      ariaLabel="Search contracts">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @for (c of filteredContracts(); track c.contractId) {
+                    <mat-option [value]="c">
+                      {{ c.contractId }} - {{ c.company }}
+                    </mat-option>
+                  }
+                  @if (filteredContracts().length === 0) {
+                    <mat-option disabled class="panel-option--status">No matching contracts</mat-option>
+                  }
+                }
+
+              </mat-select>
+            <mat-error>Contract ID is required</mat-error>
+            </mat-form-field>
+
+            <div class="search-card__description" role="group" aria-labelledby="desc-label">
+              <span id="desc-label" class="search-card__description-label">Description</span>
+              <div class="search-card__description-value"
+                   aria-labelledby="desc-label"
+                   [title]="selectedContractDescription || '-'">{{ selectedContractDescription || '-' }}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="search-card__actions">
+          <button type="button" mat-button class="btn-clear"
+                  [disabled]="!selectedContract" (click)="clearContract()"
+                  aria-label="Clear contract selection">
+            CLEAR
+          </button>
+        </div>
+      </div>
+
+      <!-- Accessible status announcements for dynamic content changes -->
+      <div aria-live="polite" class="cdk-visually-hidden">
+        @if (isLoadingMatrix) {
+          Loading test mapping data
+        } @else if (selectedContract && rows.length > 1) {
+          {{ rows.length - 1 }} test mapping entries loaded
+        } @else if (selectedContract && rows.length <= 1) {
+          No test mapping entries found
+        }
+      </div>
+
+      <!-- ── Table card (after contract selected) ── -->
+      @if (selectedContract) {
+        <div class="table-card">
+          <div class="table-toolbar">
+            <button type="button" mat-button class="btn-clear" (click)="clearAllRows()"
+                    [disabled]="!formDirty"
+                    aria-label="Clear all test mapping rows">
+              CLEAR ALL
+            </button>
+            <button type="button" class="btn-save" (click)="onSave()"
+                    [disabled]="!canSave || isSaving"
+                    aria-label="Save test mapping changes">
+              SAVE
+            </button>
+          </div>
+
+          <div class="table-wrapper">
+            @if (isLoadingMatrix) {
+              <div class="data-table__loading" role="status" aria-label="Loading test mapping data">
+                <mat-spinner diameter="36" aria-hidden="true"></mat-spinner>
+                <span class="cdk-visually-hidden">Loading test mapping data</span>
+              </div>
+            } @else {
+              <div class="data-table-scroll-wrapper">
+                <table class="mat-mdc-table" role="table" aria-label="Test mapping entries for selected contract">
+                  <thead>
+                    <tr class="mat-mdc-header-row">
+                      <th class="mat-mdc-header-cell col-test-id">
+                        <button class="data-table__sort-button" (click)="toggleSort()" aria-label="Sort by Test ID">
+                          <span>Test ID <span class="required" aria-hidden="true">*</span><span class="cdk-visually-hidden">required</span></span>
+                          <mat-icon class="sort-icon">
+                            {{ sortDirection === 'asc' ? 'arrow_upward' : 'arrow_downward' }}
+                          </mat-icon>
+                        </button>
+                      </th>
+                      <th class="mat-mdc-header-cell col-description">Description</th>
+                      <th class="mat-mdc-header-cell col-cbc-test-id">CBC Test ID <span class="required" aria-hidden="true">*</span><span class="cdk-visually-hidden">required</span></th>
+                      <th class="mat-mdc-header-cell col-eff-date">Effective Date <span class="required" aria-hidden="true">*</span><span class="cdk-visually-hidden">required</span></th>
+                      <th class="mat-mdc-header-cell col-term-date">Termination Date</th>
+                      <th class="mat-mdc-header-cell col-mod-date">Modified Date</th>
+                      <th class="mat-mdc-header-cell col-actions">
+                        <span class="cdk-visually-hidden">Actions</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (row of rows.controls; track $index; let i = $index) {
+                      <tr class="mat-mdc-row" [formGroup]="$any(row)" [class.template-row]="isTemplateRow(i)">
+                        <!-- Test ID (FE-DROP-005 adaptive) — LOV on new rows, locked on existing -->
+                        <td class="mat-mdc-cell col-test-id">
+                          @if (row.get('isNew')?.value === true) {
+                            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field"
+                                            [class.mat-form-field-invalid]="isFieldInvalid($any(row), 'testId')">
+                              <mat-label class="cdk-visually-hidden">Test ID</mat-label>
+                              <mat-select formControlName="testId"
+                                          placeholder=""
+                                          (selectionChange)="onTestSelected(i)"
+                                          (openedChange)="onTestSelectOpened($event)"
+                                          [compareWith]="compareTest"
+                                          [attr.aria-required]="true">
+
+                                @if (isLoadingTests) {
+                                  <mat-option [value]="'__loading__'" disabled class="panel-option--status">
+                                    <span class="panel-loading">
+                                      <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+                                      <span>Loading...</span>
+                                    </span>
+                                  </mat-option>
+                                } @else if (getAvailableTests(i).length === 0) {
+                                  <mat-option [value]="'__empty__'" disabled class="panel-option--status">
+                                    No data available
+                                  </mat-option>
+                                } @else if (testOptions().length <= 3) {
+                                  @for (test of getAvailableTests(i); track test.testId) {
+                                    <mat-option [value]="test">{{ test.testId }} - {{ test.testDesc }}</mat-option>
+                                  }
+                                } @else {
+                                  <mat-option>
+                                    <ngx-mat-select-search [formControl]="testSearchControl"
+                                      placeholderLabel="Search..." noEntriesFoundLabel=""
+                                      [autofocus]="false"
+                                      ariaLabel="Search tests">
+                                    </ngx-mat-select-search>
+                                  </mat-option>
+                                  @for (test of getAvailableTests(i); track test.testId) {
+                                    <mat-option [value]="test">{{ test.testId }} - {{ test.testDesc }}</mat-option>
+                                  }
+                                  @if (getAvailableTests(i).length === 0) {
+                                    <mat-option disabled class="panel-option--status">No data available</mat-option>
+                                  }
+                                }
+
+                              </mat-select>
+                              <mat-error>Test ID is required</mat-error>
+                            </mat-form-field>
+                          } @else {
+                            <div class="readonly-cell">{{ getTestIdDisplay(i) }}</div>
+                          }
+                        </td>
+
+                        <!-- Description (readonly) -->
+                        <td class="mat-mdc-cell col-description">
+                          <div class="readonly-cell">{{ getTestDescription(i) || '-' }}</div>
+                        </td>
+
+                        <!-- CBC Test ID — editable on all rows -->
+                        <td class="mat-mdc-cell col-cbc-test-id">
+                          <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field"
+                                          [class.mat-form-field-invalid]="isFieldInvalid($any(row), 'cbcTestId')">
+                            <mat-label class="cdk-visually-hidden">CBC Test ID</mat-label>
+                            <input matInput formControlName="cbcTestId"
+                                   maxlength="10"
+                                   (keydown)="blockLeadingSpace($event)"
+                                   (input)="markDirty()"
+                                   [attr.aria-required]="true"
+                                   [attr.aria-describedby]="'cbc-error-' + i">
+                            <mat-error [id]="'cbc-error-' + i">
+                              @if ($any(row).get('cbcTestId')?.hasError('maxlength')) {
+                                CBC Test ID must be 10 characters or less
+                              } @else {
+                                CBC Test ID is required
+                              }
+                            </mat-error>
+                          </mat-form-field>
+                        </td>
+
+                        <!-- Effective Date — editable on all rows -->
+                        <td class="mat-mdc-cell col-eff-date">
+                          <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field date-cell">
+                            <mat-label class="cdk-visually-hidden">Effective Date</mat-label>
+                            <input matInput [matDatepicker]="effPicker"
+                                   formControlName="effDate"
+                                   placeholder="DD-MMM-YYYY"
+                                   [min]="row.get('isNew')?.value ? minEffDate : null"
+                                   [attr.aria-required]="true"
+                                   [errorStateMatcher]="getEffDateMatcher($any(row))"
+                                   (input)="onEffDateInput($event, $any(row))"
+                                   (dateChange)="onEffDateChange($any(row))"
+                                   [attr.aria-describedby]="'eff-error-' + i">
+                            <mat-datepicker-toggle matIconSuffix [for]="effPicker" aria-label="Open effective date picker"></mat-datepicker-toggle>
+                            <mat-datepicker #effPicker></mat-datepicker>
+                            <mat-error [id]="'eff-error-' + i">{{ getEffDateError($any(row)) }}</mat-error>
+                          </mat-form-field>
+                        </td>
+
+                        <!-- Termination Date -->
+                        <td class="mat-mdc-cell col-term-date">
+                          <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field date-cell">
+                            <mat-label class="cdk-visually-hidden">Termination Date</mat-label>
+                            <input matInput [matDatepicker]="termPicker"
+                                   formControlName="termDate"
+                                   placeholder="DD-MMM-YYYY"
+                                   [matDatepickerFilter]="getTermDateFilter(i)"
+                                   [errorStateMatcher]="getTermDateMatcher($any(row))"
+                                   (input)="onTermDateInput($event, $any(row))"
+                                   (dateChange)="onTermDateChange($any(row))"
+                                   [attr.aria-describedby]="'term-error-' + i">
+                            <mat-datepicker-toggle matIconSuffix [for]="termPicker" aria-label="Open termination date picker"></mat-datepicker-toggle>
+                            <mat-datepicker #termPicker></mat-datepicker>
+                            <mat-error [id]="'term-error-' + i">{{ getTermDateError($any(row)) }}</mat-error>
+                          </mat-form-field>
+                        </td>
+
+                        <!-- Modified Date (readonly) -->
+                        <td class="mat-mdc-cell col-mod-date">
+                          <div class="readonly-cell">{{ formatDate(row.get('modifiedDate')?.value) }}</div>
+                        </td>
+
+                        <!-- Delete -->
+                        <td class="mat-mdc-cell col-actions">
+                          @if (row.get('testId')?.value) {
+                            <button mat-icon-button (click)="deleteRow(i)"
+                                    [attr.aria-label]="'Delete test mapping for ' + getTestIdDisplay(i)">
+                              <mat-icon>delete</mat-icon>
+                            </button>
+                          }
+                        </td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            }
+          </div>
+        </div>
+      } @else {
+        <!-- ── Empty state before contract selection ── -->
+        <div class="table-card">
+          <div class="empty-state-container">
+            <div class="empty-state-icon" aria-hidden="true">
+              <mat-icon>search</mat-icon>
+            </div>
+            <h3 class="empty-state-title">No Results to Display</h3>
+            <p class="empty-state-message">Enter Contract ID to begin.</p>
+          </div>
+        </div>
+      }
+    </div>
+  </div>
+</div>
+
+<!-- ── Warning dialog template ── -->
+<ng-template #warningDialogTpl>
+  <h2 mat-dialog-title id="warning-dialog-title">Save Completed with Warnings</h2>
+  <mat-dialog-content id="warning-dialog-content">
+    <ul class="warning-list">
+      @for (w of pendingWarnings; track w.code) {
+        <li>{{ w.message }}</li>
+      }
+    </ul>
+  </mat-dialog-content>
+  <mat-dialog-actions align="end">
+    <button mat-flat-button color="primary" mat-dialog-close>OK</button>
+  </mat-dialog-actions>
+</ng-template>

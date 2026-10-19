@@ -1,0 +1,354 @@
+CREATE OR REPLACE PACKAGE DON_COST_ANALYSIS AS 
+    PROCEDURE calc_act_cpu(p_drive_id in varchar2,
+                           p_chapter_id in varchar2,
+                           act_cpu out number,      
+                           err_flag out varchar2,  
+                           err_msg out varchar2) ; 
+    PROCEDURE calc_proj_cost (param_drive_id in varchar2,
+                             param_loc_id in varchar2,
+                             stup_bkdown in number,                             
+                             proj_cost out number,                              
+                             err_flag out varchar2) ;                           
+END DON_COST_ANALYSIS ;                      
+/                                   
+CREATE OR REPLACE PACKAGE BODY DON_COST_ANALYSIS AS   
+   PROCEDURE calc_act_cpu(p_drive_id in varchar2,     
+                          p_chapter_id in varchar2,   
+                          act_cpu out number,         
+                          err_flag out varchar2,      
+                          err_msg out varchar2) IS    
+      reg_cost number := 0;                           
+      ot_cost number := 0;                            
+      cur integer ;                                   
+      cursor c1 is                                    
+         select drive_emp_diffs.staff_no,diff_code    
+         from  drive_emp_diffs,drive_employees        
+         where drive_emp_diffs.drive_id = p_drive_id  
+         and  drive_emp_diffs.chapter_id = p_chapter_id
+         and  drive_employees.drive_id = drive_emp_diffs.drive_id
+         and  drive_employees.staff_no = drive_emp_diffs.staff_no
+         and  drive_employees.chapter_id = p_chapter_id
+         and  drive_employees.staff_type != 'STDNT' ;
+      v_formula varchar2(1800) ;                  
+      return_value number ;                       
+      diff_cost number := 0 ;                     
+      rows number := 0;                           
+      prod number ;                               
+      sql_str varchar2(1800) ;                    
+   BEGIN                                          
+      begin                                       
+         select nvl(sum((out_time - in_time)*24 * 
+                nvl(hourly_rate,0)),0),             
+                    nvl(sum(nvl(ot_hours,0)*nvl(hourly_rate,0)*0.5),0)
+         into reg_cost,ot_cost       
+         from drive_employees        
+         where drive_id = p_drive_id 
+         and  chapter_id = p_chapter_id 
+         and  staff_type != 'STDNT' ;   
+      exception                         
+         when others then 
+            err_flag := 'A' ;
+            err_msg := 'Error in finding drive';
+            return ;    
+      END;              
+      dbms_output.put_line('reg_cost:'||to_char(reg_cost));
+      for c1rec in c1 loop                                 
+         cur := DBMS_SQL.OPEN_CURSOR ;                     
+         begin                                             
+            select formula into v_formula                  
+            from  valid_diffs                              
+            where diff_code =  c1rec.diff_code ;           
+         exception                                         
+            when others then
+               err_flag := 'B' ;
+               err_msg := 'Error in finding formula';
+               return ;                             
+         end ;                                      
+         sql_str := ' select '|| v_formula ||       
+                             ' from drive_employees '||
+                             ' where drive_id=:drive_id '||
+                             ' and   staff_no=:staff_no '||
+                             ' and chapter_id=:chapter_id ' ;
+         dbms_output.put_line(sql_str) ;      
+         DBMS_SQL.PARSE(cur,sql_str, DBMS_SQL.V7) ;
+         DBMS_SQL.DEFINE_COLUMN(cur,1,return_value) ;
+         DBMS_SQL.BIND_VARIABLE(cur,'drive_id',p_drive_id) ;
+         DBMS_SQL.BIND_VARIABLE(cur,'staff_no',c1rec.staff_no) ;
+         DBMS_SQL.BIND_VARIABLE(cur,'chapter_id',p_chapter_id) ;
+         rows := DBMS_SQL.EXECUTE_AND_FETCH(cur) ;
+         if rows = 1 then
+            DBMS_SQL.COLUMN_VALUE(cur,1,return_value) ;
+            diff_cost := diff_cost + nvl(return_value,0) ;
+         end if ;
+         DBMS_SQL.CLOSE_CURSOR(cur) ;
+      end loop ;
+      begin
+         select count(*) into prod
+         from donations
+         where drive_id = p_drive_id 
+         and  chapter_id = p_chapter_id
+         and  unit_id is not null ;
+      exception
+         when others then
+            err_flag := 'C' ;
+            err_msg := 'Error in finding production'; 
+            return ;
+      end ;
+      if prod = 0 then
+         act_cpu := reg_cost + diff_cost + ot_cost ;
+      else
+         act_cpu := (reg_cost + diff_cost + ot_cost) / prod ;
+      end if ;
+   END calc_act_cpu ;
+-------------------------------------------------------------------------
+---------------------------Modified By Amit------------------------------
+-------------------------------------------------------------------------
+   PROCEDURE calc_proj_cost (param_drive_id in varchar2,
+                             param_loc_id in varchar2,
+                             stup_bkdown in number,
+                             proj_cost out number,
+                             err_flag out varchar2) IS
+      avg_rate number ;   
+      start_time date ;   
+      end_time date ;     
+      proj_draw number ;  
+      proj_show number;
+      staff_reqd number ; 
+      travel_time number ;
+      staff_cost number;
+      supply_cost number;
+      vehicle_cost number;
+      courier_cost number;
+      incen_cost number;
+      v_drive_date date;
+      NO_PICKUPS number := 0;
+   BEGIN                  
+      err_flag := 'N' ;   
+      ----Define General Values-------------------------------------
+      begin
+         select drive_date into v_drive_date
+         from drives 
+         where drive_id = param_drive_id;
+      exception  
+         when others then 
+            err_flag := 'D' ;
+            return ;
+      end ; 
+      begin         
+         select sum(projected_draw), sum(projected_show)
+         into proj_draw, proj_show
+         from drive_sponsors 
+         where drive_id = param_drive_id ; 
+      exception  
+         when others then 
+            err_flag := 'E' ;
+            return ;
+      end ; 
+      if proj_draw = 0 then                
+         err_flag := 'F' ;                 
+         return ;                          
+      end if;                                 
+      --------------------------------------------------------------
+      ----------------------CALCULATE SUPPLY COST-------------------
+      --------------------------------------------------------------
+      BEGIN
+         SELECT proj_show * to_number(parameter_value) 
+         INTO supply_cost
+         FROM valid_parameters
+         WHERE parameter_code = 'SCOST'   
+         AND v_drive_date between eff_date 
+             and nvl(term_date,v_drive_date+1);
+      EXCEPTION
+         WHEN no_data_found THEN
+            supply_cost := 0;
+         WHEN others THEN
+            err_flag := 'G';
+            return;
+      END;
+      -------------------------------------------------------------- 
+      ---------------------CALCULATE LABOR COST---------------------
+      --------------------------------------------------------------
+      BEGIN
+         select to_number(parameter_value)
+         into avg_rate                    
+         from valid_parameters            
+         where parameter_code = 'SRATE'   
+         and v_drive_date between eff_date and nvl(term_date,v_drive_date+1);
+      EXCEPTION
+         WHEN others THEN
+            err_flag := 'H';
+            return; 
+      END; 
+      begin  
+         select schedule_start_time,schedule_end_time 
+         into   start_time,end_time         
+         from drives  
+         where drive_id = param_drive_id ;
+      exception 
+         when others then
+            err_flag := 'I' ;
+            return ; 
+      end ;  
+      begin          
+         select nvl(travel_time,0) into travel_time from locations
+         where location_id = param_loc_id ;   
+      exception       
+         when others then
+            err_flag := 'J' ; return ;  
+      end ;         
+      begin 
+         select number_reqd into staff_reqd
+         from drive_estimated_resources    
+         where drive_id = param_drive_id   
+         and resource_code = 'STAFF' ;     
+      exception                            
+         when others then                  
+            err_flag := 'K' ;              
+            return ;                       
+      end ;                                
+      staff_cost := (staff_reqd * avg_rate * 
+                        ((end_time - start_time)*24 + 
+                            ((2*travel_time+nvl(stup_bkdown,0))/60)
+                     )); 
+      
+      --------------------------------------------------------------
+      -------------------CALCULATE COURIER COST---------------------
+      --------------------------------------------------------------
+      BEGIN
+         SELECT count(*) 
+         INTO NO_PICKUPS
+         FROM pickup_schedule
+         WHERE drive_id = param_drive_id;
+      EXCEPTION
+         WHEN no_data_found THEN
+            null;
+         WHEN others THEN
+            err_flag := 'L';
+            return;
+      END;
+      IF no_pickups > 0 THEN
+         BEGIN
+            SELECT no_pickups * to_number(parameter_value) 
+            INTO courier_cost
+            FROM valid_parameters
+            WHERE parameter_code = 'CCOST'   
+            AND v_drive_date between eff_date 
+                and nvl(term_date,v_drive_date+1);
+         EXCEPTION
+            WHEN no_data_found THEN
+               courier_cost := 0;
+            WHEN others THEN
+               err_flag := 'M';
+               return;
+         END;
+      END IF;       
+      --------------------------------------------------------------
+      -------------------CALCULATE INCENTIVE COST-------------------
+      --------------------------------------------------------------
+      BEGIN
+         SELECT sum(dci.qty * vim.avg_cost) 
+         INTO incen_cost
+         FROM drive_campaign_items dci, valid_item_master vim
+         WHERE dci.drive_id = param_drive_id
+         AND dci.item_id = vim.item_code
+         AND sysdate between vim.eff_date
+             and nvl(vim.term_date,sysdate);
+      EXCEPTION
+         WHEN no_data_found THEN
+            incen_cost := 0;
+         WHEN others THEN
+            err_flag := 'N';
+            return;
+      END;
+      ---------------------------------------------------------------
+      ------------------CALCULATE VEHICLE COST-----------------------
+      ---------------------------------------------------------------
+      DECLARE
+         no_coach number(4);
+         no_van   number(4);
+         coach_cost number(7,2);
+         van_cost   number(7,2);
+         trav_dist  number(6,2);
+      BEGIN
+         --For Coach--
+         BEGIN
+            SELECT sum(number_reqd) 
+            INTO no_coach
+            FROM drive_estimated_resources der, valid_parameters vp,
+                 valid_resources vr
+            WHERE der.drive_id = param_drive_id
+            AND der.resource_code = vr.resource_code
+            AND vr.resource_type = 'COACH'
+            AND v_drive_date between vr.eff_date
+               and nvl(vr.term_date,v_drive_date+1);
+         EXCEPTION
+            WHEN no_data_found THEN
+               coach_cost := 0;
+            WHEN others THEN
+               err_flag := 'O';
+               return;
+         END;               
+         BEGIN 
+            SELECT no_coach * to_number(parameter_value)
+            INTO coach_cost
+            FROM valid_parameters
+            WHERE parameter_code = 'COCOST'   
+            AND sysdate between eff_date 
+                and nvl(term_date,sysdate+1);
+         EXCEPTION
+            WHEN others THEN
+               coach_cost := 0;
+         END;
+         --For Van
+         BEGIN
+            SELECT sum(number_reqd) 
+            INTO no_van
+            FROM drive_estimated_resources der, valid_parameters vp,
+                 valid_resources vr
+            WHERE der.drive_id = param_drive_id
+            AND der.resource_code = vr.resource_code
+            AND vr.resource_type = 'VAN'
+            AND sysdate between vr.eff_date
+               and nvl(vr.term_date,sysdate+1);
+            ----Distance-------
+            SELECT nvl(travel_distance,0) INTO trav_dist
+            FROM locations 
+            WHERE location_id = param_loc_id;
+         EXCEPTION
+            WHEN no_data_found THEN
+               van_cost := 0;
+            WHEN others THEN
+               err_flag := 'P';
+               return;
+         END;               
+         BEGIN 
+            SELECT no_van * to_number(parameter_value) * trav_dist * 2
+            INTO van_cost
+            FROM valid_parameters
+            WHERE parameter_code = 'MCOST'   
+            AND sysdate between eff_date 
+                and nvl(term_date,sysdate+1);
+         EXCEPTION
+            WHEN others THEN
+               van_cost := 0;
+         END;
+         vehicle_cost := van_cost + coach_cost;
+      END;
+      ---------------Projected Cost----------------------------------
+      proj_cost := (nvl(staff_cost,0) + nvl(supply_cost,0) 
+                    + nvl(vehicle_cost,0) + nvl(courier_cost,0)  
+                    + nvl(incen_cost,0)) 
+                   / proj_draw;
+      
+   exception     
+      when others then 
+         err_flag := 'Q' ;
+   END calc_proj_cost ;   
+END DON_COST_ANALYSIS ;   
+/
+drop public synonym don_cost_analysis
+/
+create public synonym don_cost_analysis for don_cost_analysis
+/
+grant all on don_cost_analysis to public
+/

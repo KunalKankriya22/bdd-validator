@@ -1,0 +1,226 @@
+<div class="warehouse-checkin-container">
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+  <!-- Card 1: Temperature (no border per design) -->
+  <div class="filter-card filter-card--no-border">
+    <form [formGroup]="tempForm">
+      <div class="field-row field-row--temp">
+        <mat-form-field appearance="fill" class="temp-field">
+          <mat-label>Check-In Temperature (C)</mat-label>
+          <input
+            matInput
+            type="number"
+            formControlName="checkInTemp"
+            (input)="onTempChange()"
+            (keypress)="onlyNumbers($event)"
+            aria-required="true"
+            placeholder="e.g. 4.5">
+          @if (tempFormControl['checkInTemp'].invalid && tempFormControl['checkInTemp'].touched) {
+            <mat-error>Temperature is required</mat-error>
+          }
+        </mat-form-field>
+
+        <div class="button-wrapper">
+          <button mat-button type="button" class="clear-btn" (click)="onClearTemp()" [attr.aria-label]="'Clear check-in temperature'">CLEAR</button>
+        </div>
+      </div>
+
+    </form>
+  </div>
+
+  <!-- Card 2: Unit entry — white background, visible border -->
+  @if (canScan()) {
+    <div class="filter-card filter-card--white">
+      <form [formGroup]="scanForm" novalidate>
+
+        <!-- Row 1: Unit ID | Product Code | Collection Date | Expiration Date | Class -->
+        <div class="field-row field-row--scan">
+
+          <!-- Col 1: Unit ID -->
+          <div class="scan-field-wrapper">
+            <app-unit-id-field
+              #unitIdField
+              [required]="true"
+              [label]="'Unit ID'"
+              [placeholder]="'Scan or type Unit ID'"
+              [validateFfValue]="'N'"
+              (postValidate)="onPostValidate($event)"
+              (cleared)="onUnitIdCleared()">
+            </app-unit-id-field>
+            <span class="scan-icon" aria-hidden="true">
+              <img src="assets/images/icons/Scan.svg" width="18" height="18" alt="" />
+            </span>
+          </div>
+
+          <!-- Col 2: Product Code -->
+          <div class="scan-field-wrapper scan-field-wrapper--select">
+            <mat-form-field appearance="fill">
+              <mat-label>Product Code</mat-label>
+              <mat-select formControlName="productCode">
+                <mat-option>
+                  <ngx-mat-select-search
+                    [formControl]="productSearchControl"
+                    placeholderLabel="Search..."
+                    noEntriesFoundLabel="No products found"
+                    ariaLabel="Search product codes">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (opt of filteredProductOptions(); track opt.productCode) {
+                  <mat-option [value]="opt.productCode">
+                    {{ opt.productCode }}@if (opt.productDesc) { — {{ opt.productDesc }}}
+                  </mat-option>
+                }
+              </mat-select>
+              @if (scanFormControl['productCode'].invalid && scanFormControl['productCode'].touched) {
+                <mat-error>Product Code is required</mat-error>
+              }
+            </mat-form-field>
+            <span class="scan-icon" aria-hidden="true">
+              <img src="assets/images/icons/Scan.svg" width="18" height="18" alt="" />
+            </span>
+          </div>
+
+          <!-- Col 3: Aliquot -->
+          <div class="scan-field-wrapper scan-field-wrapper--aliquot">
+            @if (aliquotOptions().length > 1) {
+              <mat-form-field appearance="fill">
+                <mat-label>Al</mat-label>
+                <mat-select formControlName="aliquot" [attr.aria-label]="'Select aliquot'">
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="aliquotSearchControl"
+                      placeholderLabel="Search..."
+                      noEntriesFoundLabel="No aliquots found"
+                      ariaLabel="Search aliquots">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @for (al of filteredAliquotOptions(); track al) {
+                    <mat-option [value]="al">{{ al }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+            } @else {
+              <div class="readonly-field">
+                <span class="readonly-label" id="aliquot-label">Al</span>
+                <span class="readonly-value" [attr.aria-labelledby]="'aliquot-label'">{{ scanFormControl['aliquot'].value || '-' }}</span>
+              </div>
+            }
+          </div>
+
+          <!-- Col 4: Collection Date -->
+          <div class="readonly-field">
+            <span class="readonly-label" id="collection-date-label">Collection Date</span>
+            <span class="readonly-value" [attr.aria-labelledby]="'collection-date-label'">{{ validationInfo()?.collectionDate || '-' }}</span>
+          </div>
+
+          <!-- Col 5: Expiration Date -->
+          <div class="readonly-field">
+            <span class="readonly-label" id="expiration-date-label">Expiration Date</span>
+            <span class="readonly-value" [attr.aria-labelledby]="'expiration-date-label'">{{ validationInfo()?.expirationDate || '-' }}</span>
+          </div>
+
+          <!-- Col 6: Class (Product Type) -->
+          <div class="readonly-field">
+            <span class="readonly-label" id="class-label">Class</span>
+            <span class="readonly-value" [attr.aria-labelledby]="'class-label'">{{ validationInfo()?.class || '-' }}@if (validationInfo()?.productType) { ({{ validationInfo()?.productType }})}</span>
+          </div>
+        </div>
+
+        <!-- Row 2: Warehouse ID | Device | Rack | Tray | CLEAR ALL -->
+        <div class="field-row field-row--location">
+
+          <!-- Warehouse ID -->
+          <div class="readonly-field">
+            <span class="readonly-label" id="warehouse-id-label">Warehouse ID</span>
+            <span class="readonly-value" [attr.aria-labelledby]="'warehouse-id-label'">{{ validationInfo()?.warehouseId || '-' }}</span>
+          </div>
+
+          <div class="field-with-error">
+            <mat-form-field appearance="fill">
+              <mat-label>Device Number</mat-label>
+              <mat-select formControlName="deviceNumber" [attr.aria-describedby]="deviceError() ? 'device-error' : null">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="deviceSearchControl" placeholderLabel="Search..." noEntriesFoundLabel="No devices found" ariaLabel="Search devices"/>
+                </mat-option>
+                @for (opt of filteredDeviceOptions(); track opt.value) {
+                  <mat-option [value]="opt.value">{{ opt.value }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+            @if (deviceError()) {
+              <div class="field-error" id="device-error" role="alert">{{ deviceError() }}</div>
+            }
+          </div>
+
+          <div class="field-with-error">
+            <mat-form-field appearance="fill">
+              <mat-label>Rack Number</mat-label>
+              <mat-select formControlName="rackNumber" [attr.aria-describedby]="rackError() ? 'rack-error' : null">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="rackSearchControl" placeholderLabel="Search..." noEntriesFoundLabel="No racks found" ariaLabel="Search racks"/>
+                </mat-option>
+                @for (opt of filteredRackOptions(); track opt.value) {
+                  <mat-option [value]="opt.value">{{ opt.value }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+            @if (rackError()) {
+              <div class="field-error" id="rack-error" role="alert">{{ rackError() }}</div>
+            }
+          </div>
+
+          <div class="field-with-error">
+            <mat-form-field appearance="fill">
+              <mat-label>Tray Number</mat-label>
+              <mat-select formControlName="trayNumber" (keydown.tab)="onTrayNumberKeydown($event)" [attr.aria-describedby]="trayError() ? 'tray-error' : null">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="traySearchControl" placeholderLabel="Search..." noEntriesFoundLabel="No trays found" ariaLabel="Search trays"/>
+                </mat-option>
+                @for (opt of filteredTrayOptions(); track opt.value) {
+                  <mat-option [value]="opt.value">{{ opt.value }}@if (opt.itemCount != null) { ({{ opt.itemCount }})}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+            @if (trayError()) {
+              <div class="field-error" id="tray-error" role="alert">{{ trayError() }}</div>
+            }
+          </div>
+
+          <!-- Col 5: CLEAR ALL -->
+          <div class="button-wrapper">
+            <button mat-button type="button" class="clear-btn" (click)="clearAllScanFields()" [attr.aria-label]="'Clear all unit scan fields'">CLEAR ALL</button>
+          </div>
+        </div>
+
+
+      </form>
+
+      @if (loading() || validating()) {
+        <div class="detail-status-row" role="status" aria-live="polite">
+          <mat-spinner diameter="18"></mat-spinner>
+          <span class="detail-status-text">
+            {{ validating() ? 'Validating unit...' : 'Processing check-in...' }}
+          </span>
+        </div>
+      }
+    </div>
+  }
+
+  <!-- Card 3: Grid -->
+  <div class="table-card">
+    @if (canScan() && warehouseLabel()) {
+      <div class="warehouse-header" role="status" aria-live="polite" aria-atomic="true">
+        <mat-icon aria-hidden="true">format_list_bulleted</mat-icon>
+        <span>{{ resolvedWarehouseLabel() || warehouseLabel() }}</span>
+      </div>
+    }
+    <app-data-table
+      [config]="tableConfig()"
+      [data]="tableData()"
+      [loading]="loading()"
+      (sortChange)="onSortChange($event)"
+      (pageChange)="onPageChange($event)">
+    </app-data-table>
+  </div>
+</div>

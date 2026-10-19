@@ -1,0 +1,354 @@
+<div class="page-wrapper">
+
+<app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+<section
+  class="edit-test-observation-container"
+  [attr.aria-labelledby]="elementId('heading')"
+  role="region">
+
+  <!-- Loading State -->
+  @if (loading()) {
+    <div class="loading-overlay" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="36"></mat-spinner>
+    </div>
+  }
+
+  <!-- Section 1: Header Card - Fixed, does NOT scroll -->
+  <div class="header-card">
+    <form [formGroup]="headerForm">
+      <div class="header-row">
+        <div class="form-field unit-id-col">
+          <app-unit-id-field
+            #unitIdField
+            [label]="'Unit ID'"
+            [required]="true"
+            [validateFfValue]="'N'"
+            [hintDefault]="'Scan or type a unit ID'"
+            (validated)="onUnitIdValidated($event)"
+            (cleared)="onUnitCleared()"
+          />
+        </div>
+
+        <mat-form-field appearance="fill" class="form-field test-id-col">
+          <mat-label>Test ID</mat-label>
+          <mat-select
+            [id]="elementId('testId')"
+            formControlName="testId"
+            required>
+            <ngx-mat-select-search [formControl]="testIdSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No match"></ngx-mat-select-search>
+            @for (option of filteredTestIds(); track option.value) {
+              <mat-option [value]="option.value">{{ option.label }}</mat-option>
+            }
+          </mat-select>
+          @if (hf['testId'].invalid && hf['testId'].touched) {
+            <mat-error>Test ID is required</mat-error>
+          }
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field desc-col">
+          <mat-label>Description</mat-label>
+          <input matInput formControlName="description" readonly>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field tb-id-col">
+          <mat-label>Test Batch ID</mat-label>
+          <mat-select [id]="elementId('testBatchId')" formControlName="testBatchId">
+            <ngx-mat-select-search [formControl]="testBatchSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No match"></ngx-mat-select-search>
+            @for (option of filteredTestBatches(); track option.value) {
+              <mat-option [value]="option.value">{{ option.label }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field seq-col">
+          <mat-label>Sequence Number</mat-label>
+          <mat-select [id]="elementId('sequenceNumber')" formControlName="sequenceNumber">
+            @for (option of sequenceNumberOptions(); track option.value) {
+              <mat-option [value]="option.value">{{ option.label }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field type-col">
+          <mat-label>Type</mat-label>
+          <input matInput formControlName="type" readonly>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field type-desc-col">
+          <mat-label>Description</mat-label>
+          <input matInput formControlName="typeDescription" readonly>
+        </mat-form-field>
+      </div>
+    </form>
+  </div>
+
+  <!-- Scrollable Content Area -->
+  <div class="scrollable-content">
+    <!-- Section 2: Two Cards Side by Side -->
+    <div class="two-card-layout">
+      <!-- Left Card: Action Buttons + Band Table -->
+      <div class="band-card">
+        <div class="band-card__actions">
+          <button
+            mat-stroked-button
+            class="btn-outlined-teal"
+            type="button"
+            (click)="onAddOtherBandResults()"
+            [disabled]="!hasData()">
+            <mat-icon>add</mat-icon>
+            ADD BAND
+          </button>
+          <button
+            mat-stroked-button
+            class="btn-outlined-teal"
+            type="button"
+            (click)="onClear()"
+            [disabled]="!hasData() && !headerForm.get('unitId')?.value">
+            <mat-icon>refresh</mat-icon>
+            CLEAR
+          </button>
+          <button
+            mat-stroked-button
+            class="btn-outlined-teal"
+            type="button"
+            (click)="onCancel()">
+            <mat-icon>close</mat-icon>
+            CANCEL
+          </button>
+          <button
+            mat-raised-button
+            color="primary"
+            type="button"
+            (click)="onSave()"
+            [disabled]="loading() || !hasData()">
+            <mat-icon>check</mat-icon>
+            SAVE
+          </button>
+        </div>
+
+        <!-- Band Table with scrollable body -->
+        <form [formGroup]="bandForm">
+          <div class="band-table-wrapper">
+            <table class="band-table" role="grid" aria-label="Band Results">
+              <thead>
+                <tr>
+                  <th>Band</th>
+                  <th>Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (band of bandRows(); track band.bandSeq) {
+                  <tr>
+                    <td class="band-label">{{ band.bandLabel }}</td>
+                    <td class="band-value">
+                      <mat-form-field appearance="fill" class="band-select">
+                        <mat-select [formControlName]="'band_' + band.bandSeq">
+                          <ngx-mat-select-search [formControl]="bandValueSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No match"></ngx-mat-select-search>
+                          @for (option of filteredBandValues(); track option.value) {
+                            <mat-option [value]="option.value">{{ option.label }}</mat-option>
+                          }
+                        </mat-select>
+                      </mat-form-field>
+                    </td>
+                  </tr>
+                }
+                @if (bandRows().length === 0) {
+                  <tr>
+                    <td colspan="2" class="empty-cell">No band data loaded</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        </form>
+      </div>
+
+      <!-- Right Card: Result + Edit Reason + Bottom Buttons -->
+      <div class="result-card">
+        <div class="result-section">
+          <h3 class="section-title">Result</h3>
+          <form [formGroup]="resultForm">
+            <div class="field-row">
+              <mat-form-field appearance="fill" class="form-field">
+                <mat-label>Result Code</mat-label>
+                <mat-select formControlName="resultCode">
+                  <ngx-mat-select-search [formControl]="resultCodeSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No match"></ngx-mat-select-search>
+                  @for (option of filteredResultCodes(); track option.value) {
+                    <mat-option [value]="option.value">{{ option.label }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+
+              <div class="plain-field">
+                <span class="plain-field__label">Description</span>
+                <span class="plain-field__value">{{ resultDescription() }}</span>
+              </div>
+            </div>
+          </form>
+        </div>
+
+        @if (systemMessage()) {
+          <div class="system-message" role="status" aria-live="polite">
+            <span class="system-message__label">System Message</span>
+            <span class="system-message__text">{{ systemMessage() }}</span>
+          </div>
+        }
+
+        <div class="edit-reason-section">
+          <h3 class="section-title">Edit Reason</h3>
+          <form [formGroup]="editReasonForm">
+            <div class="field-row">
+              <mat-form-field appearance="fill" class="form-field">
+                <mat-label>Edit Reason Code</mat-label>
+                <mat-select formControlName="editReasonCode">
+                  <ngx-mat-select-search [formControl]="editReasonSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No match"></ngx-mat-select-search>
+                  @for (option of filteredEditReasons(); track option.value) {
+                    <mat-option [value]="option.value">{{ option.label }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+
+              <div class="plain-field">
+                <span class="plain-field__label">Description</span>
+                <span class="plain-field__value">{{ editReasonDescription() }}</span>
+              </div>
+            </div>
+          </form>
+        </div>
+
+        <div class="result-card__footer">
+          <button mat-button type="button" (click)="onCancel()">CANCEL</button>
+          <button
+            mat-raised-button
+            color="primary"
+            type="button"
+            (click)="onSave()"
+            [disabled]="loading() || !hasData()">
+            SAVE
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 3: Notes -->
+    <div class="notes-section">
+      <h3 class="section-title">Notes</h3>
+
+      <div class="note-input-row">
+        <form [formGroup]="noteForm" class="note-form">
+          <mat-form-field appearance="fill" class="note-textarea">
+            <mat-label>{{ editingNoteId() ? 'Edit Notes' : 'Add Notes' }}</mat-label>
+            <textarea
+              matInput
+              formControlName="noteText"
+              rows="3"
+              maxlength="240">
+            </textarea>
+          </mat-form-field>
+        </form>
+        <button
+          mat-raised-button
+          color="primary"
+          type="button"
+          class="add-note-btn"
+          (click)="editingNoteId() ? onUpdateNote() : onAddNote()"
+          [disabled]="noteForm.invalid || !noteForm.get('noteText')?.value?.trim() || !hasData()">
+          {{ editingNoteId() ? 'UPDATE' : 'ADD' }}
+        </button>
+      </div>
+
+      @for (note of notes(); track note.id) {
+        <div class="note-card">
+          <div class="note-card__header">
+            <div class="note-card__user">
+              <div class="note-card__avatar">{{ getInitials(note.author) }}</div>
+              <div class="note-card__info">
+                <span class="note-card__name">{{ note.author }}</span>
+                <span class="note-card__meta">{{ note.version }}{{ note.version && note.date ? ' | ' : '' }}{{ note.date }}</span>
+              </div>
+            </div>
+            <div class="note-card__actions">
+              <button mat-button color="primary" (click)="onEditNote(note)">EDIT</button>
+              <button mat-button color="warn" (click)="onDeleteNote(note)">DELETE</button>
+            </div>
+          </div>
+          <div class="note-card__label">Notes</div>
+          <p class="note-card__text">{{ note.content }}</p>
+        </div>
+      }
+    </div>
+  </div>
+
+  <!-- Additional Bands Side Panel -->
+  @if (showAdditionalBands()) {
+    <div class="side-panel-overlay" (click)="onCloseAdditionalBands()"></div>
+    <div class="side-panel">
+      <div class="side-panel__header">
+        <h2 class="side-panel__title">Additional Bands</h2>
+        <button mat-icon-button (click)="onCloseAdditionalBands()" aria-label="Close">
+          <mat-icon>close</mat-icon>
+        </button>
+      </div>
+
+      <div class="side-panel__content">
+        <div class="side-panel__unit-id">
+          <span class="side-panel__label">Unit ID</span>
+          <span class="side-panel__value">{{ headerForm.get('unitId')?.value }}</span>
+        </div>
+
+        <table class="other-bands-table" role="grid" aria-label="Additional Bands">
+          <thead>
+            <tr>
+              <th colspan="2">Tech 1</th>
+              <th colspan="2">Tech 2</th>
+              <th colspan="2" class="supervisor-col">Supervisor</th>
+              <th class="delete-col"></th>
+            </tr>
+            <tr class="sub-header">
+              <th>Band 1</th>
+              <th>Band 2</th>
+              <th>Band 1</th>
+              <th>Band 2</th>
+              <th class="supervisor-col">Band 1</th>
+              <th>Band 2</th>
+              <th class="delete-col"></th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (row of otherBandRows(); track $index) {
+              <tr>
+                <td>{{ row.tech1Band1 || '-' }}</td>
+                <td>{{ row.tech1Band2 || '-' }}</td>
+                <td>{{ row.tech2Band1 || '-' }}</td>
+                <td>{{ row.tech2Band2 || '-' }}</td>
+                <td>{{ row.supBand1 || '-' }}</td>
+                <td>{{ row.supBand2 || '-' }}</td>
+                <td class="delete-col">
+                  @if (canDeleteSupervisorBand() && (row.supBand1 || row.supBand2)) {
+                    <button
+                      mat-icon-button
+                      (click)="onDeleteSupervisorBand()"
+                      aria-label="Delete supervisor band">
+                      <mat-icon class="delete-icon">delete</mat-icon>
+                    </button>
+                  }
+                </td>
+              </tr>
+            }
+            @if (otherBandRows().length === 0) {
+              <tr>
+                <td colspan="7" class="empty-cell">No other band data</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+
+      <div class="side-panel__footer">
+        <button mat-button type="button" (click)="onCloseAdditionalBands()">CANCEL</button>
+      </div>
+    </div>
+  }
+</section>
+</div>

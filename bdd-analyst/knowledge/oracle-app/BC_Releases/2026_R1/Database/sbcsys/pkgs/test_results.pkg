@@ -1,0 +1,2453 @@
+CREATE OR REPLACE PACKAGE test_results IS
+/* --
+--	This function will be called by instrument update programs
+--	to update data in utrs or unit_test_base and
+--	schedule additional tests according to valid_test_results
+--    update date :04-18-11
+--    version     :02 replace user by lt_user_session.get_userid -- by Hussein
+--    version     :03 some debug message was removed, ronum=1 was added in A50
+--    version     :04 Kishore (12/09/2015) - SCR 151894 - Display debug messages based on 
+--                 value in the DEBUG_CONTROLS table.
+--      Version:01 for resetting
+--      Version: 02   for adding all the six confirmatory tests By edwin
+--      Version: 03 07/21/2018 MLT 526 (QCRE placement query modified) -- VO3
+--      Version: 04 09/13/2018  MLT 803/804, call the new confirmatory package
+--      Version: 05 10/09/18     To place QCRE code for confirmatory tests      - Edwin
+--      Version: 06 10/16/18     Changes to QCRE code related for confirmatory tests - Edwin
+--      Version: 07 10/16/18     Not able to remove the QCRE for confirmatory, so tweaked the code - Edwin
+--      Version: 08 04/13/20 MLT- 2866/3149 (not scheduling test correctly for multiple chapters cases) 
+--      Version: 09 02/23/22 MLT- 4912 (Mergin from 2018R2_SP5 and 2019_R3)
+--      Version: 10 05/19/22 MLT-5152 (to avoid putting WAD chapter if the unit is not checked in the system)
+
+--
+*/
+FUNCTION update_auto_test (	ax_unit_id varchar2,
+				ax_test_id varchar2,
+				ax_well_number varchar2,
+				ax_absorbance varchar2,
+				ax_ratio varchar2,
+				ax_result_status varchar2,
+				ax_tb_id varchar2,
+				ax_program_id varchar2,
+				ax_result_dats date DEFAULT NULL) 	
+							return VARCHAR2 ;
+--
+--	For manual test update, this routine is called after result update.
+--	It schedules additional tests and confirmatory tests
+--	Also creates interdictions and attributes according to valid_test_results
+--
+FUNCTION update_inter 	( 	ax_unit_id varchar2,
+				ax_coll_date date,
+				ax_chapter_id varchar2,
+				ax_test_id varchar2,
+				ax_result_status varchar2,
+				ax_program_id varchar2 ) return VARCHAR2 ;
+--
+--	Called AFTER voiding a result in utrs or unit_test_base .
+--	If reactive result, current interdictions due to this test are deleted
+--	Interdictions and attributes are recomputed as per new status of the 
+--	voided result. Additional tests and confirmatory test are scheduled
+--	according to valid_test_results
+--
+FUNCTION unit_void 		( 	ax_unit_id varchar2,
+					ax_coll_date date,
+					ax_chapter_id varchar2,
+					ax_test_id varchar2,
+					ax_result_status varchar2,	/* old result */
+					ax_program_id varchar2 )	return VARCHAR2 ;
+--
+--	The result must be edited in utrs or unit_test_base first.
+--	This will delete current interdictions due to this test and recompute
+--	interdictions, attributes  etc.
+--
+FUNCTION unit_edit 		(ax_unit_id varchar2,
+				ax_coll_date date,
+				ax_chapter_id varchar2,
+				ax_test_id varchar2,
+				ax_old_result_status varchar2,	
+				ax_new_result_status varchar2,	
+				ax_program_id varchar2 ) return VARCHAR2 ;
+--
+--	This function is called by donor interface program to check for
+--	result discrepancy in case of ABORH and antigen test results
+--
+FUNCTION discrepancy	( ax_unit_id varchar2,
+			ax_coll_date date,
+			ax_chapter_id varchar2,
+			ax_test_id varchar2,
+			ax_don_result_status varchar2,
+			ax_program_id varchar2 )	return VARCHAR2 ;
+end test_results;
+/
+-- ===========================================================================
+
+CREATE OR REPLACE PACKAGE BODY test_results IS
+--
+--				NOTES about hardcoding:
+--  				=======================
+--
+--	Test IDs : ABORH are hardcoded for creating HOLD interdiction on discrepancy
+--	Test mode updated to A (auto) in update_auto_test
+--	plate sequence I (Initial) and R (Repeat)
+--	Attribute    code DISD generated for : Donor Discrepancy
+--	Attribute    code DISU generated for : Test Discrepancy
+--	Void Reason code DISC is generated in test_voids
+--	Interdiction code QCRE generated for : result after labeling
+--	master code type OKABO : OK product ABO labels to update QCRE interdiction
+--	master code type REAC : reactive result status
+--	test result NT for special logic
+--
+-- ===========================================================================
+--	global variables declared
+	u_no_of_ok_comp               number(2) ;
+	ins_test_seq_no               number(2);
+	nutr_test_seq_no              number(2);
+	nutr_no_of_recs               number(2);
+	nutb_test_seq_no              number(2);
+	nutb_no_of_recs               number(2);
+	t_test_chapter_id             varchar2(4);
+	t_testing_lab_code            varchar2(2);
+	v_number_of_repeats           number(1);
+	v_inter_code                  varchar2(4);
+	v_attrib_group                varchar2(5);
+	v_attrib_code                 varchar2(5);
+	v_confirm_test_id_1           varchar2(10);
+	v_confirm_test_id_2           varchar2(10);
+        v_confirm_test_id_3           varchar2(10);
+	v_confirm_test_id_4           varchar2(10);
+        v_confirm_test_id_5           varchar2(10);
+	v_confirm_test_id_6           varchar2(10);
+      	step_no                       varchar2(4);
+	result                        varchar2(100);
+	single_test_flag              varchar2(1); -- repeats to be scheduled
+	discrepancy_flag              varchar2(1); -- test if discrepancy checked
+	utr_max_tsn		  number(2); -- To restrict UTR data
+	utb_max_tsn		  number(2); -- To restrict UTB data
+	recompute_flag		  BOOLEAN; -- is recalculating
+        v_final_flag              varchar2(1);
+        v_conf_status             varchar2(240);
+	--
+	TYPE inter_code_tab IS TABLE OF unit_interdictions.inter_code%TYPE
+					INDEX BY BINARY_INTEGER;
+	inter_code_arr			  inter_code_tab; -- inter_code array
+	icount	  			  number(2); -- count of the inter rows
+	--
+	TYPE attrib_group_tab IS TABLE OF unit_attributes.attrib_group%TYPE
+				INDEX BY BINARY_INTEGER;
+	attrib_group_arr	 attrib_group_tab; -- attrib_group array
+	--
+	TYPE attrib_code_tab IS TABLE OF unit_attributes.attrib_code%TYPE
+						INDEX BY BINARY_INTEGER;
+	attrib_code_arr		  attrib_code_tab; -- attrib-code array
+	acount			  number(2); -- count of the attrib rows
+	--
+	x			  varchar2(1);
+-- ===========================================================================
+--	Forward declarartion of procedures and functions
+--
+	procedure check_antigen_test(	p_test_id varchar2 );
+	function calculate_inter 	(p_unit_id varchar2,
+					p_coll_date date,
+					p_chapter_id varchar2,
+					p_test_id varchar2,
+					p_result_status varchar2,
+					p_program_id varchar2 ) return VARCHAR2;
+	function is_any_reactive (p_unit_id varchar2,
+				p_coll_date date,
+				p_chapter_id varchar2,
+			        p_test_id varchar2 ) return BOOLEAN;
+	
+        procedure insert_utr 	(p_unit_id varchar2,
+				p_coll_date date,
+				p_chapter_id varchar2,
+				p_test_id varchar2,
+				p_program_id varchar2 ,
+				p_test_seq_no number );
+	
+        procedure sched_conf_utr (p_unit_id varchar2,
+				p_coll_date date,
+				p_chapter_id varchar2,
+				p_conf_test_id varchar2 ,
+				p_program_id varchar2);
+	
+         procedure insert_utb 	(p_unit_id varchar2,
+				p_coll_date date,
+				p_chapter_id varchar2,
+				p_test_id varchar2,
+				p_program_id varchar2 ,
+				p_test_seq_no number );
+
+	procedure sched_conf_utb (p_unit_id varchar2,
+				p_coll_date date,
+				p_chapter_id varchar2,
+				p_conf_test_id varchar2 ,
+				p_program_id varchar2);
+	
+        procedure insert_inter 	(p_unit_id varchar2,
+				p_coll_date date,
+				p_chapter_id varchar2,
+				p_inter_code varchar2,
+				p_test_id varchar2,
+				p_program_id varchar2 ) ;
+	
+       procedure insert_attrib  	( 	p_unit_id varchar2 ,
+						p_coll_date date,
+						p_chapter_id varchar2,
+						p_test_id varchar2,
+						p_attrib_group varchar2,
+						p_attrib_code varchar2 ,
+						p_program_id varchar2 ) ;
+	procedure get_user_info ;
+	procedure get_unit_info	(   p_unit_id varchar2 ,
+                                p_test_id varchar2,
+				p_coll_date out date,
+				p_chapter_id out varchar2 );
+	
+        procedure create_qcre	(p_unit_id varchar2 ,
+				p_coll_date date,
+				p_chapter_id varchar2,
+				p_program_id varchar2 ) ;
+
+	
+    Procedure create_qcre_cnfrm  (p_unit_id      in varchar2,    --- This was added as part of 2018R3
+				  p_coll_date    in date,
+                                  p_test_id      in varchar2,
+                                  p_chapter_id   in varchar2,
+				  p_program_id in varchar2 );
+
+       function lab_discrepancy	(p_unit_id varchar2,
+				p_coll_date date,
+				p_chapter_id varchar2,
+				p_test_id varchar2,
+				p_result_status varchar2,
+				p_program_id varchar2 ) return VARCHAR2;
+	
+        procedure void_utr 	(p_utr_rec utrs%rowtype );
+	procedure void_utb 			( 	p_utb_rec unit_test_base%rowtype );
+	function recompute 		    ( 	p_unit_id varchar2,
+						p_coll_date date,
+						p_chapter_id varchar2,
+						p_test_id varchar2,
+						p_program_id varchar2 ) return VARCHAR2;
+
+	function IsTestMissing		(	p_unit_id varchar2,
+						p_coll_date date,
+						p_chapter_id varchar2,
+						p_test_id  varchar2) return BOOLEAN;
+
+	procedure	cancel_test_results ( p_unit_id varchar2,
+					      p_coll_date date,
+					      p_chapter_id varchar2,
+					      p_test_id varchar2,
+					      p_program_id varchar2);
+
+-- ###########################################################################
+--	This function will be called by instrument update programs
+--	to update data in utrs or unit_test_base and
+--	schedule additional tests according to valid_test_results
+	FUNCTION update_auto_test (ax_unit_id varchar2,
+				ax_test_id varchar2,
+				ax_well_number varchar2,
+				ax_absorbance varchar2,
+				ax_ratio varchar2,
+				ax_result_status varchar2,
+				ax_tb_id varchar2,
+				ax_program_id varchar2,
+				ax_result_dats date DEFAULT NULL)
+				RETURN VARCHAR2 IS
+	u_coll_date                   date ;
+	u_chapter_id                  varchar2(4) ;
+        c_chapter_id                  varchar2(4);
+	cx_result_dats		  date;
+        h_tested_chapter_id      varchar2(4);
+        t_is_debug_msg_displayed  boolean; -- Added by Kishore on 12/09/2015. SCR 18344
+	-- ******************************************************************
+	begin
+                -- Added by Kishore on 12/09/2015. SCR 18344
+                if lab_common.is_debug_msg_displayed ('TEST_RESULTS', 'PKG') then
+                  t_is_debug_msg_displayed := TRUE;
+                else
+                  t_is_debug_msg_displayed := FALSE;
+                end if;
+                -- End of change for SCR 18344
+
+		cx_result_dats := nvl (ax_result_dats, sysdate);
+		get_unit_info ( ax_unit_id ,
+                                ax_test_id,
+				u_coll_date,
+				u_chapter_id );
+
+                     --- Get the chapter ID from the holding tests table to know where the test was performed
+
+               --- MLT-2866
+
+               If u_chapter_id is null then 
+                  u_chapter_id:=t_test_chapter_id;
+               End If;
+
+               Begin
+                 select test_chapter_id into h_tested_chapter_id
+                   from holding_tests where unit_id=ax_unit_id 
+                   and tb_id=ax_tb_id and test_id=ax_test_id and 
+                   holding_status is null and rownum=1;
+              Exception when others then
+                  h_tested_chapter_id:=null;
+              End;
+
+            --- end MLT- 2866        
+		--  Check if the test is antigen test or not
+	    check_antigen_test ( ax_test_id );
+		--  Check where the result is to be updated	and update it ****
+		step_no := '30';
+		begin
+			select min(test_seq_no)
+			into ins_test_seq_no
+			from utrs
+			where unit_id = ax_unit_id
+			  and nvl(coll_date,sysdate+100) = nvl(u_coll_date,sysdate+100)
+			  and (nvl(chapter_id,'NULL') = nvl(u_chapter_id,'NULL') 
+                                Or chapter_id in (select test_chapter_id from holding_tests   --- Or clause was added MLT 2866
+                                                  where unit_id=ax_unit_id and tb_id=ax_tb_id and
+                                                  test_id=ax_test_id and holding_status is null and
+                                                  rownum=1)
+                                                
+                              )
+			  and test_id = ax_test_id
+			  and cancel_flag is null
+			  and tb_id is null
+			  and result_status_1 is null
+			  and result_status_2 is null;
+		end;
+		--
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('1. ins_test_seq_no:' || 
+                  --                        to_char(ins_test_seq_no));
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+
+		if  ins_test_seq_no is not null
+		then
+			begin
+				step_no := '40';
+				update utrs
+				set test_mode = 'A',
+					tb_id = ax_tb_id,
+					result_status_1 = ax_result_status,
+					well_number = ax_well_number,
+					absorbance = ax_absorbance ,
+					ratio = ax_ratio,
+					test_chapter_id = t_test_chapter_id,
+					testing_lab_code = t_testing_lab_code,
+					result_dats = cx_result_dats,
+					result_user_id = LT_USER_SESSION.get_userid,
+					program_id = ax_program_id
+				where
+					unit_id = ax_unit_id and
+				    nvl(coll_date,sysdate+100)= nvl(u_coll_date,sysdate+100) and
+				    ( nvl(chapter_id,'NULL') = nvl(u_chapter_id,'NULL')
+                                      Or chapter_id in (select test_chapter_id from holding_tests   --- Or clause was added MLT 2866
+                                                  where unit_id=ax_unit_id and tb_id=ax_tb_id and
+                                                  test_id=ax_test_id and holding_status is null and
+                                                  rownum=1)
+                                                
+                                    )
+                                    and test_id = ax_test_id
+                                    and	test_seq_no = ins_test_seq_no;
+			end;
+		else
+			begin
+				step_no := '50';
+				select min(test_seq_no)
+				into ins_test_seq_no
+				from unit_test_base
+				where unit_id = ax_unit_id
+				  and nvl(coll_date,sysdate+100) = nvl(u_coll_date,sysdate+100)
+				  and (nvl(chapter_id,'NULL') = nvl(u_chapter_id,'NULL')
+                                        Or chapter_id in (select test_chapter_id from holding_tests   --- Or clause was added MLT 2866
+                                                          where unit_id=ax_unit_id and tb_id=ax_tb_id and
+                                                          test_id=ax_test_id and holding_status is null and
+                                                         rownum=1)
+                                       )
+				  and test_id = ax_test_id
+				  and cancel_flag is null
+				  and tb_id is null
+				  and result_status_1 is null
+				  and result_status_2 is null;
+			end;
+			--
+                        --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+			  --dbms_output.put_line ('2. ins_test_seq_no:' || to_char(ins_test_seq_no));
+                        --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+			if  ins_test_seq_no is not null
+			then
+			      begin
+				step_no := '60';
+					update unit_test_base
+					set test_mode = 'A',
+					tb_id = ax_tb_id,
+					result_status_1 = ax_result_status,
+					well_number = ax_well_number,
+					absorbance = ax_absorbance ,
+					ratio = ax_ratio,
+					test_chapter_id = t_test_chapter_id,
+					testing_lab_code = t_testing_lab_code,
+					result_dats = cx_result_dats,
+					result_user_id = LT_USER_SESSION.get_userid,
+					program_id = ax_program_id
+					where
+			       		unit_id = ax_unit_id and
+					nvl(coll_date,sysdate+100)=nvl(u_coll_date,sysdate+100) and
+						(nvl(chapter_id,'NULL') = nvl(u_chapter_id,'NULL') 
+                                                  Or chapter_id in (select test_chapter_id from holding_tests   --- Or clause was added MLT 2866
+                                                                    where unit_id=ax_unit_id and tb_id=ax_tb_id and
+                                                                    test_id=ax_test_id and holding_status is null and
+                                                                    rownum=1)
+                                                 )
+                                                and test_id = ax_test_id and
+						test_seq_no = ins_test_seq_no;
+			      end;		
+			else
+				--	Get the next test_seq_no in unit_test_base *****
+				begin
+					step_no := '65';
+					select nvl(max(test_seq_no),0)
+					into nutb_test_seq_no
+					from unit_test_base
+					where unit_id = ax_unit_id
+					  and nvl(coll_date,sysdate+100) = nvl(u_coll_date,sysdate+100) and
+					    ( nvl(chapter_id,'NULL') = nvl(u_chapter_id,'NULL')
+                                                 Or chapter_id in (select test_chapter_id from holding_tests   --- Or clause was added MLT 2866
+                                                                   where unit_id=ax_unit_id and tb_id=ax_tb_id and
+                                                                   test_id=ax_test_id and holding_status is null and
+                                                                   rownum=1)
+                                            )
+					  and test_id = ax_test_id ;
+                                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+				  --dbms_output.put_line ('nutb_test_seq_no:' ||to_char(nutb_test_seq_no));
+                                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+					step_no := '70';
+					insert into unit_test_base
+					(
+						unit_id,
+						coll_date,
+						chapter_id,
+						test_seq_no,
+						test_id,
+						test_mode,
+						result_status_1,
+						tb_id,
+						test_chapter_id,
+						well_number,
+						absorbance,
+						ratio,
+						result_dats,
+						result_user_id,
+						testing_lab_code,
+						insert_dats,
+						insert_user_id,
+						program_id
+					)
+					values
+					(
+						ax_unit_id,
+						u_coll_date,
+						h_tested_chapter_id,   -- MLT 2866
+						nutb_test_seq_no + 1 ,
+						ax_test_id,
+						'A',
+						ax_result_status,
+						ax_tb_id,
+						nvl(h_tested_chapter_id,u_chapter_id),    ---t_test_chapter_id),   -- MLT- 2866
+						ax_well_number,
+						ax_absorbance ,
+						ax_ratio,
+						cx_result_dats,
+				LT_USER_SESSION.get_userid,
+						t_testing_lab_code,
+						sysdate,
+				LT_USER_SESSION.get_userid,
+						ax_program_id
+					);
+				end;
+			end if;
+		end if;
+		result := recompute (ax_unit_id ,
+				     u_coll_date ,
+		  		     nvl(h_tested_chapter_id,u_chapter_id),  --u_chapter_id , MLT-2866
+				     ax_test_id ,
+				     ax_program_id ) ;
+		/* -- If wish to replace the code not to recomute every time
+		utr_max_tsn := 99;
+		utb_max_tsn := 99;
+		recompute_flag := FALSE;
+		result := calculate_inter (	ax_unit_id ,
+									u_coll_date ,
+									u_chapter_id ,
+									ax_test_id ,
+									ax_result_status ,
+									ax_program_id ) ;
+		*/
+		if	result != '0' then
+			return(result);
+		end if;
+		result := lab_discrepancy (	ax_unit_id ,
+						u_coll_date ,
+						u_chapter_id ,
+						ax_test_id ,
+						ax_result_status ,
+						ax_program_id ) ;
+		return(result);
+	exception
+		when others then
+			return ('Err: '||step_no||' '|| to_char(sqlcode) ||' '||
+			substr(sqlerrm,1,60));
+	end update_auto_test;
+	---------------------------------------------------------------------------
+	FUNCTION update_inter ( ax_unit_id varchar2,
+				ax_coll_date date,
+		         	ax_chapter_id varchar2,
+				ax_test_id varchar2,
+				ax_result_status varchar2,
+				ax_program_id varchar2	) return VARCHAR2 is
+	-- **********************************************************************
+	begin
+		--  Check if the test is antigen test or not
+	    check_antigen_test ( ax_test_id );
+		result := recompute (ax_unit_id ,
+				ax_coll_date ,
+				ax_chapter_id ,
+				ax_test_id ,
+				ax_program_id ) ;
+		/*
+		utr_max_tsn := 99;
+		utb_max_tsn := 99;
+		recompute_flag := FALSE;
+		result := calculate_inter (	ax_unit_id ,
+						ax_coll_date ,
+					    ax_chapter_id ,
+						ax_test_id ,
+						ax_result_status ,
+						ax_program_id ) ;
+		*/
+		if	result != '0' then
+			return(result);
+		end if;
+		result := lab_discrepancy (	ax_unit_id ,
+						ax_coll_date ,
+						ax_chapter_id ,
+						ax_test_id ,
+						ax_result_status ,
+						ax_program_id ) ;
+		return(result);
+	exception
+		when others then
+			return ('Err: '||step_no||' '|| to_char(sqlcode) ||' '||
+			substr(sqlerrm,1,60));
+	end update_inter;
+	---------------------------------------------------------------------------
+	FUNCTION unit_void ( 	ax_unit_id varchar2,
+							ax_coll_date date,
+							ax_chapter_id varchar2,
+							ax_test_id varchar2,
+							ax_result_status varchar2,
+							ax_program_id varchar2	) return VARCHAR2 is
+	-- **********************************************************************
+	begin
+		--  Check if the test is antigen test or not
+	    check_antigen_test ( ax_test_id );
+		--
+		result := recompute (ax_unit_id ,
+							ax_coll_date ,
+							ax_chapter_id ,
+							ax_test_id ,
+							ax_program_id ) ;
+		return(result);
+	exception
+		when others then
+			return ('Err: '||step_no||' '|| to_char(sqlcode) ||' '||
+			substr(sqlerrm,1,60));
+	end unit_void;
+	---------------------------------------------------------------------------
+	FUNCTION unit_edit ( 	ax_unit_id varchar2,
+							ax_coll_date date,
+							ax_chapter_id varchar2,
+							ax_test_id varchar2,
+							ax_old_result_status varchar2, -- old result
+							ax_new_result_status varchar2, -- new result
+							ax_program_id varchar2	) return VARCHAR2 is
+	-- **********************************************************************
+	begin
+		--  Check if the test is antigen test or not
+	    check_antigen_test ( ax_test_id );
+		--
+		result := recompute (ax_unit_id ,
+							ax_coll_date ,
+							ax_chapter_id ,
+							ax_test_id ,
+							ax_program_id ) ;
+		if	result != '0' then
+			return(result);
+		end if;
+		--	check for test discrepancy
+		result := lab_discrepancy (	ax_unit_id ,
+						ax_coll_date ,
+						ax_chapter_id ,
+						ax_test_id ,
+						ax_new_result_status ,
+						ax_program_id ) ;
+		return(result);
+	exception
+		when others then
+			return ('Err: '||step_no||' '|| to_char(sqlcode) ||' '||
+			substr(sqlerrm,1,60));
+	end unit_edit;
+	---------------------------------------------------------------------------
+	--
+	-- 	Handle donor discrepancy for antigen tests and ABORh
+	--	Called by the donor interface
+	--
+	FUNCTION discrepancy 	( 	ax_unit_id varchar2 ,
+								ax_coll_date date ,
+								ax_chapter_id varchar2 ,
+								ax_test_id varchar2 ,
+								ax_don_result_status varchar2,
+								ax_program_id varchar2 ) return VARCHAR2 is
+	--
+		prior_result_status       varchar2(4);
+		utr_discrep_count         number(2);
+		utb_discrep_count         number(2);
+                t_is_debug_msg_displayed  boolean; -- Added by Kishore on 12/09/2015. SCR 18344
+	-- *******************************************************************
+	begin
+                -- Added by Kishore on 12/09/2015. SCR 18344
+                if lab_common.is_debug_msg_displayed ('TEST_RESULTS', 'PKG') then
+                  t_is_debug_msg_displayed := TRUE;
+                else
+                  t_is_debug_msg_displayed := FALSE;
+                end if;
+                -- End of change
+
+		-- The test must be an antigen test
+		step_no := 'D10';
+	    check_antigen_test ( ax_test_id );
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('discrepancy_flag:' || discrepancy_flag);
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		if	discrepancy_flag != 'Y'
+		then
+			return ('Err: Test should not be checked for discrepancy');
+		end if;
+		--
+		if ax_test_id = 'CMV' and
+		   ax_don_result_status = 'N' then
+		   return '0';
+		end if;
+		-- Check if a different result exists in utrs or unit_test_base
+		-- If yes, generate interdiction
+		step_no := 'D20';
+		select count(*)
+		into utr_discrep_count
+		from utrs
+		where unit_id = ax_unit_id
+		  and nvl(coll_date,sysdate+100) = nvl(ax_coll_date,sysdate+100)
+		  and nvl(chapter_id,'NULL') = nvl(ax_chapter_id,'NULL')
+		  and test_id = ax_test_id
+		  and cancel_flag is null
+		  and decode(result_status_1,NULL,ax_don_result_status,
+									'NT',ax_don_result_status,result_status_1)
+		             			   != ax_don_result_status
+		  and result_status_2 is null;
+		--
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+ 		  --dbms_output.put_line ('utr_discrep_count:' || to_char(utr_discrep_count));
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		select count(*)
+		into utb_discrep_count
+		from unit_test_base
+		where unit_id = ax_unit_id
+		  and nvl(coll_date,sysdate+100) = nvl(ax_coll_date,sysdate+100)
+		  and nvl(chapter_id,'NULL') = nvl(ax_chapter_id,'NULL')
+		  and test_id = ax_test_id
+		  and cancel_flag is null
+		  and decode(result_status_1,NULL,ax_don_result_status,
+									'NT',ax_don_result_status,result_status_1)
+		             			   != ax_don_result_status
+		  and result_status_2 is null;
+		--
+		--if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('utb_discrep_count:' || to_char(utb_discrep_count));
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		if	( utr_discrep_count + utb_discrep_count ) > 0
+		then
+			-- source_test_id is set to null so that it can be removed only
+			-- by user and not by this routine
+			step_no := 'D30';
+			cancel_test_results (ax_unit_id,
+					 ax_coll_date,
+					 ax_chapter_id,
+					 ax_test_id, 
+					 ax_program_id);
+			if ax_test_id = 'ABORH'  then
+				insert_inter (	ax_unit_id ,
+						ax_coll_date,
+			         		ax_chapter_id,
+						'ABOD',
+						NULL,
+						ax_program_id ) ;
+			else
+				insert_attrib ( ax_unit_id,
+						ax_coll_date,
+						ax_chapter_id,
+						NULL,
+						'ALERT',
+						'DISD',
+						ax_program_id ) ;
+			end if;
+		end if;
+		return ('0');
+	exception
+		when others then
+			return ('Err: '||step_no||' '|| to_char(sqlcode) ||' '||
+			substr(sqlerrm,1,60));
+	end discrepancy;
+	-- ***********************************************************************
+	-- ***********************************************************************
+	--							Local procedures
+	-- ***********************************************************************
+	-- ***********************************************************************
+	--
+	--	Check if the test is an antigen test or not
+	--
+	procedure check_antigen_test (	p_test_id varchar2 ) is
+	begin
+		step_no := 'A10';
+		begin
+			select nvl(antigen_flag,'N'), nvl(discrepancy_flag, 'N')
+			into single_test_flag, discrepancy_flag
+			from valid_tests
+			where test_id = p_test_id
+			  and sysdate between eff_date and nvl(term_date,sysdate+365);
+		end;
+	end check_antigen_test;
+	--
+	--	Update interdictions, attributes. Schedule additional tests and
+	--	schedule confirmatory tests
+	--
+	function calculate_inter ( p_unit_id varchar2,
+							p_coll_date date,
+							p_chapter_id varchar2,
+							p_test_id varchar2,
+							p_result_status varchar2,
+							p_program_id varchar2	) return VARCHAR2 is
+	--
+		total_recs                number(2) := 0; -- sum of nutr_no_of_recs and
+		                                          -- nutb_no_of_recs
+		required_test		  number(1); -- is it a required test
+		utr_result_count          number(2) := 0;
+		utb_result_count          number(2) := 0;
+		t_plate_seq               varchar2(1) :=  null;
+                p_ovr_status              varchar2(240);
+                c_chapter_id              varchar2(4);
+                pl_contract_type          varchar2(3);
+                pl_contract_id            varchar2(15);
+                
+                t_is_debug_msg_displayed  boolean; -- Added by Kishore on 12/09/2015. SCR 18344
+	begin
+                -- Added by Kishore on 12/09/2015. SCR 18344
+                if lab_common.is_debug_msg_displayed ('TEST_RESULTS', 'PKG') then
+                  t_is_debug_msg_displayed := TRUE;
+                else
+                  t_is_debug_msg_displayed := FALSE;
+                end if;
+                -- End of change for SCR 18344
+
+		if  single_test_flag = 'Y' then
+				t_plate_seq := 'I';
+		elsif	p_result_status = 'NT'  then
+		--
+		--	result status : "NT" for a non-antigen test
+		--	If a reactive result already present,
+		--	Treat NT as Repeat, even though it is Initial
+		--
+			step_no := 'A10';
+			if is_any_reactive (p_unit_id,
+									p_coll_date,
+									p_chapter_id,
+									p_test_id ) then
+				t_plate_seq := 'R';
+			else
+				t_plate_seq := 'I';
+			end if;
+		else
+			step_no := 'A15';
+			begin
+				select count(*)
+				into utr_result_count
+				from utrs
+				where unit_id = p_unit_id
+				  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+				---  and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')  MLT-2866
+				  and test_id = p_test_id
+				  and cancel_flag is null
+				  and (result_status_1 = p_result_status or(
+				  result_status_1 in
+				 ( select code 
+				   from   master_codes
+				   where  code_type = 'REAC'
+				   and  sysdate between eff_date 
+				   and nvl(term_date,sysdate+100))))
+				  and test_seq_no <= utr_max_tsn
+				  and result_status_2 is null;
+			end;
+			--if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+                          --dbms_output.put_line ('utr_result_count:' || to_char(utr_result_count));
+                        --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+			--	Check if any test result present in unit_test_base
+			step_no := 'A20';
+			begin
+				select count(*)
+				into utb_result_count
+				from unit_test_base
+				where unit_id = p_unit_id
+				  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+				  ---and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')    -- MLT-2866
+				  and test_id = p_test_id
+				  and cancel_flag is null
+				  and (result_status_1 = p_result_status or(
+				  result_status_1 in
+				 ( select code 
+				   from   master_codes
+				   where  code_type = 'REAC'
+				   and  sysdate between eff_date 
+				   and nvl(term_date,sysdate+100))))
+				  and test_seq_no <= utb_max_tsn
+				  and result_status_2 is null;
+			end;
+			--
+                        --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+			  --dbms_output.put_line ('utb count:' || to_char(utb_result_count));
+                        --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+			if ( utr_result_count + utb_result_count = 1 ) then
+				t_plate_seq := 'I';	-- Initial Test
+			else
+				t_plate_seq := 'R';	-- Repeat Test
+			end if;
+		end if;
+		--
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('t_plate_seq:' || t_plate_seq);
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		-- Get details from valid_test_results ****
+		step_no := 'A40';
+		begin
+			select 	number_of_repeats,
+					inter_code,
+					attrib_group,
+					attrib_code,
+					confirm_test_id_1,
+					confirm_test_id_2,
+                                        confirm_test_id_3,
+                                        confirm_test_id_4,
+                                        confirm_test_id_5,
+                                        confirm_test_id_6
+			into
+					v_number_of_repeats,
+					v_inter_code,
+					v_attrib_group,
+					v_attrib_code,
+					v_confirm_test_id_1,
+					v_confirm_test_id_2,
+                                        v_confirm_test_id_3,
+                                        v_confirm_test_id_4,
+                                        v_confirm_test_id_5,
+                                        v_confirm_test_id_6
+			from	valid_test_results
+			where	test_id = p_test_id and
+					result_status = p_result_status and
+					plate_seq = t_plate_seq and
+					sysdate between eff_date and nvl(term_date,sysdate+365);
+		exception
+			when no_data_found then
+				return ('Err: No valid_test_results: '||p_result_status||
+							':'|| t_plate_seq);
+		end;
+		--
+		-- just to make sure that if data is incorrect in valid_test_results
+		if single_test_flag = 'Y' then
+			v_number_of_repeats := 0;
+		end if;
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('conf_1:'	|| v_confirm_test_id_1 );
+		  --dbms_output.put_line ('conf_2:'	|| v_confirm_test_id_2 );
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		step_no := 'A60';
+		begin
+                        --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+			  --dbms_output.put_line ('chapter_id:' || p_chapter_id );
+                        --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+			select	nvl(max(test_seq_no),0),
+					nvl(sum(decode(cancel_flag,NULL,1,0)),0)
+			into 	nutr_test_seq_no,
+					nutr_no_of_recs
+			from utrs
+			where unit_id = p_unit_id
+			  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+			  ---and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')   --- MLT 2866
+			  and test_id = p_test_id ;
+		end;
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('nutr_test_seq_no:' || to_char(nutr_test_seq_no));
+		  --dbms_output.put_line ('nutr_no_of_recs:' || to_char(nutr_no_of_recs));
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		--	Get the next test_seq_no in unit_test_base *****
+		step_no := 'A70';
+		begin
+			select	nvl(max(test_seq_no),0),
+					nvl(sum(decode(cancel_flag,NULL,1,0)),0)
+			into	nutb_test_seq_no,
+					nutb_no_of_recs
+			from unit_test_base
+			where unit_id = p_unit_id
+			  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+			  ---and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')   -- MLT-2866
+			  and test_id = p_test_id ;
+		end;
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('nutb_test_seq_no:' || to_char(nutb_test_seq_no));
+		  --dbms_output.put_line ('nutb_no_of_recs:' || to_char(nutb_no_of_recs));
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		total_recs := nutr_no_of_recs + nutb_no_of_recs;
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('total_recs:' || to_char(total_recs));
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		if	( nutr_no_of_recs > 0  ) then
+			-- schdule additional tests
+			for i in 1..( v_number_of_repeats +1 - total_recs ) loop
+				step_no := 'A80';
+                                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+				  --dbms_output.put_line ('insert utr:' || to_char(nutr_test_seq_no + i ));
+                                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+				insert_utr(p_unit_id,
+					p_coll_date,
+					p_chapter_id,
+					p_test_id,
+					p_program_id ,
+					nutr_test_seq_no + i );
+                                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+				  --dbms_output.put_line ('insert_utr over');
+                                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+			end loop;
+
+                     --- Added by Edwin as part of LT 2018 R2
+
+             SBCLIB.SCH_CUSTOMER_OVER_TESTS(p_unit_id,P_coll_date,
+                                            p_chapter_id,
+                                            p_test_id,
+                                            p_result_status,
+                                            t_plate_seq,
+                                            p_program_id,
+                                            'UTRS', p_ovr_status);
+
+                 IF p_ovr_status='NO' then   -- if there is no customer override then sch the TESTS table confirm tests
+
+		    --	Schedule confirmatory test, if required
+			step_no := 'A90';
+			If	v_confirm_test_id_1 is not null and
+				IsTestMissing (p_unit_id,
+					p_coll_date,
+					p_chapter_id,
+					v_confirm_test_id_1)  then
+				sched_conf_utr(	p_unit_id,
+						p_coll_date,
+						p_chapter_id,
+						v_confirm_test_id_1,
+						p_program_id);
+			End if;
+
+			-- Schedule confirmatory test 2 , if required
+			step_no := 'A100';
+			If	v_confirm_test_id_2 is not null and
+				IsTestMissing (p_unit_id,
+					   p_coll_date,
+					   p_chapter_id,
+					   v_confirm_test_id_2)  then
+				sched_conf_utr(	p_unit_id,
+						p_coll_date,
+						p_chapter_id,
+						v_confirm_test_id_2,
+						p_program_id);
+			End if; -- end of confirm_test_id_2 is not null
+
+                       
+                        -- The below 4 confirmatory are added as part of 2018 R2
+
+                         -- Schedule confirmatory test 3 , if required
+
+			step_no := 'A101';
+			If      v_confirm_test_id_3 is not null and
+				IsTestMissing (p_unit_id,
+					       p_coll_date,
+					       p_chapter_id,
+					       v_confirm_test_id_3)  then
+				sched_conf_utr(	p_unit_id,
+						p_coll_date,
+						p_chapter_id,
+						v_confirm_test_id_3,
+						p_program_id);
+			End if; -- end of confirm_test_id_3 is not null
+                    
+                        -- Schedule confirmatory test 3 , if required
+                        step_no := 'A102';
+			If	v_confirm_test_id_4 is not null and
+				IsTestMissing (p_unit_id,
+					       p_coll_date,
+					       p_chapter_id,
+					       v_confirm_test_id_4)  then
+				sched_conf_utr(	p_unit_id,
+						p_coll_date,
+						p_chapter_id,
+						v_confirm_test_id_4,
+						p_program_id);
+			End if; -- end of confirm_test_id_4 is not null
+
+                        -- Schedule confirmatory test 5 , if required
+                        step_no := 'A103';
+			If v_confirm_test_id_5 is not null and
+				IsTestMissing (p_unit_id,
+					       p_coll_date,
+					       p_chapter_id,
+					       v_confirm_test_id_5)  then
+				sched_conf_utr(	p_unit_id,
+						p_coll_date,
+						p_chapter_id,
+						v_confirm_test_id_5,
+						p_program_id);
+			End if; -- end of confirm_test_id_5 is not null
+
+                         -- Schedule confirmatory test 6 , if required
+                         step_no := 'A104';
+			If v_confirm_test_id_6 is not null and
+				IsTestMissing (p_unit_id,
+					       p_coll_date,
+					       p_chapter_id,
+					       v_confirm_test_id_6)  then
+				sched_conf_utr(	p_unit_id,
+						p_coll_date,
+						p_chapter_id,
+						v_confirm_test_id_6,
+						p_program_id);
+			End if; -- end of confirm_test_id_6 is not null                        
+
+                  END IF;   --- for p_ovr_status=NO
+
+		else -- else of if schedule tests in UTR
+		        dbms_output.put_line('v_repeats:'||to_char(v_number_of_repeats));
+			step_no := 'A110';
+                        if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+			  dbms_output.put_line('v_repeats:'||to_char(v_number_of_repeats));
+                        end if; -- Added by Kishore on 12/09/2015. SCR 18344
+			-- schedule additional tests  in UTB
+			for i in 1..(v_number_of_repeats +1 - total_recs) loop
+                                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+				  --dbms_output.put_line ('insert utb:' ||to_char(nutb_test_seq_no + i ));
+                                --end if; -- Added by Kishore on 12/09/2015. SCR 18344 
+				insert_utb	(p_unit_id,
+							p_coll_date,
+							p_chapter_id,
+							p_test_id,
+							p_program_id ,
+							nutb_test_seq_no + i );
+			end loop;
+
+                         --- Added by Edwin as part of 2018R2
+
+                        SBCLIB.SCH_CUSTOMER_OVER_TESTS(p_unit_id,P_coll_date,
+                                                       p_chapter_id,
+                                                       p_test_id,
+                                                       p_result_status,
+                                                       t_plate_seq,
+                                                       p_program_id,
+                                                       'UTB',
+                                                       p_ovr_status);
+                                                       
+                           --dbms_output.put_line('SCH CUSTOMER='||p_ovr_status);
+
+
+                      IF p_ovr_status='NO' then   -- if there is NO custoer override then do it 
+
+			--	Schedule confirmatory test, if required
+			step_no := 'A120';
+			If	v_confirm_test_id_1 is not null and
+				IsTestMissing (p_unit_id,
+						p_coll_date,
+						p_chapter_id,
+						v_confirm_test_id_1)  then
+			        --dbms_output.put_line ('scheduling:' ||v_confirm_test_id_1);
+
+				sched_conf_utb( p_unit_id,
+						p_coll_date,
+						p_chapter_id,
+						v_confirm_test_id_1,
+						p_program_id);
+			End if;
+
+			--		Schedule confirmatory test 2 , if required
+			step_no := 'A130';
+			If	v_confirm_test_id_2 is not null and
+				IsTestMissing (p_unit_id,
+					       p_coll_date,
+					       p_chapter_id,
+					       v_confirm_test_id_2)  then
+                                --dbms_output.put_line ('scheduling:' ||v_confirm_test_id_1);
+                                
+				sched_conf_utb( p_unit_id ,
+						p_coll_date,
+						p_chapter_id,
+						v_confirm_test_id_2,
+						p_program_id);
+			End if;
+
+
+			--		Schedule confirmatory test 3 , if required
+			step_no := 'A131';
+			If	v_confirm_test_id_3 is not null and
+				IsTestMissing (p_unit_id,
+					       p_coll_date,
+					       p_chapter_id,
+					       v_confirm_test_id_3)  then
+
+				sched_conf_utb( p_unit_id ,
+						p_coll_date,
+						p_chapter_id,
+						v_confirm_test_id_3,
+						p_program_id);
+			End if;
+
+                      
+                      	-- Schedule confirmatory test 4 , if required
+			step_no := 'A132';
+			If	v_confirm_test_id_4 is not null and
+				IsTestMissing (p_unit_id,
+					       p_coll_date,
+					       p_chapter_id,
+					       v_confirm_test_id_4)  then
+
+				sched_conf_utb( p_unit_id ,
+						p_coll_date,
+						p_chapter_id,
+						v_confirm_test_id_4,
+						p_program_id);
+			End if;
+
+
+                         -- Schedule confirmatory test 5 , if required
+			step_no := 'A133';
+			If	v_confirm_test_id_5 is not null and
+				IsTestMissing (p_unit_id,
+					       p_coll_date,
+					       p_chapter_id,
+					       v_confirm_test_id_5)  then
+
+				sched_conf_utb( p_unit_id ,
+						p_coll_date,
+						p_chapter_id,
+						v_confirm_test_id_5,
+						p_program_id);
+			End if;
+
+
+                         -- Schedule confirmatory test 6 , if required
+
+			step_no := 'A134';
+			If      v_confirm_test_id_6 is not null and
+				IsTestMissing (p_unit_id,
+					       p_coll_date,
+					       p_chapter_id,
+					       v_confirm_test_id_6)  then
+
+				sched_conf_utb( p_unit_id ,
+						p_coll_date,
+						p_chapter_id,
+						v_confirm_test_id_6,
+						p_program_id);
+			End if;
+
+                 END IF;    --- for p_ovr_status=NO
+
+		end if; -- end of schedule_additional/confirmatory tests
+
+                step_no := 'A145';   --- Added by Edwin for MLT- 803
+                
+                           
+                --- Get the chapter Id for the confirmatory test
+ 
+               begin
+                  c_chapter_id:=null;
+                 select nvl(test_chapter_id, chapter_id) into c_chapter_id 
+                 from utrs where unit_id=p_unit_id and coll_date=p_coll_date and
+                 test_id=p_test_id and rownum=1;
+                exception when no_data_found then
+                  c_chapter_id:=p_chapter_id; 
+                end;
+
+               
+                CONFIRM_TEST_RESULTS.check_series_config(
+                                                 p_unit_id,
+                                                 c_chapter_id,
+                                                  null     ,   ---p_test_series_id  
+                                                  p_program_id,
+                                                  v_final_flag,
+                                                  v_conf_status   -- status -- 'OK' or error msg.
+                                                        );
+               If v_conf_status<>'OK' then
+                  Return('CONFIRM_TEST_RESULTS-Failed'||v_conf_status);
+               End If;
+
+                            
+ 
+                 ----- 
+		step_no := 'A150';
+		--		Create interdiction, if required
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('v_inter_code:' || v_inter_code );
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		if	v_inter_code is not null then
+			insert_inter (	p_unit_id ,
+					p_coll_date,
+					p_chapter_id,
+					v_inter_code,
+					p_test_id,
+					p_program_id ) ;
+		end if;
+		step_no := 'A160';
+		--
+		--		Create 'QCRE' interdiction, if result came after labelling
+		--      only for required tests in that contract
+		--
+        --- Check if the contract ID is internal
+	  begin
+	    select contract_id into pl_contract_id from units where
+	    unit_id=p_unit_id and rownum=1;
+	exception when others then 
+	    null;
+	end;
+	
+	-- check the contract type
+	If pl_contract_id='INTERNAL' then 
+	   null;
+	Else
+	   begin
+	      select contract_type into pl_contract_type from CONTRACTS
+	      where contract_id=pl_contract_id and rownum=1;                
+	  exception when others then 
+	      null;
+	  end;
+       End If;  
+
+
+
+      If pl_contract_id='INTERNAL' or nvl(pl_contract_type,'XX')!='RG' then 
+    		select count(*)
+    		into   required_test
+    		from   contract_tests ct, units u
+    		where unit_id = p_unit_id
+    		  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+    		  and nvl(u.chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+    		  and u.chapter_id  = ct.chapter_id
+    		  and u.contract_id = ct.contract_id
+    		  and ct.test_id = p_test_id
+    		  and sysdate between ct.eff_date and nvl (ct.term_date, sysdate)
+    		  and ct.stop_label_flag = 'Y';
+        
+      Elsif pl_contract_type='RG' then 
+        
+                   select count(*)
+                    into   required_test
+                   from   contract_tests ct, units u, batch_inputs bi
+                   where unit_id = p_unit_id
+                   and u.batch_id = bi.batch_id
+                   and ct.profile_set_id = bi.profile_set_id
+                   and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+                   and nvl(u.chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+                   --and u.chapter_id  = ct.chapter_id
+                   and u.contract_id = ct.contract_id
+                   and ct.test_id = p_test_id
+                   and sysdate between ct.eff_date and nvl (ct.term_date, sysdate)
+                   and ct.stop_label_flag = 'Y';
+    
+      End If;      
+              
+    	If  required_test > 0 then
+    	    create_qcre	(p_unit_id ,
+    			 p_coll_date,
+    			 p_chapter_id,
+    			 p_program_id ) ;
+    	end if;
+
+
+          step_no:='A179';
+          ---- Place the QCRE   for the confirmatory tests if needed (this is differnt QCRE than the one above)
+           ---  this was added for 2018R3 on 10/10/18 (Edwin)
+
+         CREATE_QCRE_CNFRM (p_unit_id,
+                            p_coll_date,
+                            p_test_id,
+                            p_chapter_id,
+                           p_program_id);
+
+    
+   -------
+
+		step_no := 'A180';
+		--		Create attributes, if required
+		if	v_attrib_code is not null then
+			insert_attrib ( p_unit_id,
+					p_coll_date,
+					p_chapter_id,
+					p_test_id,
+					v_attrib_group,
+					v_attrib_code,
+					p_program_id ) ;
+		end if;
+		if v_attrib_code is not null and recompute_flag  then
+			acount := acount + 1;
+			attrib_code_arr  (acount) := v_attrib_code;
+			attrib_group_arr (acount) := v_attrib_group;
+		end if;
+		return('0');
+	end calculate_inter;
+	--
+	--	Add count of reactive tests for NT result status
+	--
+	function  is_any_reactive (	p_unit_id varchar2,
+					p_coll_date date,
+					p_chapter_id varchar2,
+					p_test_id varchar2 ) return BOOLEAN is
+	react_count	  number (2) := 0;
+        t_is_debug_msg_displayed  boolean; -- Added by Kishore on 12/09/2015. SCR 18344
+	begin
+                -- Added by Kishore on 12/09/2015. SCR 18344
+                if lab_common.is_debug_msg_displayed ('TEST_RESULTS', 'PKG') then
+                  t_is_debug_msg_displayed := TRUE;
+                else
+                  t_is_debug_msg_displayed := FALSE;
+                end if;
+                -- End of change for SCR 18344             
+                
+			select count(*)
+			into react_count
+			from utrs
+			where unit_id = p_unit_id
+			  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+			  and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+			  and test_id = p_test_id
+			  and cancel_flag is null
+			  and result_status_2 is null
+			  and result_status_1 in
+				(
+				select code from   master_codes
+				where  code_type = 'REAC'
+				  and  sysdate between eff_date and nvl(term_date,sysdate+100)
+				);
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('utr count with REAC:' || to_char(react_count));
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		begin
+			select react_count + count(*)
+			into react_count
+			from unit_test_base
+			where unit_id = p_unit_id
+			  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+			  and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+			  and test_id = p_test_id
+			  and cancel_flag is null
+			  and result_status_2 is null
+			  and result_status_1 in
+				(
+				select code from   master_codes
+				where  code_type = 'REAC'
+				  and  sysdate between eff_date and nvl(term_date,sysdate+100)
+				);
+		end;
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('total_count with REAC:' || to_char(react_count));
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		if (react_count > 0) then
+			return TRUE;
+		else
+			return FALSE;
+		end if;
+	end is_any_reactive;
+	--
+	-- 		Create a record in utrs to schedule additional test
+	--
+	procedure insert_utr (	p_unit_id varchar2 ,
+							p_coll_date date,
+							p_chapter_id varchar2,
+							p_test_id varchar2 ,
+							p_program_id varchar2 ,
+							p_test_seq_no number ) is
+	begin
+		insert into utrs
+		(
+			unit_id,
+			coll_date,
+			chapter_id,
+			test_seq_no,
+			test_id,
+			insert_dats,
+			insert_user_id,
+			cancel_flag,
+			program_id
+		)
+		values
+		(
+			p_unit_id,
+			p_coll_date,
+			p_chapter_id,
+			p_test_seq_no ,
+			p_test_id,
+			sysdate,
+			LT_USER_SESSION.get_userid,
+			NULL,
+			p_program_id
+		);
+	end insert_utr;
+	--
+	-- 		Schedule a confirmatory test  in utrs
+	--
+	procedure sched_conf_utr (	p_unit_id varchar2,
+								p_coll_date date,
+								p_chapter_id varchar2,
+								p_conf_test_id varchar2 ,
+								p_program_id varchar2 ) is
+	begin
+
+	      insert into utrs
+		(
+			unit_id,
+			coll_date,
+			chapter_id,
+			test_seq_no,
+			test_id,
+			insert_dats,
+			insert_user_id,
+			program_id
+		)
+		select
+			p_unit_id,
+			p_coll_date,
+			p_chapter_id,
+			nvl (max (test_seq_no), 0) + 1,
+			p_conf_test_id,
+			sysdate,
+			LT_USER_SESSION.get_userid,
+			p_program_id
+		from utrs utr1
+		where utr1.unit_id = p_unit_id
+		  and nvl(utr1.coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+		  and nvl(utr1.chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+		  and utr1.test_id = p_conf_test_id;
+
+	exception
+		when dup_val_on_index then null ;
+	end sched_conf_utr ;
+	--
+	-- 		Create a record in unit_test_base to schedule additional test
+	--
+	procedure insert_utb (  p_unit_id varchar2,
+							p_coll_date date,
+							p_chapter_id varchar2,
+							p_test_id varchar2,
+							p_program_id  varchar2,
+							p_test_seq_no number ) is
+	begin
+		insert into unit_test_base
+		(
+			unit_id,
+			coll_date,
+			chapter_id,
+			test_seq_no,
+			test_id,
+			insert_dats,
+			insert_user_id,
+			program_id
+		)
+		values
+		(
+			p_unit_id,
+			p_coll_date,
+			p_chapter_id,
+			p_test_seq_no ,
+			p_test_id,
+			sysdate,
+			LT_USER_SESSION.get_userid,
+			p_program_id
+		);
+	end insert_utb;
+	--
+	-- 		Schedule a confirmatory test  in unit_test_base
+	--
+	procedure sched_conf_utb (  p_unit_id varchar2 ,
+								p_coll_date date,
+								p_chapter_id varchar2,
+								p_conf_test_id varchar2 ,
+								p_program_id varchar2 ) is
+	begin
+		insert into unit_test_base
+		(
+			unit_id,
+			coll_date,
+			chapter_id,
+			test_seq_no,
+			test_id,
+			insert_dats,
+			insert_user_id,
+			program_id
+		)
+		select
+			p_unit_id,
+			p_coll_date,
+			p_chapter_id,
+			nvl (max (test_seq_no), 0) + 1,
+			p_conf_test_id,
+			sysdate,
+			LT_USER_SESSION.get_userid,
+			p_program_id
+		from unit_test_base utb1
+		where utb1.unit_id = p_unit_id
+		  and nvl(utb1.coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+		  and nvl(utb1.chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+		  and utb1.test_id = p_conf_test_id;
+	exception
+		when dup_val_on_index then null ;
+	end sched_conf_utb;
+	--
+	-- 		Create an interdiction
+	--
+	procedure insert_inter (	p_unit_id varchar2,
+								p_coll_date date,
+								p_chapter_id varchar2,
+								p_inter_code varchar2,
+								p_test_id varchar2 ,
+								p_program_id varchar2  ) is
+	begin
+		if p_test_id is not null and
+		   p_inter_code is not null and
+		   recompute_flag  then 
+			icount := icount + 1;
+			inter_code_arr  (icount) := v_inter_code;
+		end if;
+		insert into unit_interdictions
+		(
+			unit_id,
+			coll_date,
+			chapter_id,
+			inter_code,
+			insert_dats,
+			inter_user_id,
+			source_test_id,
+			program_id
+		)
+	values
+		(
+			p_unit_id,
+			p_coll_date,
+			p_chapter_id,
+			p_inter_code,
+			sysdate,
+			LT_USER_SESSION.get_userid,
+			p_test_id,
+			p_program_id
+		);
+	exception
+		when dup_val_on_index then null;
+	end insert_inter;
+	--
+	-- 		Create an attribute
+	--
+	procedure insert_attrib (	p_unit_id varchar2,
+					p_coll_date date,
+					p_chapter_id varchar2,
+					p_test_id varchar2,
+					p_attrib_group varchar2,
+					p_attrib_code varchar2,
+					p_program_id varchar2)
+								is
+		a_status_flag           varchar2(1) := NULL;
+		a_stop_label_flag       varchar2(1) := NULL;
+		a_inter_code            varchar2(4) := NULL;
+	begin
+		begin
+			select
+				status_flag,
+				stop_label_flag,
+				inter_code
+			into
+				a_status_flag,
+				a_stop_label_flag,
+				a_inter_code
+			from
+				valid_attributes
+			where
+				attrib_group = p_attrib_group and
+				attrib_code = p_attrib_code and
+				unit_scheme_type = 
+				   decode(length(p_unit_id),13,'I','C') and
+				sysdate between eff_date and 
+				nvl(term_date,sysdate+365);
+		exception
+			when no_data_found then null ;
+		end;
+		begin
+			insert into unit_attributes
+			(
+				unit_id,
+				coll_date,
+				chapter_id,
+				attrib_group,
+				attrib_code,
+				status_flag,
+				stop_label_flag,
+				insert_dats,
+				insert_user_id,
+				program_id,
+				source_test_id
+			)
+			values
+			(
+				p_unit_id,
+				p_coll_date,
+				p_chapter_id,
+				p_attrib_group,
+				p_attrib_code,
+				a_status_flag,
+				a_stop_label_flag,
+				sysdate,
+				LT_USER_SESSION.get_userid,
+				p_program_id,
+				p_test_id
+			);
+		exception
+			when dup_val_on_index then null ;
+		end ;
+		if  a_inter_code is not null then
+			insert_inter (	p_unit_id ,
+					p_coll_date,
+					p_chapter_id,
+					a_inter_code,
+					null,
+					p_program_id ) ;
+		end if;
+	end insert_attrib;
+	--
+	-- 		Get unit information
+	--
+	 Procedure get_unit_info ( p_unit_id in varchar2 ,
+                                  p_test_id in varchar2,
+				  p_coll_date out date ,
+				  p_chapter_id out varchar2 ) is
+	--  Get collection date and chapter id from units ***
+          nUcount  number;
+
+	Begin
+		step_no := 'A50';
+              select nvl(count(*),0) into nUcount from units where 
+              unit_id = p_unit_id;
+            If nUcount  = 1 then 
+		select coll_date,
+			   chapter_id
+		into   p_coll_date,
+		       p_chapter_id
+		from   units
+		where  unit_id = p_unit_id;
+
+            Elsif nUcount > 1 then 
+               Begin
+                  select distinct coll_date,
+		          chapter_id
+		   into   p_coll_date,
+                          p_chapter_id
+		   from   units
+		   where  unit_id = p_unit_id;
+                
+               Exception   
+                 when too_many_rows then 
+                   begin
+                      select coll_date, nvl(chapter_id,test_chapter_id)
+                      into p_coll_date,p_chapter_id
+                      from utrs where unit_id = p_unit_id and test_id=p_test_id
+                      and rownum=1;
+	           exception
+   	              when no_data_found then
+                          begin
+                            select coll_date,nvl(chapter_id,test_chapter_id) 
+                            into p_coll_date,p_chapter_id
+                            from unit_test_base where unit_id = p_unit_id and test_id=p_test_id
+                            and rownum=1;
+                         exception  
+                            when no_data_found  then
+                               begin
+                                  select test_chapter_id into p_chapter_id from 
+                                  holding_tests where unit_id=p_unit_id and test_id=p_test_id
+                                  and rownum=1;
+                               exception when others then 
+                                  p_chapter_id:=null;
+                               end;
+
+                         end;   
+                   end;
+               End;
+            Elsif nUCount = 0 then 
+                BEGIN
+                   select test_chapter_id into p_chapter_id from 
+                   holding_tests where unit_id=p_unit_id and test_id=p_test_id
+                  and rownum=1;
+               EXCEPTION 
+                 When no_data_found then 
+                    Begin
+                       select test_chapter_id into p_chapter_id from 
+                       unit_test_base where unit_id=p_unit_id and test_id=p_test_id
+                       and rownum=1;
+                    Exception when no_data_found then 
+                        begin
+                            select chapter_id into p_chapter_id from 
+                            result_inp_dtl where unit_id=p_unit_id and test_id=p_test_id
+                            and rownum=1;
+                        exception when others then 
+                            p_chapter_id:=null;
+                        end;
+                    End;
+                 When others then 
+                    p_chapter_id:=null;
+               END;
+            End If;
+
+            /* If p_coll_date is null or p_chapter_id is null then 
+                   select  coll_date,
+	 	          chapter_id
+		   into   p_coll_date,
+                          p_chapter_id
+		   from   units
+		   where  unit_id = p_unit_id and
+                    insert_dats in (select max(insert_dats) from units where
+                                      unit_id = p_unit_id );
+            End If;
+          */       
+	END get_unit_info;
+	--
+	-- 	If atleast one product is labeled OK, create QCRE interdiction
+	--	to indicate that result came after labeling
+	--
+	procedure create_qcre (	p_unit_id varchar2 ,
+				p_coll_date date,
+				p_chapter_id varchar2,
+				p_program_id varchar2 ) is
+
+          t_is_debug_msg_displayed  boolean; -- Added by Kishore on 12/09/2015. SCR 18344
+	begin
+                -- Added by Kishore on 12/09/2015. SCR 18344
+                if lab_common.is_debug_msg_displayed ('TEST_RESULTS', 'PKG') then
+                  t_is_debug_msg_displayed := TRUE;
+                else
+                  t_is_debug_msg_displayed := FALSE;
+                end if;
+                -- End of change for SCR 18344
+          
+		u_no_of_ok_comp := 0;
+		step_no := 'A55';
+		begin
+	  	 select  count(*)
+		  into   u_no_of_ok_comp
+		  from   units
+		  where  unit_id = p_unit_id
+	            and  nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+	            and  nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+	            and  qc_test_Date is not null;
+	        end;
+		if u_no_of_ok_comp = 0
+		then
+		begin
+			select  count(*)
+			into   u_no_of_ok_comp
+			from   components
+			where  unit_id = p_unit_id
+			  and  nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+			  and  nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+			  and  system_label_decision in
+				(
+				select code from   master_codes
+				where  code_type = 'OKABO'
+				  and  sysdate between eff_date and nvl(term_date,sysdate+100)
+				);
+		end;
+		end if;
+		if u_no_of_ok_comp > 0
+		then
+                        --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		          --dbms_output.put_line ('no_of_ok_comp:' ||
+                          --                      to_char(u_no_of_ok_comp));
+
+			  --dbms_output.put_line ('creating QCRE' );
+                        --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+			insert_inter (	p_unit_id ,
+					p_coll_date,
+					p_chapter_id,
+					'QCRE',
+					NULL ,       
+					p_program_id ) ;
+		end if;
+	end create_qcre;
+	--
+       
+        -- Placing the QCRE for Confirmatory results .This routine was added by Edwin for 2018R3 , 10/10/18
+
+    Procedure create_qcre_cnfrm  (p_unit_id      in varchar2,
+				  p_coll_date    in date,
+                                  p_test_id      in varchar2,
+                                  p_chapter_id   in varchar2,
+				  p_program_id   in varchar2 ) is
+
+             t_is_debug_msg_displayed  boolean;
+              v_tseries_id varchar2(20);
+     Begin
+               
+                if lab_common.is_debug_msg_displayed ('TEST_RESULTS', 'PKG') then
+                  t_is_debug_msg_displayed := TRUE;
+                else
+                  t_is_debug_msg_displayed := FALSE;
+                end if;
+                -- End of change for SCR 18344
+          
+		u_no_of_ok_comp := 0;
+		step_no := 'A556';
+		begin
+	  	 select  count(*)
+		  into   u_no_of_ok_comp
+		  from   UTRS
+		  where  unit_id = p_unit_id
+                    and  test_id = p_test_id
+	            and  nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+	            and  qc_test_Date is not null 
+                    and  cancel_flag is null;
+	        end;
+		
+	   If u_no_of_ok_comp > 0  and 
+              upper(p_program_id) not in ('LTIMUNVO','LTIMTBVO') then 
+ 
+                    insert_inter (p_unit_id ,
+				 p_coll_date,
+				 p_chapter_id,
+				'QCRE',
+				 null,  ----; p_test_id,
+				 p_program_id ) ;
+                  
+
+   
+              --- Check if there is a test series ID
+          
+
+              Begin
+                select test_series_id into v_tseries_id from 
+                UTRS  where  unit_id = p_unit_id
+                    and  test_id = p_test_id
+	            and  nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+	            and  qc_test_Date is not null 
+                    and  cancel_flag is null
+                    and test_series_id is not null
+                    and extract_date is null and rownum=1;
+                   
+                  --- reset the QC flag for the whole series
+
+                   update UTRS set qc_test_flag=null,qc_test_date=null,
+                   qc_test_user=null where unit_id=p_unit_id and
+                    nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100) 
+                   and test_series_id=v_tseries_id and 
+                   qc_test_date is not null and 
+                   extract_date is null;
+
+              Exception when no_data_found then 
+                    --- else the test is not part of the series ID
+
+                   update UTRS set qc_test_flag=null,qc_test_date=null,
+                   qc_test_user=null where unit_id=p_unit_id and
+                    nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100) 
+                   and test_id=p_test_id and qc_test_date is not null
+                   and rownum=1;
+               End;
+             End if;
+	END create_qcre_cnfrm;
+
+       --- End place of QCRE for confirmatory
+
+        
+	-- 		Get user's information
+	--
+	procedure get_user_info is
+          t_is_debug_msg_displayed    boolean; -- Added by Kishore on 12/09/2015. SCR 18344
+	begin
+                -- Added by Kishore on 12/09/2015. SCR 18344
+                if lab_common.is_debug_msg_displayed ('TEST_RESULTS', 'PKG') then
+                  t_is_debug_msg_displayed := TRUE;
+                else
+                  t_is_debug_msg_displayed := FALSE;
+                end if;
+                -- End of change for SCR 18344
+
+		step_no := 'A140';
+		select 	chapter_id,
+			testing_lab_code
+		into 	t_test_chapter_id,
+			t_testing_lab_code
+		from 	system_users
+		where user_id = LT_USER_SESSION.get_userid;
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('t_test_chapter_id:' || t_test_chapter_id);
+		  --dbms_output.put_line ('t_testing_lab_code:' || t_testing_lab_code);
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+	end get_user_info;
+	--
+	--	Handle discrepancy within testing for antigen tests and ABORh
+	--	called at the time of result update and edit
+	--
+	function lab_discrepancy ( 	p_unit_id varchar2 ,
+					p_coll_date date ,
+					p_chapter_id varchar2 ,
+					p_test_id varchar2 ,
+					p_result_status varchar2,
+					p_program_id varchar2 ) return VARCHAR2 is
+	--
+		prior_result_status     varchar2(4);
+	utr_lab_count		  number (2) := 0;
+	utb_lab_count		  number (2) := 0;
+        t_is_debug_msg_displayed  boolean; -- Added by Kishore on 12/09/2015. SCR 18344
+	-- *******************************************************************
+	begin
+                -- Added by Kishore on 12/09/2015. SCR 18344
+                if lab_common.is_debug_msg_displayed ('TEST_RESULTS', 'PKG') then
+                  t_is_debug_msg_displayed := TRUE;
+                else
+                  t_is_debug_msg_displayed := FALSE;
+                end if;
+                -- End of change. SCR 18344
+
+		-- The test must be an antigen test
+		if	discrepancy_flag = 'N' or p_result_status = 'NT' then
+			return ('0');
+		end if;
+		-- Check if a different result exists in utrs or unit_test_base
+		-- If yes, generate interdiction
+		step_no := 'D20';
+		select count(*)
+		into utr_lab_count
+		from utrs
+		where unit_id = p_unit_id
+		  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+		  and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+		  and test_id = p_test_id
+		  and cancel_flag is null
+		  and decode(result_status_1,NULL,p_result_status,
+		             'NT',p_result_status,result_status_1) != p_result_status
+		  and result_status_2 is null;
+		--
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('utr count:' || to_char(utr_lab_count));
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		select count(*)
+		into utb_lab_count
+		from unit_test_base
+		where unit_id = p_unit_id
+		  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+		  and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+		  and test_id = p_test_id
+		  and cancel_flag is null
+		  and decode(result_status_1,NULL,p_result_status,
+			     'NT',p_result_status,result_status_1)
+				!= p_result_status
+		  and result_status_2 is null;
+		--
+                --if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		  --dbms_output.put_line ('utb count:' || to_char(utb_lab_count));
+                --end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		if	( utr_lab_count + utb_lab_count ) > 0
+		then
+		    -- source_test_id is set to null so that it can be removed
+			-- only by user and not by this routine
+			step_no := 'D30';
+			insert_attrib ( p_unit_id,
+					p_coll_date,
+					p_chapter_id,
+					NULL,
+					'ALERT',
+					'DISU',
+					p_program_id ) ;
+			--
+			cancel_test_results ( p_unit_id,
+					  p_coll_date,
+			         	  p_chapter_id,
+		          		  p_test_id,
+				          p_program_id);
+		else
+			--	No discrepancy within test results
+			--	Check donor tested results in donor_tested_units table.
+			--	If present and different from the current result,
+			--	create an interdiction
+			begin
+				select nvl(result_status,p_result_status)
+				into prior_result_status
+				from donor_tested_units
+				where unit_id = p_unit_id
+				  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+				  and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+				  and test_id = p_test_id;
+			exception
+				when no_data_found then
+					prior_result_status := null;
+			end;
+                        if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+			  dbms_output.put_line('prior_result_status:'|| prior_result_status);
+			  dbms_output.put_line('p_result_status:' || p_result_status );
+                        end if; -- Added by Kishore on 12/09/2015. SCR 18344
+			--
+			if  p_test_id = 'CMV' and
+				prior_result_status = 'N' then
+				null;
+			elsif  nvl (prior_result_status, p_result_status) != p_result_status
+			then
+			-- source_test_id is set to null so that it can be removed only
+			-- by user and not by this routine
+				cancel_test_results ( p_unit_id,
+						  p_coll_date,
+						  p_chapter_id,
+						  p_test_id,
+						  p_program_id);
+				if p_test_id = 'ABORH'  then
+					insert_inter (	p_unit_id ,
+							p_coll_date,
+							p_chapter_id,
+							'ABOD',
+							NULL,
+							p_program_id ) ;
+				else
+					insert_attrib ( p_unit_id,
+							p_coll_date,
+							p_chapter_id,
+							NULL,
+							'ALERT',
+							'DISD',
+							p_program_id ) ;
+				end if;
+			end if;
+		end if; -- ( utr_lab_count + utb_lab_count ) > 0
+		return ('0');
+	end lab_discrepancy;
+	--
+	-- 		Void a record in utrs
+	--
+	procedure void_utr ( p_utr_rec in utrs%rowtype ) is
+	begin
+		insert into test_voids
+		(
+			unit_id,
+			coll_date,
+			chapter_id,
+			test_seq_no,
+			test_id,
+			test_mode,
+			result_status_1,
+			result_status_2,
+			tb_id,
+			test_chapter_id,
+			tb_seq_no,
+			well_number,
+			absorbance,
+			ratio,
+			result_dats,
+			result_user_id,
+			testing_lab_code,
+			insert_dats,
+			insert_user_id,
+			void_type,
+			void_reason_code,
+			void_dats,
+			void_user_id
+		)
+		values
+		(
+			p_utr_rec.unit_id,
+			p_utr_rec.coll_date,
+			p_utr_rec.chapter_id,
+			p_utr_rec.test_seq_no,
+			p_utr_rec.test_id,
+			p_utr_rec.test_mode,
+			p_utr_rec.result_status_1,
+			p_utr_rec.result_status_2,
+			p_utr_rec.tb_id,
+			p_utr_rec.test_chapter_id,
+			p_utr_rec.tb_seq_no,
+			p_utr_rec.well_number,
+			p_utr_rec.absorbance,
+			p_utr_rec.ratio,
+			p_utr_rec.result_dats,
+			p_utr_rec.result_user_id,
+			p_utr_rec.testing_lab_code,
+			p_utr_rec.insert_dats,
+			p_utr_rec.insert_user_id,
+			'D',
+			'DISC',
+			sysdate,
+			LT_USER_SESSION.get_userid
+		);
+	end void_utr;
+	--
+	-- 		Void a record in unit_test_base
+	--
+	procedure void_utb ( p_utb_rec in unit_test_base%rowtype ) is
+	begin
+		insert into test_voids
+		(
+			unit_id,
+			coll_date,
+			chapter_id,
+			test_seq_no,
+			test_id,
+			test_mode,
+			result_status_1,
+			result_status_2,
+			tb_id,
+			test_chapter_id,
+			tb_seq_no,
+			well_number,
+			absorbance,
+			ratio,
+			result_dats,
+			result_user_id,
+			testing_lab_code,
+			insert_dats,
+			insert_user_id,
+			void_type,
+			void_reason_code,
+			void_dats,
+			void_user_id
+		)
+		values
+		(
+			p_utb_rec.unit_id,
+			p_utb_rec.coll_date,
+			p_utb_rec.chapter_id,
+			p_utb_rec.test_seq_no,
+			p_utb_rec.test_id,
+			p_utb_rec.test_mode,
+			p_utb_rec.result_status_1,
+			p_utb_rec.result_status_2,
+			p_utb_rec.tb_id,
+			p_utb_rec.test_chapter_id,
+			p_utb_rec.tb_seq_no,
+			p_utb_rec.well_number,
+			p_utb_rec.absorbance,
+			p_utb_rec.ratio,
+			p_utb_rec.result_dats,
+			p_utb_rec.result_user_id,
+			p_utb_rec.testing_lab_code,
+			p_utb_rec.insert_dats,
+			p_utb_rec.insert_user_id,
+			'D',
+			'DISC',
+			sysdate,
+			LT_USER_SESSION.get_userid
+		);
+	end void_utb;
+	---
+	--- function to recompute the interdictions/alerts/confirmatory/repeat test
+	---
+	function recompute ( p_unit_id varchar2,
+		       	     p_coll_date date,
+			     p_chapter_id varchar2,
+			     p_test_id varchar2,
+		       	     p_program_id varchar2	) return VARCHAR2 is
+		cursor c_get_utr is
+		select test_seq_no, result_status_1
+		from   utrs
+		where unit_id = p_unit_id
+		  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+		  ---and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')  -- MLT-2866
+		  and test_id = p_test_id
+		  and cancel_flag is null
+		  and result_status_1 is not null
+		  and result_status_2 is null
+	    order by 1;
+		--
+		cursor c_get_utb is
+		select test_seq_no, result_status_1
+		from   unit_test_base
+		where unit_id = p_unit_id
+		  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+		  ---and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')  -- MLT-2866
+		  and test_id = p_test_id
+		  and cancel_flag is null
+		  and result_status_1 is not null
+		  and result_status_2 is null
+	    order by 1;
+		--
+		cursor c_get_ui is
+		select unit_id, coll_date, chapter_id, inter_code
+		from   unit_interdictions
+		where  unit_id = p_unit_id
+		  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+		  ---and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')   -- MLT 2866
+		  and source_test_id = p_test_id
+		for update of unit_id;
+		--
+		cursor c_get_ua is
+		select unit_id, coll_date, chapter_id, attrib_group, attrib_code
+		from   unit_attributes
+		where  unit_id = p_unit_id
+		  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+		 --- and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')   -- MLT-2866
+		  and source_test_id = p_test_id
+		for update of unit_id;
+		temp_found_flag 	  BOOLEAN;
+                t_is_debug_msg_displayed  boolean; -- Added by Kishore on 12/09/2015. SCR 18344
+	begin
+                -- Added by Kishore on 12/09/2015. SCR 18344
+                if lab_common.is_debug_msg_displayed ('TEST_RESULTS', 'PKG') then
+                  t_is_debug_msg_displayed := TRUE;
+                else
+                  t_is_debug_msg_displayed := FALSE;
+                end if;
+                -- End of change for SCR 18344
+
+		step_no := 'R10';
+		utb_max_tsn := 0; -- do not see the UTB data
+		recompute_flag := TRUE;
+		icount := 0;
+		acount := 0;
+		for utr_result_rec in c_get_utr loop
+			utr_max_tsn := 	utr_result_rec.test_seq_no;
+			result := calculate_inter (	p_unit_id ,
+							p_coll_date ,
+							p_chapter_id ,
+							p_test_id ,
+					utr_result_rec.result_status_1,
+							p_program_id ) ;
+			if (result != '0') then
+				return result;
+			end if;
+		end loop;
+		utr_max_tsn := 99; -- see all the UTR data
+		step_no := 'R20';
+		for utb_result_rec in c_get_utb loop
+		    dbms_output.put_line('unit_id='||p_unit_id||'coll='||to_char(p_coll_date,'mm-dd-yyyy')||
+                                         ' Chap='||p_chapter_id||' Test='||p_test_id||' Resu='|| utb_result_rec.result_status_1);
+                                         
+			utb_max_tsn := 	utb_result_rec.test_seq_no;
+			result := calculate_inter (	p_unit_id ,
+							p_coll_date ,
+							p_chapter_id ,
+							p_test_id ,
+						utb_result_rec.result_status_1,
+							p_program_id ) ;
+			if (result != '0') then
+				return result;
+			end if;
+		end loop;
+		-- now delete the extra interdictions
+		step_no := 'R30';
+		for i in 1..icount loop
+                  if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		    dbms_output.put_line('array inter-code:'|| inter_code_arr (i));
+                  end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		end loop;
+		for ui_inter_rec in c_get_ui loop
+			temp_found_flag := FALSE;
+                        if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+			  dbms_output.put_line('ui:'|| ui_inter_rec.inter_code);
+                        end if; -- Added by Kishore on 12/09/2015. SCR 18344
+			for i in 1..icount loop
+			if ui_inter_rec.inter_code = inter_code_arr (i) then
+					temp_found_flag := TRUE;
+					exit;
+				end if;
+			end loop;
+			if temp_found_flag  = FALSE then
+                                if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+		        	  dbms_output.put_line('delete:'|| ui_inter_rec.inter_code);
+                                end if; -- Added by Kishore on 12/09/2015. SCR 18344
+			-- delete the extra interdictions
+				delete from unit_interdictions
+				where current of c_get_ui;
+			end if;
+		end loop;
+		-- now delete the extra attributes
+		step_no := 'R40';
+		for i in 1..acount loop
+                        if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+			  dbms_output.put_line('array attrib-group:'|| attrib_group_arr (i));
+			  dbms_output.put_line('array attrib-code:'|| attrib_code_arr (i));
+                        end if; -- Added by Kishore on 12/09/2015. SCR 18344
+		end loop;
+		for ua_attrib_rec in c_get_ua loop
+			temp_found_flag := FALSE;
+                        if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+			  dbms_output.put_line('ua:'|| ua_attrib_rec.attrib_group);
+			  dbms_output.put_line('ua:'|| ua_attrib_rec.attrib_code);
+                        end if; -- Added by Kishore on 12/09/2015. SCR 18344
+			for i in 1..acount loop
+			if ua_attrib_rec.attrib_group = attrib_group_arr (i) and
+			   ua_attrib_rec.attrib_code  = attrib_code_arr (i) then
+					temp_found_flag := TRUE;
+					exit;
+			end if;
+			end loop;
+			if temp_found_flag  = FALSE then
+                                if t_is_debug_msg_displayed then -- Added by Kishore on 12/09/2015. SCR 18344
+				  dbms_output.put_line('delete:'|| ua_attrib_rec.attrib_group);
+				  dbms_output.put_line('delete'|| ua_attrib_rec.attrib_code);
+                                end if; -- Added by Kishore on 12/09/2015. SCR 18344
+			-- delete the extra attributes
+				delete from unit_attributes
+				where current of c_get_ua;
+			end if;
+		end loop;
+	return ('0');
+	end recompute;
+
+function IsTestMissing		    (	p_unit_id varchar2,
+					p_coll_date date,
+					p_chapter_id varchar2,
+					p_test_id  varchar2) return BOOLEAN is
+test_count	number (2);
+begin
+	select 	count(*)
+	into	test_count
+	from    utrs
+	where unit_id = p_unit_id
+	  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+	  and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+	  and test_id = p_test_id
+	  and cancel_flag is null;
+	select test_count + count(*)
+	into   test_count
+	from   unit_test_base
+	where unit_id = p_unit_id
+	  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+	  and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+	  and test_id = p_test_id
+	  and cancel_flag is null;
+	if test_count > 0 then
+		return FALSE;
+	else
+		return TRUE;
+	end if;
+end IsTestMissing;
+procedure	cancel_test_results ( p_unit_id varchar2,
+								  p_coll_date date,
+								  p_chapter_id varchar2,
+								  p_test_id varchar2,
+								  p_program_id varchar2) is
+		--
+		-- select records to cancel previous results
+		--
+		cursor utr_cur
+		return utrs%rowtype is
+		select *
+		from utrs
+		where unit_id = p_unit_id
+		  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+		  and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+		  and test_id = p_test_id
+		  and cancel_flag is null
+		  and result_status_1 is not null
+		  and result_status_2 is null
+		  for update of cancel_flag;
+		--
+		-- select records to cancel previous results
+		--
+		cursor utb_cur
+		return unit_test_base%rowtype is
+		select *
+		from unit_test_base
+		where unit_id = p_unit_id
+		  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+		  and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+		  and test_id = p_test_id
+		  and cancel_flag is null
+		  and result_status_1 is not null
+		  and result_status_2 is null
+		  for update of cancel_flag;
+begin
+		--	if any results in utr, cancel them
+		for utr_rec in utr_cur loop
+			step_no := 'D40';
+			void_utr ( utr_rec );
+			--
+			step_no := 'D50';
+			update utrs
+			set  cancel_flag = 'D'
+			where current of utr_cur;
+		end loop;
+		--	if any results in utb, cancel them
+		for utb_rec in utb_cur loop
+			step_no := 'D70';
+			void_utb ( utb_rec );
+			--
+			step_no := 'D80';
+			update unit_test_base
+			set  cancel_flag = 'D'
+			where current of utb_cur;
+		end loop;
+		-- recompute interdictions/attributes
+		result := recompute (p_unit_id ,
+							p_coll_date ,
+							p_chapter_id ,
+							p_test_id ,
+							p_program_id ) ;
+		--
+		--	schedule additional test in utr or utb
+		--
+		begin
+			nutr_test_seq_no := 0;
+			select nvl(max(test_seq_no),0)
+			into nutr_test_seq_no
+			from utrs
+			where unit_id = p_unit_id
+			  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+			  and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+			  and test_id = p_test_id ;
+		end;
+		--	if any test result in utrs, schedule in utr
+		if	( nutr_test_seq_no > 0 )
+		then
+			step_no := 'D60';
+			insert_utr	(p_unit_id,
+						p_coll_date,
+						p_chapter_id,
+						p_test_id,
+						p_program_id ,
+						nutr_test_seq_no + 1 );
+			--
+		else	--  which means no records in utrs yet, so schedule in utb
+			nutb_test_seq_no := 0;
+			select nvl(max(test_seq_no),0)
+			into nutb_test_seq_no
+			from unit_test_base
+			where unit_id = p_unit_id
+			  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+			  and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+			  and test_id = p_test_id ;
+			--
+			step_no := 'D90';
+			insert_utb	(p_unit_id,
+						p_coll_date,
+						p_chapter_id,
+						p_test_id,
+						p_program_id ,
+						nutb_test_seq_no + 1 );
+		end if;
+end cancel_test_results;
+-- *****************************************************************************
+--                                   Initialization
+-- *****************************************************************************
+begin
+get_user_info;
+end test_results;
+/

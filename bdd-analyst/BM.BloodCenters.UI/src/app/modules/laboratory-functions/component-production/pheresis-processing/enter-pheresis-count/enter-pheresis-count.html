@@ -1,0 +1,217 @@
+<div class="main-content">
+  <!-- Section 1: Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig">
+  </app-page-header-with-breadcrumb>
+
+  <!-- Section 2: Search Form Card -->
+  <div class="form-card">
+    <form
+      [formGroup]="form"
+      (ngSubmit)="onRetrieve()"
+      [id]="elementId('search-form')"
+      class="search-form"
+      aria-label="Search by collection date"
+      novalidate>
+
+      <mat-form-field appearance="fill" class="date-field">
+        <mat-label [id]="labelId('collectionDate')">
+          Collection Date
+        </mat-label>
+        <input
+          matInput
+          [matDatepicker]="collectionDatePicker"
+          [id]="elementId('collectionDate')"
+          [max]="today"
+          formControlName="collectionDate"
+          [errorStateMatcher]="collectionDateErrorMatcher"
+          (dateChange)="onCollectionDateChange()"
+          (input)="onCollectionDateInput($event)"
+          required>
+        <mat-datepicker-toggle matIconSuffix [for]="collectionDatePicker" [ariaLabel]="'Open calendar for Collection Date'"></mat-datepicker-toggle>
+        <mat-datepicker #collectionDatePicker></mat-datepicker>
+        <mat-error *ngIf="getCollectionDateError()">
+          {{ getCollectionDateError() }}
+        </mat-error>
+      </mat-form-field>
+
+      <div class="form-actions">
+        <button
+          mat-stroked-button
+          color="primary"
+          type="submit"
+          class="retrieve-btn"
+          [id]="elementId('retrieve-btn')"
+          [disabled]="loading()"
+          [attr.aria-label]="loading() ? 'Retrieving, please wait' : 'Retrieve pheresis components'"
+          [attr.aria-busy]="loading()">
+          @if (loading()) {
+            <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+            <span class="sr-only">Retrieving, please wait...</span>
+          } @else {
+            RETRIEVE
+          }
+        </button>
+
+        @if (searchPerformed()) {
+          <button
+            mat-button
+            type="button"
+            class="clear-btn"
+            (click)="onClear()"
+            [id]="elementId('clear-btn')"
+            [disabled]="loading()">
+            CLEAR ALL
+          </button>
+        }
+      </div>
+    </form>
+  </div>
+
+  <!-- Section 3: Grid Section (always visible) -->
+  <div class="grid-section">
+
+    <!-- Loading State -->
+    @if (loading()) {
+      <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+        <mat-spinner diameter="40" aria-label="Loading components"></mat-spinner>
+        <span>Loading components...</span>
+      </div>
+    }
+
+    <!-- Empty / Initial State -->
+    @if (!hasResults() && !loading()) {
+      <div class="empty-state" role="status">
+        <mat-icon aria-hidden="true">search</mat-icon>
+        <p class="empty-message">No Results to Display</p>
+        <p class="empty-submessage">Scan or enter a Unit ID to begin.</p>
+      </div>
+    }
+
+    <!-- Results -->
+    @if (hasResults() && !loading()) {
+      <!-- Table Toolbar -->
+      <div class="table-toolbar">
+        @if (!editMode()) {
+          <div class="toolbar-right">
+            <button
+              mat-stroked-button
+              color="primary"
+              class="retrieve-btn"
+              (click)="enterEditMode()"
+              [id]="elementId('edit-table-btn')"
+              [disabled]="allLabeled()">
+              EDIT TABLE
+            </button>
+            <app-search-bar
+              [config]="searchConfig"
+              (search)="onSearchFilter($event)"
+              (cleared)="onSearchCleared()">
+            </app-search-bar>
+          </div>
+        } @else {
+          <div class="toolbar-right">
+            <button
+              mat-stroked-button
+              color="primary"
+              class="retrieve-btn"
+              (click)="cancelEdit()"
+              [id]="elementId('cancel-edit-btn')">
+              <mat-icon>close</mat-icon>
+              CANCEL
+            </button>
+            <button
+              mat-raised-button
+              color="primary"
+              (click)="saveAll()"
+              [disabled]="saving()"
+              [id]="elementId('save-btn')">
+              @if (saving()) {
+                <mat-spinner diameter="20" aria-label="Saving"></mat-spinner>
+              } @else {
+                <mat-icon>check</mat-icon>
+              }
+              SAVE
+            </button>
+          </div>
+        }
+      </div>
+
+      <div class="table-container">
+        <table
+          mat-table
+          [dataSource]="dataSource"
+          class="pheresis-count-table"
+          [attr.aria-label]="'Pheresis components table'">
+
+          <ng-container matColumnDef="unitId">
+            <th mat-header-cell *matHeaderCellDef class="sortable-header"
+                [attr.aria-sort]="currentSortOrder === 'ASC' ? 'ascending' : 'descending'">
+              <button class="sort-button" (click)="toggleSort()"
+                      [attr.aria-label]="'Sort by Unit ID, currently sorted ' + (currentSortOrder === 'ASC' ? 'ascending' : 'descending')">
+                <span>Unit ID</span>
+                <mat-icon class="sort-icon" aria-hidden="true">{{ getSortIcon() }}</mat-icon>
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.unitId }}</td>
+          </ng-container>
+
+          <ng-container matColumnDef="productCode">
+            <th mat-header-cell *matHeaderCellDef>Product</th>
+            <td mat-cell *matCellDef="let row">{{ row.productCode }}</td>
+          </ng-container>
+
+          <ng-container matColumnDef="productDescription">
+            <th mat-header-cell *matHeaderCellDef>Product Description</th>
+            <td mat-cell *matCellDef="let row">{{ row.productDescription }}</td>
+          </ng-container>
+
+          <ng-container matColumnDef="labeled">
+            <th mat-header-cell *matHeaderCellDef>Labeled</th>
+            <td mat-cell *matCellDef="let row">{{ row.isLabeled ? 'Yes' : 'No' }}</td>
+          </ng-container>
+
+          <ng-container matColumnDef="cellCount">
+            <th mat-header-cell *matHeaderCellDef>Count (×10¹⁰)</th>
+            <td mat-cell *matCellDef="let row">
+              @if (editMode() && !row.isLabeled) {
+                <mat-form-field appearance="fill" class="count-field">
+                  <mat-label class="sr-only">Cell count for {{ row.unitId }}</mat-label>
+                  <input
+                    matInput
+                    type="number"
+                    [(ngModel)]="row.cellCount"
+                    [id]="elementId('count-' + row.unitId)"
+                    (keypress)="onlyNumbers($event)"
+                    (paste)="onPasteNumbers($event, row)"
+                    (blur)="onCellCountBlur(row)"
+                    min="0"
+                    max="999"
+                    [attr.aria-describedby]="row.error ? elementId('error-' + row.unitId) : null">
+                  @if (row.error) {
+                    <mat-error [id]="elementId('error-' + row.unitId)" role="alert">
+                      {{ row.error }}
+                    </mat-error>
+                  }
+                </mat-form-field>
+              } @else {
+                <span class="count-value">{{ row.cellCount }}</span>
+              }
+            </td>
+          </ng-container>
+
+          <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+          <tr mat-row *matRowDef="let row; columns: displayedColumns;"></tr>
+        </table>
+      </div>
+
+      <mat-paginator
+        [length]="totalRecords()"
+        [pageSize]="pageSize"
+        [pageSizeOptions]="pageSizeOptions"
+        [showFirstLastButtons]="true"
+        (page)="onPageChange()"
+        [attr.aria-label]="'Table pagination'">
+      </mat-paginator>
+    }
+  </div>
+</div>

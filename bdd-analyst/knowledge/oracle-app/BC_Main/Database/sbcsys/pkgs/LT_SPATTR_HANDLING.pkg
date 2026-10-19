@@ -1,0 +1,289 @@
+create or replace package sbcsys.LT_SPATTR_HANDLING as
+/*  ------------- Change History------------
+
+
+ Ver: 01 - LT2018 (Ashok) - 01/18/2017
+ Ver: 02 -- user_id to lt_user_session.get_userid
+
+------------------------------------------------ */
+   procedure ADD_SPATR_INTER(pUnit     in varchar2,
+                             pCollDate in date,
+                             pChapter  in varchar2,
+                             pProd     in varchar2,
+                             pShip     in varchar2 DEFAULT NULL);
+
+   procedure DEL_SPATR_INTER(pUnit     in varchar2,
+                             pCollDate in date,
+                             pChapter  in varchar2,
+                             pProd     in varchar2,
+                             pCheck    in varchar2);
+
+   function GET_HOLD return varchar2;
+
+   function insert_inter (p_unit_id varchar2,
+               p_coll_date date,
+             p_chapter_id varchar2,
+             p_inter_code varchar2,
+             p_product_code varchar2 ,
+             p_program_id varchar2  ) return VARCHAR2;
+
+   procedure Log_Err(pgm_id in varchar2,
+                     stmt_id in varchar2,
+                     err_cd  in varchar2,
+                     err_txt in varchar2);
+end;
+/
+create or replace package body sbcsys.LT_SPATTR_HANDLING as
+   /*4.01.02*/
+   procedure ADD_SPATR_INTER(pUnit     in varchar2,
+                             pCollDate in date,
+                             pChapter  in varchar2,
+                             pProd     in varchar2,
+                             pShip     in varchar2 DEFAULT NULL)
+   is
+      vInter  varchar2(5);
+      vRet    varchar2(100);
+      vShipTo varchar2(15);
+      vAdd    boolean   := TRUE;
+      cursor c1 is
+         select attrib_code
+         from BC_SPATR spa, valid_products vp
+         where spa.unit_id = pUnit
+         and spa.chapter_id = pChapter
+         and spa.prodtype = vp.inv_product_type
+         and vp.product_code = substr(pProd,1,5)
+         and not exists
+            (select 'x' from component_attributes
+             where unit_id = pUnit
+             and product_code = pProd
+             and coll_date = pCollDate
+             and chapter_id = pChapter
+             and attrib_code = spa.attrib_code
+             union
+             select 'x' from unit_attributes
+             where unit_id = pUnit
+             and coll_date = pCollDate
+             and chapter_id = pChapter
+             and attrib_code = spa.attrib_code
+            );
+      cursor c2 is
+         select code_desc from master_codes
+         where code_type = 'BCRAH'
+         and sysdate < nvl(term_date,sysdate+1);
+   BEGIN
+      IF pShip is null THEN
+         BEGIN
+            select td.ship_id into vShipTo
+            from transf_details td, special_units su
+            where td.surg_id = su.surg_id
+            and td.pat_id = su.pat_id
+            and td.chapter_id = su.chapter_id
+            and su.unit_id = pUnit
+            and su.chapter_id = pChapter;
+         EXCEPTION
+            when others THEN
+               null;
+         END;
+      ELSE
+         vShipTo := pShip;
+      END IF;
+      IF vShipTo is not null THEN
+         for rec in c1 loop
+            --Check if shipment is being made to a hospital where processing is
+            --not required.
+            BEGIN
+               for rec2 in c2 loop
+                 if instr(rec2.code_desc,'|'||vShipTo||'|') != 0
+                     and instr(rec2.code_desc,'|'||rec.attrib_code||'|') != 0
+                  then
+                     vAdd := FALSE;
+                     exit;
+                  end if;
+               end loop;
+            EXCEPTION
+               when others then
+                  null;
+            END;
+            IF vADD then
+               vInter := get_hold;
+               -- Place Component Hold
+               IF vInter is not null THEN
+                  vRet := insert_inter(pUnit,
+                                                pCollDate,
+                                                pChapter,
+                                                vInter,
+                                                pProd,
+                                                'ATTRINDL');
+                  --insert into bc_debug values ('After Inter : '|| vRet);
+                  if vRet!= 0 then
+                     Log_Err('ATRAR','BCSPA',
+                                      pUnit || ' ' ||
+                                      pProd,vRet);
+                  end if;
+               END IF;
+            END IF;
+            exit;
+         end loop;
+      END IF;
+   EXCEPTION
+      WHEN others THEN
+         null;
+   END;
+
+   procedure DEL_SPATR_INTER(pUnit     in varchar2,
+                             pCollDate in date,
+                             pChapter  in varchar2,
+                             pProd     in varchar2,
+                             pCheck    in varchar2)
+   is
+      vTemp  varchar2(1);
+      vInter varchar2(5);
+   BEGIN
+      IF pCheck = 'N' THEN
+         raise no_data_found;
+      END IF;
+      select 'x' into vTemp
+      from BC_SPATR spa, valid_products vp
+      where spa.unit_id = pUnit
+      and spa.chapter_id = pChapter
+      and spa.prodtype = vp.inv_product_type
+      and vp.product_code = substr(pProd,1,5)
+      and not exists
+         (select 'x' from component_attributes
+          where unit_id = pUnit
+          and product_code = pProd
+          and coll_date = pCollDate
+          and chapter_id = pChapter
+          and attrib_code = spa.attrib_code
+          union all
+          select 'x' from unit_attributes
+          where unit_id = pUnit
+          and coll_date = pCollDate
+          and chapter_id = pChapter
+          and attrib_code = spa.attrib_code)
+      and rownum = 1;
+   EXCEPTION
+      when no_data_found then
+         vInter := get_hold;
+         IF vInter is not null THEN
+            delete from component_interdictions
+            where unit_id = pUnit
+            and   product_code = pProd
+            and   coll_date = pCollDate
+            and   chapter_id = pChapter
+            and   inter_code = vInter;
+         END IF;
+      when others then
+         null;
+   END;
+
+   function GET_HOLD return varchar2 is
+      vHl  varchar2(5) := null;
+   BEGIN
+      select code_desc into vHl
+      from master_codes
+      where code_type = 'MISC'
+      and code = 'BCSPA';
+      return vHl;
+   EXCEPTION
+      when others then
+         return null;
+   END;
+
+  function insert_inter (p_unit_id varchar2,
+        p_coll_date date,
+        p_chapter_id varchar2,
+        p_inter_code varchar2,
+        p_product_code varchar2 ,
+        p_program_id varchar2  ) return VARCHAR2 is
+  temp_x  varchar2(1);
+  begin
+     if p_inter_code is not null then
+     begin
+       select 'x'
+         into temp_x
+       from valid_interdictions_lab
+       where inter_code = p_inter_code
+       and sysdate between eff_date and nvl(term_date, sysdate+1);
+       if p_product_code is not null then
+       begin
+       insert into component_interdictions
+      ( unit_id,
+        coll_date,
+        chapter_id,
+        inter_code,
+        product_code,
+        insert_dats,
+        inter_user_id,
+        program_id
+      )
+    select p_unit_id, p_coll_date, p_chapter_id, p_inter_code,
+           p_product_code, sysdate, lt_user_session.get_userid, p_program_id
+           from valid_interdictions_lab
+           where inter_code = p_inter_code
+           and not exists (select 'x' from component_interdictions
+               where unit_id = p_unit_id
+               and coll_date = p_coll_date
+               and product_code = p_product_code
+               and inter_code = p_inter_code
+               and chapter_id = p_chapter_id)
+                 and sysdate between eff_date and nvl(term_date, sysdate+1);
+      return ('0');
+       exception
+    when dup_val_on_index then
+        null;
+            when others then
+       return ('Err: '|| to_char(sqlcode) ||' '||substr(sqlerrm,1,60));
+       end;
+       else
+       begin
+       insert into unit_interdictions
+      ( unit_id,
+        coll_date,
+        chapter_id,
+        inter_code,
+        insert_dats,
+        inter_user_id,
+        program_id
+      )
+    select p_unit_id, p_coll_date, p_chapter_id, p_inter_code,
+           sysdate, lt_user_session.get_userid, p_program_id
+           from valid_interdictions_lab
+           where inter_code = p_inter_code
+           and not exists (select 'x' from unit_interdictions
+               where unit_id = p_unit_id
+               and coll_date = p_coll_date
+               and inter_code = p_inter_code
+               and chapter_id = p_chapter_id)
+                 and sysdate between eff_date and nvl(term_date, sysdate+1);
+      return ('0');
+       exception
+    when dup_val_on_index then
+        null;
+          when others then
+       return ('Err: '|| to_char(sqlcode) ||' '||substr(sqlerrm,1,60));
+       end;
+       end if;
+     exception
+        when others then
+    return('Err: Invalid Interdiction');
+     end;
+    end if;
+  end insert_inter;
+
+   procedure Log_Err(pgm_id in varchar2,
+                     stmt_id in varchar2,
+                     err_cd  in varchar2,
+                     err_txt in varchar2) is
+      PRAGMA AUTONOMOUS_TRANSACTION;
+   BEGIN
+      insert into system_error_log
+      (module_name,     insert_dats,        user_id,
+       statement_id,    error_key,          error_desc)
+      values
+      (substr(pgm_id,1,8),      sysdate,    'SYSTEM',
+       substr(stmt_id,1,6),     substr(err_cd,1,70),   substr(err_txt,1,70));
+      COMMIT;
+   END;
+END;
+/

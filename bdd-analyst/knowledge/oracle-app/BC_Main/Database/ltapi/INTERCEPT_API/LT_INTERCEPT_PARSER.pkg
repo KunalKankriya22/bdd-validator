@@ -1,0 +1,531 @@
+create or replace PACKAGE LT_INTERCEPT_PARSER IS
+
+/* ************************************************************
+  This is Intercept Parser
+
+  Created By        : Basker Edwin
+  Date Of Creation  : 04/14/16
+  Version           : 01 - Edwin
+                    : 02 , IM: 279, Edwin   /06/17/16
+
+   **Resetting the version for 2018**
+
+  Ver: 01           Resetting to version 01
+  Ver: 02            MLT-3460
+
+  *************************************************************   */
+
+  procedure add_log_entry(p_log_text in varchar2);
+  procedure main_proc(file_name in varchar2,
+                       pl_chapter_id in varchar2);
+  procedure process;
+  procedure get_column(txtline in varchar2, delimit in char,strt in number,
+  endc in number,outcol out varchar2);
+  procedure read_delimiter;
+  procedure parse_read_record;
+  procedure init_variables;
+  procedure rollback_and_exit ;
+
+  temp_coll_date         DATE;
+  field_delimiter        VARCHAR2(1);
+  repeat_delimiter       VARCHAR2(1);
+  logfile                UTL_FILE.FILE_TYPE;
+  instfile               UTL_FILE.FILE_TYPE;
+  LogDir                 VARCHAR2(100);
+  logfilename            VARCHAR2(100);
+  p_file_name            VARCHAR2(100);
+  result_file_name       VARCHAR2(100);
+  read_record            VARCHAR2(900);
+  fetch_count            NUMBER:=0;
+  complete               BOOLEAN:=false;
+  process_date_time      VARCHAR2(25);
+  v_unit_id              VARCHAR2(20);
+  v_chapter_id           VARCHAR2(4);
+  record_count           NUMBER:=0;
+  upload_count           NUMBER:=0;
+  err_msg                VARCHAR2(300);
+  ncount                 NUMBER:=0;
+  no_of_units            NUMBER:=0;
+  g_local_time           DATE;
+  p_chp_sys_date         DATE;
+
+end LT_INTERCEPT_PARSER;
+
+/
+
+create or replace package body LT_INTERCEPT_PARSER is
+
+PROCEDURE add_log_entry(p_log_text varchar2) is
+BEGIN
+         UTL_FILE.putf(logfile,'%s\n',p_log_text);
+         UTL_FILE.fflush(logfile);
+END add_log_entry;
+
+procedure main_proc(file_name in varchar2,
+                    pl_chapter_id in varchar2) is
+
+ start_time   VARCHAR2(30);
+ end_time     VARCHAR2(30);
+Begin
+      dbms_output.enable(50000000);
+      result_file_name:=file_name;
+      v_chapter_id:=pl_chapter_id;
+      p_chp_sys_date:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                                sysdate);
+      --p_chp_sys_date:=sysdate;
+
+      begin
+           select code_desc into LogDir from master_codes
+           where code_type='LOGDR' and code='ILOG' and p_chp_sys_date
+	   between eff_date and nvl(term_date,sysdate+10);
+      exception
+           when utl_file.invalid_path then
+               dbms_output.put_line('Invalid path or filename');
+	       raise;
+           when others then
+           dbms_output.put_line('Error in prepare_log_filename');
+	   raise;
+       end;
+
+      dbms_output.put_line('File Name='||file_name);
+
+     begin
+         instfile:=UTL_FILE.fopen(LogDir,file_name, 'r');
+       exception
+         when utl_file.invalid_path then
+         dbms_output.put_line('Invalid path or filename'); raise;
+     end;
+
+    dbms_output.put_line('Input file has been opend successfully');
+
+
+      begin
+       p_file_name:=substr(result_file_name,1,instr(result_file_name,'.',1)-1);
+
+       select 'INT_PARSER_'||p_file_name||'_'||
+       to_char(sysdate,'mmddyyyyhh24mi')||'.r' into logfilename from dual;
+      exception
+	  when others then
+	     dbms_output.put_line('Error in getting logfilename ... Aborting');
+	     raise;
+      end;
+
+
+       begin
+        -- g_local_time:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+        --     sysdate);
+
+           g_local_time:=sysdate;
+	   start_time := to_char(g_local_time,'mm-dd-yy hh24:mi:ss');
+           logfile:=UTL_FILE.fopen(LogDir,logfilename, 'w');
+           add_log_entry(' Intercept Parsing Log');
+           add_log_entry('-------------------');
+           add_log_entry(' ');
+	   add_log_entry('Parsing start time:'||start_time);
+	   add_log_entry('File Name  : '||result_file_name);
+	   add_log_entry('Log Name   : '||logfilename);
+	   add_log_entry('----------------------------------------');
+
+       exception
+	  when utl_file.invalid_path then
+	   dbms_output.put_line('Invalid path or filename'); raise;
+        end;
+
+
+          dbms_output.put_line('Log file opened successfully');
+
+          init_variables;
+	  read_delimiter;
+
+	  loop
+	     process;
+	     exit when complete;
+	  end loop;
+
+
+	  add_log_entry('No. of Records parsed: '||to_char(no_of_units));
+	  add_log_entry('Parsing successfully completed');
+
+     ---  g_local_time:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+     --  sysdate);
+
+          g_local_time:=sysdate;
+          end_time := to_char(g_local_time,'mm-dd-yy hh24:mi:ss');
+	  add_log_entry('Program End Time:'||end_time);
+	  add_log_entry('*********************End****************************');
+
+         UTL_FILE.fclose(logfile);
+         UTL_FILE.fclose(instfile);
+
+End main_proc;
+
+/*
+Procedure process is
+   rec_type  VARCHAR2(1);
+   process_exception EXCEPTION;
+Begin
+   readrecord;
+   If not complete then
+     begin
+
+         fetch_count:=fetch_count+1;
+         record_count:=record_count+1;
+         parse_read_record;
+    end;
+   End if;
+Exception
+    When process_exception then
+	 null;
+End process;
+
+*/
+
+Procedure process is
+ Begin
+   utl_file.get_line(instfile,read_record);
+   If not complete then
+      fetch_count:=fetch_count+1;
+      record_count:=record_count+1;
+      parse_read_record;
+   End if;
+
+ Exception
+  when no_data_found then
+    complete:=TRUE;
+
+  when UTL_FILE.READ_ERROR then
+     add_log_entry('Error reading file '||result_file_name);
+     rollback_and_exit;
+ End process;
+
+Procedure get_column(txtline in varchar2,
+                     delimit in char,
+                     strt in number,
+		     endc in number,
+                     outcol out varchar2) is
+   stringend number;
+ Begin
+    if instr(txtline,delimit,1,endc) = 0 then
+       stringend:=length(txtline);
+   else
+    stringend:=instr(txtline,delimit,1,endc) - instr(txtline,delimit,1,strt)-1;
+  end if;
+  outcol := substr(txtline,instr(txtline,delimit, 1, strt)+1,stringend);
+End get_column;
+
+procedure read_delimiter is
+ read_hdr    varchar2(250);
+begin
+  field_delimiter:=',';
+End read_delimiter;
+
+
+Procedure parse_read_record is
+ user_exception      EXCEPTION;
+ v_inst_code         varchar2(26);
+ v_unit_suffix       varchar2(15);
+ v_product_code      varchar2(10);
+ v_treat_start_time  varchar2(30);
+ v_tot_treat_time    varchar2(20);
+ v_dosage_measured   varchar2(20);
+ v_status            varchar2(10);
+ v_target_dose       varchar2(20);
+ v_operator_id       varchar2(30);
+ v_chamber_number    varchar2(10);
+ v_agitation_time    varchar2(10);
+ v_inst_message      varchar2(310);
+ v_software_ver      varchar2(10);
+ v_site_code         varchar2(20);
+ v_lot_number        varchar2(15);
+ v_set_code          varchar2(15);
+ v_check_sum          varchar2(20);
+ first_delimitor     NUMBER:=0;
+ v_error_code        VARCHAR2(10);
+ nDup                NUMBER:=0;
+ nDup_arc            NUMBER:=0;
+ p_status            varchar2(200);
+ nLotExist           NUMBER:=0;
+ nPathExist          NUMBER:=0;
+ nSerialExist        NUMBER:=0;
+ v_temp_chapter_id   VARCHAR2(5);
+BEGIN
+
+
+  --Get the instrument Code
+
+   Begin
+     first_delimitor:=INSTR(read_record,',',1);
+     v_inst_code:=substr(read_record,1,first_delimitor-1);
+
+     if substr(v_inst_code,1,1)!='"' then
+         v_inst_code:=substr(v_inst_code,instr(v_inst_code,'"',1));
+     end if;
+
+     If substr(v_inst_code,1,1)='"' and substr(v_inst_code,-1)='"' then
+        v_inst_code:=substr(v_inst_code,2, Length(v_inst_code)-2);
+     End If;
+
+     no_of_units:=no_of_units+1;
+     dbms_output.put_line('Inst code='||v_inst_code);
+   Exception
+     when others then
+       add_log_entry('inst parsing:'||sqlerrm);
+   End;
+
+
+   --Get unit ID (Donation Number)
+   get_column(read_record,field_delimiter,1,2,v_unit_id);
+   v_unit_id:=substr(v_unit_id,2,Length(v_unit_id)-2);
+
+    If Length(v_unit_id)=16 then
+        v_unit_id:=substr(v_unit_id,2,13);
+    Elsif Length(v_unit_id)=15 then
+        v_unit_id:=substr(v_unit_id,1,13);
+    End If;
+
+    dbms_output.put_line('v_unit_id='||v_unit_id);
+
+   -- get the chapter ID from units table for instrument check
+   -- and check if the serial number in the file is valid
+
+   Begin
+     select chapter_id into v_temp_chapter_id from units
+     where unit_id=v_unit_id and
+     insert_dats=(select max(insert_dats) from units where unit_id=v_unit_id);
+  Exception when others then
+    v_temp_chapter_id:=v_chapter_id;
+  End;
+
+       -- now check if the serial number is valid for this chapter
+    dbms_output.put_line('Chapter-'||v_temp_chapter_id);
+
+/*
+   select  nvl(count(*),0) into nSerialExist from equipment
+   where serial_number=trim(v_inst_code)
+    and status='IN' and chapter_id=v_temp_chapter_id;
+
+
+   If nSerialExist =0 then
+      p_status:='Invalid Equipment serial number:'||v_unit_id||
+                 ' : '||v_inst_code;
+      raise user_exception;
+  End If;
+
+*/
+
+     --Get unit suffix
+     get_column(read_record,field_delimiter,2,3,v_unit_suffix);
+     v_unit_suffix:=substr(v_unit_suffix,2,Length(v_unit_suffix)-2);
+
+     dbms_output.put_line('unit_suffix-'||v_unit_suffix);
+
+     --Get product code
+     get_column(read_record,field_delimiter,3,4,v_product_code);
+     v_product_code:=substr(v_product_code,2,Length(v_product_code)-2);
+
+     dbms_output.put_line('v_product_code:'||v_product_code);
+
+/*
+     -- check if the product exists in the pathogen details table
+      select  nvl(count(*),0) into nPathExist from pathogen_reduction_details
+      where unit_id=v_unit_id and suit_prod_code=v_product_code;
+
+      If nPathExist =0 then
+         p_status:='Pathogen process has not been started:'||v_unit_id||
+                    ' : '||v_product_code;
+         raise user_exception;
+     End If;
+*/
+
+
+     --Get treatment start time
+     get_column(read_record,field_delimiter,4,5,v_treat_start_time);
+     v_treat_start_time:=substr(v_treat_start_time,2,
+                                Length(v_treat_start_time)-2);
+
+     dbms_output.put_line('v_treat_start_time:'||v_treat_start_time);
+
+
+     --Get total treat time
+     get_column(read_record,field_delimiter,5,6,v_tot_treat_time);
+     v_tot_treat_time:=substr(v_tot_treat_time,2,Length(v_tot_treat_time)-2);
+
+      dbms_output.put_line('v_tot_treat_time:'||v_tot_treat_time);
+
+    --Get Dosabge measured
+     get_column(read_record,field_delimiter,6,7,v_dosage_measured);
+     v_dosage_measured:=substr(v_dosage_measured,2,Length(v_dosage_measured)-2);
+
+      dbms_output.put_line('v_dosage_measured:'||v_dosage_measured);
+
+   --Get status
+     get_column(read_record,field_delimiter,7,8,v_status);
+     v_status:=substr(v_status,2,Length(v_status)-2);
+
+      dbms_output.put_line('v_status:'||v_status);
+      If v_status not in ('0','1') then
+         p_status:='Invalid Status code:'||v_unit_id|| ' : '||v_status;
+         raise user_exception;
+      End if;
+
+
+    --Get target dose
+     get_column(read_record,field_delimiter,8,9,v_target_dose);
+     v_target_dose:=substr(v_target_dose,2,Length(v_target_dose)-2);
+
+    --Get operator
+     get_column(read_record,field_delimiter,9,10,v_operator_id);
+     v_operator_id:=substr(v_operator_id,2,Length(v_operator_id)-2);
+
+      dbms_output.put_line('Operator ID:'||v_operator_id);
+
+     --Get chamber number
+     get_column(read_record,field_delimiter,10,11,v_chamber_number);
+
+     v_chamber_number:=substr(v_chamber_number,2,Length(v_chamber_number)-2);
+     dbms_output.put_line('v_chamber number:'||v_chamber_number);
+
+    --Get Agitation Time
+    get_column(read_record,field_delimiter,11,12,v_agitation_time);
+
+    v_agitation_time:=substr(v_agitation_time,2,Length(v_agitation_time)-2);
+    dbms_output.put_line('v_agitation_time:'||v_agitation_time);
+
+      --Get inst message
+    get_column(read_record,field_delimiter,12,13,v_inst_message);
+
+    v_inst_message:=substr(v_inst_message,2,Length(v_inst_message)-2);
+    dbms_output.put_line('v_inst_message:'||v_inst_message);
+
+    --Get software version
+    get_column(read_record,field_delimiter,13,14,v_software_ver);
+
+    v_software_ver:=substr(v_software_ver,2,Length(v_software_ver)-2);
+    dbms_output.put_line('v_software_ver:'||v_software_ver);
+
+    --Get site code
+   get_column(read_record,field_delimiter,14,15,v_site_code);
+
+   v_site_code:=substr(v_site_code,2,Length(v_site_code)-2);
+   dbms_output.put_line('v_site_code:'||v_site_code);
+
+    --Get Lot Number
+   get_column(read_record,field_delimiter,15,16,v_lot_number);
+
+   v_lot_number:=substr(v_lot_number,2,Length(v_lot_number)-2);
+   dbms_output.put_line('v_lot_number:'||v_lot_number);
+
+   -- check if the lot number already captured in the pathogen streile docking
+
+/*
+   select  nvl(count(*),0) into nLotExist from pathogen_sterile_docking
+   where unit_id=v_unit_id and set_lot_no=v_lot_number;
+
+   If nLotExist =0 then
+      p_status:='Lot number is not correct: '||v_unit_id||' : '||v_lot_number;
+      raise user_exception;
+  End If;
+*/
+
+    --Get set code
+    get_column(read_record,field_delimiter,16,17,v_set_code);
+
+    v_set_code:=substr(v_set_code,2,Length(v_set_code)-2);
+    dbms_output.put_line('v_set_code:'||v_set_code);
+
+    --Get checksum
+    get_column(read_record,field_delimiter,17,18,v_check_sum);
+
+    v_check_sum:=substr(v_check_sum,2,Length(v_check_sum)-2);
+    dbms_output.put_line('v_check_sum:'||v_check_sum);
+
+     -- check for duplicate entry for unit+product code
+     select nvl(count(*),0) into nDup from api_pathogen_reduction
+     where unit_id=v_unit_id and product_code=v_product_code;
+
+      -- check for duplicate entry for unit+product code
+     select nvl(count(*),0) into nDup_arc from api_pathogen_reduction_arch
+    where unit_id=v_unit_id and product_code=v_product_code;
+
+  If nDup =0 and nDup_arc = 0 then
+
+  INSERT INTO API_PATHOGEN_REDUCTION
+   (FILE_ID              ,
+    INSTRUMENT_CODE      ,
+    UNIT_ID              ,
+    UNIT_SUFFIX          ,
+    PRODUCT_CODE         ,
+    TREATMENT_START_TIME ,
+    TOTAL_TREATMENT_TIME ,
+    DOSAGE_MEASURED      ,
+    STATUS               ,
+    TARGET_DOSE          ,
+    OPERATOR_ID          ,
+    CHAMBER_NUMBER       ,
+    AGITATION_TIME       ,
+    INST_MESSAGE_CODE    ,
+    SOFTWARE_VERSION     ,
+    SITE_CODE            ,
+    LOT_NUMBER           ,
+    SET_CODE             ,
+    CHECK_SUM            ,
+    RECORD_STATUS        ,
+    INSERT_DATE          ,
+    INSERT_USER          ,
+    PROGRAM_ID           ,
+    AUDIT_KEY
+   )
+ VALUES
+   (  result_file_name       ,
+      V_INST_CODE            ,
+      V_UNIT_ID              ,
+      V_UNIT_SUFFIX          ,
+      V_PRODUCT_CODE         ,
+      TO_DATE(V_TREAT_START_TIME,'YYYYMMDD HH24:MI'),
+      V_TOT_TREAT_TIME       ,
+      TO_NUMBER(V_DOSAGE_MEASURED) ,
+      V_STATUS               ,
+      TO_NUMBER(V_TARGET_DOSE) ,
+      V_OPERATOR_ID          ,
+      V_CHAMBER_NUMBER       ,
+      V_AGITATION_TIME       ,
+      V_INST_MESSAGE         ,
+      V_SOFTWARE_VER         ,
+      V_SITE_CODE            ,
+      V_LOT_NUMBER           ,
+      V_SET_CODE             ,
+      V_CHECK_SUM            ,
+      'p',
+      p_chp_sys_date,
+      USER,
+      'INTRCPT',
+      AUDIT_SEQ_LAB.nextval );
+ Else
+  add_log_entry('Duplicate Data:'||v_unit_id||' Prod'||v_product_code);
+ End If;
+
+EXCEPTION When user_exception then
+  null;
+  add_log_entry(p_status);
+  when others then
+  add_log_entry('Error on '||v_unit_id||' '||sqlerrm);
+  dbms_output.put_line('Error:'||sqlerrm);
+END parse_read_record;
+
+Procedure init_variables is
+ v_prism_id    varchar2(10);
+Begin
+  null;
+End init_variables;
+
+procedure rollback_and_exit is
+ end_time  varchar2(30);
+Begin
+ rollback;
+ add_log_entry('Aborting');
+ UTL_FILE.fclose(logfile);
+ raise_application_error('-20000','Aborting');
+End rollback_and_exit;
+
+END LT_INTERCEPT_PARSER;
+/

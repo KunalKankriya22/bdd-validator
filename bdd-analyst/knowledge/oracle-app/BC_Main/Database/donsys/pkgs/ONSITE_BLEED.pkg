@@ -1,0 +1,153 @@
+create or replace PACKAGE ONSITE_BLEED IS
+/*
+** VER   DATE   BY    COMMENTS
+** ---------------------------------------------------------------------
+** 1.0  082519  Edwin  Initial version
+
+*/
+
+
+PROCEDURE validate_bleed_time  (pl_drive_id    in varchar2,
+                                pl_chapter_id  in varchar2,
+                                pl_start_time  in date,
+                                pl_end_time    in date,
+                                pl_return_code out varchar2,
+                                pl_error       out varchar2);
+
+g_chapter_id     varchar2(5);
+
+END ONSITE_BLEED;
+/
+
+create or replace PACKAGE BODY ONSITE_BLEED IS
+
+
+PROCEDURE validate_bleed_time  (pl_drive_id    in varchar2,
+                                pl_chapter_id  in varchar2,
+                                pl_start_time  in date,
+                                pl_end_time    in date,
+                                pl_return_code out varchar2,
+                                pl_error       out varchar2) is 
+
+  lHold                   VARCHAR2(5);
+  alert_msg               VARCHAR2(100):='Possible Illogical Bleed end 
+                                        time - Make decision?';
+  start_time              varchar2(18);
+  end_time                varchar2(18);
+  b_start_date_time       DATE;
+  b_end_date_time         DATE;
+  drive_start_date_time   VARCHAR2(15);
+  drive_end_date_time     VARCHAR2(15);
+  bleed_end_time          VARCHAR2(15);
+  vMsg                    VARCHAR2(100);
+  v_local_start_time      DATE;
+  v_local_end_time        DATE;
+  v_bleed_inp_dtime       DATE;
+  vMsg16068               VARCHAR2(100);
+
+
+FUNCTION check_bleed_time ( b_date in date ) RETURN boolean IS
+a date;
+b date;
+v_local_time date; 
+v_sysdate date;
+BEGIN
+  
+  v_sysdate:=Lifetrack_timezone_convert.get_local_time(g_chapter_id,sysdate);
+--  a := to_date(to_char(b_date,'mm-dd-yyyy')||' '
+--         ||to_char(b_time,'hh24:mi'),'mm-dd-yyyy hh24:mi');
+
+  a:=b_date;
+  b := to_date(to_char(	v_sysdate,'mm-dd-yyyy hh24:mi'),'mm-dd-yyyy hh24:mi')  ;
+   
+  if a >= b  THEN
+	return false;
+  else
+	return TRUE;
+  end if;
+
+END check_bleed_time;
+
+BEGIN
+
+g_chapter_id:=pl_chapter_id;
+
+If pl_start_time is not null and
+   pl_end_time is null then
+  v_bleed_inp_dtime:=pl_start_time;
+Else
+  v_bleed_inp_dtime:=pl_end_time;
+End If;
+
+pl_return_code:='OK';
+
+
+/* Begin
+  select 'Msg:'||error_code||': '
+  ||error into vMsg from valid_errors where error_code='21066';
+Exception when others then
+   vMsg:='Entry is Out of Drive start and end time';
+End;
+
+
+     If not(check_bleed_time(v_bleed_inp_dtime)) then
+       Begin
+         select error_code||': ' ||error into vMsg16068 from valid_errors where error_code='16068';
+      Exception when others then
+         vMsg16068:='Error message is not defined for 16068';
+      End;
+        pl_return_code:=null;
+        pl_error:=vMsg16068;
+        return;
+     End if;
+
+*/
+
+     -- Case:1 If the bleed time is out of the drive time boundries 
+
+     SELECT to_char(nvl(actual_start_time,schedule_start_time),
+            'mm-dd-rr hh24:mi') ,
+            to_char(nvl(actual_end_time,schedule_end_time),'mm-dd-rr hh24:mi')
+       INTO drive_start_date_time, drive_end_date_time
+       from drives 
+      where drive_id =pl_drive_id;
+            
+       v_local_start_time:=Lifetrack_timezone_convert.get_local_time(
+                          pl_chapter_id,
+                         to_date(drive_start_date_time, 'MM-DD-RR HH24:MI'));
+
+       v_local_end_time:=Lifetrack_timezone_convert.get_local_time(
+                         pl_chapter_id,
+                         to_date(drive_end_date_time, 'MM-DD-RR HH24:MI'));
+     
+       IF v_bleed_inp_dtime NOT BETWEEN (v_local_start_time) AND (v_local_end_time) then
+          pl_return_code:='ALERT2';
+          RETURN; 
+      ELSE
+
+       /* start_time := to_char(:ctrl_blk_1.start_bleed_time,'HH24:mi');
+        b_start_date_time :=to_date(to_char(:ctrl_blk_1.start_bleed_date,'mm-dd-RR')||' '||start_time,'mm-dd-RR hh24:mi');
+
+        end_time := to_char(:ctrl_blk_1.end_bleed_time,'HH24:mi');
+        b_end_date_time :=to_date(to_char(:ctrl_blk_1.end_bleed_date,'mm-dd-RR')||' '||end_time,'mm-dd-RR hh24:mi');
+        */
+
+       If pl_start_time is not null and pl_end_time is not null then 
+         If pl_end_time < pl_start_time then
+            pl_return_code:='ALERT3';
+            return;
+         End If;
+      End If;
+
+    END IF; 
+EXCEPTION
+    when value_error then
+	 null;
+   when others then
+     pl_return_code:=null;
+     pl_error:=sqlerrm;
+     return;
+END;
+
+END ONSITE_BLEED;
+/

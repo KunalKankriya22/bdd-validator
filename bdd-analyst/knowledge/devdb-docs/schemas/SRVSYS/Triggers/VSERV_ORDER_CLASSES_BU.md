@@ -1,0 +1,48 @@
+---
+tags:
+  - trigger
+  - SRVSYS
+---
+# VSERV_ORDER_CLASSES_BU
+
+**Schema**: [[schemas/SRVSYS/SRVSYS|SRVSYS]]
+**Table**: [[schemas/SRVSYS/Tables/VSERV_ORDER_CLASSES|VSERV_ORDER_CLASSES]]
+**Type**: BEFORE EACH ROW
+**Event**: UPDATE
+**Status**: ENABLED
+
+## Trigger Body
+
+```plsql
+begin
+  insert into VSERV_ORDER_CLASSES_AUDIT
+  (	ORDER_CLASS,
+	CHAPTER_ID,
+	ORDER_PRIORITY,
+	CLASS_DESC,
+	PROCESS_HOURS,
+	EFF_DATE,
+	TERM_DATE,
+	LAST_MODIFIED_DATE,
+	DISPLAY_FLAG,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  (	:new.ORDER_CLASS,
+	:new.CHAPTER_ID,
+	:new.ORDER_PRIORITY,
+	:new.CLASS_DESC,
+	:new.PROCESS_HOURS,
+	:new.EFF_DATE,
+	:new.TERM_DATE,
+	:new.LAST_MODIFIED_DATE,
+	:new.DISPLAY_FLAG,
+	:new.AUDIT_KEY,
+	'UPDATE',LT_USER_SESSION.GET_USERID,
+    sysdate
+  ) ;
+  end ;
+```

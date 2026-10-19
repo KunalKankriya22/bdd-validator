@@ -1,0 +1,78 @@
+---
+type: sub-module
+module: Donor
+screen_count: 64
+tags:
+  - module-index
+---
+
+# Blood Drives & Scheduling
+
+**Module:** Donor | **Screens:** 64
+
+## Screens
+
+- [[caqoptim]]
+- [[dcwdcomm]]
+- [[dcwlooks]]
+- [[dcwsndlt]]
+- [[dcwvwltr]]
+- [[dnwcalen]]
+- [[dnwdcomm]]
+- [[dnwdebug]]
+- [[dnweligb]]
+- [[dnwisbtq]]
+- [[dnwltqry]]
+- [[dnwsndlt]]
+- [[dnwvwltr]]
+- [[dpqconst]]
+- [[dpwaaddr]]
+- [[dpwdcard]]
+- [[dpwdemgr]]
+- [[dpwdndtl]]
+- [[dpwdnint]]
+- [[dpwdntst]]
+- [[dpwdscan]]
+- [[dpwelgby]]
+- [[dpwhldrn]]
+- [[dpwholdr]]
+- [[dpwiaddr]]
+- [[dpwpropr]]
+- [[drwaudit]]
+- [[drwcolld]]
+- [[drwcstat]]
+- [[drwholds]]
+- [[drwnotes]]
+- [[drwsstat]]
+- [[dswaslot]]
+- [[dswavsit]]
+- [[dswdonis]]
+- [[dswequip]]
+- [[dswvslot]]
+- [[mcicandr]]
+- [[mcicansf]]
+- [[mcicrtfx]]
+- [[mcifixdr]]
+- [[mcimobdr]]
+- [[mcislots]]
+- [[mcumobdr]]
+- [[mcwabodr]]
+- [[mcwabosp]]
+- [[mriacmpg]]
+- [[mridefcl]]
+- [[mridproc]]
+- [[mridrsgn]]
+- [[mruhktml]]
+- [[mrwpadrv]]
+- [[mrwrperf]]
+- [[onimpclr]]
+- [[onimpcud]]
+- [[onisetup]]
+- [[ppidretn]]
+- [[ppidtrak]]
+- [[ppqpicks]]
+- [[ppqsivas]]
+- [[sdwphysc]]
+- [[sswsstat]]
+- [[vdidrule]]
+- [[vdwnwzip]]

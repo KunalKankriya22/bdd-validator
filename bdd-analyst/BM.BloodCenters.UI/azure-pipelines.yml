@@ -1,0 +1,406 @@
+name: BM.BloodCenters.UI
+
+trigger:
+  branches:
+    include:
+      - Dev
+      - QA
+      - Stage
+      - main
+
+pr:
+  branches:
+    include:
+      - '*'
+
+variables:
+- name: vmImage
+  value: ubuntu-latest
+
+- name: isDeployBranch
+  value:
+    $[or(
+      eq(variables['Build.SourceBranchName'], 'Dev'),
+      eq(variables['Build.SourceBranchName'], 'QA'),
+      eq(variables['Build.SourceBranchName'], 'Stage'),
+      eq(variables['Build.SourceBranchName'], 'main')
+    )]
+
+# Version variables - can be overridden by variable groups or pipeline parameters
+- name: BaseVersion
+  value: ''  # Will use package.json version if empty
+
+- group: npmrc
+
+# ✅ Variable groups by environment
+- ${{ if eq(variables['Build.Reason'], 'PullRequest') }}:
+  - group: Blood_Center_PR
+
+- ${{ if eq(variables['Build.SourceBranchName'], 'Dev') }}:
+  - group: Blood_Center_Dev
+
+- ${{ if eq(variables['Build.SourceBranchName'], 'QA') }}:
+  - group: Blood_Center_QA
+
+- ${{ if eq(variables['Build.SourceBranchName'], 'Stage') }}:
+  - group: Blood_Center_Stage
+
+# pool:
+#   vmImage: $(vmImage)""
+
+jobs:
+- job: UI
+  displayName: 'Build and Test UI'
+  timeoutInMinutes: 60
+  ${{ if eq(variables['Build.SourceBranchName'], 'Stage') }}:
+    pool:
+      name: bmbcapprl01
+  ${{ if ne(variables['Build.SourceBranchName'], 'Stage') }}:
+    pool:
+      name: bmbcsqaapprl01
+
+  steps:
+
+    - checkout: self
+      fetchDepth: 0
+      persistCredentials: true
+
+    # ✅ Node setup
+    - task: NodeTool@0
+      displayName: 'Use Node.js 20'
+      inputs:
+        versionSpec: '20'
+
+    # ✅ Cache node_modules (saves 2-5 minutes on subsequent runs)
+    - task: Cache@2
+      displayName: 'Cache node_modules'
+      inputs:
+        key: 'npm | "$(Agent.OS)" | package-lock.json'
+        restoreKeys: |
+          npm | "$(Agent.OS)"
+        path: $(Pipeline.Workspace)/.npm
+        cacheHitVar: CACHE_RESTORED
+
+    # ✅ Install dependencies (fast mode)
+    - script: npm ci --cache $(Pipeline.Workspace)/.npm --prefer-offline --no-audit --no-fund
+      displayName: 'Install dependencies'
+
+
+      # ✅ Generate dynamic version
+    - script: |
+        echo "Branch: $(Build.SourceBranchName)"
+        echo "Reason: $(Build.Reason)"
+
+        # Read original version from package.json (before modification)
+        ORIGINAL_VERSION=$(node -p "require('./package.json').version")
+        echo "Original package.json version: $ORIGINAL_VERSION"
+
+        # Use BaseVersion from variable group if set, otherwise use package.json
+        if [ -z "$(BaseVersion)" ]; then
+          BASE_VERSION="$ORIGINAL_VERSION"
+        else
+          BASE_VERSION="$(BaseVersion)"
+        fi
+        echo "Base version: $BASE_VERSION"
+
+        # Calculate Release Version (YYYY-Rn.m format)
+        # Format: 2026-R1.1, R1.2 ... R1.99, R2.1 (auto-rollover at 100)
+        # Same commit across Dev/QA/Stage gets SAME release version
+        CURRENT_YEAR=$(date -u +"%Y")
+        COMMIT_SHA=$(git rev-parse HEAD)
+
+        echo "Current year: $CURRENT_YEAR"
+        echo "Commit SHA: $COMMIT_SHA"
+
+        if [ "$(Build.Reason)" = "PullRequest" ]; then
+          # PR Build: Calculate based on merge-base for stability
+          # This ensures all commits in the same PR show the same release version
+          echo "PR Build detected - calculating stable release based on merge-base"
+
+          # Get target branch (e.g., Dev, QA, Stage)
+          TARGET_BRANCH="origin/Dev"  # Default to Dev as main target
+          echo "Target branch: $TARGET_BRANCH"
+
+          # Find where this PR branched from target (merge-base)
+          MERGE_BASE=$(git merge-base HEAD $TARGET_BRANCH 2>/dev/null || git rev-parse HEAD~10)
+          echo "Merge base: $MERGE_BASE"
+
+          # Find latest release tag reachable from merge-base (format: 2026-R1.99)
+          LATEST_TAG=$(git tag --merged $MERGE_BASE -l "release/${CURRENT_YEAR}-R*.*" 2>/dev/null | \
+            sort -V | tail -1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            # First release of the year
+            MAJOR=1
+            MINOR=1
+          else
+            # Parse existing tag: release/2026-R1.99 → extract 1 and 99
+            LATEST_VERSION=$(echo "$LATEST_TAG" | sed "s/^release\/${CURRENT_YEAR}-R//")
+            MAJOR=$(echo "$LATEST_VERSION" | cut -d'.' -f1)
+            MINOR=$(echo "$LATEST_VERSION" | cut -d'.' -f2)
+
+            # Increment minor
+            MINOR=$((MINOR + 1))
+
+            # Auto-rollover at 100
+            if [ $MINOR -ge 100 ]; then
+              MAJOR=$((MAJOR + 1))
+              MINOR=1
+            fi
+          fi
+
+          RELEASE_VERSION="${CURRENT_YEAR}-R${MAJOR}.${MINOR}"
+          echo "PR Release (based on merge-base, stable within PR): $RELEASE_VERSION"
+
+          # Don't create tag for PR builds
+
+        else
+          # Dev/QA/Stage Build: Use commit-based tagging
+          # Check if this commit already has a release tag
+          EXISTING_TAG=$(git tag --points-at HEAD | grep "^release/${CURRENT_YEAR}-R" || echo "")
+
+          if [ -n "$EXISTING_TAG" ]; then
+            # Commit already tagged - reuse the release version
+            RELEASE_VERSION=$(echo "$EXISTING_TAG" | sed 's/^release\///')
+            echo "Found existing release tag: $RELEASE_VERSION"
+          else
+            # New commit - calculate next release number for this year
+            # Find latest tag with format: 2026-R1.99
+            LATEST_TAG=$(git tag -l "release/${CURRENT_YEAR}-R*.*" | sort -V | tail -1)
+
+            if [ -z "$LATEST_TAG" ]; then
+              # First release of the year
+              MAJOR=1
+              MINOR=1
+            else
+              # Parse existing tag: release/2026-R1.99 → extract 1 and 99
+              LATEST_VERSION=$(echo "$LATEST_TAG" | sed "s/^release\/${CURRENT_YEAR}-R//")
+              MAJOR=$(echo "$LATEST_VERSION" | cut -d'.' -f1)
+              MINOR=$(echo "$LATEST_VERSION" | cut -d'.' -f2)
+
+              # Increment minor
+              MINOR=$((MINOR + 1))
+
+              # Auto-rollover at 100: R1.100 becomes R2.1
+              if [ $MINOR -ge 100 ]; then
+                MAJOR=$((MAJOR + 1))
+                MINOR=1
+                echo "Auto-rollover: Minor version reached 100, incrementing to R${MAJOR}.${MINOR}"
+              fi
+            fi
+
+            RELEASE_VERSION="${CURRENT_YEAR}-R${MAJOR}.${MINOR}"
+            echo "Calculated new release version: $RELEASE_VERSION"
+
+            # Create git tag for this release
+            git tag "release/${RELEASE_VERSION}" HEAD
+            git push origin "release/${RELEASE_VERSION}" || echo "Tag push failed (may already exist)"
+          fi
+        fi
+
+        echo "Release Version: $RELEASE_VERSION"
+
+        if [ "$(Build.Reason)" = "PullRequest" ]; then
+          SUFFIX="PR"
+        else
+          case "$(Build.SourceBranchName)" in
+            Dev)
+              SUFFIX="Dev"
+              ;;
+            QA)
+              SUFFIX="QA"
+              ;;
+            Stage)
+              SUFFIX="Stage"
+              ;;
+            main)
+              SUFFIX="Prod"
+              ;;
+            *)
+              SUFFIX="$(Build.SourceBranchName)"
+              ;;
+          esac
+        fi
+
+        VERSION="$BASE_VERSION-$SUFFIX.$(Build.BuildId)"
+
+        echo "Generated version: $VERSION"
+
+        # Store variables for later steps
+        echo "##vso[task.setvariable variable=ORIGINAL_BASE_VERSION]$BASE_VERSION"
+        echo "##vso[task.setvariable variable=RELEASE_VERSION]$RELEASE_VERSION"
+        echo "##vso[task.setvariable variable=APP_VERSION]$VERSION"
+        echo "##vso[build.updatebuildnumber]$VERSION"
+      displayName: "Generate version"
+
+    # ✅ Update package.json version
+    - script: |
+        node -e "
+        const fs = require('fs');
+        const pkg = JSON.parse(fs.readFileSync('package.json'));
+        pkg.version = process.env.APP_VERSION;
+        fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+        "
+      displayName: "Update package.json version"
+
+    # ✅ Inject version into Angular app (optional but useful)
+    - script: |
+        echo "export const appVersion = '$(APP_VERSION)';" > src/environments/version.ts
+      displayName: "Inject version into Angular"
+
+
+    # ✅ Replace tokens (only needed for tests, not full versioning in PRs)
+    - task: replacetokens@6
+      displayName: 'Replace tokens in proxy.conf.json'
+      inputs:
+        targetFiles: '**/proxy.conf.json'
+        tokenPrefix: '#{'
+        tokenSuffix: '}#'
+
+
+    # # ✅ Run tests with Karma (optimized for speed)
+    # # Use CI configuration which has all optimizations enabled
+    # - script: npm test -- --configuration=ci --browsers=MyHeadlessChrome --code-coverage
+    #   displayName: 'Run Karma tests (optimized)'
+    #   env:
+    #     CI: true
+    #     NODE_OPTIONS: '--max-old-space-size=8192'
+
+    #  # Publish test results
+    # - task: PublishTestResults@2
+    #   displayName: 'Publish Test Results'
+    #   inputs:
+    #     testResultsFormat: JUnit
+    #     testResultsFiles: '**/test-results/*.xml'
+    #     failTaskOnFailedTests: true  # Fail if tests fail
+
+    # # Skip coverage publishing in PR builds for speed
+    # # Coverage only collected on main branch builds
+    # - task: PublishCodeCoverageResults@2
+    #   displayName: 'Publish Cobertura Coverage'
+    #   # condition: eq(variables.isDeployBranch, true)
+    #   # continueOnError: true
+    #   inputs:
+    #     codeCoverageTool: 'Cobertura'
+    #     summaryFileLocation: '$(System.DefaultWorkingDirectory)/coverage/**/cobertura-coverage.xml'
+    #     reportDirectory: '$(System.DefaultWorkingDirectory)/coverage'
+
+    # # ✅ Enforce coverage threshold (only on deploy branches)
+    # - task: BuildQualityChecks@10
+    #   displayName: 'Check code coverage'
+    #   # condition: eq(variables.isDeployBranch, true)
+    #   # continueOnError: true
+    #   inputs:
+    #     checkCoverage: true
+    #     coverageFailOption: 'fixed'
+    #     coverageType: 'lines'
+    #     coverageThreshold: '$(coverageThresholdUI)'
+    #     forceCoverageImprovement: true 
+
+
+    - script: npm cache clean --force
+      displayName: 'Free npm cache memory'
+
+    # ✅ Build Angular app
+    - script: npm run build -- --configuration=development
+      displayName: 'Build Angular app'
+      condition: succeeded()
+      env:
+        NODE_OPTIONS: '--max-old-space-size=8192'
+
+    # ✅ Create version.json file
+    - script: |
+        echo "Creating version.json..."
+
+        # Use the original base version captured before package.json was modified
+        BASE_VERSION="$(ORIGINAL_BASE_VERSION)"
+
+        # Use release version (calculated earlier with git tags)
+        # Same commit = same release version across ALL environments
+        # Commit abc123 on Dev: 2026-R1
+        # Same commit abc123 on QA: 2026-R1 (SAME!)
+        # Same commit abc123 on Stage: 2026-R1 (SAME!)
+        RELEASE_VERSION="$(RELEASE_VERSION)"
+
+        echo "Base version: $BASE_VERSION"
+        echo "Release version: $RELEASE_VERSION"
+        echo "Environment: $(Build.SourceBranchName)"
+
+        # UI Version = Release Version
+        # Example: 2026-R1 (first release of 2026)
+        # Same commit deployed to any env will have this exact version
+        UI_VERSION="$RELEASE_VERSION"
+        echo "Calculated UI Version: $UI_VERSION"
+
+        # Get project name from package.json
+        PROJECT_NAME=$(node -p "require('./package.json').name")
+        echo "Project name: $PROJECT_NAME"
+
+        # Determine output path (Angular 18+ uses browser subfolder)
+        OUTPUT_PATH="dist/${PROJECT_NAME}/browser"
+        if [ ! -d "$OUTPUT_PATH" ]; then
+          OUTPUT_PATH="dist/${PROJECT_NAME}"
+        fi
+
+        # Verify output path exists
+        if [ ! -d "$OUTPUT_PATH" ]; then
+          echo "##[error]Output path does not exist: $OUTPUT_PATH"
+          echo "Available dist structure:"
+          ls -la dist/ || echo "No dist folder found"
+          exit 1
+        fi
+
+        echo "Output path: $OUTPUT_PATH"
+
+        # Get current UTC timestamp
+        LAST_UPDATED_UTC=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Extract major.minor.patch from BaseVersion
+        IFS='.' read -ra VERSION_PARTS <<< "$BASE_VERSION"
+        MAJOR="${VERSION_PARTS[0]:-1}"
+        MINOR="${VERSION_PARTS[1]:-0}"
+        PATCH="${VERSION_PARTS[2]:-0}"
+
+        # Create version.json
+        cat > "$OUTPUT_PATH/version.json" <<EOF
+        {
+          "version": "$(Build.BuildNumber)",
+          "lastUpdatedUtc": "$LAST_UPDATED_UTC",
+          "branch": "$(Build.SourceBranchName)",
+          "buildNumber": "$(Build.BuildNumber)",
+          "buildId": "$(Build.BuildId)",
+          "commit": "$(Build.SourceVersion)",
+          "major": "$MAJOR",
+          "minor": "$MINOR",
+          "patch": "$PATCH",
+          "uiVersion": "$UI_VERSION",
+          "releaseVersion": "$RELEASE_VERSION",
+          "baseVersion": "$BASE_VERSION",
+          "appVersion": "$(APP_VERSION)"
+        }
+        EOF
+
+        echo "version.json created successfully at: $OUTPUT_PATH/version.json"
+        echo "Content:"
+        cat "$OUTPUT_PATH/version.json"
+      displayName: 'Create version.json'
+      condition: succeeded()
+
+    # ✅  Publish artifact
+    - task: PublishBuildArtifacts@1
+      displayName: 'Upload build artifacts'
+      condition: eq(variables.isDeployBranch, true)
+      inputs:
+        pathtoPublish: 'dist'
+        artifactName: 'BM.BloodCenters.UI'
+        publishLocation: 'Container'
+
+    # # Publish code coverage artifact (only on deploy branches where coverage is collected)
+    # - task: PublishBuildArtifacts@1
+    #   displayName: 'Publish Code Coverage Artifact'
+    #   #condition: eq(variables.isDeployBranch, true)
+    #   # continueOnError: true
+    #   inputs:
+    #     pathtoPublish: 'coverage'
+    #     artifactName: 'BM.BloodCenters.UI-Coverage'
+    #     publishLocation: 'Container'  

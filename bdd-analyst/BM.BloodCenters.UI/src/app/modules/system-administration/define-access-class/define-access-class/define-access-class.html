@@ -1,0 +1,247 @@
+<div class="define-class-page">
+  <div class="page-wrapper">
+    <!-- Visually hidden h1 for proper heading hierarchy -->
+    <h1 class="cdk-visually-hidden">Donor Access Class</h1>
+
+    <!-- PAGE HEADER WITH BREADCRUMB -->
+    <app-page-header-with-breadcrumb [config]="pageHeaderConfig"></app-page-header-with-breadcrumb>
+
+    <!-- SEARCH CARD -->
+    <div class="search-card">
+      <form class="search-user" [formGroup]="form">
+        <mat-form-field appearance="fill" class="class-select">
+          <mat-label>Search by Class</mat-label>
+          <mat-select formControlName="classCode" placeholder="Select Class">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="classSearchControl"
+                placeholderLabel="Search classes..."
+                noEntriesFoundLabel="No matching classes">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option *ngFor="let cls of filteredClassOptions" [value]="cls.code">
+              {{ cls.code }}{{ cls.description ? ' — ' + cls.description : '' }}
+            </mat-option>
+          </mat-select>
+        </mat-form-field>
+
+        <button
+          mat-raised-button
+          type="button"
+          class="btn-retrieve"
+          [disabled]="!form.value.classCode || isLoading"
+          (click)="onRetrieve()">
+          RETRIEVE
+        </button>
+      </form>
+    </div>
+
+    <!-- ACCESS CLASS PANEL -->
+    <div class="access-class-panel">
+      <!-- Panel Header -->
+      <div class="panel-header">
+        <div class="panel-title-section">
+          <!-- Before search: Show default title -->
+          <ng-container *ngIf="!hasSearched || !selectedClassCode">
+            <h2 class="panel-title">Access Class</h2>
+            <p class="panel-subtitle">
+              Access class details and records will display here.
+            </p>
+          </ng-container>
+
+          <!-- After successful search: Show Class Info -->
+          <ng-container *ngIf="hasSearched && selectedClassCode">
+            <h2 class="panel-title user-name-title">{{ selectedClassCode }}</h2>
+            <p class="panel-subtitle user-meta-subtitle">{{ selectedClassDescription }}</p>
+          </ng-container>
+        </div>
+
+        <div class="panel-actions">
+          <button
+            mat-stroked-button
+            type="button"
+            class="btn-outline"
+            [disabled]="!hasSearched"
+            (click)="openAttachedUsers()">
+            ATTACHED USERS
+          </button>
+          <button
+            mat-flat-button
+            type="button"
+            class="btn-primary"
+            [disabled]="!hasSearched"
+            (click)="openCreateRecord()">
+            <mat-icon aria-hidden="true">add</mat-icon>
+            CREATE RECORD
+          </button>
+        </div>
+      </div>
+
+      <!-- EMPTY STATE (Before search) -->
+      <div *ngIf="!hasSearched" class="empty-state-container">
+        <div class="empty-state-icon" aria-hidden="true">
+          <mat-icon>edit</mat-icon>
+        </div>
+        <h3 class="empty-state-title">Get Started</h3>
+        <p class="empty-state-message">
+          Use the Search bar above to locate an access class<br />
+          and manage its records &amp; permissions.
+        </p>
+      </div>
+
+      <!-- TABLE (After successful search) -->
+      <ng-container *ngIf="hasSearched">
+        <!-- LOADING STATE -->
+        <div class="loading-container" *ngIf="isLoading" role="status" aria-live="polite">
+          <mat-spinner diameter="50"></mat-spinner>
+          <p class="loading-text">Loading access class data...</p>
+        </div>
+
+        <!-- NO RECORDS -->
+        <div *ngIf="!isLoading && tableData.length === 0" class="empty-state empty-state--no-results" role="status">
+          <div class="empty-state__icon-wrapper" aria-hidden="true">
+            <mat-icon>inbox</mat-icon>
+          </div>
+          <p class="empty-state__title">No records found</p>
+        </div>
+
+        <!-- TABLE WITH CONTROLS (only when data exists) -->
+        <ng-container *ngIf="!isLoading && tableData.length > 0">
+          <!-- CONTROLS -->
+          <div class="table-controls">
+            <!-- Left section: Filter button and chips -->
+            <div class="table-controls__left">
+              <button
+                #filterBtn
+                type="button"
+                mat-button
+                class="filter-button"
+                [class.filter-button--active]="isFilterOpen"
+                [attr.aria-expanded]="isFilterOpen"
+                cdkOverlayOrigin
+                #trigger="cdkOverlayOrigin"
+                (click)="toggleFilter()">
+                <mat-icon>filter_list</mat-icon>
+                <span class="filter-text">FILTER</span>
+              </button>
+
+              <!-- Inline Filter Chips -->
+              <div class="table-controls__chips-wrapper" *ngIf="hasActiveFilters()">
+                <div class="table-controls__chips-scroll">
+                  <app-filter-chips
+                    [chips]="filterChips"
+                    [maxVisible]="3"
+                    (removeChip)="onRemoveFilterChip($event)"
+                    (clearAll)="clearAllFilters()">
+                  </app-filter-chips>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right section: Search bar -->
+            <app-search-bar
+              [config]="searchConfig"
+              (search)="onTableSearch($event)" />
+          </div>
+
+          <!-- Filter Panel Overlay -->
+          <ng-template
+            cdkConnectedOverlay
+            [cdkConnectedOverlayOrigin]="trigger"
+            [cdkConnectedOverlayOpen]="isFilterOpen"
+            [cdkConnectedOverlayHasBackdrop]="true"
+            [cdkConnectedOverlayBackdropClass]="'cdk-overlay-transparent-backdrop'"
+            [cdkConnectedOverlayOffsetY]="16"
+            cdkConnectedOverlayPanelClass="filter-overlay-panel"
+            (backdropClick)="closeFilter()"
+            (detach)="closeFilter()">
+            <div cdkTrapFocus cdkTrapFocusAutoCapture>
+              <app-define-class-filter
+                [currentFilters]="appliedClassFilters"
+                [classname]="selectedClassCode"
+                (apply)="applyFilters($event)"
+                (close)="closeFilter()">
+              </app-define-class-filter>
+            </div>
+          </ng-template>
+
+          <!-- NO FILTERED RESULTS -->
+          <div *ngIf="filteredAssignments.length === 0" class="empty-state empty-state--no-results" role="status">
+            <div class="empty-state__icon-wrapper" aria-hidden="true">
+              <mat-icon>inbox</mat-icon>
+            </div>
+            <p class="empty-state__title">No records found</p>
+          </div>
+
+          <!-- TABLE -->
+          <div class="table-wrapper" *ngIf="filteredAssignments.length > 0">
+            <table class="users-table" aria-label="Access class records">
+              <thead>
+                <tr>
+                  <th scope="col" class="sortable"
+                    tabindex="0"
+                    role="button"
+                    [attr.aria-sort]="sortDirection === 'asc' ? 'ascending' : sortDirection === 'desc' ? 'descending' : 'none'"
+                    (click)="toggleSort()"
+                    (keydown.enter)="toggleSort()"
+                    (keydown.space)="$event.preventDefault(); toggleSort()">
+                    <span class="th-content-sortable">
+                      Type
+                      <mat-icon class="sort-icon" [ngClass]="{'sort-icon--active': sortDirection !== 'default'}" aria-hidden="true">
+                        {{ sortDirection === 'asc' ? 'arrow_upward' : sortDirection === 'desc' ? 'arrow_downward' : 'unfold_more' }}
+                      </mat-icon>
+                    </span>
+                  </th>
+                  <th scope="col">Code</th>
+                  <th scope="col">Description</th>
+                  <th scope="col">Effective Date</th>
+                  <th scope="col">Termination Date</th>
+                  <th scope="col" class="action-column"><span class="cdk-visually-hidden">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr *ngFor="let row of pagedAssignments" [class.row-highlighted]="isRowHighlighted(row)">
+                  <td>{{ row.type }}</td>
+                  <td>{{ row.code }}</td>
+                  <td>{{ row.description }}</td>
+                  <td>{{ row.effectiveDate }}</td>
+                  <td>{{ row.terminationDate }}</td>
+                  <td class="action-column">
+                    <button
+                      type="button"
+                      mat-icon-button
+                      class="edit-icon"
+                      (click)="openEditRecord(row)"
+                      [attr.aria-label]="'Edit record ' + row.type + ' ' + row.code">
+                      <mat-icon>edit</mat-icon>
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Pagination -->
+          <nav *ngIf="filteredAssignments.length > 0" class="data-table__pagination" aria-label="Table pagination navigation">
+            <mat-paginator
+              [length]="filteredAssignments.length"
+              [pageSize]="pageSize"
+              [pageSizeOptions]="[10, 25, 50, 100]"
+              [pageIndex]="pageIndex"
+              (page)="onPageChange($event)"
+              showFirstLastButtons>
+            </mat-paginator>
+          </nav>
+        </ng-container>
+      </ng-container>
+    </div>
+  </div>
+
+  <!-- Right Side Panel -->
+  <app-view-associated-interdiction
+    [isOpen]="isPanelOpen"
+    [accessClassCode]="selectedAccessClassCode"
+    [accessClassDescription]="selectedAccessClassDescription"
+    (closePanel)="closeInterdictionPanel()">
+  </app-view-associated-interdiction>
+</div>

@@ -1,0 +1,345 @@
+<div class="release-test-results-container">
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <div class="content-wrapper">
+    <mat-drawer-container class="drawer-container" [hasBackdrop]="false">
+      <mat-drawer-content>
+        <!-- Search Form -->
+        <section
+          class="search-section"
+          [attr.aria-labelledby]="elementId('search-heading')"
+          role="region">
+
+          <form
+            [formGroup]="searchForm"
+            (ngSubmit)="onRetrieve()"
+            [id]="elementId('search-form')"
+            novalidate>
+
+            <div class="form-row">
+              <!-- Contract ID (LOV) -->
+              <mat-form-field appearance="fill" class="form-field">
+                <mat-label>Contract ID <span class="required-marker">*</span></mat-label>
+                <mat-select
+                  formControlName="contractId"
+                  [attr.aria-required]="true">
+                  <mat-select-trigger>{{ searchForm.get('contractId')?.value }}</mat-select-trigger>
+                  @for (option of contractOptions(); track option.contractId) {
+                    <mat-option [value]="option.contractId">{{ option.contractId }} - {{ option.company }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+
+              <!-- Contract ID Description (readonly) -->
+              <mat-form-field appearance="fill" class="form-field form-field-description">
+                <mat-label>Contract ID Description</mat-label>
+                <input
+                  matInput
+                  formControlName="contractIdDescription"
+                  readonly
+                  [attr.aria-readonly]="true">
+              </mat-form-field>
+
+              <!-- Batch ID (LOV) -->
+              <mat-form-field appearance="fill" class="form-field">
+                <mat-label>Batch ID</mat-label>
+                <mat-select formControlName="batchId">
+                  <mat-option [value]="''">-- Select Batch --</mat-option>
+                  @for (option of batchOptions(); track option.batchId) {
+                    <mat-option [value]="option.batchId" [disabled]="option.isInUse">
+                      <span [class.in-use-batch]="option.isInUse">{{ option.batchId }}</span>
+                      @if (option.isInUse) {
+                        <span class="in-use-indicator">In Use</span>
+                      }
+                    </mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+
+              <!-- Action Buttons -->
+              <div class="filter-actions">
+                <button
+                  mat-stroked-button
+                  color="primary"
+                  type="submit"
+                  [disabled]="loading()">
+                  @if (loading()) {
+                    <mat-spinner diameter="20"></mat-spinner>
+                  } @else {
+                    RETRIEVE
+                  }
+                </button>
+                <button
+                  mat-button
+                  type="button"
+                  (click)="onClearAll()">
+                  CLEAR ALL
+                </button>
+              </div>
+            </div>
+          </form>
+        </section>
+
+        <!-- Units Table Section -->
+        <section
+          class="table-section"
+          [attr.aria-labelledby]="elementId('table-heading')"
+          role="region">
+
+          @if (loading()) {
+            <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+              <mat-spinner diameter="40" aria-label="Loading"></mat-spinner>
+              <span class="sr-only">Loading units, please wait...</span>
+            </div>
+          }
+
+          @if (!loading() && !hasResults()) {
+            <div class="empty-state" role="status" aria-live="polite">
+              <mat-icon aria-hidden="true">search</mat-icon>
+              <p>No Results to Display</p>
+              <p class="subtitle">Please enter search criteria to view results</p>
+            </div>
+          }
+
+          @if (!loading() && hasResults()) {
+            <div class="table-wrapper">
+              <div class="table-header">
+                <h3 [id]="elementId('table-heading')">
+                  Unit ID ({{ totalUnits() }})
+                </h3>
+              </div>
+
+              <div class="table-scroll-container">
+                <table
+                  class="units-table"
+                  role="table"
+                  [attr.aria-label]="'Units available for release'">
+                  <thead>
+                    <tr>
+                      <th>Unit ID</th>
+                      <th>Tube Check-In</th>
+                      <th (click)="onSortChange()" class="sortable-header" style="cursor: pointer;">
+                        Coll Date
+                        <mat-icon class="sort-icon">{{ sortDirection() === 'ASC' ? 'arrow_upward' : 'arrow_downward' }}</mat-icon>
+                      </th>
+                      <th>Red 1 Tube</th>
+                      <th>Red 2 Tube</th>
+                      <th>Purple 1 Tube</th>
+                      <th>QC</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (row of unitsData(); track row.unitId; let i = $index) {
+                      <tr
+                        class="table-row clickable-row"
+                        [class.selected-row]="selectedUnit() === row"
+                        (click)="onRowClick(row, i)">
+                        <td>
+                          @if (row.hasReactiveResults) {
+                            <mat-icon
+                              class="reactive-indicator"
+                              [matTooltip]="'Unit has test initial or repeats with reactive test results'">
+                              error
+                            </mat-icon>
+                          }
+                          {{ row.unitId }}{{ row.checkDigit ? '-' + row.checkDigit : '' }}
+                        </td>
+                        <td>{{ row.qcCheckinFlag === 'Y' ? 'Yes' : '-' }}</td>
+                        <td [ngClass]="getCollectionDateClass(row.collDate)">
+                          {{ formatDate(row.collDate) }}
+                        </td>
+                        <td>{{ row.redTubeFlag === 'Y' ? 'Yes' : '-' }}</td>
+                        <td>{{ row.redTube2Flag === 'Y' ? 'Yes' : '-' }}</td>
+                        <td>{{ row.purpleTubeFlag === 'Y' ? 'Yes' : '-' }}</td>
+                        <td>
+                          <mat-select
+                            [(value)]="row.qcTestFlag"
+                            class="qc-select"
+                            (click)="$event.stopPropagation()"
+                            [attr.aria-label]="'QC flag for unit ' + row.unitId">
+                            <mat-option value="Y">Yes</mat-option>
+                            <mat-option value="N">No</mat-option>
+                            <mat-option value="T">T</mat-option>
+                          </mat-select>
+                        </td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          }
+        </section>
+
+        <!-- Footer Section -->
+        @if (hasResults()) {
+          <footer class="footer-section" role="contentinfo">
+            <div class="footer-stats">
+              <div class="stat-item">
+                <span class="stat-label">Total Units</span>
+                <span class="stat-value">{{ totalUnits() }}</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">Skipped</span>
+                <span class="stat-value">{{ skippedUnits() }}</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">No Result</span>
+                <span class="stat-value">{{ noResultUnits() }}</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">SQC</span>
+                <span class="stat-value">{{ sqcUnits() }}</span>
+              </div>
+            </div>
+
+            <div class="footer-actions">
+              <button mat-button (click)="onShowLegend()">LEGEND</button>
+              <button
+                mat-button
+                (click)="onReconcileAllUnits()"
+                [disabled]="!canReconcile() || reconciling()">
+                @if (reconciling()) {
+                  <mat-spinner diameter="20"></mat-spinner>
+                } @else {
+                  RECONCILE ALL UNITS
+                }
+              </button>
+              <button
+                mat-raised-button
+                color="primary"
+                (click)="onSave()"
+                [disabled]="!canSave()">
+                @if (saving()) {
+                  <mat-spinner diameter="20"></mat-spinner>
+                } @else {
+                  SAVE
+                }
+              </button>
+            </div>
+          </footer>
+        }
+      </mat-drawer-content>
+
+      <!-- Side Panel -->
+      <mat-drawer
+        #drawer
+        mode="side"
+        position="end"
+        [opened]="showSidePanel()"
+        class="side-panel"
+        [attr.aria-label]="'Unit details panel'">
+
+        @if (selectedUnit()) {
+          <div class="side-panel-content">
+            <div class="panel-header">
+              <div class="panel-unit-id">
+                {{ selectedUnit()?.unitId }}{{ selectedUnit()?.checkDigit ? '-' + selectedUnit()?.checkDigit : '' }}
+                @if (selectedUnit()?.hasReactiveResults) {
+                  <mat-icon
+                    class="reactive-indicator"
+                    [matTooltip]="'Unit has reactive test results'">
+                    error
+                  </mat-icon>
+                }
+              </div>
+
+              <div class="panel-action-buttons">
+                <button mat-stroked-button color="primary" (click)="onHoldsQuery()">HOLDS QUERY</button>
+                <button mat-stroked-button color="primary" (click)="onSamplesQuery()">SAMPLES QUERY</button>
+              </div>
+            </div>
+
+            <div class="unit-details">
+              <div class="detail-row">
+                <span class="detail-label">Batch ID</span>
+                <span class="detail-value">{{ selectedUnit()?.batchId || '-' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Profile Set Id</span>
+                <span class="detail-value">{{ selectedUnit()?.programId || '-' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Chapter</span>
+                <span class="detail-value">{{ selectedUnit()?.chapterId || '-' }}</span>
+              </div>
+              @if (selectedUnit()?.testSeriesId) {
+                <div class="detail-row">
+                  <span class="detail-label">Test Series ID</span>
+                  <span class="detail-value">{{ selectedUnit()?.testSeriesId }}</span>
+                </div>
+              }
+            </div>
+
+            <!-- Test Results Table -->
+            <div class="test-results-section">
+              @if (testResultsLoading()) {
+                <div class="loading-container-small">
+                  <mat-spinner diameter="30"></mat-spinner>
+                </div>
+              }
+
+              @if (!testResultsLoading() && testResults().length === 0) {
+                <p class="no-results">No test results available</p>
+              }
+
+              @if (!testResultsLoading() && testResults().length > 0) {
+                <div class="test-results-scroll">
+                  <table class="test-results-table" role="table">
+                    <thead>
+                      <tr>
+                        <th>Sequence</th>
+                        <th>Test ID</th>
+                        <th>Result</th>
+                        <th>Description</th>
+                        <th>Interim Result</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      @for (result of testResults(); track result.sequence) {
+                        <tr>
+                          <td>{{ result.sequence }}</td>
+                          <td [class.reactive-test]="result.isReactive === 'Y'">
+                            {{ result.testId }}
+                          </td>
+                          <td [class.reactive-result]="result.isReactive === 'Y'">
+                            {{ result.resultCode }}
+                          </td>
+                          <td [class.reactive-text]="result.isReactive === 'Y'">
+                            {{ result.resultDescription }}
+                          </td>
+                          <td>{{ result.interimResult || '-' }}</td>
+                        </tr>
+                      }
+                    </tbody>
+                  </table>
+                </div>
+              }
+            </div>
+
+            <!-- Pagination Controls -->
+            <div class="panel-pagination">
+              <button
+                mat-icon-button
+                (click)="onPreviousUnit()"
+                [disabled]="selectedUnitIndex() === 0"
+                [attr.aria-label]="'Previous unit'">
+                <mat-icon>chevron_left</mat-icon>
+              </button>
+              <span class="pagination-text">
+                Unit {{ selectedUnitIndex() + 1 }} of {{ totalUnits() }}
+              </span>
+              <button
+                mat-icon-button
+                (click)="onNextUnit()"
+                [disabled]="selectedUnitIndex() === totalUnits() - 1"
+                [attr.aria-label]="'Next unit'">
+                <mat-icon>chevron_right</mat-icon>
+              </button>
+            </div>
+          </div>
+        }
+      </mat-drawer>
+    </mat-drawer-container>
+  </div>
+</div>

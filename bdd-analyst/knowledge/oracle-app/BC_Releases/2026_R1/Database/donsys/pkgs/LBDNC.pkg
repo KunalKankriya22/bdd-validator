@@ -1,0 +1,1455 @@
+/*****************************************************************************
+Developed By : Jeff Centilli
+Create Date  : Year 1997
+Purpose      : To bring the Contract results from the LT/Lab to LT/Donor
+Version Det  : [Ver: 02]  Date: 06.28.2006
+               [Ver: 03]  Date:12/09/08 LT 3.4.1 Scr#14747 , By:Edwin
+               [Ver: 04]  Date:04/20/10 LT 4.5.1 Scr#16360 , By:Kishore
+               [Ver: 05]  Date:02/16/11 LT 4.7.0 IM#4791 ,   By:Kishore
+               [Ver: 06]  Date:04/15/11                      By:Hussein
+                *******   replace user by lt_session_user.get_user_id
+               [Ver: 07]  Date:05/20/11 LT 4.7.0 IM#5400 ,   By:Kishore
+               [Ver: 08]  Date:04/20/12 LT 4.8.0 IM#8441 ,   By:Ashok
+                *******   Modified get_result_status routine (for IM#8441)
+               [Ver: 10]  IM: 8461 striping user ID length Edwin 04/23/12
+               [Ver: 11]  Ashok; 09/25/2012 READ_LAB_TEST_RESULTS modified
+                                  - sysdate converted to local chapter date
+              [Ver: 12] Edwin, 04/13/13 SCR: 19187 (not to populate the 
+                                                 interdiction multiple times)
+              [Ver: 13] Edwin 03/21/14 SCR:20559 LT_2013_SP1
+              [Ver: 14] Edwin 09/18/14 SCR:20758 LT_2013_R2
+              [Ver: 15] Edwin 04/10/15 , added the timezone logic in remove_hold
+                       check 
+ 
+*-----------------------------------------------------------------------
+** VER   DATE   	BY	COMMENTS
+** ---------------------------------------------------------------------
+    16 	05/10/2016	Seshu	Renamed Below tables for merging database work
+				LAB_UTRS		as	UTRS
+				LAB_UNITS		as	UNITS
+				LAB_UNIT_TEST_BASE	as	UNIT_TEST_BASE
+				LAB_VALID_INTERDICTIONS	as	VALID_INTERDICTIONS_LAB
+				VALID_TEST_RESULTS	as	VALID_TEST_RESULTS_DON
+				LAB_VALID_TEST_RESULTS	as	VALID_TEST_RESULTS
+				LAB_UNIT_INTERDICTIONS	as	UNIT_INTERDICTIONS
+				LAB_COMPONENTS		as	COMPONENTS
+				LAB_CONTRACT_TESTS	as	CONTRACT_TESTS
+        
+Version Det  : [Ver: 17]  12-26-2019 MLT 2854
+               [Ver: 18] Edwin  03-17-23  [To fix the latency issue, moved the timezone 
+                                     call from the SQL to local in the read_lab_results 
+                                     routine] MLT-5852
+                [Ver: 18] Edwin  04-04-24  [To fix the placing the repeating attributes] MLT-6695
+              
+              
+
+**************************************************************************** */
+
+CREATE OR REPLACE PACKAGE LBDNC IS
+
+
+PROCEDURE read_lab_test_results
+              (p_unit_id    IN   VARCHAR2,
+               p_f_date     IN   DATE,
+               p_t_date     IN   DATE,
+               p_test_grp   IN   VARCHAR2,
+               p_test_id    IN   VARCHAR2,
+               p_chapter    IN   VARCHAR2,
+               i_id         IN OUT  VARCHAR2);
+PROCEDURE get_result_status
+              (c_unit_id    IN   VARCHAR2,
+               c_chapter    IN   VARCHAR2,
+               c_date       IN   DATE,
+               c_test_id    IN   VARCHAR2,
+               c_result     OUT  VARCHAR2,
+               c_absorb     OUT  VARCHAR2,
+               c_status     OUT  VARCHAR2);
+FUNCTION  is_donor_attached
+              (a_unit_id    IN   VARCHAR2,
+               a_chapter    IN   VARCHAR2,
+               a_coll_date  IN   DATE,
+               c_donor_id   OUT  VARCHAR2)    RETURN boolean;
+FUNCTION  is_result_ok
+              (i_unit_id    IN   VARCHAR2,
+               i_chapter    IN   VARCHAR2,
+               i_coll_date  IN   DATE,
+               i_test_id    IN   VARCHAR2)      RETURN boolean;
+PROCEDURE place_donor_interdiction
+              (c_test_id    IN   VARCHAR2,
+               c_result     IN   VARCHAR2,
+               c_status     IN   VARCHAR2,
+               c_unit_id    IN   VARCHAR2,
+               c_chapter    IN   VARCHAR2,
+               c_coll_date  IN   DATE,
+               c_donor_id   IN   VARCHAR2);
+PROCEDURE check_donor_abo
+              (b_unit_id    IN   VARCHAR2,
+               b_chapter    IN   VARCHAR2,
+               b_coll_date  IN   DATE,
+               b_result     IN   VARCHAR2,
+               abo_status   OUT  VARCHAR2);
+PROCEDURE check_result_override
+              (c_unit_id        IN   VARCHAR2,
+               c_chapter        IN   VARCHAR2,
+               c_coll_date      IN   DATE,
+               c_test_id        IN   VARCHAR2,
+               c_test_result    IN   VARCHAR2,
+               c_override_flag  OUT  VARCHAR2);
+PROCEDURE remove_lab_result_hold
+              (c_unit_id        IN   VARCHAR2,
+               c_chapter        IN   VARCHAR2,
+               c_coll_date      IN   DATE,
+               c_donor_id       IN   VARCHAR2);
+END LBDNC;
+/
+CREATE OR REPLACE PACKAGE BODY LBDNC IS
+/*.*/
+PROCEDURE get_result_status
+             (c_unit_id    IN   VARCHAR2,
+              c_chapter    IN   VARCHAR2,
+              c_date       IN   DATE,
+              c_test_id    IN   VARCHAR2,
+              c_result     OUT  VARCHAR2,
+              c_absorb     OUT  VARCHAR2,
+              c_status     OUT  VARCHAR2)
+/*
+||
+||   Tests with incomplete testing:
+||      (Tests that have null results, or
+||       results in unit_test_base)
+||   are screened out by the IS_RESULT_OK function,  prior to calling this
+||   routine,  so this routine will not check for incomplete testing.
+||
+||  At the test level determine if results for unit have been interfaced:
+||     if result has not been interfaced            return       'NEW'
+||     if result has been interfaced, and equal     return       'SAME'
+||     if result has been interfaced, but is
+||              different on the two systems        return       'DIFF'
+||  9/10/1997
+||
+*/
+IS
+   temp            VARCHAR2(4);
+   no_of_test      NUMBER;
+   result_exist    VARCHAR2(5);
+   test_exist      VARCHAR2(10);
+   t_result        VARCHAR2(5);
+   t_status        VARCHAR2(5);
+   t_absorb        VARCHAR2(12);
+   err_msg         VARCHAR2(375);
+   err_code        NUMBER;
+BEGIN
+   c_result := null;
+   c_status := null;
+   c_absorb := null;
+/*
+||
+||   Find number of tests for specified test ID
+||
+*/
+   SELECT count(*)
+     INTO no_of_test
+     FROM utrs
+    WHERE test_id  = c_test_id
+      AND unit_id = c_unit_id
+      AND coll_date = c_date
+      AND cancel_flag is null
+      AND program_id != 'FRILINK'
+      AND chapter_id = c_chapter;
+   BEGIN
+      SELECT test_id, result_code
+        INTO test_exist,result_exist
+        FROM unit_test_results
+       WHERE test_id  = c_test_id
+         AND unit_id = c_unit_id
+         AND coll_date = c_date
+         AND chapter_id = c_chapter;
+   EXCEPTION
+      WHEN no_data_found THEN
+         result_exist := '';
+         test_exist   := '';
+   END;
+/*
+||
+||   Handle case where there is only one test result for test.
+||
+*/
+   IF (no_of_test = 1) THEN
+      BEGIN
+         SELECT result_status_1, ltrim(absorbance,'0'), 'NEW'
+           INTO t_result, t_absorb, t_status
+           FROM utrs UR
+          WHERE UR.unit_id = c_unit_id
+            AND UR.test_id = c_test_id
+            AND UR.coll_date = c_date
+            AND cancel_flag is null
+            AND program_id != 'FRILINK'
+            AND UR.chapter_id = c_chapter;
+      END;
+      c_result := t_result;
+      c_status := t_status;
+      c_absorb := t_absorb;
+/*
+||
+||   Handle where the result has already been interfaced to the donor system
+||
+*/
+      IF ((test_exist is not null) and (result_exist is not null)) THEN
+         BEGIN
+            IF (result_exist = t_result) THEN
+                c_status := 'SAME';
+            ELSE
+                c_status := 'DIFF';
+            END IF;
+         END;
+      END IF;
+   END IF;
+/*
+||
+||   Handle case where there are multiple test results for the test.
+||
+||      First select pulls all reactive interpretations based upon the
+||      interdictions assigned.
+||
+||      Exception pulls all repeat nonreactive interpretations.  Test
+||      must have 2 not reactive results,  one reactive result,  and no
+||      not tested results.
+||
+||      If the test result cannot be interpreted as either reactive or
+||      nonreactive,  the result is sent back as blank,  which will not
+||      interface to the donor system.
+||
+*/
+   IF (no_of_test > 1) THEN
+      if c_test_id != 'ABORH' then
+      BEGIN
+         SELECT vtr2.result_status, 'NEW'
+           INTO t_result, t_status
+           FROM unit_interdictions ui,
+                valid_interdictions_lab vi,
+                valid_test_results vtr,
+                valid_test_results vtr2,
+                valid_interdictions_lab v2
+          WHERE ui.unit_id = c_unit_id
+            AND ui.source_test_id = c_test_id
+            AND ui.inter_code = vi.inter_code
+            AND vi.inter_type not in ('I','H')
+            AND vi.inter_code = vtr.inter_code
+            AND vtr.plate_seq = 'R'
+            AND rownum < 2
+            AND vtr2.test_id = c_test_id
+            AND vtr2.plate_seq = 'I'
+            AND vtr2.inter_code is not null
+            AND vtr2.inter_code = v2.inter_code
+            AND v2.inter_type = 'I'
+            AND sysdate between vtr2.eff_date and
+                nvl(vtr2.term_date, sysdate+1);
+      EXCEPTION
+         WHEN no_data_found THEN
+             BEGIN
+                SELECT vtr.result_status, 'NEW'
+                  INTO t_result, t_status
+                  FROM valid_test_results vtr
+                 WHERE test_id = c_test_id
+                   AND vtr.plate_seq = 'R'
+                   AND vtr.inter_code is null
+                   AND rownum < 2
+                   AND sysdate between vtr.eff_date and nvl(vtr.term_date,
+                                                            sysdate+1)
+                   AND 1 =
+                          (SELECT count(*)
+                             FROM utrs utrs
+                            WHERE utrs.unit_id = c_unit_id
+                              AND utrs.coll_date = c_date
+                              AND utrs.chapter_id = c_chapter
+                              AND utrs.test_id = c_test_id
+                              AND utrs.cancel_flag is null
+                              AND program_id != 'FRILINK'
+                              AND utrs.result_status_1 in -- = IM#8441 - replaced '=' with 'in' because of ORA-01427 - Confirmed with Edwin)
+                                  (SELECT vtr2.result_status
+                                     FROM valid_test_results vtr2,
+                                          valid_interdictions_lab vi
+                                    WHERE vtr2.test_id = c_test_id
+                                      AND vtr2.plate_seq = 'I'
+                                      AND vtr2.inter_code is not null
+                                      AND vtr2.inter_code = vi.inter_code
+                                      AND vi.inter_type = 'I'
+                                      AND sysdate between vtr2.eff_date and
+                                          nvl(vtr2.term_date, sysdate+1)))
+                   AND 2 =
+                          (SELECT count(*)
+                             FROM utrs utrs
+                            WHERE utrs.unit_id = c_unit_id
+                              AND utrs.coll_date = c_date
+                              AND utrs.chapter_id = c_chapter
+                              AND utrs.test_id = c_test_id
+                              AND utrs.result_status_1 = vtr.result_status
+                              AND program_id != 'FRILINK'
+                              AND utrs.cancel_flag is null)
+                   AND 0 =
+                          (SELECT count(*)
+                             FROM utrs utrs
+                            WHERE utrs.unit_id = c_unit_id
+                              AND utrs.coll_date = c_date
+                              AND utrs.chapter_id = c_chapter
+                              AND utrs.test_id = c_test_id
+                              AND utrs.result_status_1 = 'NT'
+                              AND program_id != 'FRILINK'
+                              AND utrs.cancel_flag is null);
+             EXCEPTION
+                WHEN no_data_found THEN
+                     c_result := null;
+                     c_status := null;
+             END;
+      END;
+      else
+      BEGIN
+         SELECT distinct result_status_1, ltrim(absorbance,'0'), 'NEW'
+           INTO t_result, t_absorb, t_status
+           FROM utrs UR
+          WHERE UR.unit_id = c_unit_id
+            AND UR.test_id = c_test_id
+            AND UR.coll_date = c_date
+            AND cancel_flag is null
+            AND program_id != 'FRILINK'
+            AND UR.chapter_id = c_chapter;
+      EXCEPTION
+            WHEN others THEN
+                t_result := null;
+                t_status := null;
+                c_result := null;
+                c_status := null;
+      END;
+      end if;
+      c_result := t_result;
+      c_status := t_status;
+      c_absorb := null;
+/*
+||
+||   Handle where the result has already been interfaced to the donor system
+||
+*/
+      IF ((test_exist is not null) AND (result_exist is not null)) THEN
+         IF (result_exist = t_result) THEN
+             c_status := 'SAME';
+         ELSE
+             c_status := 'DIFF';
+         END IF;
+      END IF;
+   END IF; /*Case where number of test > 1*/
+EXCEPTION
+   WHEN others THEN
+      err_code := sqlcode;
+      err_msg  := 'Unit: '||C_UNIT_ID||' Test: '||C_TEST_ID||
+		  substr(sqlerrm,1,50);
+      IF (err_code != -100501) THEN
+         raise_application_error(-20501,err_msg||'1');
+      END IF;
+END;
+/*
+||
+||           End GET RESULT STATUS procedure
+||
+*/
+/*.*/
+FUNCTION is_donor_attached
+              (a_unit_id     IN   VARCHAR2,
+               a_chapter     IN   VARCHAR2,
+               a_coll_date   IN   DATE,
+               c_donor_id    OUT  VARCHAR2)    RETURN boolean
+IS
+/*
+||
+||     This function is used to verify that a donor record is attached
+||     to this donation.  If the donor has not been attached,  the interface
+||     will not attempt to tranfer the unit.
+||     09/10/1997
+||
+*/
+   temp_donor_id    VARCHAR2(10);
+   err_msg          VARCHAR2(375);
+   err_code         NUMBER;
+BEGIN
+   BEGIN
+      SELECT nvl(donor_id,'NO DONORID')
+        INTO temp_donor_id
+        FROM donations
+       WHERE unit_id = a_unit_id
+         AND chapter_id = a_chapter
+         AND coll_date = a_coll_date;
+   EXCEPTION
+      WHEN no_data_found then
+         temp_donor_id := 'NO DONORID';
+   END;
+   IF (temp_donor_id = 'NO DONORID') THEN
+      RETURN FALSE;
+   ELSE
+      c_donor_id := temp_donor_id;
+      RETURN TRUE;
+   END IF;
+EXCEPTION
+   WHEN others THEN
+      err_code := sqlcode;
+      err_msg  := 'Unit: '||A_UNIT_ID||' '||
+		  substr(sqlerrm,1,50);
+      IF (err_code != -100501) THEN
+         raise_application_error(-20502,err_msg||'2');
+      END IF;
+END;
+/*
+||
+||           End of IS_DONOR_ATTACHED function
+||
+*/
+/*.*/
+FUNCTION is_result_ok
+            (i_unit_id    IN   VARCHAR2,
+             i_chapter    IN   VARCHAR2,
+             i_coll_date  IN   DATE,
+             i_test_id    IN   VARCHAR2)      RETURN boolean
+IS
+/*
+||
+||     This function is used to verify that this unit does not have
+||         A record in UTRS where there are null result for this test.
+||         Any record in UNIT_TEST_BASE for this test.
+||     The interface will not attempt to interface a test result if
+||     either of the above is true.
+||
+*/
+   temp VARCHAR2(1) := 'X';
+   err_msg  varchar2(375);
+   err_code      number;
+BEGIN
+   BEGIN
+      SELECT distinct 'Y'
+        INTO temp
+        FROM utrs
+       WHERE unit_id = i_unit_id
+         AND coll_date = i_coll_date
+         AND chapter_id = i_chapter
+         AND test_id = i_test_id
+         AND program_id != 'FRILINK'
+         AND NOT EXISTS
+             (SELECT 'null result'
+                FROM utrs
+               WHERE unit_id = i_unit_id
+                 AND coll_date = i_coll_date
+                 AND chapter_id = i_chapter
+                 AND test_id = i_test_id
+                 AND result_status_1 is null
+                 AND program_id != 'FRILINK'
+                 AND cancel_flag is null)
+         AND NOT EXISTS
+             (SELECT 'Non NT result in UTB'
+                FROM unit_test_base utrs
+               WHERE unit_id = i_unit_id
+                 AND coll_date = i_coll_date
+                 AND chapter_id = i_chapter
+                 AND test_id = i_test_id
+                 AND nvl(result_status_1, 'XX') != 'NT'
+                 AND result_status_2 is null
+                 AND cancel_flag is null);
+   EXCEPTION
+      WHEN no_data_found THEN
+         temp := 'X';
+   END;
+   BEGIN
+      SELECT 'X'
+        INTO temp
+        FROM units
+       WHERE unit_id = i_unit_id
+         AND coll_date = i_coll_date
+         AND chapter_id = i_chapter
+         AND NOT EXISTS
+             (SELECT 'Repeat Test'
+                FROM utrs
+               WHERE unit_id = i_unit_id
+                 AND coll_date = i_coll_date
+                 AND chapter_id = i_chapter
+                 AND test_id = i_test_id
+                 AND program_id != 'FRILINK'
+                 AND test_seq_no > 1
+                 AND cancel_flag is null)
+         AND EXISTS
+             (SELECT 'Initial interdiction'
+                FROM unit_interdictions ui, valid_interdictions_lab vi
+               WHERE ui.unit_id = i_unit_id
+                 AND ui.coll_date = i_coll_date
+                 AND ui.chapter_id = i_chapter
+                 AND ui.source_test_id = i_test_id
+                 AND ui.inter_code = vi.inter_code
+                 AND vi.inter_type = 'I');
+   EXCEPTION
+      WHEN no_data_found THEN
+         null;
+   END;
+   IF (temp != 'X') THEN
+       RETURN TRUE;
+   ELSE
+       RETURN FALSE;
+   END IF;
+EXCEPTION
+   WHEN no_data_found THEN
+        RETURN FALSE;
+   WHEN others THEN
+        err_code := sqlcode;
+        err_msg  := 'Unit: '||I_UNIT_ID||' Test: '||I_TEST_ID||
+                     substr(sqlerrm,1,50);
+        IF (err_code != -100501) THEN
+           raise_application_error(-20504,err_msg||'3');
+        END IF;
+END;
+/*
+||
+||           End of IS_RESULT_OK function
+||
+*/
+PROCEDURE place_donor_interdiction
+             (c_test_id    IN   VARCHAR2,
+              c_result     IN   VARCHAR2,
+              c_status     IN   VARCHAR2,
+              c_unit_id    IN   VARCHAR2,
+              c_chapter    IN   VARCHAR2,
+              c_coll_date  IN   DATE,
+              c_donor_id   IN   VARCHAR2)
+IS
+   t_term_date      DATE;
+   c_inter_code     VARCHAR2(5);
+   c_inter_status   VARCHAR2(450);
+   err_msg          VARCHAR2(375);
+   err_code         NUMBER;
+   pl_insert_user   VARCHAR2(30);
+   t_transaction_id VARCHAR2(10);
+   nInterCount      NUMBER:=0;
+   nAttrCount       NUMBER:=0;
+   nSurveCount      NUMBER:=0;
+   nInterCount1     NUMBER:=0;
+   temp_insert_date DATE;
+   szInterType      VARCHAR2(5);
+   chp_date         date;
+   l_chapter        VARCHAR2(4);
+
+   CURSOR get_inter_info IS
+         SELECT vi.inter_code, vi.period_type, vi.period_number,
+                decode(vi.fixed_period, 'N', 'N', null, 'N', decode
+                    (vi.period_type, 'P', 'N',  null, 'N', 'Y')) send_term_date
+           FROM valid_test_results_don vtr, valid_interdictions vi
+          WHERE vtr.test_id = c_test_id
+            AND vtr.result_code = c_result
+            AND sysdate between vtr.eff_date and nvl(vtr.term_date,sysdate+1)
+            AND vtr.inter_code = vi.inter_code
+            AND sysdate between vi.eff_date and nvl(vi.term_date,sysdate+1)
+         UNION
+         SELECT vi.inter_code, vi.period_type, vi.period_number,
+                decode(vi.fixed_period, 'N', 'N', null, 'N', decode
+                    (vi.period_type, 'P', 'N',  null, 'N', 'Y')) send_term_date
+           FROM valid_test_results_don vtr, valid_interdictions vi
+          WHERE vtr.test_id = c_test_id
+            AND vtr.result_code = c_result
+            AND sysdate between vtr.eff_date and nvl(vtr.term_date,sysdate+1)
+            AND vtr.inter_code_1 = vi.inter_code
+            AND sysdate between vi.eff_date and nvl(vi.term_date,sysdate+1)
+         UNION
+         SELECT vi.inter_code, vi.period_type, vi.period_number,
+                decode(vi.fixed_period, 'N', 'N', null, 'N', decode
+                    (vi.period_type, 'P', 'N',  null, 'N', 'Y')) send_term_date
+           FROM valid_test_results_don vtr, valid_interdictions vi
+          WHERE vtr.test_id = c_test_id
+            AND vtr.result_code = c_result
+            AND sysdate between vtr.eff_date and nvl(vtr.term_date,sysdate+1)
+            AND vtr.inter_code_2 = vi.inter_code
+            AND sysdate between vi.eff_date and nvl(vi.term_date,sysdate+1);
+BEGIN
+   IF (c_test_id not in ('ABORH','CHOL')) THEN
+      BEGIN
+         t_transaction_id := null;
+         BEGIN
+            SELECT transaction_id
+              INTO t_transaction_id
+              FROM donations
+             WHERE unit_id = c_unit_id
+               AND chapter_id = c_chapter
+               AND coll_date = c_coll_date
+               AND donor_id = c_donor_id;
+         EXCEPTION
+            WHEN no_data_found THEN
+                  t_transaction_id := null;
+            WHEN too_many_rows THEN
+                  t_transaction_id := null;
+         END;
+---
+         FOR A1 in get_inter_info LOOP
+            IF (A1.send_term_date = 'Y') THEN
+               BEGIN
+                  SELECT c_coll_date + (nvl(numeral_value,1) * decode
+                         (A1.period_number, null, 1, 0, 1, A1.period_number))
+                    INTO t_term_date
+                    FROM valid_master_codes
+                   WHERE code_type = 'PRTYP'
+                     AND code = A1.period_type;
+               EXCEPTION
+                  WHEN no_data_found THEN
+                     t_term_date := null;
+               END;
+            END IF;
+
+          /*  Added for IM:8461 Edwin 04/23/12 */
+
+          begin
+           SELECT DECODE(SUBSTR(lt_user_session.get_userid,1,3),'OPS',
+           SUBSTR(lt_user_session.get_userid,5),lt_user_session.get_userid)
+           INTO pl_insert_user from dual;
+          exception when others then
+             pl_insert_user:='DONSYS';
+          end;
+
+
+          -- The below block and the if clause was added by Edwin 
+          -- for SCR:19187 LT_2013)
+
+        begin
+          select inter_type into szInterType from valid_interdictions
+         where inter_code=a1.inter_code and sysdate between eff_date and
+          nvl(term_date, sysdate+2) and rownum =1;
+        exception when others then 
+          null;
+        end;
+  
+        chp_date:=lifetrack_timezone_convert.get_local_time(c_chapter,sysdate);
+     
+
+
+        
+       /* Added by Edwin on 03/21/2014  */
+
+        begin
+           select chapter_id into l_chapter from donors where
+           donor_id=c_donor_id and rownum=1;
+        exception when others then
+            l_chapter:='ALL';
+        end;
+      /*   -- Changes ends here --- */
+
+ 
+         -- the below 'IF' statement was added for SCR 19187 LT_2013
+        -- MLT 2854 (added DR, SPINS, CAUTN) to Inter_type check.
+        If szInterType IN ('INFOR','DR','SPINS','CAUTN') then --if the inter is present then do not
+            
+            select nvl(count(*),0) into nInterCount from donor_interdictions
+            where donor_id=c_donor_id and inter_code=a1.inter_code and
+            inter_type IN ('INFOR','DR','SPINS','CAUTN');
+            -- and  (term_date is null OR
+            --(term_date > chp_date and release_date is null));
+
+            If nInterCount > 0 then 
+               null;
+
+            Else          
+               don_inter.inter_upgrade_place
+                   (c_donor_id, l_chapter, c_unit_id, t_transaction_id,
+                   a1.inter_code, null, null, pl_insert_user, null,
+                   null, 'LBDNC', c_coll_date, t_term_date, null,
+                   c_inter_status); --- by Kishore on 05/20/2011. IM 5588, 5400
+           End If;
+        Else
+           don_inter.inter_upgrade_place
+               (c_donor_id, l_chapter, c_unit_id, t_transaction_id,
+                a1.inter_code, null, null, pl_insert_user, null,
+                null, 'LBDNC', c_coll_date, t_term_date, null,
+                c_inter_status); --- by Kishore on 05/20/2011. IM 5588, 5400
+        End If;
+
+         If szInterType IN ('INFOR','DR','SPINS','CAUTN') then
+
+            select nvl(count(*),0) into nAttrCount from donor_interdictions
+            where donor_id=c_donor_id and inter_code=a1.inter_code and
+            inter_type IN ('INFOR','DR','SPINS','CAUTN') and program_id='LBDNC';
+  
+             If nAttrCount > 1 then
+
+                 select min(insert_date) into temp_insert_date from donor_interdictions
+                 where donor_id=c_donor_id and inter_code=a1.inter_code and
+                 inter_type IN ('INFOR','DR','SPINS','CAUTN') and program_id='LBDNC';
+
+
+                delete from donor_interdictions
+                where donor_id=c_donor_id and inter_code=a1.inter_code and
+               inter_type IN ('INFOR','DR','SPINS','CAUTN') and insert_date > temp_insert_date and 
+               program_id='LBDNC';
+
+               update donor_interdictions set term_date=null, release_date=null,release_user=null, term_reason=null
+                where donor_id=c_donor_id and inter_code=a1.inter_code and
+               inter_type IN ('INFOR','DR','SPINS','CAUTN') and program_id='LBDNC';
+
+
+            Else
+              update donor_interdictions set term_date=null, release_date=null,release_user=null, term_reason=null
+                where donor_id=c_donor_id and inter_code=a1.inter_code and
+               inter_type IN ('INFOR','DR','SPINS','CAUTN') and program_id='LBDNC';
+            End If;
+
+        End If;
+
+        -----
+         If szInterType IN ('SURVE') then  
+
+            select nvl(count(*),0) into nSurveCount from donor_interdictions
+            where donor_id=c_donor_id and inter_code=a1.inter_code and
+            inter_type IN ('SURVE') and program_id='LBDNC';
+  
+             If nSurveCount > 1 then
+
+                delete from donor_interdictions
+                where donor_id=c_donor_id and inter_code=a1.inter_code and
+                inter_type IN ('SURVE') and program_id='LBDNC'and release_date is not null
+                and term_date is not null;
+             Elsif nSurveCount = 1 then 
+              delete from donor_interdictions
+                where donor_id=c_donor_id and inter_code in (select action_inter from valid_inter_upgrades where source_inter=a1.inter_code and
+                                                          exist_inter=a1.inter_code) and
+                inter_type IN ('SURVE') and program_id='LBDNC'and release_date is not null
+                and term_date is not null;
+            End If;
+
+        End If;
+
+        If szInterType IN ('INTER') then  
+
+            select nvl(count(*),0) into nInterCount1 from donor_interdictions
+            where donor_id=c_donor_id and inter_code=a1.inter_code and
+            inter_type IN ('INTER') and program_id='LBDNC';
+  
+             If nInterCount1 > 1 then
+
+                delete from donor_interdictions
+                where donor_id=c_donor_id and inter_code=a1.inter_code and
+                inter_type IN ('INTER') and program_id='LBDNC'and release_date is not null
+                and term_date is not null;
+             Elsif nInterCount1 = 1 then 
+
+              delete from donor_interdictions
+                where donor_id=c_donor_id and inter_code in (select action_inter from valid_inter_upgrades where source_inter=a1.inter_code and
+                                                          exist_inter=a1.inter_code) and
+                inter_type IN ('INTER') and program_id='LBDNC'and release_date is not null
+                and term_date is not null;
+            End If;
+
+        End If;
+
+
+
+
+        -----
+
+        END LOOP;
+      END;
+   END IF;
+EXCEPTION
+    WHEN no_data_found THEN
+       null;
+    WHEN others THEN
+       err_code := sqlcode;
+       err_msg  := 'Unit: '||C_UNIT_ID||' Test: '||C_TEST_ID||
+                   substr(sqlerrm,1,50);
+       if (err_code != -100501) then
+          raise_application_error(-20540,err_msg||'4');
+       end if;
+END;
+/*
+||
+||           End of PLACE_DONOR_INTERDICTION procedure
+||
+*/
+/*.*/
+PROCEDURE  check_donor_abo
+                (b_unit_id     IN   VARCHAR2,
+                 b_chapter     IN   VARCHAR2,
+                 b_coll_date   IN   DATE,
+                 b_result      IN   VARCHAR2,
+                 abo_status    OUT  VARCHAR2)
+IS
+   c_abo           VARCHAR2(5);
+   c_donor_id      VARCHAR2(10);
+   c_inter_status  VARCHAR2(350);
+   no_donor_hold   VARCHAR2(50);
+   c_trans_id      VARCHAR2(10);
+   err_msg         VARCHAR2(375);
+   err_code        NUMBER;
+BEGIN
+   abo_status := 'Y';
+   SELECT nvl(blood_type,'***'), donors.donor_id, donations.transaction_id
+     INTO c_abo, c_donor_id , c_trans_id
+     FROM donors, donations
+    where donors.donor_id = donations.donor_id
+      AND donations.chapter_id = b_chapter -- Added by Kishore on 02/16/2011. IM 4791
+      AND donations.unit_id = b_unit_id
+      AND donations.coll_date = b_coll_date;
+   IF (c_abo = '***') THEN
+      BEGIN
+         UPDATE donors
+            SET blood_type = b_result
+          WHERE donor_id = c_donor_id
+            AND b_result in ('51','62','73','84','95','06','17','28');
+      EXCEPTION
+         WHEN no_data_found THEN
+            null;
+      END;
+   ELSE
+      IF (c_ABO != b_result) THEN
+         abo_status := 'N';
+         IF (b_result in ('51','62','73','84','95','06','17','28')) THEN
+            don_inter.inter_upgrade_place
+                (c_donor_id, b_chapter, b_unit_id, c_trans_id, 'ABOD',
+                 null, null, LT_USER_SESSION.get_userid, null, null, 'LBDNC', sysdate, null,
+                 null, c_inter_status); -- Substituted "SYSTEM" with "LT_USER_SESSION.get_userid". Changed by Kishore on 05/20/2011. IM 5588, 5400
+            don_inter.place_inter_unit
+                (b_unit_id, null, b_coll_date, b_chapter, c_trans_id, 'ABOD',
+                 null, null, null, LT_USER_SESSION.get_userid, null, null, 'LBDNC', sysdate,
+                 null, no_donor_hold); -- Substituted "SYSTEM" with "LT_USER_SESSION.get_userid". Changed by Kishore on 05/20/2011. IM 5588, 5400
+         END IF;
+      END IF;
+   END IF;
+EXCEPTION
+   WHEN no_data_found THEN
+        raise_application_error(-20505, 'Unit: '||B_UNIT_ID||' ABO '||B_RESULT||
+                                        'Error in package check donor ABO');
+   WHEN others THEN
+        err_code := sqlcode;
+        err_msg  := 'Unit: '||B_UNIT_ID||' ABO: '||B_RESULT||
+                    substr(sqlerrm,1,50);
+        IF (err_code != -100501) THEN
+           raise_application_error (-20506, err_msg||'5');
+        END IF;
+END;
+/*
+||           End of CHECK_DONOR_ABO procedure
+*/
+PROCEDURE check_result_override
+             (c_unit_id        IN   VARCHAR2,
+              c_chapter        IN   VARCHAR2,
+              c_coll_date      IN   DATE,
+              c_test_id        IN   VARCHAR2,
+              c_test_result    IN   VARCHAR2,
+              c_override_flag  OUT  VARCHAR2) IS
+/*
+||     This procedure checks to see if the override of the current result on
+||     the donor system is allowed,  and if the donor should be interdicted.
+*/
+   c_donor_id      VARCHAR2(10);
+   c_trans_id      VARCHAR2(10);
+   c_inter_code    VARCHAR2(5);
+   c_inter_status  VARCHAR2(450);
+   err_msg         VARCHAR2(375);
+   err_code        NUMBER;
+BEGIN
+   BEGIN
+      SELECT nvl(vro.inter_code, '*****'), vro.override_flag
+        INTO c_inter_code, c_override_flag
+        FROM valid_result_overrides vro, unit_test_results utrs
+       WHERE vro.test_id = c_test_id
+         AND vro.chapter_id = c_chapter
+         AND vro.new_result_status = c_test_result
+         AND vro.current_result_status = utrs.result_code
+         AND utrs.unit_id = c_unit_id
+         AND utrs.chapter_id = c_chapter
+         AND utrs.coll_date = c_coll_date
+         AND utrs.test_id = c_test_id;
+   EXCEPTION
+      WHEN no_data_found THEN
+         c_inter_code := '*****';
+         c_override_flag := 'Y';
+   END;
+   IF (c_inter_code != '*****') THEN
+      SELECT donor_id, transaction_id
+        INTO c_donor_id, c_trans_id
+        FROM donations
+       WHERE unit_id = c_unit_id
+         AND chapter_id = c_chapter
+         AND coll_date = c_coll_date;
+      don_inter.inter_upgrade_place
+           (c_donor_id, c_chapter, c_unit_id, c_trans_id, c_inter_code, null,
+            null, LT_USER_SESSION.get_userid, null, null, 'LBDNC', sysdate, null, null,
+            c_inter_status); -- Substituted "SYSTEM" with "LT_USER_SESSION.get_userid". Changed by Kishore on 05/20/2011. IM 5588, 5400
+   END IF;
+EXCEPTION
+   WHEN no_data_found THEN
+        raise_application_error(-20505, 'Unit: '||C_UNIT_ID||' Test: '||
+                                      C_TEST_ID||'Error in check res override');
+   WHEN others THEN
+        err_code := sqlcode;
+        err_msg  := 'Unit: '||C_UNIT_ID||' Test: '||C_TEST_ID||
+                    substr(sqlerrm,1,50);
+        IF (err_code != -100501) THEN
+           raise_application_error (-20503, err_msg||'5');
+        END IF;
+END;
+/*
+||           End of CHECK_RESULT_OVERRIDE procedure
+*/
+PROCEDURE remove_lab_result_hold
+              (c_unit_id        IN   VARCHAR2,
+               c_chapter        IN   VARCHAR2,
+               c_coll_date      IN   DATE,
+               c_donor_id       IN   VARCHAR2)
+IS
+/*
+||
+||     This procedure checks to see if an interdiction exists on the unit
+||     because the lab results have not been transferred.  If so, terminate it.
+||
+*/
+   c_inter_status  VARCHAR2(450);
+   err_msg         VARCHAR2(375);
+   err_code        NUMBER;
+   t_insert_date   DATE;
+   trph_exists     VARCHAR2(1);
+   t_trans_id      VARCHAR2(10);
+   t_chapter       varchar2(5);
+BEGIN
+   trph_exists := 'N';
+   BEGIN
+      SELECT 'Y'
+        INTO trph_exists
+        FROM donor_interdictions
+       WHERE donor_id = c_donor_id
+         AND decode(chapter_id, 'ALL', c_chapter, chapter_id) = c_chapter --chapter_id = c_chapter -- Changed by Kishore on 02/16/2011. IM 4791
+         AND unit_id = c_unit_id
+         AND inter_code = 'TRPH'
+         AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate+1);
+   EXCEPTION
+      WHEN no_data_found THEN
+         trph_exists := 'N';
+   END;
+   IF (trph_exists = 'Y') THEN
+      t_trans_id := null;
+      BEGIN
+         SELECT transaction_id
+           INTO t_trans_id
+           FROM donations
+          WHERE unit_id = c_unit_id
+            AND chapter_id = c_chapter
+            AND coll_date = c_coll_date
+            AND donor_id = c_donor_id;
+      EXCEPTION
+         WHEN no_data_found THEN
+               t_trans_id := null;
+         WHEN too_many_rows THEN
+               t_trans_id := null;
+      END;
+
+     /* Added by Edwin on 09/18/2014 For SCR 20758 */
+
+    begin
+       select chapter_id into t_chapter from donors where
+       donor_id=c_donor_id and rownum=1;
+    exception when others then
+       t_chapter:='ALL';
+    end;
+/*   -- Changes ends here --- */
+
+
+---
+      don_inter.inter_upgrade_remove
+           (c_donor_id, t_chapter, c_unit_id, t_trans_id, 'TRPH', null,
+            null, LT_USER_SESSION.get_userid, null, null, 'LBDNC', 
+            null, t_insert_date,
+            trunc(sysdate), 'LRIOK', 'LAB RESULTS TRANSFERRED: '||
+            to_char(trunc(sysdate), 'MM-DD-YYYY'), c_inter_status); -- Substituted "SYSTEM" with "LT_USER_SESSION.get_userid". Changed by Kishore on 05/20/2011. IM 5588, 5400
+   END IF;
+END;
+/*
+||
+||           End of REMOVE_LAB_RESULT_HOLD procedure
+||
+*/
+/*.*/
+PROCEDURE  read_lab_test_results
+              (p_unit_id   IN   VARCHAR2,
+               p_f_date    IN   DATE,
+               p_t_date    IN   DATE,
+               p_test_grp  IN   VARCHAR2,
+               p_test_id   IN   VARCHAR2,
+               p_chapter   IN   VARCHAR2,
+               i_id        IN OUT  VARCHAR2)
+IS
+   no_donor_hold          varchar2(250);
+   test_result            valid_test_results_don.result_code%type;
+   c_unit_id              donations.unit_id%type;
+   c_result               valid_test_results_don.result_code%type;
+   c_absorb               varchar2(12);
+   c_test_id              valid_tests.test_id%type;
+   c_status               varchar2(5);
+   c_donor_id             donors.donor_id%type;
+   c_coll_date            date;
+   c_interface_id         interface_log.interface_id%type;
+   c_procedure_code       varchar2(5);
+   skip_bloodtype_upd     varchar2(1);
+   c_count                number := 0;
+   C_EXCP_COUNT           number := 0;
+   C_antigen              varchar2(1);
+   err_flag               varchar2(1) := 'N' ;
+   err_msg                varchar2(1375);
+   err_code               number := 0;
+   tot_count              number := 0;
+   t_complete_count       number := 0;
+   t_partial_count        number := 0;
+   t_no_xfer_count        number := 0;
+   inter_code_count       number := 0;
+   tot_contract_count     number := 0;
+   days_back_for_hold     number := 0;
+   default_from_date      number := 0;
+   t_recon_count          number := 0;
+   c_override_flag        varchar2(1);
+   new_inter_flag         varchar2(1);
+   abo_status             varchar2(1);
+   t_transaction_id	  donations.transaction_id%type;
+   t_inter_code		  valid_test_results_don.inter_code%type;
+   c_inter_status   	  VARCHAR2(450);
+   d_local_date           DATE;
+
+   CURSOR units_cur IS
+      SELECT unit_id, coll_date
+        FROM units u
+       WHERE coll_date BETWEEN nvl (trunc(p_f_date), decode(p_unit_id,
+             null, d_local_date-default_from_date, coll_date)) and
+                               nvl (p_t_date, d_local_date) -- V11; SYSDATE converted to local chapter date;
+         AND u.unit_id = nvl(p_unit_id, u.unit_id)
+         --AND length(u.unit_id) = 7  --Commented for ISBT: 06/27/06
+         AND u.chapter_id = p_chapter
+         AND (u.lab_donor_dats is null OR p_unit_id is not null)
+         AND u.contract_id = 'INTERNAL'
+         AND EXISTS
+             (SELECT distinct 'x'
+                FROM components C
+               WHERE u.unit_id = c.unit_id
+                 AND u.chapter_id = c.chapter_id
+                 AND u.coll_date = c.coll_date
+                 AND c.system_label_decision is not null
+                 AND c.relabel_product_code is null
+                 AND c.pooled_component_id is null
+                 AND c.system_label_decision not in ('39','Mq')
+              UNION
+              SELECT distinct 'x'
+                FROM donations
+               WHERE donations.unit_id = u.unit_id
+                 AND donations.coll_date = u.coll_date
+                 AND donations.chapter_id = u.chapter_id
+                 AND donations.donation_type = 'SM')
+      UNION
+      SELECT unit_id, coll_date
+        FROM units u
+       WHERE unit_id = p_unit_id
+       ORDER BY 2, 1;
+   CURSOR test_cur IS
+      SELECT test_id ,'N' antigen_flag
+        FROM contract_tests
+       WHERE contract_id = 'INTERNAL'
+         AND chapter_id = p_chapter
+         AND test_id = nvl(p_test_id, test_id)
+         AND sysdate BETWEEN eff_date and nvl(term_date,sysdate+1)
+      UNION
+      SELECT test_id, 'N'
+        FROM utrs
+       WHERE p_test_id is null
+         AND test_id = 'CMV'
+         AND unit_id = c_unit_id
+         AND coll_date = c_coll_date
+         AND chapter_id = p_chapter
+         AND cancel_flag is null;
+   each_test              test_cur%ROWTYPE;
+   current_unit           units_cur%ROWTYPE;
+BEGIN
+
+        d_local_date:=LIFETRACK_TIMEZONE_CONVERT.GET_LOCAL_TIME(p_chapter ,SYSDATE);
+   
+        d_local_date:=TRUNC(d_local_date);
+
+   BEGIN
+      SELECT count(*)
+        INTO tot_contract_count
+        FROM contract_tests
+       WHERE contract_id = 'INTERNAL'
+         AND chapter_id = p_chapter
+         AND sysdate between eff_date and nvl(term_date, sysdate+1);
+
+      BEGIN
+         SELECT to_number(parameter_value)
+           INTO days_back_for_hold
+           FROM valid_parameters
+          WHERE decode(chapter_id, 'ALL', p_chapter, chapter_id) = p_chapter --chapter_id = p_chapter -- Changed by Kishore on 02/16/2011. IM 4791
+            AND parameter_code = 'DAYS_TRPH'
+            AND sysdate between eff_date and nvl(term_date, sysdate+1);
+      EXCEPTION
+         WHEN no_data_found THEN
+            days_back_for_hold := 7;
+      END;
+      
+      BEGIN
+         SELECT to_number(parameter_value)
+           INTO default_from_date
+           FROM valid_parameters
+          WHERE decode(chapter_id, 'ALL', p_chapter, chapter_id) = p_chapter --chapter_id = p_chapter -- Changed by Kishore on 02/16/2011. IM 4791
+            AND parameter_code = 'LBDN_CONTR'
+            AND sysdate between eff_date and nvl(term_date, sysdate+1);
+      EXCEPTION
+         WHEN no_data_found THEN
+            default_from_date := 7;
+      END;
+/*
+||
+||     See if an interface ID was passed in.  If so use it,  otherwise
+||     create an interface ID.  Insert a row into the log with start time
+||
+*/
+      new_inter_flag := 'N';
+      IF (i_id is null) THEN
+         don_common_pack.generate_new_id ('LTOD', c_interface_id, err_flag,
+                                          err_msg);
+         i_id := c_interface_id;
+      END IF;
+      
+      BEGIN
+         SELECT 'Y'
+           INTO new_inter_flag
+           FROM interface_log
+          WHERE interface_id = i_id;
+      EXCEPTION
+         WHEN no_data_found THEN
+            INSERT INTO interface_log VALUES
+               (i_id, 'LBDNC', null, 0, sysdate, sysdate,
+                decode(substr(LT_USER_SESSION.get_userid,1,3),'OPS',substr(LT_USER_SESSION.get_userid,5),LT_USER_SESSION.get_userid),
+                0,0,0,p_chapter, 'PROFT');
+            new_inter_flag := 'N';
+      END;
+      
+      INSERT INTO interface_log_parms VALUES
+         (i_id, p_chapter, p_unit_id, p_test_grp, p_test_id,
+          p_f_date, p_t_date);
+     
+   FOR current_unit IN units_cur LOOP
+      tot_count := tot_count + 1;
+      c_unit_id := current_unit.unit_id;
+      c_coll_date := current_unit.coll_date;
+      c_count := c_count + 1;
+/*
+||
+||    Verify that the unit in question has been registered on the donor
+||    system,  and is attached to a donor record.  If not skip unit.
+||
+*/
+      IF (is_donor_attached(c_unit_id, p_chapter, c_coll_date, c_donor_id)) THEN
+         FOR each_test IN test_cur LOOP
+            c_test_id := each_test.test_id;
+            c_antigen := each_test.ANTIGEN_FLAG;
+/*
+||
+||    Verify that the test in question has been completed on the Lab system.
+||
+*/
+            IF (is_result_ok(c_unit_id, p_chapter, c_coll_date, c_test_id)) THEN
+               get_result_status (c_unit_id, p_chapter, c_coll_date, c_test_id,
+                                  test_result, c_absorb, c_status);
+               IF (test_result is not null) THEN
+/*
+||	Place an interdiction on the donor if the test id is ABORH and
+||	test result is NT. Added by Kishore on 04/20/2010.
+*/
+			IF (each_test.test_id = 'ABORH') and 
+			   (test_result = 'NT') THEN
+			  t_transaction_id := null;
+         		  BEGIN
+            	    SELECT transaction_id
+              	      INTO t_transaction_id
+              		FROM donations
+             	     WHERE unit_id = c_unit_id
+               		 AND chapter_id = p_chapter
+               		 AND coll_date = c_coll_date
+               		 AND donor_id = c_donor_id;
+         		  EXCEPTION
+            	    WHEN no_data_found THEN
+                  	t_transaction_id := null;
+            	    WHEN too_many_rows THEN
+                  	t_transaction_id := null;
+         		  END;
+
+ 			  t_inter_code := null;
+                    BEGIN
+		          SELECT inter_code
+                        INTO t_inter_code
+				FROM valid_test_results_don
+			     WHERE test_id = 'ABORH'
+				 AND result_code = 'NT';
+			  EXCEPTION
+			    WHEN others THEN
+				t_inter_code := null;
+			  END;
+
+			  don_inter.inter_upgrade_place
+                 		(c_donor_id, p_chapter, c_unit_id, t_transaction_id,
+                  	 t_inter_code, null, null, LT_USER_SESSION.get_userid, null, null, 'LBDNC',
+                  	 trunc(sysdate), null, null, c_inter_status); -- Substituted "DONSYS" with "LT_USER_SESSION.get_userid". Changed by Kishore on 05/20/2011. IM 5588, 5400
+
+			END IF; -- Place interdiction if test id = ABORH and test result = NT
+/*
+||	End of change by Kishore
+*/
+/*
+||    Do not check to see if blood type matches,  or try to set donors
+||    blood type,  if the donation is a umbilical stem cell donation.
+*/
+                  abo_status := 'Y';
+                  IF (each_test.test_id = 'ABORH') THEN
+                     c_procedure_code := null;
+                     skip_bloodtype_upd := 'N';
+                     SELECT procedure_code
+                       INTO c_procedure_code
+                       FROM donations
+                      WHERE donations.unit_id = c_unit_id
+                        AND donations.coll_date = c_coll_date
+                        AND donations.chapter_id = p_chapter;
+
+                     BEGIN
+                        SELECT 'Y'
+                          INTO skip_bloodtype_upd
+                          FROM valid_master_codes
+                         WHERE code_type = 'LBPRJ'
+                           AND code = c_procedure_code
+                           AND sysdate between
+                                       eff_date and nvl(term_date, sysdate+1);
+                     EXCEPTION
+                        WHEN no_data_found THEN
+                              skip_bloodtype_upd := 'N';
+                     END;
+
+                     IF (skip_bloodtype_upd != 'Y') THEN
+                        check_donor_abo (c_unit_id, p_chapter, c_coll_date,
+                                         test_result, abo_status);
+                     ELSE
+                        INSERT INTO interface_log_excp VALUES
+                           (i_id, c_unit_id, c_test_id, 'LBDNC',
+                            'TSKIP', null, p_chapter);
+                     END IF;
+                  END IF;
+
+                  IF ((each_test.test_id != 'ABORH') or
+                     (abo_status != 'N')) THEN
+                     IF (c_status = 'NEW') THEN
+                        INSERT INTO unit_test_results
+                           (test_id, unit_id, coll_date, chapter_id,
+                            result_code, absorbance, program_id)
+                        VALUES
+                           (C_test_id, c_unit_id, c_coll_date, p_chapter,
+                            test_result, c_absorb, 'LBDNC');
+                        UPDATE utrs
+                           SET extract_date = sysdate
+                         WHERE unit_id = c_unit_id
+                           AND coll_date = c_coll_date
+                           AND chapter_id = p_chapter
+                           AND program_id != 'FRILINK'
+                           AND test_id = c_test_id
+                           AND cancel_flag is null;
+
+                        inter_code_count := 0;
+
+                        SELECT count(inter_code)
+                          INTO inter_code_count
+                          FROM valid_test_results_don
+                         WHERE test_id = each_test.test_id
+                           AND result_code = test_result
+                           AND sysdate BETWEEN eff_date and
+                                               nvl(term_date, sysdate+1);
+                        IF (inter_code_count > 0) THEN
+                           place_donor_interdiction (each_test.test_id,
+                                                     test_result,
+                                                     c_status,
+                                                     current_unit.unit_id,
+                                                     p_chapter, c_coll_date,
+                                                     c_donor_id);
+                        END IF;
+                        IF (p_test_id is not null) THEN
+                           INSERT INTO interface_log_excp VALUES
+                              (i_id, c_unit_id, p_test_id, 'LBDNC',
+                               'TSTOK', 'Y', p_chapter);
+                        END IF;
+                     END IF;
+/*
+||
+||    Verify that new result can be placed on the unit prior to updating.
+||
+*/
+                     IF (c_status = 'DIFF') THEN
+                        check_result_override (c_unit_id, p_chapter,
+                                               c_coll_date, c_test_id,
+                                               test_result, c_override_flag);
+                        IF (c_override_flag = 'Y') THEN
+                           UPDATE unit_test_results
+                              SET result_code = test_result,
+                                  absorbance = c_absorb
+                            WHERE test_id = each_test.test_id
+                              AND coll_date = c_coll_date
+                              AND chapter_id = p_chapter
+                              AND unit_id = current_unit.unit_id;
+                           UPDATE utrs
+                              SET extract_date = sysdate
+                            WHERE unit_id = c_unit_id
+                              AND coll_date = c_coll_date
+                              AND chapter_id = p_chapter
+                              AND program_id != 'FRILINK'
+                              AND test_id = c_test_id
+                              AND cancel_flag is null;
+                           inter_code_count := 0;
+                           SELECT count(inter_code)
+                             INTO inter_code_count
+                             FROM valid_test_results_don
+                            WHERE test_id = each_test.test_id
+                              AND result_code = test_result
+                              AND sysdate BETWEEN eff_date and
+                                                  nvl(term_date, sysdate+1);
+                           IF (inter_code_count > 0) THEN
+                              place_donor_interdiction (each_test.test_id,
+                                                        test_result, c_status,
+                                                        current_unit.unit_id,
+                                                        p_chapter, c_coll_date,
+                                                        c_donor_id);
+                           END IF;
+                           IF (p_test_id is not null) THEN
+                              INSERT INTO interface_log_excp VALUES
+                                 (i_id, c_unit_id, p_test_id, 'LBDNC',
+                                  'TSTOK', 'Y', p_chapter);
+                           END IF;
+                        ELSE
+                           INSERT INTO interface_log_excp VALUES
+                              (i_id, c_unit_id, c_test_id, 'LBDNC',
+                               'OVREJ', 'N', p_chapter);
+                        END IF;  /*   Override flag check */
+                     END IF; /* STATUS = DIFF check */
+                  ELSE
+                     INSERT INTO interface_log_excp VALUES
+                        (i_id, c_unit_id, c_test_id, 'LBDNC',
+                         'BTDIS', 'N', p_chapter);
+                  END IF; /* bloodtype discrepancy check */
+               ELSE
+                  INSERT INTO interface_log_excp VALUES
+                     (i_id, c_unit_id, c_test_id, 'LBDNC',
+                      'TRBAD', 'N', p_chapter);
+               END IF; /*   Test result null check  */
+            ELSE
+               INSERT INTO interface_log_excp VALUES
+                  (i_id, c_unit_id, c_test_id, 'LBDNC',
+                   'TRREJ', 'N', p_chapter);
+            END IF; /* result ok */
+         END LOOP; /* end of test loop */
+/*
+||
+||     see if unit has completed profile testing in the donor system.
+||        Log as PRCOM Profile complete if count(*) = profile tests.
+||        Log as PRINC Profile incomplete if count(*) < profile tests.
+||        Log as NOINT No testing interfaced if count(*) = 0
+||
+*/
+         IF (p_test_id is null) THEN
+            BEGIN
+               SELECT COUNT (utrs.test_id)
+                 INTO t_recon_count
+                 FROM UNIT_TEST_RESULTS utrs
+                WHERE utrs.unit_id = c_unit_id
+                  AND utrs.coll_date = c_coll_date
+                  AND utrs.chapter_id = p_chapter
+                  AND utrs.test_id in
+                      (SELECT test_id
+                         FROM contract_tests ct
+                        WHERE ct.contract_id = 'INTERNAL'
+                          AND ct.chapter_id = p_chapter
+                          AND sysdate between ct.eff_date and
+                                  nvl(ct.term_date, sysdate+1));
+            EXCEPTION
+               WHEN no_data_found THEN
+                  t_recon_count := 0;
+            END;
+
+            IF (t_recon_count = 0) THEN
+               INSERT INTO interface_log_excp VALUES
+                  (i_id, c_unit_id, null, 'LBDNC',
+                   'UNONE', 'N', p_chapter);
+               t_no_xfer_count := t_no_xfer_count + 1;
+            ELSE
+               IF (t_recon_count = tot_contract_count) THEN
+                  BEGIN
+                     UPDATE units
+                        SET lab_donor_dats = sysdate
+                      WHERE unit_id = current_unit.unit_id
+                        AND chapter_id = p_chapter
+                        AND coll_date = current_unit.coll_date;
+                     UPDATE donations
+                        SET interface_date = sysdate
+                      WHERE unit_id = current_unit.unit_id
+                        AND chapter_id = p_chapter
+                        AND coll_date = current_unit.coll_date;
+                     INSERT INTO interface_log_excp VALUES
+                        (i_id, c_unit_id, null, 'LBDNC',
+                         'UALL', 'Y', p_chapter);
+                     t_complete_count := t_complete_count + 1;
+                     
+                   IF ((current_unit.coll_date + days_back_for_hold) <=d_local_date) THEN
+
+                        remove_lab_result_hold (current_unit.unit_id,
+                                                p_chapter,
+                                                current_unit.coll_date,
+                                                c_donor_id);
+                     END IF;
+                  END;
+               ELSE
+                  INSERT INTO interface_log_excp VALUES
+                     (i_id, c_unit_id, null, 'LBDNC',
+                      'USOME', 'Y', p_chapter);
+                     t_partial_count := t_partial_count + 1;
+               END IF;
+            END IF;
+         END IF; /* log unit level data if a single test was not requested */
+      ELSE
+/*
+||
+||     Donor is not attached. Place hold on the DONATION and log the unit
+||     in the exception log.
+||
+*/
+         don_inter.place_inter_unit(current_unit.unit_id, null,
+                                    c_coll_date,p_chapter,
+                                    null, 'RRAND', null, null, null, LT_USER_SESSION.get_userid,
+                                    null, null, 'LBDNC', sysdate, null,
+                                    no_donor_hold ); -- Substituted "SYSTEM" with "LT_USER_SESSION.get_userid". Changed by Kishore on 05/20/2011. IM 5588, 5400
+         INSERT INTO interface_log_excp VALUES
+            (i_id, c_unit_id, null, 'LBDNC' ,
+             'NODON', 'N', p_chapter);
+         t_no_xfer_count := t_no_xfer_count + 1;
+      END IF; /* end of donor attached */
+      COMMIT;
+   END LOOP; /**** end of  units loop *****/
+/*.*/
+/*------------    INTERFACE LEVEL COUNTS INTO THE LOG    ------------*/
+   UPDATE interface_log
+      SET no_of_units = no_of_units + tot_count,
+          complete_count = complete_count + t_complete_count,
+          partial_count = partial_count + t_partial_count,
+          no_xfer_count = no_xfer_count + t_no_xfer_count,
+          end_time = sysdate,
+          log_text =  'SUCCESSFUL'
+    WHERE interface_id = i_id;
+   COMMIT;
+   END;
+   EXCEPTION
+      WHEN others THEN
+         err_code := sqlcode;
+         err_msg  := 'Unit: '||c_unit_id||' Test: '||c_test_id||
+                     substr(sqlerrm,1,50);
+         IF (err_code != -100501) THEN
+            raise_application_error(-20100,err_msg||' in main');
+         END IF;
+   COMMIT;
+END;  /******* end of read results    *******/
+END LBDNC; /************** end of package ****************/
+/
+Create or replace public synonym LBDNC for DONSYS.LBDNC;
+
+Show errors

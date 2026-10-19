@@ -1,0 +1,787 @@
+
+  CREATE OR REPLACE PACKAGE GENBDR as
+  
+  /* *********************************************************************************
+    Name              : GENBDR.pkg
+    Created By        : Basker Edwin 
+    Date Of Creation  : 12/10/2019
+    Purpose           : Generating the BDR automatically .
+  
+    Version History (Change program version in code below)
+    
+    Date         Version   by     	Description
+    ---------------------------------------------------------------------------------
+    12/01/2019   01	B. Edwin 	Initial development
+    01/14/202    02     B. Edwin        Added drive ID, credit sponsor, double stick arm codes 
+    01/22/2020   03     B. Edwin        MLT-2961
+    01/27/2020   04     B. Edwin        MLT-2961  (Adding date to the donor comments)
+    02/03/2020   05     B. Edwin        MLT-2996
+    04/21/2020   06     B. Edwin        MLT- 3148
+    05/12/2020   07     B. Edwin        MLT- 3291
+    07/07/2020   08     B. Edwin        MLT-3454
+    08/20/2020   09     B. Edwin        MLT-3558
+    03/16/2021   10     B. Edwin        MLT-4143
+   
+     *********************************************************************** 
+  */
+
+
+  procedure MAIN_PROGRAM(p_trans_id   in varchar2,
+                         p_chapter_id in varchar2,
+                         p_user_id    in varchar2,
+                         p_status     out varchar2) ;
+
+ --- Donor dempgraphic cursor
+
+    cursor C1 (p_donor_id in varchar2 ) is select d.donor_id,
+           d.last_name, d.first_name, d.middle_name, d.date_of_birth dob ,
+           d.blood_type, d.gender,d.alternate_id_type, d.alternate_id,d.ETHNIC_GROUP ,
+           da.street_name,decode(da.suite_apt,null,null,'APT# '||da.suite_apt) suiteapt,
+           decode(h_area_code,null,null,h_area_code||'-'||substr(h_phone_no,1,3)||'-'||substr(h_phone_no,4)) HP,
+           decode(d_area_code,null,null,d_area_code||'-'||substr(d_phone_no,1,3)||'-'||substr(d_phone_no,4)) DP,
+           decode(m_area_code,null,null,m_area_code||'-'||substr(m_phone_no,1,3)||'-'||substr(m_phone_no,4)) MP,
+           da.preferred_contact_flag, da.email,da.extension,da.INTL_ADDR_FLAG,
+           vcs.city,vcs.state,vcs.zip from donors d, donor_addresses da,
+           valid_city_state vcs where d.donor_id=p_donor_id and
+          d.donor_id=da.donor_id and da.usps_id=vcs.usps_id;
+
+ cursor C1A (p_donor_id in varchar2 ) is select d.donor_id,
+           d.last_name, d.first_name, d.middle_name, d.date_of_birth dob ,
+           d.blood_type, d.gender,d.alternate_id_type, d.alternate_id,d.ETHNIC_GROUP ,
+           da.email,da.INTL_ADDRESS_1,da.INTL_ADDRESS_2,da.INTL_ADDRESS_3,da.COUNTRY_NAME,da.INTL_POSTAL_CODE,                       
+           da.INTL_HOME_PHONE_NO,da.INTL_WORK_PHONE_NO,da.INTL_WORK_PHONE_EXT,da.INTL_MOBILE_PHONE_NO,                   
+           da.INTL_FAX_NO,da.INTL_ADDR_FLAG,da.INTL_ADDRESS_4,da.INTL_CITY_NAME , 
+           da.preferred_contact_flag from donors d, donor_addresses da 
+           where d.donor_id=p_donor_id and d.donor_id=da.donor_id;      
+
+
+   --- Getting the donations details
+
+     cursor C2 (p_trans_id in varchar2 ) is select u.unit_id,
+           u.deferral_id, u.coll_date, u.donation_type, u.procedure_code ,
+           u.lot_number, u.catalog_number, u.arm_used,
+           u.lookup_id, u.screener_id, u.physical_id,u.BLEED_START_TIME_L1,
+           u.BLEED_START_TIME_L2, u.BLEED_START_TIME_R1,u.BLEED_START_TIME_R2,
+           u.BLEED_END_TIME_R,u.BLEED_END_TIME_L, u.BLEED_END_TIME_L2 ,
+           u.BLEED_END_TIME_R2,U.BLEED_START_PHLEB_L1,U.BLEED_START_PHLEB_L2,
+           U.BLEED_START_PHLEB_R1,U.BLEED_START_PHLEB_R2,
+           U.BLEED_END_PHLEB_L,U.BLEED_END_PHLEB_L2,U.BLEED_END_PHLEB_R,U.BLEED_END_PHLEB_R2,
+           U.VOID_UNIT_ID,U.FIRST_REVIEWER_ID,U.CREDIT_SPONSOR
+           from donations u where transaction_id=p_trans_id;
+
+     cursor C2A (p_trans_id in varchar2 ) is select ua.attrib_code,
+           ua.attrib_value from donation_attributes ua where transaction_id=p_trans_id
+           order by 1 ;
+
+    cursor C2B (p_trans_id in varchar2 ) is select inter_type, inter_code, originated_from, reason_code,
+              eff_date ED, term_date TD from donor_interdictions where transaction_id=p_trans_id and
+              inter_code not in (select inter_code from valid_regint_reasons where    
+                                  inter_reason in ('INTRFEMALE','INTRMALE'))
+            order by 1 ;
+
+
+
+  cursor C3 (p_trans_id in varchar2 )is select physical_code, physical_value,
+            physical_value_repeat, inter_code, comments,EQUIP_REFERENCE,
+            EQUIP_REFERENCE_REPEAT
+            from physical_findings where transaction_id=p_trans_id;
+
+   /* cursor C4 (p_trans_id in varchar2 )is select distinct question_code, response
+            from health_history where transaction_id=p_trans_id;
+   */
+
+
+    cursor C4 (p_trans_id in varchar2 )is  select distinct A.question_code QC ,A.response res, B.display_order 
+           from health_history A, health_history_template B where 
+           A.TRANSACTION_ID=p_trans_id and A.template_id=B.template_id and
+           a.question_code=b.question_code order by display_order;
+
+   /* cursor C5 (p_trans_id in varchar2, p_ques_code in varchar2 ) is select A.question_code QC ,A.answer_code AC ,A.incident_date ID, 
+            A.def_thru_date DTD, A.comments COMM, A.inter_code ICODE,A.start_date SD, A.end_date ED,
+            B.display_order from health_history A, health_history_template B where 
+            A.TRANSACTION_ID=p_trans_id and A.template_id=B.template_id and
+            a.question_code=b.question_code and b.question_code=p_ques_code and 
+            a.answer_code not in ('Yes','YES','NO','No')  order by display_order;
+  */
+
+
+   cursor C5 (p_trans_id in varchar2, p_ques_code in varchar2 )is select question_code QC, answer_code AC, incident_date ID,
+             def_thru_date DTD, start_date SD, end_date ED, inter_code ICODE ,comments COMM from health_history where 
+             transaction_id=p_trans_id and question_code=p_ques_code and
+             answer_code not in ('Yes','YES','NO','No');
+  
+
+  cursor C6 (p_trans_id in varchar2 )is select letter_code, letter_id , signature_date, manual_signature_date
+            from donor_consents where transaction_id=p_trans_id;
+
+  cursor C7 (p_letter_id in varchar2 )is select letter_content from valid_letters where letter_id=p_letter_id and
+            rownum = 1;
+            
+  cursor C8 (p_trans_id in varchar2) is select LKUP_UPDT_BY ,HLTH_UPDT_BY,PHY_UPDT_BY,PHELOB_UPDT_BY,UNIT_STATUS_UPDT_BY,
+                                              LKUP_OVR_RSN,HLTH_HIST_OVR_RSN,PHY_OVR_RSN  from online_status where
+                                              transaction_id=p_trans_id;
+
+  cursor C8A (p_trans_id in varchar2) is select cn.note from donor_interdictions di, central_notes cn
+                                             where di.transaction_id=p_trans_id and
+                                                   di.inter_code='OVRDF' and 
+                                                   di.note_id=cn.note_id;
+                                              
+  cursor C9 (p_trans_id in varchar2) is select equip_or_supply, equip_supply_code, equip_reference,catalog_no,lot_no,
+                                        qc_status from DONATION_EQUIP_SUPPLY_DET where transaction_id=p_trans_id;
+                                        
+  cursor C10 (p_trans_id in varchar2) is select tube_type, insert_user from donation_tubes where transaction_id=p_trans_id;
+  
+  Cursor C11 (p_donor_id in varchar2) is select DI.inter_type IT, DI.inter_code IC, VI.inter_desc IDESC ,
+                                         DI.eff_date ED,DI.term_date TD
+                                         from donor_interdictions DI,
+                                         valid_interdictions VI where DI.donor_id=p_donor_id and 
+                                         DI.inter_code=VI.inter_code and
+                                         DI.inter_type in ('SPINS','CAUTN','INFOR','DR');
+
+ cursor C12 (p_trans_id in varchar2) is select source_code,inter_code, inter_type, originated_from, reason_code from 
+                                       donation_interdictions where transaction_id=p_trans_id and reason_code='QC';
+
+cursor C13 (p_note_id in varchar2) is select insert_date, note from central_notes where note_id=p_note_id
+                                      order by insert_date desc;
+
+cursor C14 (p_trans_id in varchar2) is select verification_type, add_on_flag, count(*) cnt from MATERIAL_VERIFICATION_DET 
+                                   where unit_id in (select unit_id from donations where transaction_id=p_trans_id)
+                                   group by VERIFICATION_TYPE, ADD_ON_FLAG;
+                                              
+                                              
+
+END GENBDR;
+
+/
+--------------------------------------------------------
+--  DDL for Package Body GENBDR
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE PACKAGE BODY "DONSYS"."GENBDR" as
+
+  procedure MAIN_PROGRAM(p_trans_id   in varchar2,
+                         p_chapter_id in varchar2,
+                         p_user_id    in varchar2,
+                         p_status     out varchar2) as
+
+
+    t_program_version        varchar2(3);
+    v_timezone_active        varchar2(1);
+    v_local_time             date;
+    handle_error             exception;
+    t_bdr_file_name          varchar2(200);
+    t_log_file_name          varchar2(200);
+    log_file                 utl_file.file_type;
+    log_loc                  varchar2(230);
+    file_loc                 varchar2(200);
+    bdr_file                 utl_file.file_type;
+    p_donor_id               varchar2(10);
+    p_drive_id               varchar2(10);
+    p_spon_name              varchar2(100);
+    p_unit_def               varchar2(15);
+    p_note_id                varchar2(10);
+    pl_equip_ref_rep         varchar2(17);
+    pl_equip_ref              varchar2(17);
+    t_bleed_start_time_L       date;
+    t_bleed_end_time_L         date;
+    t_bleed_start_time_R       date;
+    t_bleed_end_time_R         date;
+    t_bleed_start_pheleb_L    varchar2(30);
+    t_bleed_start_pheleb_R    varchar2(30);
+    t_bleed_end_pheleb_L      varchar2(30);
+    t_bleed_end_pheleb_R      varchar2(30);
+    t_end_phleb              varchar2(30);
+    t_ques_des               varchar2(1000);
+    consent_count            number:=0;
+    disp_counter             number:=0;
+    t_reviewer_id            varchar2(10);
+    t_ethnic_des             varchar2(50);
+    pl_intl_flag             varchar2(1);
+
+ BEGIN -- Start of main program
+    t_program_version := '01';
+
+    begin
+      select nvl(time_zone_enabled, 'N')
+        into v_timezone_active
+        from lt_application_config;
+    exception
+      when no_data_found then
+    p_status := 'No records found- LT Application Config';
+        raise handle_error;
+      when others then
+    p_status := 'WHEN OTHERS: ' || sqlerrm;
+        raise handle_error;
+    end;
+    -- End of change
+
+
+    if v_timezone_active = 'Y' then
+       Lifetrack_timezone_convert.get_local_time(p_chapter_id, sysdate, v_local_time);
+    else
+      v_local_time := sysdate;
+    end if;
+
+
+--- Get the donor ID
+   begin
+      select donor_id, drive_id, nvl(unit_id,deferral_id) into p_donor_id,
+      p_drive_id,p_unit_def from donations where transaction_id=p_trans_id;
+   exception when no_data_found then
+       p_status:='No Donation record was found ';
+       return;
+    end;
+
+  -- get the sponsor name
+
+  begin
+   select name into p_spon_name from sponsors where sponsor_id in (
+   select sponsor_id from drive_sponsors where drive_id=p_drive_id and
+   rownum=1);
+ exception when others then 
+   p_spon_name:='Unknown';
+ end;
+
+ 
+    -- Build BDR file name
+     t_bdr_file_name := 'BDR_'||p_donor_id||'_'||nvl(p_unit_def,'XXXXX')||'_'||p_user_id|| '.bdr';
+
+
+    -- BDR log file name and pull user name
+    begin
+      select 'BDR_' || p_donor_id || '_' ||p_unit_def||'-'||p_user_id||'.log'  into t_log_file_name from dual;
+    end;
+
+    -- Get log directory location
+    begin
+      select code_desc
+        into file_loc
+        from master_codes
+       where code_type = 'LOGDR'
+         and code = 'UTIL'
+         and v_local_time between eff_date and nvl(term_date, v_local_time + 1);
+    exception
+      when no_data_found then
+        p_status := 'Log Dir not maintained';
+        raise handle_error;
+      when others then
+        p_status := 'Error in fetching Log Dir: '|| sqlerrm;
+        return; --raise handle_error;
+    end;
+
+   -- Open the log file
+
+    if utl_file.is_open(log_file) then
+      utl_file.fclose(log_file);
+    end if;
+
+    begin
+      log_file := utl_file.fopen(file_loc, t_log_file_name, 'w');
+    exception
+      when utl_file.invalid_filehandle then
+        utl_file.put_line(log_file, 'Invalid Filehandle');
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+      when utl_file.invalid_path then
+        utl_file.put_line(log_file, 'Invalid Path');
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+      when utl_file.invalid_mode then
+        utl_file.put_line(log_file, 'Invalid Mode');
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+      when utl_file.invalid_operation then
+        utl_file.put_line(log_file, 'Invalid Operation');
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+    end;
+
+
+  -- Open result file for writing
+
+    if utl_file.is_open(bdr_file) then
+      utl_file.fclose(bdr_file);
+    end if;
+
+    begin
+      bdr_file := utl_file.fopen(file_loc, t_bdr_file_name, 'w');
+    exception
+      when utl_file.invalid_filehandle then
+        utl_file.put_line(log_file, 'Invalid Filehandle - ' || t_bdr_file_name);
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+      when utl_file.invalid_path then
+        utl_file.put_line(log_file, 'Invalid Path - ' || t_bdr_file_name);
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+      when utl_file.invalid_mode then
+        utl_file.put_line(log_file, 'Invalid Mode - ' || t_bdr_file_name);
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+      when utl_file.invalid_operation then
+        utl_file.put_line(log_file, 'Invalid Operation - ' || t_bdr_file_name);
+        utl_file.put_line(log_file, 'Terminating.');
+        raise handle_error;
+    end;
+
+
+    utl_file.put_line(log_file, 'BDR Version ' || t_program_version);
+    utl_file.put_line(log_file, '**************************************************************************');
+    utl_file.put_line(log_file, 'Log File Name: ' || t_log_file_name);
+    utl_file.put_line(log_file, 'Donor: ' || p_donor_id);
+    utl_file.put_line(log_file, 'Unit/Deferral: ' || p_unit_def);
+
+
+   utl_file.put_line(bdr_file, '------------- BLOOD DONOR RECORD --------------');
+   utl_file.put_line(bdr_file, ' ');
+   utl_file.put_line(bdr_file, 'Donor Personal Information');
+   utl_file.put_line(bdr_file, '===========================');
+
+  -- Find out if the donor is local or internaltional 
+
+   select intl_addr_flag into pl_intl_flag from donor_addresses where donor_id=p_donor_id;
+  
+   If pl_intl_flag is null then
+
+    for c1rec in c1 (p_donor_id) loop
+      begin
+        utl_file.put_line(bdr_file, 'Donor ID: '||p_donor_id); 
+        utl_file.put_line(bdr_file, 'Name: ' ||c1rec.last_name||','||c1rec.first_name|| '  DOB:'||to_char(c1rec.dob,'mm-dd-yyyy')||
+                                    ' Gender:'||c1rec.gender||' Blood Type:' ||c1rec.blood_type||
+                                    ' Alt ID:'||c1rec.alternate_id||' Alt Type:'||c1rec.alternate_id_type);
+        utl_file.put_line(bdr_file,' ');
+
+        utl_file.put_line(bdr_file,'Address:'|| c1rec.street_name||' Apt/Suite:'||c1rec.suiteapt
+                                       ||' City:'||c1rec.city||' State:'||c1rec.state
+                                       ||' Zip:'||c1rec.zip);
+          utl_file.put_line(bdr_file,'Contact:'||'Home:'||c1rec.HP||
+                                       '      Work:'||c1rec.DP||' Extn:'||c1rec.extension||
+                                       '      Mobile:'||c1rec.MP||
+                                       '   Preferred Ph:'||c1rec.preferred_contact_flag);
+
+        -- Get the ethnic grouo desc
+
+       Begin
+        select c1rec.ETHNIC_GROUP||'-'||description into t_ethnic_des from valid_master_codes where
+        code_type='ETHGP' and code=c1rec.ETHNIC_GROUP;
+      exception when others then 
+        t_ethnic_des:='Not Available';
+      end;
+
+       utl_file.put_line(bdr_file,'Email: '||nvl(c1rec.email,'Not Available')||'    Ethnic Group:'||t_ethnic_des);
+
+      end;
+    end loop;
+
+  Else
+        
+     For c1Arec in c1A (p_donor_id) loop
+
+        utl_file.put_line(bdr_file, 'Donor ID: '||p_donor_id); 
+        utl_file.put_line(bdr_file, 'Name: ' ||c1Arec.last_name||','||c1Arec.first_name|| '  DOB:'||to_char(c1Arec.dob,'mm-dd-yyyy')||
+                                    ' Gender:'||c1Arec.gender||' Blood Type:' ||c1Arec.blood_type||
+                                    ' Alt ID:'||c1Arec.alternate_id||' Alt Type:'||c1Arec.alternate_id_type);
+       
+          utl_file.put_line(bdr_file,' ');
+
+
+            utl_file.put_line(bdr_file,'Address:'|| c1Arec.INTL_ADDRESS_1||','||c1Arec.INTL_ADDRESS_2||','||
+                                                c1Arec.INTL_ADDRESS_3||','||c1Arec.INTL_ADDRESS_4);
+
+             utl_file.put_line(bdr_file,'City:'||c1Arec.INTL_CITY_NAME||' Postal Code:'||c1Arec.INTL_POSTAL_CODE);
+
+            utl_file.put_line(bdr_file,'Contact:'||'   Home:'||c1Arec.INTL_HOME_PHONE_NO||
+                                       '      Work:'||c1Arec.INTL_WORK_PHONE_NO||' Extn:'||c1Arec.INTL_WORK_PHONE_EXT||
+                                       '      Mobile:'||c1Arec.INTL_MOBILE_PHONE_NO||
+                                       '   Preferred Ph:'||c1Arec.preferred_contact_flag);
+
+             -- Get the ethnic grouo desc
+
+         Begin
+            select c1Arec.ETHNIC_GROUP||'-'||description into t_ethnic_des from valid_master_codes where
+            code_type='ETHGP' and code=c1Arec.ETHNIC_GROUP;
+         exception when others then 
+            t_ethnic_des:='Not Available';
+         end;
+
+          utl_file.put_line(bdr_file,'Email: '||nvl(c1Arec.email,'Not Available')||'    Ethnic Group:'||t_ethnic_des);
+
+     End loop;
+   End If; 
+
+
+        utl_file.put_line(bdr_file,' ');
+        utl_file.put_line(bdr_file,'Drive ID:'||p_drive_id ||' ['||p_spon_name||']');
+        utl_file.put_line(bdr_file, ' ');
+
+        utl_file.put_line(bdr_file,' ');
+        utl_file.put_line(bdr_file,'Donation Details:');
+        utl_file.put_line(bdr_file, '=================');
+
+      For c2rec in c2 (p_trans_id) loop
+
+       -- Get the start time/Phleb
+
+        t_bleed_start_time_L:=nvl(c2rec.bleed_start_time_l1,c2rec.bleed_start_time_l2);        
+        --t_bleed_start_time:=nvl(t_bleed_start_time,nvl(c2rec.bleed_start_time_r1,c2rec.bleed_start_time_r2));
+        t_bleed_start_time_L:=lifetrack_timezone_convert.get_local_time(p_chapter_id,t_bleed_start_time_L);
+
+        t_bleed_start_time_R:=nvl(c2rec.bleed_start_time_r1,c2rec.bleed_start_time_r2);        
+        t_bleed_start_time_R:=lifetrack_timezone_convert.get_local_time(p_chapter_id,t_bleed_start_time_R);
+
+        
+        t_bleed_start_pheleb_L:=nvl(c2rec.BLEED_START_PHLEB_L1,c2rec.BLEED_START_PHLEB_L2);
+        t_bleed_start_pheleb_R:=nvl(c2rec.BLEED_START_PHLEB_R1,c2rec.BLEED_START_PHLEB_R2);
+        
+        
+        --- Get End time/Phleb
+        t_bleed_end_time_L:=nvl(c2rec.bleed_end_time_l,c2rec.bleed_end_time_l2);
+        --t_bleed_end_time:=nvl(t_bleed_end_time,nvl(c2rec.bleed_end_time_r,c2rec.bleed_end_time_r2));
+        t_bleed_end_time_L:=lifetrack_timezone_convert.get_local_time(p_chapter_id,t_bleed_end_time_L);
+
+
+        t_bleed_end_time_R:=nvl(c2rec.bleed_end_time_r,c2rec.bleed_end_time_r2);
+        t_bleed_end_time_R:=lifetrack_timezone_convert.get_local_time(p_chapter_id,t_bleed_end_time_R);
+
+
+
+        
+        t_bleed_end_pheleb_L:=nvl(c2rec.BLEED_END_PHLEB_L,c2rec.BLEED_END_PHLEB_L2);
+        t_bleed_end_pheleb_R:=nvl(c2rec.BLEED_END_PHLEB_R,c2rec.BLEED_END_PHLEB_R2);
+         
+         utl_file.put_line(bdr_file,'Unit/Def ID:'||nvl(c2rec.unit_id,c2rec.deferral_id)||' Coll_date:'||to_char(c2rec.coll_date,'MM-DD-YYYY')||
+                                     ' Don Type:'||c2rec.donation_type||' Proc Code:'||c2rec.procedure_code);
+        
+      If t_bleed_start_time_L is not null or t_bleed_start_time_R is not null then  
+                                     
+             utl_file.put_line(bdr_file,'Arm Used:'|| c2rec.arm_used||'    Void unit:'||c2rec.void_unit_id ||
+                                  '    Alternate Spon:'||c2rec.credit_sponsor);
+
+          utl_file.put_line(bdr_file,' ');
+          utl_file.put_line(bdr_file, 'Bleed Start (L):'||NVL(to_char(t_bleed_start_time_L,'MM-DD-YYYY hh24:mi'),'NA')||
+                        '  Bleed End (L):'||NVL(to_char(t_bleed_end_time_L,'MM-DD-YYYY hh24:mi'),'NA')||
+                        '  Bleed Start (R):'||NVL(to_char(t_bleed_start_time_R,'MM-DD-YYYY hh24:mi'),'NA')||
+                        '  Bleed End (R):'||NVL(to_char(t_bleed_end_time_R,'MM-DD-YYYY hh24:mi'),'NA'));
+
+
+          utl_file.put_line(bdr_file,  'Pheleb Start(L):'||NVL(t_bleed_start_pheleb_L,' NA')||
+                          '    Pheleb End (L):'||NVL(t_bleed_end_pheleb_L,' NA')||
+                          '    Pheleb Start (R):'||NVL(t_bleed_start_pheleb_R,' NA')||
+                          '    Pheleb End (R):'||NVL(t_bleed_end_pheleb_R,' NA'));
+     
+       End If;
+
+       t_reviewer_id:=c2rec.FIRST_REVIEWER_ID;
+      End Loop;
+
+        utl_file.put_line(bdr_file,' ');
+        utl_file.put_line(bdr_file,'Donation Attributes:');
+        utl_file.put_line(bdr_file, '===================');
+        utl_file.put_line(bdr_file,' ');
+
+        utl_file.put_line(bdr_file, 'Code     Value');
+        utl_file.put_line(bdr_file, ' ');
+
+
+        For C2Arec in C2A (p_trans_id) loop
+        utl_file.put_line(bdr_file, RPAD(C2Arec.attrib_code,8,' ')||
+                                    RPAD(C2Arec.attrib_value,8,' '));
+
+        End loop;
+
+
+        utl_file.put_line(bdr_file,' ');
+        utl_file.put_line(bdr_file,'Donor Deferal Reason:');
+        utl_file.put_line(bdr_file, '====================');
+        utl_file.put_line(bdr_file,' ');
+
+        utl_file.put_line(bdr_file, 'Type     Code     Originated   Reason    Eff Date       Term Date');
+        utl_file.put_line(bdr_file, ' ');
+
+
+        For C2Brec in C2B (p_trans_id) loop
+        utl_file.put_line(bdr_file, RPAD(C2Brec.inter_type,10,' ')||
+                                    RPAD(C2Brec.inter_code,8,' ')||
+                                    RPAD(nvl(C2Brec.originated_from,' '),12,' ')||
+                                    RPAD(nvl(C2Brec.reason_code,' '),10,' ') ||
+                                    RPAD(to_char(C2Brec.ED,'mm-dd-yyyy'),15,' ')||
+                                    RPAD(NVL(to_char(C2Brec.TD,'mm-dd-yyyy'),' '),15,' ') );
+
+        End loop;
+
+
+
+
+        utl_file.put_line(bdr_file,' ');
+        utl_file.put_line(bdr_file,'Donor Attributes:');
+        utl_file.put_line(bdr_file, '=================');
+         utl_file.put_line(bdr_file,' ');
+         
+      utl_file.put_line(bdr_file, 'Type     Code     Eff date       Term Date     Desc');
+       For c11rec in c11 (p_donor_id) loop
+         utl_file.put_line(bdr_file,RPAD(c11rec.IT,10,' ')||
+                           RPAD(c11rec.IC,8,' ')||
+                           RPAD(to_char(c11rec.ED,'mm-dd-yyyy'),15,' ')||
+                           RPAD(NVL(to_char(c11rec.TD,'mm-dd-yyyy'),' '),15,' ')||
+                           c11rec.IDESC);
+
+        End Loop;
+
+
+        utl_file.put_line(bdr_file,' ');
+        utl_file.put_line(bdr_file,'Physical Findings:');
+        utl_file.put_line(bdr_file, '=================');
+         utl_file.put_line(bdr_file,' ');
+
+       utl_file.put_line(bdr_file, 'Code        Equip           Value     Equip           Repeat   Inter   Comments');
+       For c3rec in c3 (p_trans_id) loop
+       
+         pl_equip_ref:=null;
+         pl_equip_ref_rep:=null;
+
+        -- Get the equip type
+        
+        If c3rec.EQUIP_REFERENCE is not null then 
+          begin
+             select equip_type into pl_equip_ref from equipment where equip_reference =c3rec.EQUIP_REFERENCE and rownum=1;
+             pl_equip_ref:=c3rec.EQUIP_REFERENCE||'-'||pl_equip_ref;
+          exception when others then 
+              pl_equip_ref:=null;
+           end;
+       End If;
+       
+
+        If c3rec.EQUIP_REFERENCE_REPEAT is not null then 
+          begin
+             select equip_type into pl_equip_ref_rep from equipment where equip_reference =c3rec.EQUIP_REFERENCE_REPEAT and rownum=1;
+             pl_equip_ref_rep:=c3rec.EQUIP_REFERENCE_REPEAT||'-'||pl_equip_ref_rep;
+          exception when others then 
+              pl_equip_ref_rep:=null;
+           end;
+       End If;
+
+
+
+         utl_file.put_line(bdr_file,RPAD(c3rec.physical_code,13,' ')||
+                           RPAD(nvl(pl_equip_ref,' '),16,' ')||
+                           RPAD(c3rec.physical_value,10,' ')||
+                           RPAD(nvl(pl_equip_ref_rep,' '),16,' ')||
+                           RPAD(nvl(c3rec.physical_value_repeat,' '),9,' ')||
+                           RPAD(nvl(c3rec.inter_code,' '),7,' ')||c3rec.comments);
+
+        End Loop;
+
+       utl_file.put_line(bdr_file,' ');
+       utl_file.put_line(bdr_file,'Health History:');
+       utl_file.put_line(bdr_file,'===============');
+       utl_file.put_line(bdr_file,' ');
+
+       utl_file.put_line(bdr_file,' ');
+
+       For c4rec in c4 (p_trans_id) loop
+        begin
+          select QUESTION_DESCRIPTION into t_ques_des from valid_hh_questions where question_code=c4rec.QC;
+        exception when others then
+           t_ques_des:=null;
+         end;
+
+         utl_file.put_line(bdr_file,'Question: '||c4rec.QC||'    '||t_ques_des);
+         utl_file.put_line(bdr_file,'Response:'||c4rec.RES);
+
+          utl_file.put_line(bdr_file,' ');
+         disp_counter:=0;
+          For c5rec in c5 (p_trans_id,c4rec.QC) loop
+             if disp_counter=0 then 
+                utl_file.put_line(bdr_file,'Answer    Eff Date     Term Date     Inter   Comments');
+              end if;
+              disp_counter:=disp_counter+1;
+              utl_file.put_line(bdr_file,RPAD(c5rec.AC,10,' ')||
+                           RPAD(to_char(c5rec.ID,'MM-DD-YYYY'),14,' ')||
+                           RPAD(NVL(to_char(c5rec.DTD,'MM-DD-YYYY'),' '),14,' ') ||
+                           RPAD(c5rec.ICODE,15,' ')||c5rec.COMM);
+
+               utl_file.put_line(bdr_file,'Start Date:'||to_char(c5rec.SD,'MM-DD-YYYY')||
+                                          '   End Date:'||TO_CHAR(c5rec.ED,'MM-DD-YYYY'));
+               utl_file.put_line(bdr_file,' ');
+
+
+          end loop;
+       End Loop;
+
+       utl_file.put_line(bdr_file,' ');
+       utl_file.put_line(bdr_file,'Donor Consents:');
+       utl_file.put_line(bdr_file, '=============');
+       -- utl_file.put_line(bdr_file,' ');
+
+       For c6rec in c6 (p_trans_id) loop
+          utl_file.put_line(bdr_file,' ');
+          consent_count:=consent_count+1;
+          utl_file.put_line(bdr_file,'Consent:'||c6rec.letter_code||'   Signature Date:'||to_char(c6rec.signature_date,'mm-dd-yyyy'));
+          For c7rec in c7 (c6rec.letter_id) loop
+              declare
+                 v_clob CLOB;
+                 l_clob INTEGER;
+                 pos INTEGER := 1;
+                 char_buffer VARCHAR2(1100);
+                 amount BINARY_INTEGER := 1000;
+
+              begin
+                l_clob:=dbms_lob.getlength(c7rec.letter_content);
+                --dbms_output.put_line(' Length='||to_char(l_clob));
+
+                 WHILE pos < l_clob LOOP
+                  dbms_lob.read(c7rec.letter_content, amount, pos, char_buffer);
+                  --dbms_output.put_line('pos='||to_char(pos));
+                 utl_file.put_line(bdr_file,char_buffer);
+                   utl_file.fflush(bdr_file);
+                 pos := pos + amount;
+               END LOOP;
+              end;
+
+               utl_file.put_line(bdr_file,' ');
+          end loop;
+       End Loop;
+
+     utl_file.put_line(bdr_file,' ');
+     
+     utl_file.put_line(bdr_file,'Actions Performed By:');
+     utl_file.put_line(bdr_file,'=====================');
+     utl_file.put_line(bdr_file,' ');
+     
+     For c8rec in C8 (p_trans_id) loop
+     utl_file.put_line(bdr_file,'Register       HH            Physical        Link           Bleed');
+     utl_file.put_line(bdr_file,RPAD(c8rec.LKUP_UPDT_BY,15,' ')||
+                                RPAD(nvl(c8rec.HLTH_UPDT_BY,' '),15,' ')||
+                                RPAD(nvl(c8rec.PHY_UPDT_BY,' '),15,' ')||
+                                RPAD(nvl(c8rec.UNIT_STATUS_UPDT_BY,' '),15,' ')||
+                                c8rec.PHELOB_UPDT_BY);
+           
+       utl_file.put_line(bdr_file,' ');
+       utl_file.put_line(bdr_file,'Override Details');
+       utl_file.put_line(bdr_file,'=================');
+       
+       If c8rec.LKUP_OVR_RSN is not null then 
+           utl_file.put_line(bdr_file,'Over ride=Y (AT Registration)');
+           utl_file.put_line(bdr_file,'Reason:'||c8rec.lkup_ovr_rsn);
+       End If;    
+       If c8rec.HLTH_HIST_OVR_RSN is not null then 
+          utl_file.put_line(bdr_file,'Over ride=Y (At Health History)');
+          utl_file.put_line(bdr_file,'Reason:'||c8rec.hlth_hist_ovr_rsn);
+       End If;
+        If c8rec.PHY_OVR_RSN is not null then
+          utl_file.put_line(bdr_file,'Over ride=Y (At Physical Findings)');
+          utl_file.put_line(bdr_file,'Reason:'||c8rec.phy_ovr_rsn);
+       End if;
+     End loop;
+
+     utl_file.put_line(bdr_file,' ');
+
+   For c8Arec in C8A (p_trans_id) loop
+     utl_file.put_line(bdr_file,'Override Comment: '||c8Arec.note);    
+   End loop;
+
+  -----
+      utl_file.put_line(bdr_file,' ');
+      utl_file.put_line(bdr_file,'Donor Comments');
+      utl_file.put_line(bdr_file,'=============');
+      utl_file.put_line(bdr_file,' ');
+
+      -- get the note_id for the donor
+        
+        begin
+          select note_id into p_note_id from donors where 
+           donor_id=p_donor_id;
+        exception
+            when others then 
+               p_note_id:=null;
+        end;
+
+    If p_note_id is not null then 
+      utl_file.put_line(bdr_file,'Note Date          Note');
+      For c13rec in c13 (p_note_id) loop
+          utl_file.put_line(bdr_file,RPAD(to_char(c13rec.insert_date,'mm-dd-yyyy hh24:mi'),23,' ')||c13rec.note);
+           utl_file.put_line(bdr_file,' ');
+       End Loop;
+    End if;
+
+      utl_file.put_line(bdr_file,' ');
+
+   ----
+
+      utl_file.put_line(bdr_file,' ');
+      utl_file.put_line(bdr_file,'Equipment/Supply Details');
+      utl_file.put_line(bdr_file,'=========================');
+      utl_file.put_line(bdr_file,' ');
+      utl_file.put_line(bdr_file,'EQUP/SUPPLY     CODE         Equip Ref    Catalog#    Lot#         QC Status');
+      For c9rec in c9 (p_trans_id) loop
+          utl_file.put_line(bdr_file,RPAD(c9rec.equip_or_supply,15,' ')||
+                                     RPAD(c9rec.equip_supply_code,15,' ') ||
+                                     RPAD(nvl(c9rec.equip_reference,' '),13,' ')||
+                                     RPAD(nvl(c9rec.catalog_no,' '),13,' ')||
+                                     RPAD(nvl(c9rec.lot_no,' '),15,' ')||
+                                     c9rec.qc_status);
+       End Loop;
+
+
+      utl_file.put_line(bdr_file,' ');
+      utl_file.put_line(bdr_file,'Equipment related interdictions');
+      utl_file.put_line(bdr_file,'===============================');
+      utl_file.put_line(bdr_file,' ');
+      utl_file.put_line(bdr_file,'EQUP/SUPPLY     CODE         Inter         Reason');
+      For c12rec in c12 (p_trans_id) loop
+          utl_file.put_line(bdr_file,RPAD(c12rec.source_code,15,' ')||
+                                     RPAD(c12rec.originated_from,15,' ') ||
+                                     RPAD(c12rec.inter_code,13,' ')||
+                                     'QC- Failed');
+       End Loop;
+     
+     utl_file.put_line(bdr_file,' ');
+      utl_file.put_line(bdr_file,'Tube Checkin Details');
+      utl_file.put_line(bdr_file,'=========================');
+      utl_file.put_line(bdr_file,' ');
+      utl_file.put_line(bdr_file,'Tube Type     Checkin user');
+      For c10rec in c10 (p_trans_id) loop
+          utl_file.put_line(bdr_file,RPAD(c10rec.tube_type,15,' ')||
+                                     RPAD(c10rec.insert_user,10,' '));
+       End Loop;
+
+      utl_file.put_line(bdr_file,' ');
+      utl_file.put_line(bdr_file,'Material Verification Details');
+      utl_file.put_line(bdr_file,'==============================');
+      utl_file.put_line(bdr_file,' ');
+      utl_file.put_line(bdr_file,'Type    Extra?    count');
+      For c14rec in c14 (p_trans_id) loop
+          utl_file.put_line(bdr_file,RPAD(c14rec.verification_type,10,' ')||
+                                     RPAD(c14rec.add_on_flag,10,' ') ||
+                                     RPAD(to_char(c14rec.cnt),3,' '));
+       End Loop;
+
+
+     utl_file.put_line(bdr_file,' ');
+     
+
+    --- Close the log file
+    if utl_file.is_open(log_file) then
+      utl_file.fclose(log_file);
+    end if;
+
+    --- Close the BDR file
+
+    if utl_file.is_open(bdr_file) then
+      utl_file.fclose(bdr_file);
+    end if;
+   p_status:='OK';
+  exception
+    when handle_error then
+      rollback;
+      dbms_output.put_line(p_status);
+      utl_file.put_line(log_file, 'Program End Time: ' || to_char(v_local_time, 'MM-DD-YYYY HH24:MI:SS'));
+      utl_file.put_line(log_file, '**************************************************************************');
+      utl_file.put_line(log_file, p_status);
+
+
+  end MAIN_PROGRAM;
+
+end GENBDR;
+
+/

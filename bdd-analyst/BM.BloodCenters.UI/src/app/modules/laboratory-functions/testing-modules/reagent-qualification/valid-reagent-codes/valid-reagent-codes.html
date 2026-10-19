@@ -1,0 +1,195 @@
+<!-- Layout Wrapper for Side Panel Management -->
+<div class="layout-wrapper" [class.side-panel-active]="sidePanelOpen">
+
+  <!-- Backdrop Overlay -->
+  <div class="drawer-backdrop"
+       [class.active]="sidePanelOpen"
+       (click)="closeSidePanel()"
+       (keydown.enter)="closeSidePanel()"
+       role="button"
+       tabindex="-1"
+       aria-label="Close side panel"></div>
+
+  <!-- Main Content Area -->
+  <main class="valid-reagent-codes main-content"
+        [class.side-panel-active]="sidePanelOpen"
+        aria-label="Valid Reagent Codes content"
+        role="main">
+
+    <!-- Page Header with Breadcrumb -->
+    <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+    <!-- Screen reader status announcements -->
+    <div class="sr-only" aria-live="polite" aria-atomic="true">
+      @if (isLoading) { Loading valid reagent codes... }
+    </div>
+
+    <!-- Cards Container -->
+    <div class="valid-reagent-codes__container">
+      <!-- Filter Card -->
+      <div class="valid-reagent-codes__filter-card">
+        <form [formGroup]="filterForm" class="filter-form">
+          <!-- Test ID -->
+          <mat-form-field appearance="fill" class="filter-field">
+            <mat-label>Test ID</mat-label>
+            <mat-select formControlName="testId"
+                        required
+                        (openedChange)="!$event && testIdSearchControl.setValue('')">
+              <mat-select-trigger>
+                {{ filterForm.get('testId')?.value }}
+              </mat-select-trigger>
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="testIdSearchControl"
+                  placeholderLabel="Search tests..."
+                  noEntriesFoundLabel="No matching tests">
+                </ngx-mat-select-search>
+              </mat-option>
+              <mat-option *ngIf="isLoadingTests()" disabled>Loading...</mat-option>
+              <mat-option *ngFor="let test of filteredTests" [value]="test.testId">
+                {{ test.testId }} - {{ test.testDesc }}
+              </mat-option>
+            </mat-select>
+            <mat-error *ngIf="filterForm.get('testId')?.hasError('required')">
+              Test ID is required
+            </mat-error>
+          </mat-form-field>
+
+          <!-- Test Description (Read-only label) -->
+          <div class="form-group" role="group" aria-label="Test Description">
+            <span class="field-label" id="test-desc-label">Test Description</span>
+            <span class="field-value" aria-labelledby="test-desc-label">{{ selectedTestDesc || '--' }}</span>
+          </div>
+
+          <!-- Action Buttons -->
+          <div class="filter-actions">
+            @if (hasLoadedData) {
+              <button
+                type="button"
+                mat-button
+                aria-label="Clear test ID selection and results"
+                (click)="onClearAll()">
+                CLEAR
+              </button>
+            }
+          </div>
+        </form>
+      </div>
+
+      <!-- Results Card -->
+      <div class="valid-reagent-codes__results-card">
+        <!-- Table Controls -->
+        @if (currentTestId && hasLoadedData) {
+          <div class="valid-reagent-codes__controls">
+            <!-- Left section: Filter button and chips -->
+            <div class="valid-reagent-codes__controls-left">
+              <button
+                type="button"
+                mat-button
+                class="filter-button"
+                [class.filter-button--active]="isFilterOpen"
+                aria-label="Open filter options"
+                cdkOverlayOrigin
+                #trigger="cdkOverlayOrigin"
+                (click)="toggleFilter()">
+                <mat-icon aria-hidden="true">filter_list</mat-icon>
+                FILTER
+              </button>
+
+              <!-- Filter Chips -->
+              @if (filterChips.length > 0) {
+                <app-filter-chips
+                  [chips]="filterChips"
+                  (removeChip)="onRemoveFilterChip($event)"
+                  (clearAll)="onClearAllFilters()">
+                </app-filter-chips>
+              }
+            </div>
+
+            <!-- Right section: Search bar -->
+            <div class="valid-reagent-codes__controls-right">
+              <app-search-bar
+                [config]="searchConfig"
+                (search)="onSearch($event)" />
+            </div>
+          </div>
+
+          <!-- Filter Panel Overlay -->
+          <ng-template
+            cdkConnectedOverlay
+            [cdkConnectedOverlayOrigin]="trigger"
+            [cdkConnectedOverlayOpen]="isFilterOpen"
+            [cdkConnectedOverlayHasBackdrop]="true"
+            [cdkConnectedOverlayBackdropClass]="'cdk-overlay-transparent-backdrop'"
+            [cdkConnectedOverlayOffsetY]="4"
+            cdkConnectedOverlayPanelClass="filter-overlay-panel"
+            (backdropClick)="toggleFilter()"
+            (detach)="isFilterOpen = false">
+            <app-valid-reagent-code-filter-panel
+              [currentFilters]="appliedFilters"
+              [testId]="currentTestId"
+              [testDesc]="currentTestDesc"
+              (apply)="onApplyFilters($event)"
+              (close)="isFilterOpen = false">
+            </app-valid-reagent-code-filter-panel>
+          </ng-template>
+        }
+
+        <!-- Error State -->
+        @if (hasError && !isLoading) {
+          <div
+            class="valid-reagent-codes__error"
+            role="alert"
+            aria-label="Error loading data">
+            <mat-icon class="error-icon" aria-hidden="true">error_outline</mat-icon>
+            <p class="error-message">Unable to load valid reagent codes. Please try again.</p>
+            <button type="button" mat-raised-button color="primary" (click)="loadData()">
+              Retry
+            </button>
+          </div>
+        }
+
+        <!-- Data Table or Empty State -->
+        <div class="valid-reagent-codes__table-wrapper">
+          @if (!hasError && currentTestId && hasLoadedData) {
+            <app-data-table
+              [config]="tableConfig"
+              [data]="dataSource"
+              [loading]="isLoading"
+              [highlightedRow]="sidePanelMode === 'edit' ? sidePanelData : null"
+              (pageChange)="onPageChange($event)"
+              (sortChange)="onSortChange($event)"
+              (rowAction)="onRowAction($event)" />
+          } @else if (!currentTestId || !hasLoadedData) {
+            <div class="valid-reagent-codes__empty">
+              <svg class="empty-icon" width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <path d="M0 32C0 14.3269 14.3269 0 32 0C49.6731 0 64 14.3269 64 32C64 49.6731 49.6731 64 32 64C14.3269 64 0 49.6731 0 32Z" fill="#E4E7E9"/>
+                <path d="M29.75 23.25C31.4739 23.25 33.1272 23.9348 34.3462 25.1538C35.5652 26.3728 36.25 28.0261 36.25 29.75C36.25 31.36 35.66 32.84 34.69 33.98L34.96 34.25H35.75L40.75 39.25L39.25 40.75L34.25 35.75V34.96L33.98 34.69C32.84 35.66 31.36 36.25 29.75 36.25C28.0261 36.25 26.3728 35.5652 25.1538 34.3462C23.9348 33.1272 23.25 31.4739 23.25 29.75C23.25 28.0261 23.9948 26.3728 25.1538 25.1538C26.3728 23.9348 28.0261 23.25 29.75 23.25ZM29.75 25.25C27.25 25.25 25.25 27.25 25.25 29.75C25.25 32.25 27.25 34.25 29.75 34.25C32.25 34.25 34.25 32.25 34.25 29.75C34.25 27.25 32.25 25.25 29.75 25.25Z" fill="#3D5463"/>
+              </svg>
+              <p class="empty-title">No Results to Display</p>
+              <p class="empty-message">Please select a Test ID to view reagent codes</p>
+            </div>
+          }
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Side Panel Container -->
+  <div class="side-panel-container" *ngIf="sidePanelOpen"
+       role="dialog"
+       aria-label="{{sidePanelMode === 'add' ? 'Add new valid reagent code' : 'Edit valid reagent code'}}"
+       aria-modal="true"
+       cdkTrapFocus>
+    <app-add-edit-valid-reagent-code-dialog
+      [mode]="sidePanelMode"
+      [data]="sidePanelData"
+      [testId]="currentTestId!"
+      [testDesc]="currentTestDesc!"
+      (close)="closeSidePanel()"
+      (saveSuccess)="onSaveSuccess($event)"
+      (modeChange)="onModeChange($event)">
+    </app-add-edit-valid-reagent-code-dialog>
+  </div>
+
+</div>

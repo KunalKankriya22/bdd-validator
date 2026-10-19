@@ -1,0 +1,208 @@
+<app-page-header-with-breadcrumb [config]="headerConfig" />
+
+<section class="release-audit-container" aria-labelledby="page-title">
+  <!-- Search Bar (matches rollback-donation-audit pattern) -->
+  <section class="search-bar" [formGroup]="searchForm">
+    <mat-form-field appearance="fill" class="type-field">
+      <mat-label>Option</mat-label>
+      <mat-select formControlName="option" aria-label="Select donation or deferral">
+        <mat-option value="donation">Donation</mat-option>
+        <mat-option value="deferral">Deferral</mat-option>
+      </mat-select>
+      @if (f['option'].hasError('required') && f['option'].touched) {
+        <mat-error>Option is required</mat-error>
+      }
+    </mat-form-field>
+
+    @if (isDonationOption()) {
+      <app-unit-id-field
+        [validateFfValue]="'N'"
+        [required]="true"
+        [placeholder]="'Enter Unit ID'"
+        (validated)="onUnitValidated($event)"
+        (cleared)="onUnitCleared()"
+        class="id-field"
+      />
+    } @else {
+      <mat-form-field appearance="fill" class="id-field">
+        <mat-label>{{ deferralStep() === 'confirm' ? 'Re-enter Deferral ID' : 'Deferral ID' }}</mat-label>
+        <input
+          matInput
+          type="text"
+          class="concealed-input"
+          formControlName="id"
+          [placeholder]="deferralStep() === 'confirm' ? 'Re-enter Deferral ID to confirm' : 'Scan or enter Deferral ID'"
+          [maxlength]="idMaxLength()"
+          autocomplete="off"
+          aria-label="Deferral ID">
+        @if (deferralMismatch()) {
+          <mat-error>Deferral IDs do not match. Please try again.</mat-error>
+        } @else if (f['id'].hasError('required') && f['id'].touched && !deferralMismatch()) {
+          <mat-error>Deferral ID is required</mat-error>
+        }
+        @if (deferralStep() === 'confirm' && !deferralMismatch()) {
+          <mat-hint>Please re-enter to confirm</mat-hint>
+        }
+      </mat-form-field>
+    }
+
+    @if (isDonationOption() && !hasResults()) {
+      <mat-form-field appearance="fill" class="collection-date-field-input">
+        <mat-label>Collection Date</mat-label>
+        <input matInput
+               [matDatepicker]="collDatePicker"
+               formControlName="collDate"
+               #collDateInput
+               [errorStateMatcher]="collDateErrorMatcher"
+               (blur)="onDateInputBlur('collDate')"
+               (keydown.enter)="$event.target.blur()"
+               aria-label="Collection date">
+        <mat-datepicker-toggle matSuffix [for]="collDatePicker"></mat-datepicker-toggle>
+        <mat-datepicker #collDatePicker></mat-datepicker>
+        <mat-error *ngIf="getCollDateError()">{{ getCollDateError() }}</mat-error>
+      </mat-form-field>
+    } @else {
+      <div class="collection-date-field">
+        <label class="field-label">Collection Date</label>
+        <div class="field-value">
+          @if (collectionDate()) {
+            <span>{{ formattedCollectionDate() }}</span>
+          } @else {
+            <span class="empty-value">—</span>
+          }
+        </div>
+      </div>
+    }
+
+    <button
+      mat-stroked-button
+      color="primary"
+      type="button"
+      (click)="onRetrieve()"
+      [disabled]="loading() || (isDonationOption() ? !unitIdField?.isValid : searchForm.invalid)"
+      class="retrieve-button"
+      aria-label="Retrieve audit interdictions">
+      RETRIEVE
+    </button>
+
+    <button
+      mat-stroked-button
+      color="primary"
+      type="button"
+      (click)="onClear()"
+      class="clear-all-button"
+      aria-label="Clear all and start new search">
+      CLEAR ALL
+    </button>
+  </section>
+
+  <!-- Error Message -->
+  @if (error()) {
+    <div class="error-container" role="alert" aria-live="assertive">
+      <mat-icon aria-hidden="true">error</mat-icon>
+      <p>{{ error() }}</p>
+    </div>
+  }
+
+  <!-- Loading State -->
+  @if (loading() && !hasResults()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading"></mat-spinner>
+      <span class="sr-only">Loading, please wait...</span>
+    </div>
+  }
+
+  <!-- Empty State -->
+  @if (!hasResults() && !loading() && !error()) {
+    <div class="empty-state">
+      <mat-icon class="search-icon">search</mat-icon>
+      <h3>No Search Criteria Selected</h3>
+      <p>Enter a Unit ID or Deferral ID then click Retrieve to view audit interdictions.</p>
+    </div>
+  }
+
+  <!-- Data Display -->
+  @if (hasResults() && !loading()) {
+    <div class="data-container">
+      <!-- Donation & Donor Info (single card) -->
+      <section class="info-card" aria-label="Donation and donor information">
+        <div class="info-grid">
+          <div class="field-row">
+            <span class="field-label">Donation Type</span>
+            <span class="field-value">{{ searchResults()!.donationInfo.donationType }}</span>
+          </div>
+          <div class="field-row">
+            <span class="field-label">Procedure type</span>
+            <span class="field-value">{{ searchResults()!.donationInfo.procedureType }}</span>
+          </div>
+          <div class="field-row">
+            <span class="field-label">Drive ID</span>
+            <span class="field-value">{{ searchResults()!.donationInfo.driveId }}</span>
+          </div>
+          <div class="field-row">
+            <span class="field-label">Donor CUE</span>
+            <span class="field-value">{{ searchResults()!.donationInfo.donorCue }}</span>
+          </div>
+          <div class="field-row">
+            <span class="field-label">No.of Other Interdictions</span>
+            <span class="field-value">{{ searchResults()!.donationInfo.numberOfOtherInterdictions }}</span>
+          </div>
+        </div>
+
+        <div class="info-grid">
+          <div class="field-row">
+            <span class="field-label">Name</span>
+            <span class="field-value">{{ searchResults()!.donorInfo.name }}</span>
+          </div>
+          <div class="field-row">
+            <span class="field-label">ABO type</span>
+            <span class="field-value">{{ searchResults()!.donorInfo.aboType }}</span>
+          </div>
+          <div class="field-row">
+            <span class="field-label">Date of birth</span>
+            <span class="field-value">{{ formatDate(searchResults()!.donorInfo.dateOfBirth) }}</span>
+          </div>
+          <div class="field-row">
+            <span class="field-label">Sex</span>
+            <span class="field-value">{{ searchResults()!.donorInfo.sex }}</span>
+          </div>
+          <div class="field-row">
+            <span class="field-label">Donor's ID number</span>
+            <span class="field-value">{{ searchResults()!.donorInfo.donorIdNumber }}</span>
+          </div>
+        </div>
+      </section>
+
+      @if (searchResults()!.hasHiddenInterdictions) {
+        <div class="warning-banner" role="alert">
+          <mat-icon aria-hidden="true">warning</mat-icon>
+          <span>NOTE: Additional interdictions associated with this donor are not within your view level.</span>
+        </div>
+      }
+
+      <!-- Existing Interdiction (shared data-table) -->
+      <section class="interdiction-card" aria-labelledby="interdiction-heading">
+        <div class="section-header">
+          <h3 id="interdiction-heading">Existing interdiction</h3>
+          <button
+            mat-stroked-button
+            color="primary"
+            type="button"
+            (click)="onShowTerminated()"
+            class="show-term-button"
+            aria-label="Show terminated interdictions">
+            SHOW TERMINATED
+          </button>
+        </div>
+
+        <app-data-table
+          [config]="interdictionTableConfig"
+          [data]="sortedInterdictions()"
+          [loading]="loading()"
+          (sortChange)="onInterdictionSort($event)"
+          (rowAction)="onInterdictionAction($event)">
+        </app-data-table>
+      </section>
+    </div>
+  }
+</section>

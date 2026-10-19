@@ -1,0 +1,237 @@
+CREATE OR REPLACE package print_util as 
+/* ************************************************************
+  Name              : PRINT_UTIL.pkg
+  Created By        : Ashok
+  Date Of Creation  : 03/10/2021
+  Purpose           : This is a label print utility package that replaces
+                      lblprt.x c program.
+  Pre-Req           : 1) Network ACL must be setup for TCP communication with
+                      printer socket.
+                      2) DB Server must be able to ping hematrax print server.
+
+  Version History
+
+  Date         Version  Description
+  --------------------------------------------------------------------
+  03/10/2021   01       POC - Initial development to replace lblprt.x c program.
+  12/15/2021   01       Updated pkg to add log file creation in LOGDR.
+  12/16/2021   01       Updated pkg to add submit_async_regular_job and
+                        submit_async_job (IN_MEMORY_FULL option
+                        is used as per oracle recommendation for frequently 
+                        running jobs that take less time to run).
+                        -- IN_MEMORY_FULL type requires 
+                        GRANT EXECUTE ON SYS.DEFAULT_IN_MEMORY_JOB_CLASS TO util;
+                        -- MLT 4745
+ **********************************************************************   */
+
+  /*
+    Routine to submit print job to print server. Opens tcp connection
+    and sends data to the print server.
+  */
+  procedure submit_job( p_host_in    IN VARCHAR2, 
+                        p_port_in    IN VARCHAR2, 
+                        p_data_in    IN VARCHAR2,
+                        p_user_in    IN VARCHAR2
+                      );
+  /* 
+    Submits a one time dbms scheduler regular type job. This routine is not used
+     as the team has decided to use IN_MEMORY_FULL option(check submit_async_job)
+  */ 
+  procedure submit_async_regular_job(p_host_in    IN VARCHAR2, 
+                                     p_port_in    IN VARCHAR2, 
+                                     p_data_in    IN VARCHAR2,
+                                     p_user_in    IN VARCHAR2);
+
+  /* 
+    Submits a one time dbms scheduler IN_MEMORY_FULL lightweight job. 
+    Called from sbclib.pll, LAIRESCH, LAIPPPRD, LAICDISB
+    -- MLT 4745
+  */ 
+  procedure submit_async_job(p_host_in    IN VARCHAR2, 
+                             p_port_in    IN VARCHAR2, 
+                             p_data_in    IN VARCHAR2,
+                             p_user_in    IN VARCHAR2);
+end print_util;
+
+/
+
+
+CREATE OR REPLACE package body print_util as
+
+    gc_logDir   CONSTANT VARCHAR2(20)   := 'LOGDR';
+    gc_logFile  CONSTANT VARCHAR2(200)  := 'lblprt.log';
+    gv_logUser  VARCHAR2(30);
+
+  procedure submit_job( p_host_in    IN VARCHAR2, 
+                        p_port_in    IN VARCHAR2, 
+                        p_data_in    IN VARCHAR2,
+                        p_user_in    IN VARCHAR2) as
+    lv_status   VARCHAR2(2000);
+    tcp_conn    UTL_TCP.CONNECTION;
+    ln_retVal   PLS_INTEGER;
+    lv_response VARCHAR2(1000) := '';
+    lv_data     VARCHAR2(1000);
+    ln_port     PLS_INTEGER;
+    lc_timeout  PLS_INTEGER := 20; -- Time in seconds before utl_tcp pkg gives up read/write operation in the conn.
+    FUNCTION get_error_message(p_message IN VARCHAR2) RETURN VARCHAR2 IS
+        ln_pos NUMBER;
+        lv_errMsg VARCHAR2(2000);
+    BEGIN
+        ln_pos := INSTR(p_message, 'ERR,');
+        IF ln_pos > 0 THEN
+            lv_errMsg := SUBSTR(p_message, ln_pos);
+        ELSE
+            lv_errMsg := p_message;
+        END IF;
+
+        RETURN lv_errMsg;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            lv_errMsg := SUBSTR(SQLERRM, 1, 1000) || '-' || lv_response;
+            RETURN lv_errMsg;
+    END get_error_message;    
+
+    PROCEDURE log_error(msg_in IN VARCHAR2) IS
+    BEGIN
+
+        -- Send output to the specified file.
+        DECLARE
+            fid UTL_FILE.file_type;
+        BEGIN
+            fid := UTL_FILE.fopen(gc_logDir, gc_logFile, 'A');
+
+            UTL_FILE.put_line(fid, gv_logUser 
+                                    || CHR(9)
+                                    || TO_CHAR(SYSDATE, 'MM-DD-YYYY HH24:MI:SS')
+                                    || CHR(9)
+                                    || msg_in);
+
+
+            UTL_FILE.fclose(fid);
+        EXCEPTION
+            WHEN OTHERS THEN
+              dbms_output.put_line('Failure to write output to ' || gc_logDir || '/' || gc_logFile);
+              UTL_FILE.fclose(fid);
+        END;
+    END log_error;
+
+  BEGIN 
+
+    ---------
+    -- set global variables
+    -----
+    gv_logUser := NVL(p_user_in,'NOUSER');
+    ----  
+
+    -- validate input parameters.
+    BEGIN
+        IF p_host_in IS NULL OR p_port_in IS NULL THEN
+            log_error('Remote host or Port number missing.');
+            RETURN;
+        END IF;
+
+        IF p_data_in IS NULL THEN
+            log_error('Input data string is required.');
+            RETURN;
+        END IF;
+
+        IF p_user_in IS NULL THEN
+            log_error('User parameter is required.');
+            RETURN;
+        END IF;
+
+        ln_port := TO_NUMBER(p_port_in);
+
+        SELECT REPLACE(p_data_in, '\"', '"') INTO lv_data FROM DUAL;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- DBMS_OUTPUT.PUT_LINE(SQLERRM);
+            log_error('Validation Error ' || SUBSTR(sqlerrm, 1, 2000));
+            RETURN;     
+    END;
+
+
+    --OPEN THE CONNECTION
+    tcp_conn := UTL_TCP.OPEN_CONNECTION(
+        REMOTE_HOST   => p_host_in,
+        REMOTE_PORT   => TO_NUMBER(p_port_in),
+        TX_TIMEOUT    => lc_timeout
+    );
+
+    --WRITE TO SOCKET
+    ln_retVal := UTL_TCP.WRITE_LINE(tcp_conn, lv_data);
+    UTL_TCP.FLUSH(tcp_conn);
+
+
+    -- CHECK AND READ RESPONSE FROM SOCKET
+    BEGIN
+        WHILE UTL_TCP.AVAILABLE(tcp_conn,10) > 0 LOOP
+            lv_response := lv_response ||  UTL_TCP.GET_LINE(tcp_conn,TRUE);
+        END LOOP;
+    EXCEPTION
+        WHEN UTL_TCP.END_OF_INPUT THEN
+            NULL;
+    END;
+
+    UTL_TCP.CLOSE_CONNECTION(tcp_conn);
+
+    --DBMS_OUTPUT.PUT_LINE('Response from Socket Server : ' || lv_response);
+
+    IF INSTR(lv_response, 'ACK') = 0 THEN
+        log_error(get_error_message(lv_response));
+    END IF;   
+
+
+  EXCEPTION
+    WHEN OTHERS THEN
+        log_error('ERR: ' || SUBSTR(SQLERRM, 1, 2000));    
+        UTL_TCP.CLOSE_CONNECTION(tcp_conn);
+        --RAISE_APPLICATION_ERROR(-20101,SQLERRM);
+  END submit_job;
+
+  procedure submit_async_regular_job(p_host_in    IN VARCHAR2, 
+                                     p_port_in    IN VARCHAR2, 
+                                     p_data_in    IN VARCHAR2,
+                                     p_user_in    IN VARCHAR2) is
+    lv_jobName VARCHAR2(100);                             
+  begin
+    lv_jobName := 'lp_' || p_user_in || '_' || to_char(sysdate, 'MMDDYYYYHH24MISS') || SYS_GUID();
+
+    dbms_scheduler.create_job(
+       job_name=> lv_jobName,
+       job_action => 'BEGIN     
+                            print_util.submit_job(p_host_in => ''' || p_host_in || ''',
+                            p_port_in => ''' || p_port_in || ''',
+                            p_data_in => ''' || p_data_in || ''',
+                            p_user_in => ''' || p_user_in || '''
+                         );
+                      END;',
+       job_type => 'plsql_block',
+       enabled => true ) ;
+  end submit_async_regular_job;
+
+  procedure submit_async_job(p_host_in    IN VARCHAR2, 
+                             p_port_in    IN VARCHAR2, 
+                             p_data_in    IN VARCHAR2,
+                             p_user_in    IN VARCHAR2) is
+    lv_jobName VARCHAR2(100);                             
+  begin
+
+    lv_jobName := 'lp_' || p_user_in || '_' || to_char(sysdate, 'MMDDYYYYHH24MISS') || SYS_GUID();
+
+    -- lv_jobName := 'LabelPrint_' || to_char(sysdate, 'MMDDYYYYHH24MISS');
+    DBMS_SCHEDULER.create_job (
+        job_name        => lv_jobName,
+        program_name    => 'LBL_PRINT_PGM',
+        job_style       => 'IN_MEMORY_FULL');    
+    DBMS_SCHEDULER.set_job_argument_value(lv_jobName , 1, p_host_in);
+    DBMS_SCHEDULER.set_job_argument_value(lv_jobName , 2, p_port_in);
+    DBMS_SCHEDULER.set_job_argument_value(lv_jobName , 3, p_data_in);
+    DBMS_SCHEDULER.set_job_argument_value(lv_jobName , 4, p_user_in);
+    DBMS_SCHEDULER.enable(lv_jobName);
+  end submit_async_job;  
+end print_util;
+
+/

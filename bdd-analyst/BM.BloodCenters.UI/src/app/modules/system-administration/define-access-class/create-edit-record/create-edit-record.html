@@ -1,0 +1,175 @@
+<div class="dialog-container">
+  <!-- Header -->
+  <div class="dialog-header">
+    <div>
+      <h2 mat-dialog-title class="dialog-title">{{ title }}</h2>
+      <div *ngIf="mode === 'edit' && headerInfo" class="header-subtitle">
+        {{ headerInfo }}
+      </div>
+    </div>
+    <button mat-icon-button class="close-button" (click)="onCancel()" aria-label="Close dialog">
+      <mat-icon>close</mat-icon>
+    </button>
+  </div>
+
+  <!-- Content -->
+  <div class="dialog-content" [formGroup]="recordForm">
+    <!-- ADD MODE -->
+    <ng-container *ngIf="mode === 'add'">
+      <!-- Row 1: Type and Code -->
+      <div class="form-row">
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label>Type</mat-label>
+          <mat-select formControlName="type">
+            <mat-option *ngFor="let type of typeOptions" [value]="type.type">
+              {{ type.type }}{{ type.description ? ' — ' + type.description : '' }}
+            </mat-option>
+          </mat-select>
+          <mat-error *ngIf="recordForm.get('type')?.hasError('required')">
+            Type is required
+          </mat-error>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label>Code</mat-label>
+          <mat-select formControlName="code" multiple>
+            <mat-select-trigger>
+              <div class="chip-list" role="list" [attr.aria-label]="(recordForm.get('code')?.value?.length || 0) + ' codes selected'">
+                <span *ngFor="let code of recordForm.get('code')?.value" class="custom-chip" role="listitem">
+                  {{ code }}
+                </span>
+              </div>
+            </mat-select-trigger>
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="codeSearchControl"
+                placeholderLabel="Search codes..."
+                noEntriesFoundLabel="No matching codes">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option *ngFor="let code of filteredCodeOptions" [value]="code.value">
+              {{ code.value }}{{ code.description ? ' — ' + code.description : '' }}
+            </mat-option>
+          </mat-select>
+        </mat-form-field>
+      </div>
+
+      <!-- Row 2: Dates -->
+      <div class="form-row">
+        <mat-form-field appearance="fill" class="form-field" [class.has-error]="getEffectiveDateError()">
+          <mat-label>Effective Date</mat-label>
+          <input matInput [matDatepicker]="effectivePicker" formControlName="effectiveDate" [min]="minDate" #effDateInput [errorStateMatcher]="effDateErrorMatcher" required (input)="onEffectiveDateInput($event)" />
+          <mat-datepicker-toggle matSuffix [for]="effectivePicker"></mat-datepicker-toggle>
+          <mat-datepicker #effectivePicker></mat-datepicker>
+          <mat-error *ngIf="getEffectiveDateError()">
+            {{ getEffectiveDateError() }}
+          </mat-error>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field" [class.has-error]="getTerminationDateError()">
+          <mat-label>Termination Date</mat-label>
+          <input matInput [matDatepicker]="terminationPicker" formControlName="terminationDate" [min]="minDate" #termDateInput [errorStateMatcher]="termDateErrorMatcher" (input)="onTerminationDateInput($event)" />
+          <mat-datepicker-toggle matSuffix [for]="terminationPicker"></mat-datepicker-toggle>
+          <mat-datepicker #terminationPicker></mat-datepicker>
+          <mat-error *ngIf="getTerminationDateError()">
+            {{ getTerminationDateError() }}
+          </mat-error>
+        </mat-form-field>
+      </div>
+
+      <div class="selected-codes-section" *ngIf="selectedCodeRows.length">
+        <h3 class="selected-codes-title" id="selected-codes-heading">Selected Codes ({{ selectedCodeRows.length }})</h3>
+
+        <div class="table-wrapper">
+          <table class="users-table selected-codes-table" aria-labelledby="selected-codes-heading">
+            <thead>
+              <tr>
+                <th scope="col"
+                  class="sortable"
+                  (click)="toggleSelectedCodeSort()"
+                  (keydown)="onSelectedCodeSortKeydown($event)"
+                  tabindex="0"
+                  role="button"
+                  [attr.aria-sort]="selectedCodeSortDirection === 'asc' ? 'ascending' : selectedCodeSortDirection === 'desc' ? 'descending' : 'none'"
+                  aria-label="Sort by code">
+                  <span class="th-content-sortable">
+                    Code
+                    <mat-icon class="sort-icon" [ngClass]="{'sort-icon--active': selectedCodeSortDirection !== 'default'}" aria-hidden="true">
+                      {{ selectedCodeSortDirection === 'asc' ? 'arrow_upward' : selectedCodeSortDirection === 'desc' ? 'arrow_downward' : 'unfold_more' }}
+                    </mat-icon>
+                  </span>
+                </th>
+                <th scope="col">Description</th>
+                <th scope="col" class="action-column"><span class="cdk-visually-hidden">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let row of selectedCodeRows">
+                <td>{{ row.code }}</td>
+                <td>{{ row.description || '-' }}</td>
+                <td class="action-column">
+                  <button mat-icon-button type="button" class="delete-icon" (click)="removeSelectedCode(row.code)" [attr.aria-label]="'Remove code ' + row.code">
+                    <mat-icon>delete</mat-icon>
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </ng-container>
+
+    <!-- EDIT MODE -->
+    <ng-container *ngIf="mode === 'edit'">
+      <!-- Row 1: Type and Code (Read-only labels) -->
+      <div class="form-row">
+        <div class="form-field-label">
+          <label class="field-label" id="edit-type-label">Type</label>
+          <div class="field-value" aria-labelledby="edit-type-label">{{ displayType }}</div>
+        </div>
+
+        <div class="form-field-label">
+          <label class="field-label" id="edit-code-label">Code</label>
+          <div class="field-value" aria-labelledby="edit-code-label">{{ displayCode }}</div>
+        </div>
+      </div>
+
+      <!-- Description (Read-only label) -->
+      <div class="form-field-label full-width">
+        <label class="field-label" id="edit-desc-label">Description</label>
+        <div class="field-value" aria-labelledby="edit-desc-label">{{ displayDescription }}</div>
+      </div>
+
+      <!-- Row 2: Dates -->
+      <div class="form-row dates-row">
+        <div class="form-field-label">
+          <label class="field-label" id="edit-effdate-label">Effective Date</label>
+          <div class="field-value" aria-labelledby="edit-effdate-label">{{ displayEffectiveDate }}</div>
+        </div>
+
+        <mat-form-field appearance="fill" class="form-field" [class.has-error]="getTerminationDateError()">
+          <mat-label>Termination Date</mat-label>
+          <input matInput [matDatepicker]="terminationPicker" formControlName="terminationDate" [min]="minDate" #termDateInput [errorStateMatcher]="termDateErrorMatcher" (input)="onTerminationDateInput($event)" />
+          <mat-datepicker-toggle matSuffix [for]="terminationPicker"></mat-datepicker-toggle>
+          <mat-datepicker #terminationPicker></mat-datepicker>
+          <mat-error *ngIf="getTerminationDateError()">
+            {{ getTerminationDateError() }}
+          </mat-error>
+        </mat-form-field>
+      </div>
+    </ng-container>
+  </div>
+
+  <!-- Footer -->
+  <div class="dialog-actions">
+    <button mat-button class="cancel-button" (click)="onCancel()">CANCEL</button>
+    <button
+      mat-raised-button
+      color="primary"
+      [disabled]="!isFormValid"
+      (click)="onSave()"
+    >
+      {{ mode === 'add' ? 'CREATE' : 'SAVE' }}
+    </button>
+  </div>
+</div>

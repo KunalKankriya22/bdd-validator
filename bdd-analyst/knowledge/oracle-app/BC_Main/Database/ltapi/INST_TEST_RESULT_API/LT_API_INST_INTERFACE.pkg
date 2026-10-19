@@ -1,0 +1,1437 @@
+create or replace PACKAGE   "LT_API_INST_INTERFACE" IS
+
+/* ************************************************************
+  This is an interface engine for the Instrument Test results. The instrument
+  interface test result API tables should have been populated by
+  the Customer or by external application. This interface will read the
+   results from the table and upload into the LT tables.
+   This is a generic interface.
+
+  Compatibility     Oralce 11g/12C 
+ 
+  Created By        : Basker Edwin 
+  Date Of Creation  : 11/05/2012
+  Version           : 01 [11/05/12] - Edwin
+                    : 02 [02/28/14] - Edwin SCR: 20357, 20358  4.6.2_R3 
+                    : 03 [03/04/14] - Edwin IM: 9930
+                    : 04 [04/14/14] - do not hardcode the flag charater 00
+                    : 05 [05/14/14] - SCR: 20608 , By: Edwin 
+                    : 06 [07/01/15] - Added code to display debug messages
+                                     based on values in the DEBUG_CONTROLS table
+
+                   Reseting it to 01 for LT 2018
+
+                   :  01 [10/10/16]
+                   :  02 [03/29/17]  IM: 507, adding eff and term date in the
+                                     TEST_SCH cursor
+                   :  03 [10/08/24]  MLT-7225
+
+  ***************************************************************   */
+
+  procedure add_log_entry(p_log_text in varchar2);
+  procedure main_proc(file_name in varchar2,v_inst_id in varchar2,
+                       pl_chapter_id in varchar2,
+                       pl_upload_status out varchar2);
+
+  Procedure process_and_upload (pl_inst_id in varchar2,
+                                pl_file_name in varchar2);
+
+  Procedure upload_test_results (pl_test_id     in varchar2,
+                               pl_result_code in varchar2,
+                               pl_well_number in varchar2,
+                               pl_ratio       in varchar2,
+                               pl_abs_value   in varchar2,
+                               pl_tb_id       in varchar2,
+                               pl_result_date in date,
+                               pl_error_status out varchar2);
+
+  Procedure insert_test_batch_det (p_tb_id in varchar2,
+                                 p_test_id in varchar2,
+                                 p_cut_off in varchar2,
+                                 p_kit_lot in varchar2) ;
+
+  Procedure gen_test_batch_id;
+  procedure init_variables;
+  procedure update_batch_information;
+  procedure insert_instrument_log (pl_test_id in varchar2);
+  procedure convert_unit_id(ok_status out varchar2) ;
+  procedure update_rpt_parm;
+  procedure rollback_and_exit ;
+  procedure update_api_inst_upload;
+  procedure archive_processed_data;
+  temp_max_test_seq_no   NUMBER:=0;
+  temp_coll_date         DATE;
+  field_delimiter        VARCHAR2(1);
+  repeat_delimiter       VARCHAR2(1);
+  component_delimiter    VARCHAR2(1);
+  last_unit              VARCHAR2(15);
+  logfile                UTL_FILE.FILE_TYPE;
+  instfile               UTL_FILE.FILE_TYPE;
+  LogDir                 VARCHAR2(50);
+  logfilename            VARCHAR2(50);
+  p_file_name            VARCHAR2(50);
+  read_record            VARCHAR2(500);
+  fetch_count            NUMBER:=0;
+  first_unit             BOOLEAN:=TRUE;
+  testing_lab_code       VARCHAR2(2);
+  plate_id               VARCHAR2(10);
+  v_tb_id                VARCHAR2(64);
+  well_count             NUMBER:=0;
+  process_date_time      VARCHAR2(25);
+  v_test_id              VARCHAR2(10);
+  cut_off                VARCHAR2(10);
+  kit_lot                VARCHAR2(30);
+  v_machine_id           VARCHAR2(5);
+  v_unit_id              VARCHAR2(15);
+  well_number            VARCHAR2(4);
+  result_status          VARCHAR2(4);
+  negative_result        VARCHAR2(4);
+  reactive_result        VARCHAR2(4);
+  ratio                  VARCHAR2(20);
+  codabar_unit_scheme    VARCHAR2(1);
+  v_chapter_id           VARCHAR2(4);
+  od_value               VARCHAR2(10);
+  batch_created          BOOLEAN:=FALSE;
+  test_created           BOOLEAN:=FALSE;
+  well_type              VARCHAR2(1);
+  result_file_name       VARCHAR2(30);
+  record_count           NUMBER:=0;
+  pos_res_count          NUMBER:=0;
+  neg_res_count          NUMBER:=0;
+  upload_count           NUMBER:=0;
+  --good_unit              BOOLEAN;
+  err_msg                VARCHAR2(300);
+  temp_test_id           VARCHAR2(20);
+  ncount                 NUMBER:=0;
+  no_of_units            NUMBER:=0;
+  g_local_time           DATE;
+  p_chp_sys_date         DATE;
+  upload_flag            VARCHAR2(1);
+  t_is_debug_msg_displayed BOOLEAN; -- Added by Kishore on 07/01/2015
+
+end LT_API_INST_INTERFACE;
+/
+
+create or replace PACKAGE BODY         "LT_API_INST_INTERFACE" is
+
+PROCEDURE add_log_entry(p_log_text varchar2) is
+BEGIN
+         UTL_FILE.putf(logfile,'%s\n',p_log_text);
+         UTL_FILE.fflush(logfile);
+END add_log_entry;
+
+procedure main_proc(file_name in varchar2, v_inst_id in varchar2,
+                    pl_chapter_id in varchar2,
+                    pl_upload_status out varchar2) is
+
+ start_time             VARCHAR2(30);
+ end_time               VARCHAR2(30);
+Begin
+      -- Added by Kishore on 07/01/2015
+      if lab_common.is_debug_msg_displayed('RTURLOAD', 'PKG') then
+        t_is_debug_msg_displayed := TRUE;
+      else
+        t_is_debug_msg_displayed := FALSE;
+      end if;
+      -- End of change
+
+      dbms_output.enable(50000000);
+      v_machine_id:=v_inst_id;
+      result_file_name:=file_name;
+      v_chapter_id:=pl_chapter_id;
+      --p_chp_sys_date:= sysdate;
+
+      p_chp_sys_date:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                                sysdate);
+
+      begin
+           select code_desc into LogDir from master_codes
+           where code_type='LOGDR' and code='ILOG' and p_chp_sys_date
+	   between eff_date and nvl(term_date,sysdate+10);
+      exception
+           when utl_file.invalid_path then
+               if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                 dbms_output.put_line('Invalid path or filename');
+               end if; -- Added by Kishore on 07/01/2015
+	       raise;
+           when others then
+           if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+             dbms_output.put_line('Error in prepare_log_filename');
+           end if; -- Added by Kishore on 07/01/2015
+	   raise;
+       end;
+
+      begin
+       p_file_name:=v_machine_id||'_'||result_file_name;
+       select p_file_name||'_'||to_char(p_chp_sys_date,'mmddyyhh24miss')||'.r'
+       into logfilename from dual;
+      exception
+	  when others then
+             if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+	       dbms_output.put_line('Error in getting logfilename ... Aborting');
+             end if; -- Added by Kishore on 07/01/2015
+	     raise;
+      end;
+
+        begin
+
+       --  g_local_time:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+      --    sysdate);
+           g_local_time:=sysdate;
+
+	   start_time := to_char(g_local_time,'mm-dd-yy hh24:mi:ss');
+           logfile:=UTL_FILE.fopen(LogDir,logfilename, 'w');
+           --instfile:=UTL_FILE.fopen(LogDir,file_name, 'r');
+
+           add_log_entry(v_machine_id||' Instrument Interface Log');
+           add_log_entry('----------------------------------------');
+           add_log_entry(' ');
+	   add_log_entry('Interface Start Time:'||start_time);
+	   add_log_entry('File Name  : '||result_file_name);
+	   add_log_entry('Log Name   : '||logfilename);
+	   add_log_entry('----------------------------------------');
+
+       exception
+	  when utl_file.invalid_path then
+           if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+	     dbms_output.put_line('Invalid path or filename'); raise;
+           end if; -- Added by Kishore on 07/01/2015
+        end;
+
+          init_variables;
+          if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+	    dbms_output.put_line('variable is initialised');
+          end if; -- Added by Kishore on 07/01/2015
+
+          If nvl(upload_flag,'X')!='A' then
+            gen_test_batch_id;
+            if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+              dbms_output.put_line('TB ID is created-'||v_tb_id);
+            end if; -- Added by Kishore on 07/01/2015
+          End If;
+
+          If nvl(upload_flag,'X')!='A' then
+	    process_and_upload (result_file_name,v_machine_id);
+            if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+              dbms_output.put_line('Process_and_upload is done');
+            end if; -- Added by Kishore on 07/01/2015
+          End If;
+
+	  update_rpt_parm;
+          if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+            dbms_output.put_line('rpt parm is updated');
+          end if; -- Added by Kishore on 07/01/2015
+
+       If nvl(upload_flag,'X')!='A'  then
+          add_log_entry('No. of Results Read: '||to_char(no_of_units));
+	  add_log_entry('No. of results uploaded :'||to_char(upload_count));
+          add_log_entry('No. of results Rejected :'||
+	  to_char(no_of_units - upload_count));
+	  add_log_entry(v_machine_id||' Intrument results are  '||
+                         'successfully completed');
+
+         g_local_time:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                                    sysdate);
+          --g_local_time:=sysdate;
+          upload_flag:='S';
+       End If;
+
+          end_time := to_char(g_local_time,'mm-dd-yy hh24:mi:ss');
+	  add_log_entry('Program End Time:'||end_time);
+     	  add_log_entry('*********************End****************************');
+          update_api_inst_upload;
+
+         If nvl(upload_flag,'X')!='A'  then
+            archive_processed_data;
+         Else
+           update API_INST_TEST_RESULTS set upload_status='A' where
+           file_id=result_file_name and machine_id=v_machine_id;
+
+            archive_processed_data;
+         End If;
+
+          commit;
+	  UTL_FILE.fclose(logfile);
+          pl_upload_status:=upload_flag;
+
+End main_proc;
+
+Procedure gen_test_batch_id is
+  v_max    NUMBER:=0;
+  v_next_max  NUMBER:=0;
+  v_last_reset_date date;
+
+begin
+
+   begin
+             SELECT nvl(max_number,0), nvl(max_number,0)+1, last_reset_date
+	     INTO  v_max , v_next_max, v_last_reset_date FROM  number_generation
+	     WHERE  chapter_id = v_chapter_id AND number_type = 'TB_ID'
+	     FOR update of max_number ;
+             if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+	       dbms_output.put_line('Seq='||to_char(v_max));
+             end if; -- Added by Kishore on 07/01/2015
+   exception
+       when others then
+           add_log_entry('Problem in Number Generation ... Aborting');
+           rollback_and_exit;
+   end;
+
+    --construct the batch ID
+
+    If trunc(p_chp_sys_date) = trunc(v_last_reset_date) then 
+
+        v_tb_id:=to_char(p_chp_sys_date,'MMDDYY')||'-'||substr(v_machine_id,1,3)
+                 ||lpad(to_char(v_max),4,0);
+
+    Elsif trunc(p_chp_sys_date) > trunc(v_last_reset_date) then 
+
+          v_tb_id:=to_char(p_chp_sys_date-1,'MMDDYY')||'-'||substr(v_machine_id,1,3)
+                 ||lpad(to_char(v_max),4,0);
+    End If;
+
+
+     
+
+    add_log_entry('Test Batch ID:'||v_tb_id);
+    batch_created:=TRUE;  --reset the value to true to not to create again
+
+    begin
+       UPDATE number_generation set max_number = v_next_max
+       where chapter_id = v_chapter_id and  number_type= 'TB_ID' ;
+    exception
+       when others then
+	   add_log_entry('Update Number Generation Problem ... Aborting');
+	   rollback_and_exit;
+    end;
+
+End gen_test_batch_id;
+
+Procedure process_and_upload (pl_inst_id in varchar2,
+                              pl_file_name in varchar2) is
+
+ function_result varchar2(200);
+ rescode1         VARCHAR2(40);
+ inst_test_id     VARCHAR2(20);
+ rescode2         VARCHAR2(40);
+ abs_value        VARCHAR2(20);
+ v_result         VARCHAR2(80);
+ temp_x           VARCHAR2(1);
+ v_loc_test       VARCHAR2(5);
+ v_max            NUMBER:=0;
+ v_auto_sch_flag  VARCHAR2(1);
+ v_next_max       NUMBER:=0;
+ result_details   varchar2(300);
+ user_exception   EXCEPTION;
+ unit_details     varchar2(16);
+ p_skip_level     VARCHAR2(1);
+ p_error_message  VARCHAR2(200);
+ c_status         VARCHAR2(300);
+ sample_type      VARCHAR2(1);
+ good_unit        BOOLEAN:=TRUE;
+ result_date      date;
+ facility_code    number:=0;
+ pl_status        varchar2(200);
+ nCfgUse          NUMBER:=0;
+ nAPICV           NUMBER:=0;
+ pl_pool_size     VARCHAR2(5);
+ nFlag            VARCHAR2(5);
+ fac_contract     VARCHAR2(15);
+
+ CURSOR TEST_RES_CUR is select * from API_INST_TEST_RESULTS where
+                        file_id=result_file_name and
+                         machine_id=v_machine_id and
+                        nvl(skip_record,'N')='N' ;
+
+   CURSOR LT_SCH_CUR  (m_id in varchar2,
+                       m_test_id in varchar2,
+                       m_pool_size in varchar2,
+                       pl_test_id_1 in varchar2,
+                       pl_test_id_2 in varchar2,
+                       pl_test_id_3 in varchar2,
+                       pl_test_id_4 in varchar2,
+                       pl_test_id_5 in varchar2,
+                       pl_test_id_6 in varchar2,
+                       pl_res_1 in varchar2,
+                       pl_res_2 in varchar2,
+                       pl_res_3 in varchar2,
+                       pl_res_4 in varchar2,
+                       pl_res_5 in varchar2,
+                       pl_res_6 in varchar2) is select * from
+                       VALID_INST_TEST_SCH
+                       where machine_id=m_id and
+                       machine_test_id=m_test_id and
+                       nvl(test_id_1,'X')=nvl(pl_test_id_1,'X') and
+                       nvl(test_id_1_res,'X')=nvl(pl_res_1,'X') and
+                       nvl(test_id_2,'X')=nvl(pl_test_id_2,'X') and
+                       nvl(test_id_2_res,'X')=nvl(pl_res_2,'X') and
+                       nvl(test_id_3,'X')=nvl(pl_test_id_3,'X') and
+                       nvl(test_id_3_res,'X')=nvl(pl_res_3,'X') and
+                       nvl(test_id_4,'X')=nvl(pl_test_id_4,'X') and
+                       nvl(test_id_4_res,'X')=nvl(pl_res_4,'X') and
+                       nvl(test_id_5,'X')=nvl(pl_test_id_5,'X') and
+                       nvl(test_id_5_res,'X')=nvl(pl_res_5,'X') and
+                       nvl(test_id_6,'X')=nvl(pl_test_id_6,'X') and
+                       nvl(test_id_6_res,'X')=nvl(pl_res_6,'X') and
+                       pool_size=m_pool_size and sysdate between
+                       eff_date and nvl(term_date, sysdate+10);
+
+BEGIN
+
+
+    FOR Z in TEST_RES_CUR loop
+
+    BEGIN
+
+     If Z.chapter_id!=v_chapter_id then
+       err_msg:='Invalid Chapter/wrong chapter for this setup';
+       raise user_exception;
+     End If;
+
+
+     IF Length(Z.unit_id) in (13,16,14,15) then  -- ISBT unit
+
+       If Length(Z.unit_id) in (15,16) then
+          select nvl(count(*),0) into nFlag from valid_ff_values where
+          source_code=substr(Z.unit_id,-2) and
+          substr(Z.unit_id,2,5)=coll_id and chapter_id=v_chapter_id and
+          sysdate between eff_date and nvl(term_date,sysdate+2);
+          If nFlag = 0 then
+             err_msg:='Invalid ISBT unit-Flag characters are invalid';
+             raise user_exception;
+         End If;
+       End If;
+
+       if Length(Z.unit_id) in (14,16) then
+          v_unit_id:=substr(Z.unit_id,2,13);
+       elsif Length(Z.unit_id) = 15 then
+          v_unit_id:=substr(Z.unit_id,1,13);
+       else
+         v_unit_id:=Z.unit_id;
+       end if;
+     ELSE  --codabar
+       v_unit_id := Z.unit_id;
+       --no_of_units:=no_of_units+1;
+     END IF;
+
+     no_of_units:=no_of_units+1;
+
+    --Performing the unit validation.
+     If length(v_unit_id)=6 then
+       If ASCII(substr(v_unit_id,1,1)) not between 65 and 90 then
+          err_msg:='Invalid Unit ';
+          good_unit:=FALSE;
+          raise user_exception;
+       Else
+          v_unit_id:=' '||v_unit_id;
+       End If;
+     End If;
+
+     If length(v_unit_id) not in (7,13) then
+        err_msg:='Invalid Unit Length';
+        good_unit:=FALSE;
+        raise user_exception;
+     End if;
+
+
+     If length(v_unit_id) in (6,7) then
+       begin
+           select contract_id into fac_contract from units where
+           unit_id=v_unit_id and rownum=1;
+
+          select bar_code_protocol into codabar_unit_scheme from
+          contracts where contract_id=fac_contract and
+          sysdate between eff_date and nvl(term_date,sysdate+1);
+
+       exception when no_data_found then
+            codabar_unit_scheme:='N';
+         when others then
+            codabar_unit_scheme:='N';
+       end ;
+
+
+       if codabar_unit_scheme='A' and
+          ltrim(v_unit_id,'0123456789') is null then
+
+          convert_unit_id(c_status);
+       if nvl(c_status,' ')!='OK' then
+          err_msg:=c_status;
+	  good_unit:=FALSE;
+	  raise user_exception;
+       end if;
+    end if;
+   End If;
+     if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+       dbms_output.put_line(v_unit_id);
+     end if; -- Added by Kishore on 07/01/2015
+
+    --Get test ID
+    inst_test_id:=Z.machine_test_id;
+
+    --Get result
+     rescode1:=Z.machine_result;
+
+    --Get Well number
+     well_number:=Z.well_number;
+
+    --Get Absorbance
+    abs_value:=Z.absorbance;
+
+    --Get Ratio
+
+     ratio:=Z.ratio;
+
+   -- get result date
+    result_date:=nvl(Z.result_date,sysdate);
+
+  process_date_time:=to_char(p_chp_sys_date,'mm-dd-yyyy hh24:mi');
+
+ if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+   dbms_output.put_line('inst test id='||inst_test_id);
+ end if; -- Added by Kishore on 07/01/2015
+
+ v_result:=RTrim(ltrim(rescode1));
+
+ if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+   dbms_output.put_line('Result='||v_result);
+ end if; -- Added by Kishore on 07/01/2015
+
+  --Check the error flag and decide if the record should be skipped or
+  -- the set should be aborted.
+
+  If Z.error_code is not null then
+     Begin
+       select skip_level,error_desc into p_skip_level,
+       p_error_message from API_INST_ERROR_HANDLING
+       where chapter_id=v_chapter_id and machine_id=v_machine_id and
+       error_code=Z.error_code and machine_test_id=Z.machine_test_id and
+       sysdate between eff_date and nvl(term_date,sysdate+1);
+
+       If upper(p_skip_level) ='S' then
+          err_msg:='Unit:'||v_unit_id||' Test:'||Z.machine_test_id||'=> '||
+                    p_error_message;
+           raise user_exception;
+       Elsif upper(p_skip_level) = 'A' then   -- aborting the whole upload
+         add_log_entry('Unit:'||v_unit_id||' Test:'||Z.machine_test_id||
+                       '=>'|| p_error_message);
+         rollback_and_exit;
+       End If;
+    Exception
+        when no_data_found then
+          add_log_entry('No Error definition for '||Z.error_code);
+          rollback_and_exit;
+    End;
+
+  End If;
+
+
+  If first_unit then
+     update_batch_information;
+     first_unit:=FALSE;
+     temp_test_id:=v_test_id;
+  End if;
+  last_unit:=v_unit_id;
+
+
+  --insert_instrument_log('ABORH'); -- ABORH is hard coded but it is OK,not used
+
+   If nvl(upload_flag,'X')='A' then
+     return;
+   End If;
+
+ --Check if the configuration table should be used or not
+
+   select nvl(count(*),0) into nCfgUse from valid_inst_test_sch
+   where machine_id=Z.machine_id and machine_test_id=z.machine_test_id;
+
+ --IF Z.machine_test_id not in ('MPX','MPX v2.0') then
+
+ IF nCfgUse = 0 then
+  Begin
+      select vit.test_id, nvl(auto_schedule,'N') into
+      v_test_id,v_auto_sch_flag
+      from valid_instrument_tests vit, valid_tests vt where
+      vit.chapter_id=v_chapter_id and
+      vit.test_id = vt.test_id and machine_id=rtrim(v_machine_id) and
+      machine_test_id=rtrim(inst_test_id) and p_chp_sys_date between
+      vit.eff_date and nvl(vit.term_date,sysdate+100)
+      and p_chp_sys_date between vt.eff_date and nvl(vt.term_date,sysdate+100);
+   Exception
+     when no_data_found then
+         v_auto_sch_flag := 'N';
+	 add_log_entry('Invalid test ID '||inst_test_id||' in record for '||
+	 v_machine_id || '..Aborting');
+         good_unit:=FALSE;
+	 rollback_and_exit;
+   End;
+
+/*    If not test_created then
+       test_created:=TRUE;
+       add_log_entry('Test ID: '||v_test_id);
+    End If;
+*/
+
+  ---insert_instrument_log(v_test_id);
+
+  If nvl(upload_flag,'X')='A' then
+    return;
+  End If;
+
+ --Check the result code
+
+
+  Begin
+     select result_status into result_status from
+     valid_instrument_test_results where test_id=v_test_id and
+     chapter_id=v_chapter_id and
+     machine_id=v_machine_id and machine_result_status=v_result and
+    p_chp_sys_date between eff_date and nvl(term_date,sysdate+100);
+  Exception when others then
+    good_unit:=FALSE;
+    err_msg:='Error translating result code '||v_result||
+	     ' for unit '||v_unit_id||sqlerrm;
+     raise user_exception;
+  End;
+
+
+   Begin
+
+       insert_test_batch_det(v_tb_id, v_test_id,null,null);
+
+       last_unit:=v_unit_id;
+
+   /*
+       If temp_test_id!=v_test_id then
+         add_log_entry('Multiple tests in file ... ');
+	 good_unit:=FALSE;
+	 rollback_and_exit;
+       End if;
+
+     */
+
+   If nvl(upload_flag,'X')='A' then
+     return;
+  End If;
+
+       -------insert into UTRS table --------
+       If v_auto_sch_flag = 'Y' then
+        Begin
+            temp_coll_date := null;
+            select max(coll_date) into temp_coll_date
+	    from units where unit_id =v_unit_id
+            and  not exists
+		   (select 'x' from utrs
+                    where unit_id = units.unit_id
+                    and coll_date = units.coll_date
+	            And test_id = v_test_id
+	            and cancel_flag is null);
+
+	    If temp_coll_date is not null then
+              Begin
+	        temp_max_test_seq_no := 0;
+	        begin
+	             select nvl(max(nvl(test_seq_no,0)),0)
+		      into temp_max_test_seq_no
+		      from utrs where unit_id = v_unit_id
+                      and coll_date = temp_coll_date
+    		      and test_id = v_test_id;
+                      if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+ 	                dbms_output.put_line('M='||to_char(temp_max_test_seq_no));
+                      end if; -- Added by Kishore on 07/01/2015
+	      exception
+		    when others then
+	   	        temp_max_test_seq_no :=0;
+										                end;
+												 begin
+                      insert into utrs
+			   (unit_id, coll_date, chapter_id,
+		            test_id, test_seq_no, program_id, insert_dats,
+		            insert_user_id, test_mode,
+			    test_chapter_id, tb_id)
+			values
+			     (v_unit_id, temp_coll_date, v_chapter_id,
+			      v_test_id, temp_max_test_seq_no +1,
+			      'ATUIFACE', sysdate, substr(user, 5),
+			      'M', v_chapter_id, null);
+                 exception
+	           when others then
+		   add_log_entry('unit='||v_unit_id);
+		   add_log_entry('coll='||to_char(temp_coll_date,
+						  'mm-dd-yyyy hh24:mi'));
+                   add_log_entry(v_chapter_id);
+		   add_log_entry(v_test_id);
+		   add_log_entry(to_char(temp_max_test_seq_no+1));
+		   add_log_entry(v_chapter_id);
+		   add_log_entry(sqlerrm);
+		   add_log_entry('Error in inserting into utrs....Aborting');
+	           rollback_and_exit;
+	  	end;
+	      End;
+	      end if;
+	  Exception
+	     when others then
+		  temp_coll_date := null;
+         End;
+      end if;
+
+     --------------------------------------
+
+       function_result := sbclib.load_holding_tests
+				(v_unit_id,
+				v_test_id,
+				well_number,
+				nvl(abs_value,'NA'),
+				ratio,
+				result_status,
+				v_tb_id,
+				v_machine_id,
+				null,
+				null,
+				'ATUIFACE',
+                               result_date,
+                               v_chapter_id); -- Uncommented "v_chapter_id" by Kishore on 07/01/2015
+		--upload_count:=upload_count+1;
+
+           if rtrim(function_result)!='0' then
+               add_log_entry('Error in load_holding_tests for unit'||v_unit_id);
+               add_log_entry(function_result);
+               raise user_exception;
+           else
+             update API_INST_TEST_RESULTS set upload_status='S' where
+             file_id=Z.file_id and unit_id=Z.unit_id and
+             machine_id=z.machine_id and machine_test_id=Z.machine_test_id and
+             upload_status='P';
+           end if;
+     End;
+
+   ELSE  -- if the nCfgUse = 0
+
+     ----  The New chnages for the 4.6.2 R3 addition starts here 02/14/14
+     if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+       dbms_output.put_line('Machine test ID='||z.machine_test_id);
+     end if; -- Added by Kishore on 07/01/2015
+
+
+         -- check the config table for the LT to be scheduled.
+
+           if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+             dbms_output.put_line('pool='||z.final_pool_size||
+                         ' Machine Test='||z.machine_test_id||
+                         'test id 1='||z.test_id_1);
+           end if; -- Added by Kishore on 07/01/2015
+
+           If z.final_pool_size=1 then
+              pl_pool_size:='1';
+           Elsif Z.final_pool_size > 1 then
+              pl_pool_size:='>1';
+           Else
+            add_log_entry('Invalid pool size value for unit '||v_unit_id||
+                          ' sample is skipped');
+            good_unit:=FALSE;
+            raise user_exception;
+           End If;
+
+
+           For Z1 in LT_SCH_CUR(Z.machine_id,
+                                       z.machine_test_id,
+                                        pl_pool_size,
+                                        z.test_id_1,
+                                        z.test_id_2,
+                                        z.test_id_3,
+                                        z.test_id_4,
+                                        z.test_id_5,
+                                        z.test_id_6,
+                                        z.result_1,
+                                        z.result_2,
+                                        z.result_3,
+                                        z.result_4,
+                                        z.result_5,
+                                        z.result_6) loop
+
+           -- Check if the machine test should check the facility ID
+
+           select nvl(count(*),0) into nAPICV from master_codes
+           where code_type='APICV' and
+           code_desc=Z.machine_id||':'||z.machine_test_id and
+           sysdate between eff_date and nvl(term_date,sysdate+10);
+
+
+         If nAPICV > 0 then  -- if contract needsneeds to checked
+           If Length(v_unit_id)> 7 then   -- for ISBT
+               select nvl(count(*),0) into facility_code from master_codes
+               where code_type='APITS' and code_desc=substr(v_unit_id,1,5) and
+               sysdate between eff_date and nvl(term_date,sysdate+2);
+           Else    -- for codabar
+
+             -- get the contract ID
+
+             fac_contract:=null;
+             begin
+               select contract_id into fac_contract from units where
+               unit_id=v_unit_id and rownum=1;
+             exception when no_data_found then
+               fac_contract:='XX';
+             end ;
+
+             select nvl(count(*),0) into facility_code from master_codes
+             where code_type='APITS' and code_desc=fac_contract and
+             sysdate between eff_date and nvl(term_date,sysdate+2);
+          End If;
+
+         End If;
+
+           if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+             dbms_output.put_line('pool='||pl_pool_size||
+                                  ' Machine Test='||z.machine_test_id||
+                                  'test id 1='||z.test_id_1||
+                                  ' Facility count='||to_char(facility_code));
+           end if; -- Added by Kishore on 07/01/2015
+
+           If ( nAPICV > 0 and facility_code > 0 ) OR  -- ex: MPX
+              (nAPICV = 0 ) then   -- ex: MPX V2.0
+
+               If z1.lt_sch_test_id_1 is not null then
+
+                  if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                    dbms_output.put_line('Lt test id 1='||z1.lt_sch_test_id_1);
+                  end if; -- Added by Kishore on 07/01/2015
+                  upload_test_results(z1.lt_sch_test_id_1,
+                                     z1.lt_sch_res_1,
+                                     null,  -- well number
+                                     null,  -- ratio
+                                     '0',   -- absorbance
+                                     v_tb_id,
+                                     result_date,
+                                     pl_status);
+                 if pl_status is not null then
+                      err_msg:=pl_status;
+                      raise user_exception;
+                 end if;
+
+              End if;
+
+                  ---If ( facility_code> 0  and Z.machine_test_id='MPX') OR
+                  ---(Z.machine_test_id='MPX v2.0') then
+
+             If z1.lt_sch_test_id_2 is not null then
+                if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                  dbms_output.put_line('Lt test id 2='||z1.lt_sch_test_id_2);
+                end if; -- Added by Kishore on 07/01/2015
+
+                upload_test_results(z1.lt_sch_test_id_2,
+                                    z1.lt_sch_res_2,
+                                    null,  -- well number
+                                    null,  -- ratio
+                                    '0',  -- absorbance
+                                    v_tb_id,
+                                    result_date,
+                                    pl_status);
+                 if pl_status is not null then
+                    err_msg:=pl_status;
+                    raise user_exception;
+                 end if;
+            End if;
+          --End If;
+
+             ---  If ( facility_code> 0  and Z.machine_test_id='MPX') OR
+             ----Z.machine_test_id='MPX v2.0') then
+
+            If z1.lt_sch_test_id_3 is not null then
+                 if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                   dbms_output.put_line('Lt test id 3='||z1.lt_sch_test_id_3);
+                 end if; -- Added by Kishore on 07/01/2015
+
+                 upload_test_results(z1.lt_sch_test_id_3,
+                                     z1.lt_sch_res_3,
+                                     null,  -- well number
+                                     null,  -- ratio
+                                     '0',  -- absorbance
+                                     v_tb_id,
+                                     result_date,
+                                     pl_status);
+                if pl_status is not null then
+                     err_msg:=pl_status;
+                     raise user_exception;
+                end if;
+
+           End if;
+         End If;   --- for APICV > 0 and facility_count > 0
+
+
+              -- If ( facility_code>=0  and Z.machine_test_id='MPX') OR
+              --(Z.machine_test_id='MPX v2.0') then
+
+             if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+               dbms_output.put_line('Lt test id 4='||z1.lt_sch_dflt_test_4);
+             end if; -- Added by Kishore on 07/01/2015
+
+
+          If ( nAPICV > 0 and facility_code >= 0 ) OR  -- ex: MPX
+               (nAPICV = 0 ) then   -- ex: MPX V2.0
+
+             if z1.lt_sch_dflt_test_4 is not null then
+                 upload_test_results(z1.lt_sch_dflt_test_4,
+                                     z1.lt_sch_dflt_res_4,
+                                     null,  -- well number
+                                     null,  -- ratio
+                                     '0',  -- absorbance
+                                     v_tb_id,
+                                     result_date,
+                                     pl_status);
+                     if pl_status is not null then
+                         err_msg:=pl_status;
+                         raise user_exception;
+                     end if;
+             end if;
+
+
+             if z1.lt_sch_dflt_test_5 is not null then
+
+                 if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                   dbms_output.put_line('Lt test id 5='||z1.lt_sch_dflt_test_5);
+                 end if; -- Added by Kishore on 07/01/2015
+
+                 upload_test_results(z1.lt_sch_dflt_test_5,
+                                     z1.lt_sch_dflt_res_5,
+                                     null,  -- well number
+                                     null,  -- ratio
+                                     '0',   -- absorbance
+                                     v_tb_id,
+                                     result_date,
+                                     pl_status);
+                   if pl_status is not null then
+                        err_msg:=pl_status;
+                        raise user_exception;
+                   end if;
+             end if;
+
+             if z1.lt_sch_dflt_test_6 is not null then
+               if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+                 dbms_output.put_line('Lt test id 6='||z1.lt_sch_dflt_test_6);
+               end if; -- Added by Kishore on 07/01/2015
+
+                  upload_test_results(z1.lt_sch_dflt_test_6,
+                                     z1.lt_sch_dflt_res_6,
+                                     null,  -- well number
+                                     null,  -- ratio
+                                     '0',   -- absorbance
+                                     v_tb_id,
+                                     result_date,
+                                     pl_status);
+                  if pl_status is not null then
+                     err_msg:=pl_status;
+                     raise user_exception;
+                  end if;
+           end if;
+
+        End If;
+       End Loop;
+
+    update API_INST_TEST_RESULTS set upload_status='S' where
+    file_id=Z.file_id and record_id=Z.record_id and upload_status='P';
+
+    END IF;  -- if nCfgUse = 0
+    upload_count:=upload_count+1;
+
+     ----- The new changes for the 4.6.2 R3 ends here ---------
+
+EXCEPTION
+ When user_exception then
+   add_log_entry('Error on: '||v_unit_id||' '||err_msg);
+
+   update API_INST_TEST_RESULTS set upload_status='E' where
+  file_id=Z.file_id and  record_id=Z.record_id
+   and upload_status='P';
+  when others then
+    add_log_entry('Error on: '||v_unit_id||' '||sqlerrm);
+    update API_INST_TEST_RESULTS set upload_status='E' where
+    file_id=Z.file_id and record_id=Z.record_id
+     and upload_status='P';
+
+END;
+END LOOP;
+
+insert_instrument_log('ABORH');
+
+END process_and_upload;
+
+Procedure upload_test_results (pl_test_id     in varchar2,
+                               pl_result_code in varchar2,
+                               pl_well_number in varchar2,
+                               pl_ratio       in varchar2,
+                               pl_abs_value   in varchar2,
+                               pl_tb_id       in varchar2,
+                               pl_result_date in date,
+                               pl_error_status out varchar2) is
+
+      pl_result_status   varchar2(10);
+      pl_auto_sch_flag varchar2(1);
+      t_coll_date      date;
+      t_max_test_seq_no  number:=0;
+      upload_exception EXCEPTION;
+      upload_err_msg varchar2(200);
+      function_result varchar2(200);
+      p_result_count   number:=0;
+
+Begin
+
+  upload_err_msg:=null;
+
+
+   Begin
+      select nvl(auto_schedule,'N') into
+      pl_auto_sch_flag
+      from valid_tests where
+      test_id=pl_test_id and
+      p_chp_sys_date between eff_date and nvl(term_date,sysdate+100);
+ Exception
+   when no_data_found then
+       pl_auto_sch_flag := 'N';
+ End;
+
+   if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+     dbms_output.put_line('UTR:Auto sche flag='||pl_auto_sch_flag);
+   end if; -- Added by Kishore on 07/01/2015
+/*
+   Begin
+     select result_status into pl_result_status from
+     valid_instrument_test_results where test_id=pl_test_id and
+     chapter_id=v_chapter_id and
+     machine_id=v_machine_id and machine_result_status=pl_result_code and
+    p_chp_sys_date between eff_date and nvl(term_date,sysdate+100);
+  Exception when others then
+    --good_unit:=FALSE;
+    upload_err_msg:=' 2. Error translating result code '||pl_result_code||
+	     ' for unit '||v_unit_id||sqlerrm;
+     raise upload_exception;
+  End;
+*/
+
+
+     insert_test_batch_det(v_tb_id, pl_test_id,null,null);
+
+     select count(*) into p_result_count from
+     valid_test_results where test_id=pl_test_id and
+     result_status=pl_result_code and
+     p_chp_sys_date between eff_date and nvl(term_date,sysdate+100);
+
+     If p_result_count > 0 then
+       null;
+     Else
+        upload_err_msg:=' Unable to get the results from the valid test result '
+                   ||pl_result_code|| ' for unit '||v_unit_id||sqlerrm;
+        raise upload_exception;
+     End If;
+
+       if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+         dbms_output.put_line('UTR:p_result_count='||to_char(p_result_count));
+       end if; -- Added by Kishore on 07/01/2015
+
+       -------insert into UTRS table --------
+       If pl_auto_sch_flag = 'Y' then
+
+        Begin
+            t_coll_date := null;
+            select max(coll_date) into t_coll_date
+	    from units where unit_id =v_unit_id
+            and  not exists
+		   (select 'x' from utrs
+                    where unit_id = units.unit_id
+                    and coll_date = units.coll_date
+	            And test_id = pl_test_id
+	            and cancel_flag is null);
+
+	    If t_coll_date is not null then
+              Begin
+	        t_max_test_seq_no := 0;
+	        begin
+	             select nvl(max(nvl(test_seq_no,0)),0)
+		      into t_max_test_seq_no
+		      from utrs where unit_id = v_unit_id
+                      and coll_date = t_coll_date
+    		      and test_id = pl_test_id;
+                      if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+ 	                dbms_output.put_line('M1='||to_char(t_max_test_seq_no));
+                      end if; -- Added by Kishore on 07/01/2015
+	      exception
+		    when others then
+	   	        t_max_test_seq_no :=0;
+										                end;
+												 begin
+                      insert into utrs
+			   (unit_id, coll_date, chapter_id,
+		            test_id, test_seq_no, program_id, insert_dats,
+		            insert_user_id, test_mode,
+			    test_chapter_id, tb_id)
+			values
+			     (v_unit_id, t_coll_date, v_chapter_id,
+			      pl_test_id, t_max_test_seq_no +1,
+			      'APIIFAC', sysdate,
+                              decode (substr(user,1,4),'OPS$',substr(user,5),
+                                      user),
+			      'M', v_chapter_id, null);
+                 exception
+	           when others then
+		   add_log_entry('unit='||v_unit_id);
+		   add_log_entry('coll='||to_char(t_coll_date,
+						  'mm-dd-yyyy hh24:mi'));
+                   add_log_entry(v_chapter_id);
+		   add_log_entry(v_test_id);
+		   add_log_entry(to_char(t_max_test_seq_no+1));
+		   add_log_entry(v_chapter_id);
+		   add_log_entry(sqlerrm);
+		   add_log_entry('Error in inserting into utrs....Aborting');
+	           rollback_and_exit;
+	  	end;
+	      End;
+	      end if;
+	  Exception
+	     when others then
+		  t_coll_date := null;
+         End;
+      end if;
+
+     --------------------------------------
+       if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+         dbms_output.put_line('UTR:Before calling the library routine');
+       end if; -- Added by Kishore on 07/01/2015
+       function_result := sbclib.load_holding_tests
+				(v_unit_id,
+				pl_test_id,
+				pl_well_number,
+				nvl(pl_abs_value,'NA'),
+				pl_ratio,
+				pl_result_code,
+				pl_tb_id,
+				v_machine_id,
+				null,
+				null,
+				'APIIFAC',
+                                pl_result_date,
+                                v_chapter_id); -- Uncommented "v_chapter_id" by Kishore on 07/01/2015
+		--upload_count:=upload_count+1;
+
+           if rtrim(function_result)!='0' then
+               upload_err_msg:='2. Error in load_holding_tests:'||v_unit_id;
+               add_log_entry('Error in load_holding_tests for unit'||v_unit_id);
+               add_log_entry(function_result);
+               raise upload_exception;
+           else
+             null;
+           end if;
+Exception
+    when upload_exception then
+        null;
+        pl_error_status:=upload_err_msg;
+END upload_test_results;
+
+
+Procedure update_api_inst_upload is
+Begin
+ insert into API_INST_UPLOAD_STATUS (MACHINE_ID,CHAPTER_ID, FILE_ID,
+                                     LT_TB_ID, UPLOAD_STATUS,TOT_REC_PROCESSED,
+                                     TOT_REC_LOADED, TOT_REC_REJECTED,
+                                     LOG_FILE_NAME, PROCESS_DATE, AUDIT_KEY)
+                     VALUES(v_machine_id,v_chapter_id,result_file_name,
+                            v_tb_id,upload_flag,no_of_units,
+                            upload_count,no_of_units - upload_count,
+                            logfilename, p_chp_sys_date,audit_seq.nextval);
+Exception when others then
+   add_log_entry('Unable to insert to API_INST_UPLOAD_STATUS:'||sqlerrm);
+End update_api_inst_upload;
+
+Procedure archive_processed_data is
+Begin
+  insert into API_INST_TEST_RESULTS_ARC select * from
+  API_INST_TEST_RESULTS where file_id=result_file_name and
+  machine_id=v_machine_id;
+
+  delete from API_INST_TEST_RESULTS
+  where file_id=result_file_name and
+  machine_id=v_machine_id;
+   null;
+Exception when others then
+ add_log_entry('Archive='||sqlerrm);
+End archive_processed_data;
+
+Procedure init_variables is
+ l_inst_id    varchar2(10);
+ chapCount    number:=0;
+Begin
+
+  upload_count:=0;
+  no_of_units:=0;
+  chapCount:=0;
+  upload_flag:=null;
+  first_unit:=TRUE;
+  testing_lab_code :=null;
+
+  --- Verify the chapter ID
+
+     select nvl(count(*),0) into chapCount from chapters where
+     chapter_id=v_chapter_id and sysdate between eff_date and
+     nvl(term_date,sysdate+1);
+
+   If chapCount = 0 then
+      add_log_entry('Invalid Chapter ID.... Aborting');
+      rollback_and_exit;
+  Else
+    begin
+       SELECT testing_lab_code into testing_lab_code
+       from system_users where user_id = user and sysdate between eff_date and
+       nvl(term_date,sysdate);
+    exception when no_data_found then
+       testing_lab_code:='99';
+       --v_chapter_id:='WAD';
+    end;
+
+    begin
+        select nvl(codabar_unit_scheme,'*') into  codabar_unit_scheme
+        from institutions where sysdate between eff_date and
+        nvl(term_date,sysdate);
+    exception when no_data_found then
+      add_log_entry('No institution data available .... Aborting');
+      rollback_and_exit;
+    end;
+
+    begin
+       select code into l_inst_id from master_codes where
+       code_type='INSTR' and code=v_machine_id and
+       p_chp_sys_date between eff_date and nvl(term_date,sysdate+100) and
+       rownum=1;
+    exception
+	when no_data_found then
+	   add_log_entry('Machine code not defined in the Master codes');
+	   rollback_and_exit;
+    end;
+ End If;
+
+End init_variables;
+
+Procedure update_batch_information is
+function_result varchar2(100);
+temp_x varchar2(1);
+Begin
+     select distinct 'x'  into temp_x
+		  from test_batch_hdr
+		  where tb_id = v_tb_id
+		  and test_chapter_id = v_chapter_id
+		  and nvl(group_test_id,' ') = nvl(v_test_id,' ');
+	add_log_entry('Duplicate batch '||v_tb_id||' ... Aborting');
+	rollback_and_exit;
+Exception when no_data_found then
+   Begin
+       select 'x'  into temp_x from dual
+		where exists (select 'x' from utrs
+			      where tb_id = v_tb_id
+			      and test_id = v_test_id
+			      and test_chapter_id = v_chapter_id)  or
+		      exists (select 'x' from unit_test_base
+			      where tb_id = v_tb_id
+			      and test_id = v_test_id
+			      and test_chapter_id = v_chapter_id)  or
+		      exists (select 'x' from holding_tests
+			      where tb_id = v_tb_id
+			      and test_id = v_test_id
+			      and test_chapter_id = v_chapter_id)  or
+		      exists (select 'x' from test_voids
+			      where tb_id = v_tb_id
+			      and test_id = v_test_id
+			      and test_chapter_id = v_chapter_id);
+         add_log_entry('Duplicate batch '||v_tb_id||' ...Aborting');
+         rollback_and_exit;
+   Exception when no_Data_found then
+         begin
+
+             insert into test_batch_hdr( tb_id, test_chapter_id, group_test_id,
+  	                                 first_unit_id, insert_dats, user_id)
+             values (v_tb_id, v_chapter_id, v_test_id, v_unit_id, sysdate,
+		     decode(substr(user,1,3),'OPS',substr(user,5), user));
+	 exception when others then
+            add_log_entry('Problem inserting into test_batch_hdr... Aborting'||
+                           'Reason='||sqlerrm);
+	     rollback_and_exit;
+         end;
+    End;
+
+End update_batch_information;
+
+
+Procedure insert_test_batch_det (p_tb_id in varchar2,
+                                 p_test_id in varchar2,
+                                 p_cut_off in varchar2,
+                                 p_kit_lot in varchar2) is
+ function_result  varchar2(100);
+ nCount  NUMBER:=0;
+Begin
+
+  select nvl(count(*),0) into nCount from test_batch_det where
+  tb_id=p_tb_id and test_id=p_test_id and test_type='A';
+
+  If nCount = 0 then
+
+	 begin
+             insert into test_batch_det(tb_id, test_chapter_id,
+	     testing_lab_code, test_id, test_type, cut_off_value, station_no,
+	     kit_lot_number)
+	     values (p_tb_id, v_chapter_id, testing_lab_code, p_test_id, 'A',
+	  	     p_cut_off, null, p_kit_lot);
+       exception when others then
+            add_log_entry('Problem inserting into test_batch_det..'||
+                        sqlerrm||'  Aborting');
+            rollback_and_exit;
+       end;
+
+       begin
+            function_result := sbclib.insert_test_parms (v_chapter_id,
+                            p_test_id, p_tb_id, v_machine_id, 'APIIFACE');
+       end;
+
+        if rtrim(function_result)!='0' then
+        add_log_entry('Error inserting test parameters ... Aborting '||
+        sqlerrm);
+
+	add_log_entry(function_result);
+	rollback_and_exit;
+        end if;
+  Else
+    null;
+  End If;
+
+
+   /*
+     If nvl(upload_flag,'X')='A' then
+        return;
+     End If;
+  */
+
+   -- insert_instrument_log;
+End insert_test_batch_det;
+
+Procedure insert_instrument_log (pl_test_id in varchar2) is
+temp_x varchar2(1);
+Begin
+ begin
+    select 'x' into temp_x from instrument_log where
+    file_name=substr(result_file_name,instr(result_file_name,'/',-1)+1);
+    add_log_entry('File '||substr(result_file_name,
+    instr(result_file_name,'/',-1)+1)||' already uploaded ..Aborting');
+    rollback_and_exit;
+ exception
+    when no_data_found then
+       null;
+    when too_many_rows then
+     begin
+        add_log_entry('File '||substr(result_file_name,
+	instr(result_file_name,'/',-1)+1)||' already uploaded ..Aborting');
+        rollback_and_exit;
+     end;
+    when others then
+     begin
+        add_log_entry('Error verifying instrument_log ...Aborting');
+        rollback_and_exit;
+     end;
+ end;
+
+ begin
+    insert into instrument_log ( tb_id, test_chapter_id, test_id, read_dats,
+		           machine_id, station_no, xmt_status, status_dats,
+			   file_name)
+    values (v_tb_id, v_chapter_id,pl_test_id,
+	    to_date(process_date_time,'MM-DD-YYYY HH24:MI') ,v_machine_id,
+	    ' ', '70', sysdate, substr(result_file_name,
+	    instr(result_file_name,'/',-1)+1));
+  exception when others then
+      add_log_entry('Error creating instrument log ... Aborting');
+      add_log_entry(sqlerrm);
+      rollback_and_exit;
+  end;
+End insert_instrument_log;
+
+procedure convert_unit_id(ok_status out varchar2) is
+Begin
+    select eye_read_trns||substr(v_unit_id,3) into
+    v_unit_id from bar_code_prefixes where
+    machine_code=substr(v_unit_id,1,2) and sysdate between
+    eff_date and nvl(term_date,sysdate);
+    ok_status:='OK';
+Exception
+    when others then
+    ok_status:='bar code translation'||sqlerrm;
+End convert_unit_id;
+
+procedure rollback_and_exit is
+end_time  varchar2(30);
+nRptCount  number:=0;
+
+Begin
+rollback;
+add_log_entry('Aborting');
+--UTL_FILE.fclose(logfile);
+upload_count:=0;
+no_of_units:=0;
+upload_flag:='A';
+if t_is_debug_msg_displayed then -- Added by Kishore on 07/01/2015
+  dbms_output.put_line('Rollback and Exit');
+end if; -- Added by Kishore on 07/01/2015
+
+--update_api_inst_upload;
+
+
+
+   select nvl(count(*),0) into nRptCount from rpt_parm where
+   nvl(parm_id,' ')=v_tb_id and report_name='APIIFACE';
+
+   If nRptCount = 0 then
+
+      insert into rpt_parm (appl_id, user_name, report_name, parm_id,
+                        parm_date, submit_date,report_status,output_file)
+       values ('SBC', decode(substr(user,1,4),'OPS$',substr(user,5),user),
+                'APIIFACE', nvl(v_tb_id,substr(result_file_name,1,14)),
+               sysdate, sysdate, 'C',logfilename);
+  End if;
+
+delete from api_locked_file where machine_id=v_machine_id;
+commit;
+return;
+
+--raise_application_error('-20000','Aborting');
+End rollback_and_exit;
+
+procedure update_rpt_parm is
+ nRptCount  NUMBER:=0;
+Begin
+
+begin
+update test_batch_hdr set last_unit_id=last_unit where tb_id=v_tb_id;
+exception
+   when others  then
+	add_log_entry('Error updating test_batch_hdr');
+end;
+
+begin
+
+    select nvl(count(*),0) into nRptCount from rpt_parm where
+    nvl(parm_id,' ')=v_tb_id and report_name='APIIFACE';
+
+    If nRptCount = 0 then
+
+       insert into rpt_parm (appl_id, user_name, report_name, parm_id,
+   			 parm_date, submit_date,report_status,output_file)
+  	values ('SBC', decode(substr(user,1,4),'OPS$',substr(user,5),user),
+                 'APIIFACE', nvl(v_tb_id,substr(result_file_name,1,14)),
+               	sysdate, sysdate, 'C',logfilename);
+    Else
+     null;
+    End If;
+
+    exception
+	when others then
+	add_log_entry('Error inserting into rpt_parm');
+	add_log_entry(sqlerrm);
+end;
+End update_rpt_parm;
+
+END LT_API_INST_INTERFACE;
+/
+

@@ -1,0 +1,196 @@
+<div class="layout-wrapper">
+  <main class="release-group-interdiction">
+
+    <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+    <!-- Query Panel -->
+    <div class="query-panel" [class.query-panel--active]="hasSearched()">
+      <div class="query-row">
+
+        <!-- Mode -->
+        <mat-form-field appearance="fill" class="query-field query-field--mode" subscriptSizing="dynamic">
+          <mat-label>Mode</mat-label>
+          <mat-select [formControl]="searchModeControl" aria-required="true">
+            @for (opt of searchModeOptions; track opt.value) {
+              <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+            }
+          </mat-select>
+          <mat-error>Please select a mode to search.</mat-error>
+        </mat-form-field>
+
+        <!-- Value field — only shown after mode is selected -->
+        @if (searchModeControl.value) {
+
+          <!-- Drive / Batch / Coll Date / Lot / TB ID — text input + autocomplete suggestions -->
+          @if (searchMode() !== 'ITBID') {
+            <mat-form-field appearance="fill" class="query-field query-field--value" subscriptSizing="dynamic">
+              <mat-label>
+                @if (searchMode() === 'DRIVE') { Drive ID }
+                @else if (searchMode() === 'BATCH') { Batch ID }
+                @else if (searchMode() === 'COLL_DATE') { Collection Date }
+                @else if (searchMode() === 'LOT') { Lot Number }
+                @else if (searchMode() === 'TB_ID') { TB ID }
+              </mat-label>
+              <input
+                matInput
+                [formControl]="searchValueControl"
+                [matAutocomplete]="valueAuto"
+                [maxlength]="searchValueMaxLength()"
+                [disabled]="isLoadingDropdown()"
+                autocomplete="off"
+                (keydown.enter)="onSearch()" />
+              <mat-autocomplete
+                #valueAuto="matAutocomplete"
+                (optionSelected)="onAutocompleteSelected($event.option.value)">
+                @if (searchMode() === 'DRIVE') {
+                  @for (d of driveOptions(); track d.driveId) {
+                    <mat-option [value]="d.driveId">{{ d.driveId }}</mat-option>
+                  }
+                }
+                @if (searchMode() === 'BATCH') {
+                  @for (b of batchOptions(); track b.batchId) {
+                    <mat-option [value]="b.batchId">{{ b.batchId }}</mat-option>
+                  }
+                }
+                @if (searchMode() === 'COLL_DATE') {
+                  @for (c of collectionDateOptions(); track c.collDate) {
+                    <mat-option [value]="c.collDate">{{ formatDate(c.collDate) }}</mat-option>
+                  }
+                }
+                @if (searchMode() === 'LOT') {
+                  @for (l of lotNumberOptions(); track l.lotNumber) {
+                    <mat-option [value]="l.lotNumber">{{ l.lotNumber }}</mat-option>
+                  }
+                }
+                @if (searchMode() === 'TB_ID') {
+                  @for (t of tbIdOptions(); track t.tbId) {
+                    <mat-option [value]="t.tbId">{{ t.tbId }}</mat-option>
+                  }
+                }
+              </mat-autocomplete>
+              @if (isLoadingDropdown()) {
+                <span matSuffix role="status" aria-live="polite" class="cdk-visually-hidden">
+                  Loading options, please wait.
+                </span>
+                <mat-spinner diameter="18" matSuffix aria-hidden="true"></mat-spinner>
+              }
+              <mat-error>This field is required. Please enter a value.</mat-error>
+            </mat-form-field>
+          }
+
+          <!-- Instrument TB ID — free text only, no autocomplete -->
+          @if (searchMode() === 'ITBID') {
+            <mat-form-field appearance="fill" class="query-field query-field--value" subscriptSizing="dynamic">
+              <mat-label>Instrument TB ID</mat-label>
+              <input
+                matInput
+                [formControl]="searchValueControl"
+                [maxlength]="searchValueMaxLength()"
+                autocomplete="off"
+                (keydown.enter)="onSearch()" />
+              <mat-error>Instrument TB ID is required.</mat-error>
+            </mat-form-field>
+          }
+
+          <!-- Search button: explicit submit affordance (SER-03) -->
+          <button
+            mat-stroked-button
+            class="search-btn"
+            (click)="onSearch()"
+            [disabled]="!searchValueControl.value?.trim()"
+            aria-label="Search interdictions">
+            SEARCH
+          </button>
+
+        }
+
+      </div>
+    </div>
+
+    <!-- Accessible status region: announces search results to screen readers (MOD-04) -->
+    <div role="status" aria-live="polite" aria-atomic="true" class="cdk-visually-hidden">
+      {{ hasSearched() && !isLoading()
+          ? (filteredInterdictions().length > 0
+              ? filteredInterdictions().length + ' interdiction(s) found.'
+              : 'No interdictions found.')
+          : '' }}
+    </div>
+
+    <!-- Results Section -->
+    <div class="results-section">
+
+      @if (isLoading()) {
+        <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+          <mat-spinner diameter="40" aria-hidden="true"></mat-spinner>
+          <span class="loading-text">Loading interdictions...</span>
+        </div>
+      } @else if (interdictions().length > 0) {
+
+        <!-- Toolbar: View Units + Search -->
+        <div class="results-toolbar">
+          <button
+            mat-stroked-button
+            class="view-units-btn"
+            (click)="onViewUnits()">
+            VIEW UNITS
+          </button>
+          <app-search-bar
+            [config]="searchConfig"
+            (search)="onFilterSearch($event)" />
+        </div>
+
+        <!-- Data Table -->
+        <div class="table-container">
+          <app-data-table
+            [config]="tableConfig"
+            [data]="filteredInterdictions()"
+            (selectionChange)="onSelectionChange($event)"
+            [attr.aria-label]="'Interdictions results'">
+          </app-data-table>
+        </div>
+
+      } @else if (hasSearched()) {
+        <div class="empty-state empty-state--centered">
+          <mat-icon aria-hidden="true">search_off</mat-icon>
+          <p class="empty-title">No Results Found</p>
+          <p class="empty-hint">No interdictions found for the specified criteria.</p>
+        </div>
+      } @else {
+        <div class="empty-state empty-state--centered">
+          <mat-icon aria-hidden="true">search</mat-icon>
+          <p class="empty-title">No Results to Display</p>
+          <p class="empty-hint">Enter Mode to begin.</p>
+        </div>
+      }
+
+    </div>
+
+    <!-- Footer Actions -->
+    @if (interdictions().length > 0) {
+      <div class="footer-actions">
+        <button
+          mat-button
+          class="clear-all-btn"
+          (click)="clearAll()">
+          CLEAR ALL
+        </button>
+        <button
+          mat-raised-button
+          color="primary"
+          class="release-btn"
+          [attr.aria-disabled]="!canRelease() || null"
+          [attr.aria-busy]="isReleasing() || null"
+          [disabled]="!canRelease()"
+          (click)="onRelease()">
+          @if (isReleasing()) {
+            <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+            <span>RELEASING...</span>
+          } @else {
+            <span>RELEASE</span>
+          }
+        </button>
+      </div>
+    }
+
+  </main>
+</div>

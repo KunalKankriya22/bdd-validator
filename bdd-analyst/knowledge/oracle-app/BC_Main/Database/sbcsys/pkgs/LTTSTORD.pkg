@@ -1,0 +1,492 @@
+/*-------------------------------------------------------------------------
+PROCEDURE : LTTSTORD
+PURPOSE   : Create an Interface file to order tests to Cerner from Lab 
+PARAMETERS: None
+DEVELOPER : Sobha
+DEV. DATE : April 2004
+NOTES     : 02 -- LT2018 -- donor_valid_interdictions to valid_interdictions table
+-----------------------------------------------------------------------*/
+CREATE OR REPLACE PACKAGE LTTSTORD as
+   PROCEDURE LTTSTORD(rundate date);
+   FUNCTION check_db RETURN BOOLEAN;
+   PROCEDURE SET_PARAMETERS(ttype varchar2,temp_unit_id  varchar2);
+   senda             varchar2(1) := 'Y';       
+   tstord            varchar2(1) := 'Y';       
+   Nodonor           varchar2(1) := 'Y';       
+   Msg_seg           varchar2(1) := 'Y';       
+   Nobar             varchar2(1) := 'Y';       
+   err_text                varchar2(50);
+End LTTSTORD;
+/
+CREATE OR REPLACE PACKAGE BODY LTTSTORD AS
+ PROCEDURE LTTSTORD(rundate date) is
+ /* MAIN CURSOR TO GET UNITS FROM UTRS WHERE RESULT IS NULL
+    FOR THE TEST ID PASSED AND SHOULD NOT PRESENT IN TEST ORDERS
+    TABLE(ALREADY ORDERED)*/
+    cursor comp(p_test_id varchar2) is
+       select u.unit_id unit_id, u.chapter_id chapter_id,
+        u.coll_date coll_date,u.chk_digit chk_digit,
+        test_id, test_seq_no
+        from  utrs c, units u
+       where  c.unit_id          = u.unit_id
+        and   c.coll_date        = u.coll_date
+        and   c.chapter_id       = u.chapter_id
+        and   cancel_flag is null
+        and   test_id = p_test_id
+        and   result_status_1 is null
+        and   not exists (SELECT 'x' FROM test_orders
+	    		  WHERE unit_id = c.unit_id
+		           AND test_id = c.test_id
+		           AND test_seq_no = c.test_seq_no)
+    order by u.unit_id, test_seq_no;
+
+    cursor unit_test is select vit.machine_test_id machine_test_id,vit.test_id test_id, test_desc
+    from valid_instrument_tests vit, valid_tests vt
+    where machine_id = 'HL7'
+    and vit.test_id = vt.test_id
+    and sysdate between vit.eff_date and nvl(vit.term_date, sysdate+1)
+    and sysdate between vt.eff_date and nvl(vt.term_date, sysdate+1)
+    and exists(select 'x' from contract_tests
+    where test_id = vt.test_id
+    and contract_id = 'INTERNAL'
+    and sysdate between eff_date and nvl(term_date, sysdate+1));
+
+   c_rec                   comp%rowtype;
+   test_rec                unit_test%rowtype;
+   v_transaction_id        varchar2(10);
+   v_donor_id              varchar2(10);
+   x                       varchar2(1);
+   v_x                     varchar2(1);
+   row_count               number(3):= 0;
+   v_send                  number :=0;
+   donordb_active          boolean;
+   temp_coll_date          date;
+   log_file                utl_file.file_type;                    
+   p_type                  varchar2(20); 
+   extract_file            utl_file.file_type;                    
+   temp_unit_scheme        varchar2(1);
+   chkin_log               varchar2(30) 
+       := 'LTTSTORD_ERR_'||to_char(rundate,'MMDDYYHH24MISS')||'.log';
+   log_loc                 varchar2(50);
+   succ_log                utl_file.file_type;
+   succ_chkn               varchar2(30) 
+       := 'LTTSTORD_SUC_'||to_char(rundate,'MMDDYYHH24MISS')||'.log';
+   ext_file varchar2(30) := 'LTTSTORD_'||to_char(rundate,'MMDDYYHH24MISS')||'.dat';
+   import_flag             varchar2(1);
+   Error                   exception;
+   Error_senda             exception;       
+   Error_sendf             exception;       
+   Error_recva             exception;       
+   Error_recvf             exception;       
+   Error_servf             exception;       
+   Error_tstord            exception;
+   Error_Msg               exception;
+   Error_Nodon             exception;
+   Error_Nobar             exception;
+   Nodon                   exception;
+   Coll_err                exception;
+   err_event               number;
+   succ_row                number := 0;
+   err_row                 number := 0;
+   ctr                     number := 0;
+   PID_Segment             varchar2(1023);
+   OBR_Segment             varchar2(1023);
+   ORC_Segment             varchar2(1023);
+   UNT_Segment             varchar2(1023);
+   MSH_Segment             varchar2(500);
+   EVN_Segment             varchar2(100);
+   PV1_Segment             varchar2(100);
+   HL7_Segment             varchar2(5000);  
+   unit_type               varchar2(1);
+   send_appl               varchar2(50);
+   send_fac                varchar2(50);
+   recvd_appl              varchar2(50);
+   recvd_fac               varchar2(50);
+   serv_fac                varchar2(50);
+   v_donation_type         varchar2(10);
+   temp_numeric            varchar2(1);
+   v_unit_id               varchar2(15);
+begin
+     dbms_output.enable(500000);
+   begin 
+     select code_desc into log_loc
+       from vserv_master
+      where code_type = 'MISC'
+       and code = 'LOGDR'
+       and sysdate between eff_date and nvl(term_date,sysdate);
+   exception
+      when no_data_found then
+         dbms_output.put_line('Log Dir not maintained');
+         return;
+      when others then
+         dbms_output.put_line('Error in fetching Log Dir :'|| sqlerrm);
+         return;
+   end;
+   begin
+     select codabar_unit_scheme,nvl(alpha_numeric,'N')
+      into temp_unit_scheme,temp_numeric
+     from institutions
+     where sysdate between eff_date and nvl(term_date, sysdate+1);
+   exception
+    when others then
+       dbms_output.put_line('No institution data available');
+       return;
+   end;
+   begin  
+   /* Check whether Donor Database is up */
+   donordb_active := check_db;
+   if donordb_active then
+     begin
+     open unit_test;
+       if utl_file.is_open(log_file) then
+          utl_file.fclose(log_file);
+       end if;
+       log_file := utl_file.fopen(log_loc,chkin_log,'w');
+       succ_log := utl_file.fopen(log_loc,succ_chkn,'w');
+       extract_file := utl_file.fopen(log_loc,ext_file,'w');
+       utl_file.put_line(log_file,'Errors in LT-Interface - dated '||
+                     to_char(sysdate,'MM-DD-YY HH24:MI'));
+       utl_file.put_line(log_file,'(These units are have not ordered)');
+       utl_file.put_line(log_file,'--------------------------------------------------------------------------------');
+       utl_file.put_line(log_file,' #     Unit Id         Test ID  Error');
+       utl_file.put_line(log_file,'--------------------------------------------------------------------------------');
+       utl_file.put_line(succ_log,'Successful Interface file extraction from LT/Lab - dated '||
+                     to_char(sysdate,'MM-DD-YY HH24:MI'));
+       utl_file.put_line(succ_log,'(These units have been extracted into the interface file )');
+       utl_file.put_line(succ_log,'----------------------------------------------------');
+       utl_file.put_line(succ_log,' #     Unit Id         Test ID                 ');
+       utl_file.put_line(succ_log,'----------------------------------------------------');
+     loop
+       fetch unit_test into test_rec;
+       dbms_output.put_line('Test ID-'||test_rec.test_id);
+       exit when unit_test%notfound;
+       open  comp(test_rec.test_id);
+      begin
+        loop
+        begin
+	  OBR_segment:=null;
+	  HL7_Segment:=null;
+          fetch  comp into c_rec;
+          exit when comp%notfound;
+          -- CREATE INTERFACE DATA
+          begin
+           dbms_output.put_line('Before Creating the output file');
+           temp_coll_date := null;  
+           select max(coll_date) 
+            into  temp_coll_date
+           from donations
+          where unit_id = c_rec.unit_id;
+          if temp_coll_date is not null then
+             if trunc(temp_coll_date) != trunc(c_rec.coll_date)
+             then
+               raise Coll_err;
+             else
+             begin
+	      begin
+	        select code_desc
+	          into send_appl
+	         from master_codes
+                 where code_type = 'SENDA'
+	          and sysdate between eff_date and nvl(term_date, sysdate+1);
+                  senda := 'Y';
+              exception
+	           when others then
+                   set_parameters('SENDA',c_rec.unit_id);
+                    raise Error_senda;
+              end;
+	      begin
+	      select code_desc
+	       into send_fac
+	       from master_codes
+               where code_type = 'SENDF'
+	       and sysdate between eff_date and nvl(term_date, sysdate+1);
+               senda := 'Y';
+              exception
+	           when others then
+                    set_parameters('SENDF',c_rec.unit_id);
+                     raise Error_sendf;
+              end;
+	      begin
+	         select code_desc
+	         into recvd_appl
+	         from master_codes
+                 where code_type = 'RECDA'
+	          and sysdate between eff_date and nvl(term_date, sysdate+1);
+                senda := 'Y';
+              exception
+	           when others then
+                     set_parameters('RECDA',c_rec.unit_id);
+                     raise Error_recva;
+              end;
+	      begin
+	         select code_desc
+	         into recvd_fac
+	         from master_codes
+                 where code_type = 'RECDF'
+	          and sysdate between eff_date and nvl(term_date, sysdate+1);
+                  senda := 'Y';
+              exception
+	           when others then
+                     set_parameters('RECDF',c_rec.unit_id);
+                     raise Error_recvf;
+              end;
+	      begin
+	         select code_desc
+	         into serv_fac
+	         from master_codes
+                 where code_type = 'SERVF'
+	          and sysdate between eff_date and nvl(term_date, sysdate+1);
+                  senda := 'Y';
+              exception
+	           when others then
+                    set_parameters('SERVF',c_rec.unit_id);
+                     raise  Error_servf;
+              end;
+              begin
+	      select 'MSH|^~\&|'||send_appl||'|'||send_fac||'|'||recvd_appl||'|'||recvd_fac||'|'||to_char(sysdate,'YYYYMMDDHH24MI')||'||ORM^O01|L'||to_char(hl7_msg_seq.nextval)||to_char(sysdate,'YYYYMMDDHH24MISS')||'|P|2.3|||||||'
+	       into MSH_Segment from dual;
+              exception 
+	        when others then
+                 set_parameters('MSG_SEG',c_rec.unit_id);
+	         raise Error_Msg;
+              end;
+              MSH_Segment := MSH_Segment||chr(13);
+	      /*
+              utl_file.put_line(extract_file,chr(11));
+              utl_file.put_line(extract_file,MSH_Segment);
+	      */
+	     /* Get donation information from Donations table */
+              begin
+              select transaction_id, donor_id, donation_type
+              into v_transaction_id, v_donor_id, v_donation_type
+              from Donations
+              where unit_id = c_rec.unit_id
+              and coll_date = c_rec.coll_date;
+              exception
+               when others then
+                 set_parameters('NODON',c_rec.unit_id);
+                raise Error_Nodon;
+              end;
+              row_count := row_count + 1;
+              if temp_unit_scheme = 'A' then
+              if  temp_numeric = 'N' then
+              begin
+               select machine_code||substr(c_rec.unit_id,3)
+                into  v_unit_id
+               from bar_code_prefixes
+              where eye_read_trns = substr(c_rec.unit_id,1,2)
+               and  sysdate between eff_date and nvl(term_date, sysdate+1);  
+              exception
+                when others then
+                 set_parameters('NOBAR',c_rec.unit_id);
+                 raise Error_Nobar;
+              end;
+              else
+                 v_unit_id := c_rec.unit_id;
+              end if;
+              else
+                 v_unit_id := c_rec.unit_id;
+             end if;  
+              ORC_Segment := 'ORC|NW|'||v_unit_id||'|||||||'||to_char(sysdate,'YYYYMMDDHH24MI')||'||||||||||';
+              ORC_segment := ORC_segment||chr(13);
+	      OBR_Segment := 'OBR|0001|'||v_unit_id||'||';
+	      OBR_Segment := OBR_Segment||test_rec.machine_test_id||'^'||test_rec.test_desc||'||'||to_char(sysdate,'YYYYMMDDHH24MI')||'|||||||||||||||||||||||||||||||||||||';
+              OBR_segment := OBR_segment||chr(13);
+	      PID_Segment := 'PID|0001|'||v_donor_id||'|||DONOR^'||v_donor_id||'|||||||||||||'||v_transaction_id||'||||||||||||';
+              PID_Segment := PID_Segment||chr(13);
+	      PV1_Segment := 'PV1|0001|||||||||||||||||'||v_donation_type||'|||||||||||||||||||||'||serv_fac||'|||||'||to_char(sysdate,'YYYYMMDDHH24MISS')||'|||||||||';
+              PV1_Segment := PV1_Segment||chr(13);
+	      /*
+              utl_file.put_line(extract_file,chr(11));
+              utl_file.put_line(extract_file,MSH_Segment);
+	      utl_file.put_line(extract_file,PID_Segment);
+	      utl_file.put_line(extract_file,PV1_Segment);
+	      utl_file.put_line(extract_file,ORC_Segment);
+	      utl_file.put_line(extract_file,OBR_Segment);
+              utl_file.put_line(extract_file,chr(28)||chr(13)); 
+	      */
+	      HL7_Segment := chr(11)||MSH_Segment||PID_Segment||PV1_Segment||ORC_Segment||OBR_Segment||chr(28)||chr(13);
+	      utl_file.put_line(extract_file, HL7_Segment);
+              dbms_output.put_line('After Writing file');       
+              begin
+	       insert into test_orders
+	       values(c_rec.unit_id,c_rec.test_id, c_rec.test_seq_no);
+              exception
+               when OTHERS then
+                 set_parameters('TSTORD',c_rec.unit_id);
+                raise Error_tstord;
+              end;
+              succ_row := succ_row + 1;
+              if c_rec.chk_digit is not null then
+                utl_file.putf(succ_log,'\n'||lpad(succ_row,4)||
+                           ' | '||rpad(c_rec.unit_id||'-'||
+                           c_rec.chk_digit,15)||' | '||
+                           c_rec.test_id||'-'||c_rec.test_seq_no 
+                           ||' |' );
+              else
+                utl_file.putf(succ_log,'\n'||lpad(succ_row,4)||
+                           ' | '||rpad(c_rec.unit_id,15)||' | '||
+                           c_rec.test_id||'-'||c_rec.test_seq_no 
+                           ||' |');
+               end if;
+               if row_count = 100 then
+                commit; 
+                row_count := 0;
+               end if;
+             exception
+               when Error_recva then
+                if senda='N' then
+                raise Error; 
+                end if;
+              when Error_recvf then
+                if senda='N' then
+                raise Error; 
+                end if;
+              when Error_sendf then 
+                if senda='N' then
+                raise Error; 
+                end if;
+              when Error_servf then 
+                if senda='N' then
+                raise Error; 
+                end if;
+              when Error_senda then
+                if senda='N' then
+                raise Error; 
+                end if;
+              when Error_tstord then
+                if tstord='N' then
+                raise Error; 
+                end if;
+              when Error_Msg then
+                if Msg_seg='N' then
+                raise Error; 
+                end if;
+              when Error_Nodon then
+                if Nodonor='N' then
+                raise Error; 
+                end if;
+              when Error_Nobar then
+                if Nobar = 'N' then
+                  raise Error;
+                end if;
+             end;
+             end if;
+         else
+             raise Nodon;
+         end if; 
+         exception 
+          when Nodon then
+	   err_text := 'No Donor Data is available for '||c_rec.unit_id;
+           raise Error; 
+          when Coll_err then
+	   err_text := 'Coll Date mismatch in Lab and Donor '||c_rec.unit_id;
+           raise Error; 
+          when others then
+           /*if (senda = 'N' or sendf='N' or recva = 'N' or recvf = 'N' or Msg_seg = 'N' or Nodonor = 'N' or tstord = 'N') then*/
+           if senda = 'N' then
+             raise Error; 
+           else
+	    err_text := 'Donor Data not available for '||c_rec.unit_id;
+           end if;
+            raise Error; 
+         end;
+        exception
+	  when no_data_found then
+	     err_text := 'Invalid Test ID';
+	     raise Error;
+          when utl_file.invalid_filehandle then
+             dbms_output.put_line('Invalid Filehandle');
+          when utl_file.invalid_path then
+             dbms_output.put_line('Invalid Path');
+          when utl_file.invalid_mode then
+             dbms_output.put_line('Invalid Mode');
+          when utl_file.invalid_operation then
+             dbms_output.put_line('Invalid Operation');
+          when Error then
+             err_row := err_row + 1;
+             if c_rec.chk_digit is not null then
+                utl_file.putf(log_file,'\n'||lpad(err_row,4)||' | '||
+                            rpad(c_rec.unit_id||'-'||c_rec.chk_digit,15)||' | '||
+                            rpad(c_rec.test_id,10)||'-'||c_rec.test_seq_no||
+                            '| '||'| '||err_text);
+             else
+	            utl_file.putf(log_file,'\n'||lpad(err_row,4)||' | '||
+                             rpad(c_rec.unit_id,15)||' | '||
+                             rpad(c_rec.test_id,10)||'-'||c_rec.test_seq_no||
+                             '| '||'| '||err_text);
+             end if;
+        end;
+dbms_output.put_line('Unit');
+        end loop;
+        close comp;
+       end;
+            utl_file.fflush(extract_file);
+     end loop;
+     close unit_test;
+     utl_file.new_line(log_file);
+     utl_file.put_line(log_file,'--------------------------------------------------------------------------------');
+     utl_file.put_line(log_file,'End of Check in '||to_char(sysdate,'MM-DD-YY HH24:MI'));
+     utl_file.new_line(succ_log);
+     utl_file.put_line(succ_log,'----------------------------------------------------');
+     utl_file.put_line(succ_log,'End of Check in '||to_char(sysdate,'MM-DD-YY HH24:MI'));
+     utl_file.fclose(extract_file);
+     utl_file.fclose(log_file);
+     utl_file.fclose(succ_log);
+     commit; 
+   end; 
+  else
+   dbms_output.put_line('Donor Database Not available'||sqlerrm);
+   return;
+ end if;
+ end;
+end LTTSTORD;
+PROCEDURE SET_PARAMETERS(ttype varchar2,temp_unit_id varchar2) IS
+begin
+   if ttype = 'MSG_SEG' then
+   senda := 'N';
+   err_text := 'Error creating MSH Segment';
+   elsif ttype = 'NODON' then
+   senda := 'N';
+   err_text := 'No Donor Data is available for '||temp_unit_id;
+   elsif ttype = 'NOBAR' then
+   senda := 'N';
+   err_text := 'No Bar Code data available '||temp_unit_id;
+   elsif ttype = 'TSTORD' then
+   senda := 'N';
+   err_text := 'Error inserting into Test Orders-'||sqlerrm;
+   else 
+   senda := 'N';
+   err_text := 'No definition for '||ttype||' for '||temp_unit_id;
+   end if;
+end;
+FUNCTION check_db RETURN BOOLEAN IS
+ping integer;
+cnt  integer;
+tmp boolean;
+v_temp varchar2(1);
+begin
+  ping := dbms_sql.open_cursor;
+  dbms_sql.parse(ping, 'select ''x'' from valid_interdictions where rownum<2', 2);
+  dbms_sql.define_column(ping,1,v_temp,1);
+  cnt := dbms_sql.execute_and_fetch(ping,tmp);
+  dbms_sql.close_cursor(ping);
+  if cnt = 1 then
+     return TRUE;
+  else
+     return FALSE;
+  end if;
+  RETURN NULL;
+  exception
+   when others then
+     if dbms_sql.is_open(ping) then
+        dbms_sql.close_cursor(ping);
+     end if;
+     return FALSE;
+end;
+end LTTSTORD;
+/
+grant all on LTTSTORD to public
+/
+create public synonym lttstord for lttstord
+/

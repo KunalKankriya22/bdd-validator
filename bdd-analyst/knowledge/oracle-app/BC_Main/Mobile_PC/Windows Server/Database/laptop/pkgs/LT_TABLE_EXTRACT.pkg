@@ -1,0 +1,1724 @@
+CREATE OR REPLACE PACKAGE "LT_TABLE_EXTRACT" 
+/*----------------------------------------------------------------------------   PACKAGE  : LT_TABLE_EXTRACT
+  PURPOSE    : Used to extract mobile PC data and generate text files or dat files based on encryption.
+  DEVELOPER  : --
+  DEV. DATE  : --
+  NOTES      : Initial version.
+  Ver        : 01
+  Modification History
+  -------------------------------------------------------------------------------
+  Modified by  |     on   |    Version   |  Remarks
+  -------------------------------------------------------------------------------
+  Ashok   |  05/02/2012   |   02   | 1) IM:8527 Modified procedure:  download_prc.  Increased variable size to 4000 from 1024.  Also, modified UTL_FILE.fopen call
+  to have max line size as 32767 instead of default 1024.
+  Ashok    |  05/13/2013    |   03    | 1) SCR 11942 (Donor_Pictures), WriteBlobToFile and Extract Pictures routines added.
+  Ashok    |  05/30/2013    |   04    | 1) SCR 11942 (Donor_Pictures), ENCRYPT_IMAGES routine added.
+  Ashok    |  06/13/2013    |   05    | 1) SCR 11942 - image file name modified to auditKey-tableName-colName.ext
+  Ashok    |  08/21/2013    |   05    | no need to create image for null column.
+  Ashok    |  12/19/2017    |   01    | new line character in comments/notes columns is interfering with extract process.(V06)
+  Ashok    |  09/23/2019    |   02    | MLT 2547 -- Allow one extract per mobile server - new column extract_status added to laptop_id_details  
+              09/23/2019    |   02    | MLT 2547 -- checked in same version added new routine set_extract_progress.
+ Ashok     |  09/23/2019    |   03    | MLT 2547 -- set_extract_progress routine modified to remove hardcoding of status.
+ Ashok     |  01/30/2020    |   04    | Encrypt file routines added.
+ Ashok     |  06/19/2020    |   05    | Use same date token in the extracted file names. Added date token to images.
+                                        Filenames for data files and images files made similar with token seperator as '-'
+ Ashok     |  07/20/2021    |   06    | Laptop_extracts hdr file generation added.   
+ Ashok     |  08/10/2021    |   07    | Issue where multiple drives data is present with the same coll date.
+ Ashok     |  02/08/2022    |   08    | Using FRENAME instead of FCOPY to move bdr files from reports directory.
+ Ashok     |  02/17/2022    |   09    | Dod Push method poc 
+                                      | START_PUSH_JOB wrapper routine added for PUSH process.  
+                                      | Archive log files added.
+ Ashok     |  09/30/2022    |   10    | donor_consents_adt - image files extraction logic modified (extract_pictures routine modified)                                     
+  -----------------------------------------------------------------------------*/
+IS
+  /*
+  ** All variables defined here.
+  */
+  stats         VARCHAR2 (10)    := 'SUCCESS';
+  logtext       VARCHAR2 (32767) := NULL;
+  v_tname       VARCHAR2 (32767) := NULL;
+  l_tab_nam     VARCHAR2 (100)   := NULL;
+  v_columns     VARCHAR2 (4000)  := NULL;
+  l_columnvalue VARCHAR2 (2000);
+  l_separator   VARCHAR2 (10) DEFAULT '';
+  c_flg         CHAR (1) := 'N';
+  l_status      INTEGER;
+  l_rows        NUMBER;
+  l_colcnt      NUMBER DEFAULT 0;
+  l_cnt         NUMBER DEFAULT 0;
+  v_sep valid_parameters.parameter_value%TYPE := NULL;
+  v_file UTL_FILE.file_type;
+  v_logfile UTL_FILE.file_type;
+  v_directory   VARCHAR2 (50)    := 'UTL_DIR';
+  v_filename    VARCHAR2 (300)   := NULL;
+  v_count       VARCHAR2 (500)   := NULL;
+  t_nam         VARCHAR2 (100)   := NULL;
+  plsql_block   VARCHAR2 (32767) := NULL;
+  tab_count     NUMBER           := 0;
+  v_exe         VARCHAR2 (1)     := 'E';
+  v_lt_id       VARCHAR2 (10)    := NULL;
+  g_enc_flag    VARCHAR2 (10)    := NULL; -- SCR 11942 (Used as encryption flag)
+  lv_date_token VARCHAR2(20);
+  lv_upload_id  VARCHAR2(100);
+  lv_arch_dir   VARCHAR2(50)    := 'EXT_ARCH';
+
+  objectexists  EXCEPTION;
+  PRAGMA EXCEPTION_INIT (objectexists, -955);
+
+  CURSOR c1
+  IS
+    SELECT DISTINCT table_name t,
+      LOWER (table_name)
+      || '_ext' extnam,
+      LOWER (table_name) tnam
+    FROM download_monitor;
+  CURSOR c2 (p_table_name VARCHAR2)
+  IS
+    SELECT table_name,
+      column_name,
+      data_type,
+      data_length
+    FROM all_tab_columns
+    WHERE table_name = p_table_name
+    ORDER BY column_id;
+  /*
+  This procedure is the main function which will be called for
+  other main procedures.
+  */
+PROCEDURE start_job(
+    p_status OUT VARCHAR2);
+PROCEDURE run_download_fnc(
+    p_err_msg OUT VARCHAR2);
+  FUNCTION download_fnc(
+      p_query     IN VARCHAR2,
+      p_separator IN VARCHAR2 DEFAULT ',',
+      p_dir       IN VARCHAR2,
+      p_filename  IN VARCHAR2 )
+    RETURN NUMBER;
+  FUNCTION extract_pictures
+    RETURN NUMBER; -- SCR 11942  05/13/2013
+  PROCEDURE do_log(
+      txt      IN VARCHAR2,
+      add_date IN BOOLEAN DEFAULT TRUE);
+      /*
+  PROCEDURE do_ddl(
+      p_flg IN VARCHAR2);
+      */
+  PROCEDURE parm_val_prc (
+        status_out OUT VARCHAR2);       
+  PROCEDURE download_prc(
+      p_query     IN VARCHAR2,
+      p_separator IN VARCHAR2 DEFAULT ',',
+      p_path      IN VARCHAR2,
+      p_filename  IN VARCHAR2,
+      p_status OUT VARCHAR2 );
+  PROCEDURE Write_BLOB_To_File(
+      in_blob_loc IN BLOB,
+      in_blob_file  IN VARCHAR2); --SCR 11942 05/13/2013
+  PROCEDURE encrypt_images(
+      in_blob_loc IN BLOB,
+      in_blob_fileName IN VARCHAR2,
+      out_status OUT VARCHAR2
+      );   -- SCR 11942; 05/28/2013;
+ PROCEDURE process_bdr_files(p_status OUT VARCHAR2);
+ PROCEDURE start_push_job(p_status OUT VARCHAR2); -- V09
+ END lt_table_extract;
+
+
+/
+
+
+CREATE OR REPLACE PACKAGE BODY lt_table_extract IS
+    
+
+    PROCEDURE set_extract_progress (
+        p_status IN VARCHAR2
+    ) IS
+    BEGIN
+        UPDATE laptop_id_details
+        SET
+            extract_in_progress = p_status
+        WHERE
+            laptop_id = v_lt_id;
+
+        COMMIT;
+    END set_extract_progress;
+
+    -- Get the drive of the mobile drive.
+    PROCEDURE get_drive_id(driveId_out OUT VARCHAR2, status_out OUT VARCHAR2) IS        
+    BEGIN
+        driveId_out := NULL;
+        status_out  := NULL;
+
+        SELECT
+            DISTINCT drive_id INTO driveId_out
+        FROM
+            donations
+        WHERE
+            audit_key IN (
+                SELECT
+                    dm.table_audit_key
+                FROM
+                    download_monitor dm
+                WHERE
+                    dm.table_name = 'DONATIONS'
+            );
+
+        status_out := 'OK';
+
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            status_out := 'Err: No Drive Id found';
+        WHEN TOO_MANY_ROWS THEN
+            SELECT DISTINCT
+                drive_id INTO driveId_out
+            FROM
+                (
+                    SELECT
+                        drive_id,
+                        coll_date,
+                        MAX(coll_date)
+                        OVER() AS max_coll_date
+                    FROM
+                        donations
+                    WHERE
+                        audit_key IN (
+                            SELECT
+                                dm.table_audit_key
+                            FROM
+                                download_monitor dm
+                            WHERE
+                                dm.table_name = 'DONATIONS'
+                        )
+                )
+            WHERE
+                coll_date = max_coll_date
+            AND ROWNUM = 1;        
+            status_out := 'OK';
+        WHEN OTHERS THEN
+            status_out := 'Err: Something went wrong.' || SUBSTR(sqlerrm, 1, 1000);        
+    END;
+
+    PROCEDURE set_header_rec(rec_out OUT laptop_extracts%ROWTYPE, status_out OUT VARCHAR2) IS
+        lnExtractSeq NUMBER;
+        lvDriveId    VARCHAR2(30);
+    BEGIN
+        get_drive_id(lvDriveId, status_out);            
+        IF status_out <> 'OK' THEN
+            RETURN;
+        END IF; 
+
+        SELECT 
+            MAX(extract_seq) 
+        INTO 
+            lnExtractSeq
+        FROM 
+            laptop_extracts
+        WHERE
+            drive_id = lvDriveId;
+
+        --rec_out.upload_id    := lv_upload_id;
+        --rec_out.files_count  := lnFileCount; -- this is set after all files are extracted and before inserting
+        rec_out.drive_id     := lvDriveId;
+        rec_out.extract_seq  := NVL(lnExtractSeq, 0) + 1;
+        rec_out.insert_date  := SYSDATE;
+        rec_out.insert_user  := 'LAPTOP';  
+        status_out := 'OK';
+    END set_header_rec;
+
+    PROCEDURE laptop_extracts_insert(rec_in IN laptop_extracts%ROWTYPE, 
+                                     status_out OUT VARCHAR2) IS
+        lnCount NUMBER;
+        header_rec laptop_extracts%ROWTYPE;
+    BEGIN
+        header_rec := rec_in;
+
+        SELECT
+            COUNT(1) INTO lnCount
+        FROM
+            extractfiles_xt
+        WHERE
+            file_name LIKE '%'|| rec_in.upload_id ||'%'
+            AND file_name NOT LIKE 'err%';
+
+        header_rec.files_count := lnCount + 1; -- extra 1 for header file which is not yet generated.
+        INSERT INTO laptop_extracts VALUES header_rec;
+
+        COMMIT;
+
+        status_out := 'OK';
+    EXCEPTION
+        WHEN OTHERS THEN
+            status_out := 'Err: Something went wrong. Manually correct laptop_extracts row and header txt file. ' 
+                        || SUBSTR(SQLERRM, 1, 500);
+    END laptop_extracts_insert;
+
+
+    FUNCTION get_param_value (
+        p_param_code IN VARCHAR2
+    ) RETURN VARCHAR2 IS
+        lv_param_value VARCHAR2(10);
+    BEGIN
+        SELECT
+            decode(COUNT(1), 0, 'N', MAX(parameter_value))
+        INTO lv_param_value
+        FROM
+            valid_parameters
+        WHERE
+            parameter_code = p_param_code;
+
+        RETURN lv_param_value;
+    END get_param_value;
+
+    PROCEDURE extract_header_file(status_out OUT VARCHAR2) IS
+        lvQuery     VARCHAR2(2000);
+        lnRows      NUMBER;
+        lvFileName  VARCHAR2(100);
+    BEGIN
+        lvQuery := 'SELECT upload_id, drive_id, extract_seq, files_count, insert_date, insert_user,''I''
+                    FROM laptop_extracts
+                    WHERe UPLOAD_ID = ''' || lv_upload_id || '''';
+        lvFileName := 'laptop_extracts'
+                           || '-'
+                           || lv_upload_id
+                           || '.hdr';            
+        lnRows := download_fnc(lvQuery,
+                               v_sep,
+                               'UTL_DIR',
+                               lvFileName); 
+        status_out := 'OK';                               
+    EXCEPTION
+        WHEN OTHERS THEN
+        --dbms_output.put_line('Err: In extract_header_file '|| substr(sqlerrm, 1, 150));
+        status_out := 'Err: Something went wrong. Manually correct header txt file ' 
+                    || SUBSTR(sqlerrm, 1, 500);
+    END extract_header_file;
+
+    PROCEDURE generate_zip_file(p_upload_id_in IN VARCHAR2, p_status_out OUT VARCHAR2) IS
+        l_zipblob     BLOB;
+        l_fileblob    BLOB;    
+        lc_extractDir VARCHAR2(10) := 'UTL_DIR'; 
+        lb_filesFound  BOOLEAN;
+
+        PROCEDURE file_to_blob (
+            p_blob     IN OUT NOCOPY BLOB,
+            p_dir      IN VARCHAR2,
+            p_filename IN VARCHAR2
+        ) AS
+            l_bfile       BFILE;
+            l_dest_offset INTEGER := 1;
+            l_src_offset  INTEGER := 1;
+        BEGIN
+            dbms_lob.createtemporary(p_blob, true);
+            l_bfile := bfilename(p_dir, p_filename);
+            dbms_lob.fileopen(l_bfile, dbms_lob.file_readonly);
+            dbms_lob.trim(p_blob, 0);
+            IF dbms_lob.getlength(l_bfile) > 0 THEN
+                dbms_lob.loadblobfromfile(  dest_lob => p_blob, 
+                                            src_bfile => l_bfile, 
+                                            amount => dbms_lob.lobmaxsize, 
+                                            dest_offset => l_dest_offset,
+                src_offset => l_src_offset);
+            END IF;
+
+            dbms_lob.fileclose(l_bfile);
+        END file_to_blob;
+
+        PROCEDURE blob_to_file (
+            p_blob     IN BLOB,
+            p_dir      IN VARCHAR2,
+            p_filename IN VARCHAR2
+        ) AS
+
+            l_file     utl_file.file_type;
+            l_buffer   RAW(32767);
+            l_amount   BINARY_INTEGER := 32767;
+            l_pos      INTEGER := 1;
+            l_blob_len INTEGER;
+        BEGIN
+            l_blob_len := dbms_lob.getlength(p_blob);
+
+          -- Open the destination file.
+            l_file := utl_file.fopen(p_dir, p_filename, 'wb', 32767);
+
+          -- Read chunks of the BLOB and write them to the file until complete.
+            WHILE l_pos <= l_blob_len LOOP
+                dbms_lob.read(p_blob, l_amount, l_pos, l_buffer);
+                utl_file.put_raw(l_file, l_buffer, true);
+                l_pos := l_pos + l_amount;
+            END LOOP;
+
+          -- Close the file.
+            utl_file.fclose(l_file);
+        EXCEPTION
+            WHEN OTHERS THEN
+            -- Close the file if something goes wrong.
+                IF utl_file.is_open(l_file) THEN
+                    utl_file.fclose(l_file);
+                END IF;
+                RAISE;
+        END blob_to_file;
+
+    BEGIN
+        p_status_out := 'OK';
+        lb_filesFound := FALSE;
+
+        -- Add the file to a new zip.
+        -- V09 -- zip only the filenames that contain the upload id. 02.28.2022
+        FOR cur_rec IN (
+            SELECT
+                file_name
+            FROM
+                extractfiles_xt
+            WHERE 
+                SUBSTR(file_name, -3) IN ('hdr', 'txt', 'dat', 'enc', 'tif', 'bdr', 'bde')
+              AND file_name LIKE '%' || p_upload_id_in || '%'
+        ) LOOP
+            lb_filesFound := TRUE;
+            --DBMS_OUTPUT.PUT_LINE(cur_rec.file_name);
+            file_to_blob(   p_blob      => l_fileblob, 
+                            p_dir       => lc_extractDir, 
+                            p_filename  => cur_rec.file_name);
+
+            apex_zip.add_file(  p_zipped_blob   => l_zipblob, 
+                                p_file_name     => cur_rec.file_name, 
+                                p_content       => l_fileblob);
+
+        END LOOP;
+
+        IF NOT lb_filesFound THEN
+            p_status_out := 'Extract files not found';
+            RETURN;
+        END IF;        
+
+        -- Close the zip file.
+        apex_zip.finish(p_zipped_blob => l_zipblob);
+
+        -- Write the file to the file system.
+        blob_to_file(   p_blob  => l_zipblob, 
+                        p_dir   => lc_extractDir, 
+                        p_filename => p_upload_id_in || '.zip');
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_status_out := SUBSTR(sqlerrm, 1, 500);
+            RETURN;
+    END generate_zip_file;
+
+    PROCEDURE archive_files(p_upload_id_in IN VARCHAR2, p_status_out OUT VARCHAR2) IS 
+    BEGIN
+        p_status_out := 'OK';
+
+        FOR file_rec IN (  SELECT
+                                file_name
+                            FROM
+                                extractfiles_xt
+                            WHERE 
+                                SUBSTR(file_name, -3) IN ('hdr', 'txt', 'dat', 'enc', 'tif', 'bdr', 'bde', 'log')
+                              AND file_name LIKE '%' || p_upload_id_in || '%'
+                        )
+        LOOP
+            UTL_FILE.FRENAME (  src_location  => v_directory,
+                                src_filename  => file_rec.file_name,
+                                dest_location => lv_arch_dir,
+                                dest_filename => file_rec.file_name,
+                                overwrite     => TRUE); 
+        END LOOP;         
+
+        -- Archive any log files that do not have upload id tagged in their name.(covers error scenario)
+        FOR file_rec IN (  SELECT
+                                file_name
+                            FROM
+                                extractfiles_xt
+                            WHERE 
+                                SUBSTR(file_name, -3) IN ('log')
+                        )
+        LOOP
+            UTL_FILE.FRENAME (  src_location  => v_directory,
+                                src_filename  => file_rec.file_name,
+                                dest_location => lv_arch_dir,
+                                dest_filename => file_rec.file_name,
+                                overwrite     => TRUE); 
+        END LOOP;  
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_status_out := 'Error in archiving files ' || SUBSTR(SQLERRM, 1, 500);
+            RETURN;    
+    END archive_files;
+
+    FUNCTION db_dir_exists(dir_name_in IN VARCHAR2) RETURN BOOLEAN IS
+        ln_count NUMBER;
+    BEGIN
+        SELECT COUNT(1) INTO ln_count 
+          FROM all_directories 
+         WHERE directory_name = dir_name_in;        
+
+        RETURN ln_count > 0; 
+    END db_dir_exists;
+
+    -- V09 -- wrapper routine added for PUSH process.
+
+    PROCEDURE start_push_job(p_status OUT VARCHAR2) IS
+    BEGIN
+        start_job(p_status);
+
+        IF p_status <> 'OK' THEN
+            RETURN; -- errors are already logged in start_job;
+        END IF;
+
+        generate_zip_file(lv_upload_id, p_status);
+
+        IF p_status <> 'OK' THEN
+            do_log('Files extracted successfully, but error in zip process.  Zip the files manually before uploading.  Err: ' || p_status, false);
+            set_extract_progress('N');
+            RETURN;                            
+        END IF;  
+
+        archive_files(lv_upload_id, p_status);
+
+        IF p_status <> 'OK' THEN
+            do_log('Files extracted successfully, but unable to archive the files. Archive the files manually before uploading. Err: ' || p_status, false);
+            set_extract_progress('N');
+            RETURN;                            
+        END IF;  
+
+        set_extract_progress('N');
+        p_status := 'All Processes Generated Successfully.';
+
+        /* below is not required as the start_job routine updates the log file with success msg.         
+        do_log(p_status, false);
+        set_extract_progress('N'); 
+        */
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_status := substr(sqlerrm, 1, 100);
+            do_log(DBMS_UTILITY.format_call_stack);
+            do_log(DBMS_UTILITY.format_error_stack);
+            do_log(DBMS_UTILITY.format_error_backtrace);  
+            /*
+            dbms_output.put_line('Err: in Start_Job ' || p_status);
+            dbms_output.put_line(DBMS_UTILITY.format_call_stack);
+            dbms_output.put_line(DBMS_UTILITY.format_error_stack);
+            dbms_output.put_line(DBMS_UTILITY.format_error_backtrace); 
+            */
+            do_log(p_status, false);
+            set_extract_progress('N'); -- updates extract_in_progress to N and commits.        
+    END start_push_job;
+
+    PROCEDURE start_job (
+        p_status OUT VARCHAR2
+    ) IS
+
+        lv_error    VARCHAR2(2000) := NULL;
+        ln_rowCount NUMBER := 0;
+
+        l_rows      NUMBER := 0;
+        n_pics      NUMBER := 0;
+        header_rec  laptop_extracts%ROWTYPE;
+        lv_chapter_id   VARCHAR2(10);
+
+        FUNCTION get_drive_chapter(drive_id_in IN VARCHAR2) RETURN VARCHAR2 IS
+            lv_chapter VARCHAR2(10);
+        BEGIN
+            SELECT chapter_id into lv_chapter
+              FROM drives
+             WHERE drive_id = drive_id_in;
+
+            RETURN lv_chapter; 
+        EXCEPTION 
+            WHEN OTHERS THEN
+                RETURN 'ALL';
+        END get_drive_chapter;        
+    BEGIN
+        p_status := NULL;
+        dbms_output.enable();
+        v_lt_id := NULL;
+        lv_date_token := to_char(sysdate, 'mmddyyhh24miss');
+
+        -- MLT 2547 (check if extract is in progress) and set laptop id.
+        DECLARE
+            lv_extract_in_progress VARCHAR2(1);
+            lv_errMsg1 VARCHAR2(200)    := 'Err: Incorrect laptop id configuration';
+            lv_errMsg2 VARCHAR2(200)    := 'Err: Extract already in progress.';
+
+            PROCEDURE log_error (
+                p_error IN VARCHAR2
+            ) IS
+                lv_filename VARCHAR2(500);
+            BEGIN
+                -- LAPTOP ID not available using XX instead.
+                lv_filename := 'err_file'
+                               || '-'
+                               || nvl(v_lt_id, 'XX')
+                               || '_'
+                               || lv_date_token
+                               || '.log';
+
+                v_logfile := utl_file.fopen(v_directory, lv_filename, 'w');
+                utl_file.put(v_logfile, p_error);
+                utl_file.new_line(v_logfile);
+                utl_file.fclose(v_logfile);
+            END log_error;
+        BEGIN
+            SELECT
+                ltrim(rtrim(laptop_id)),
+                extract_in_progress
+            INTO
+                v_lt_id,
+                lv_extract_in_progress
+            FROM
+                laptop_id_details;
+
+            IF v_lt_id IS NULL THEN
+                p_status := lv_errMsg1; --Err: Incorrect laptop id configuration
+                log_error(p_status);
+                RETURN;
+            END IF;
+
+            IF nvl(lv_extract_in_progress, 'N') = 'Y' THEN
+                p_status := lv_errMsg2; -- Err: Extract already in progress.
+                log_error(p_status);
+                RETURN;
+            END IF;
+
+        EXCEPTION
+            WHEN no_data_found THEN
+                p_status := lv_errMsg1; -- incorrect laptop id configuration.
+                log_error(p_status);
+                RETURN;
+            WHEN too_many_rows THEN
+                p_status := lv_errMsg1; -- incorrect laptop id configuration.
+                log_error(p_status);
+                RETURN;
+        END;  
+
+        v_filename := 'err_file'
+                       || '-'
+                       || nvl(v_lt_id, 'XX')
+                       || '_'
+                       || lv_date_token
+                       || '.log';
+
+        IF v_lt_id IS NULL THEN
+            p_status := 'Err: There is no laptop ID in LAPTOP_ID_DETAILS table';
+            do_log(p_status, false);
+            RETURN;
+        END IF;
+
+
+        set_header_rec(rec_out => header_rec, status_out => p_status);
+        IF p_status <> 'OK' THEN
+            do_log(p_status, false);
+            utl_file.fclose(v_logfile);
+            RETURN;
+        END IF;
+
+        lv_chapter_id := get_drive_chapter(header_rec.drive_id);
+
+        lv_upload_id := v_lt_id
+                        || '_'
+                        || lv_date_token
+                        || '_'
+                        || lv_chapter_id;        
+
+        header_rec.upload_id := lv_upload_id;
+
+
+        set_extract_progress('Y'); -- updates extract_in_progress to Y and commits.
+
+        -- Upload ID is tagged to log file from this point forward.
+        v_filename := 'err_file'
+                       || '-'
+                       || lv_upload_id
+                       || '.log';
+
+        SELECT COUNT(1) INTO ln_rowCount
+         FROM download_monitor;
+
+        IF ln_rowCount = 0 THEN
+            p_status := 'Err: There is no file to process.';
+            do_log(p_status, false);
+            set_extract_progress('N');
+            RETURN;
+        END IF;
+
+
+        lt_table_extract.parm_val_prc(p_status);
+
+        IF p_status <> 'OK' THEN
+            do_log(p_status, false);
+            set_extract_progress('N');
+            RETURN;
+        END IF;
+
+        lt_table_extract.run_download_fnc(lv_error);
+
+        IF lv_error IS NOT NULL THEN
+            p_status := lv_error; 
+            do_log(p_status, false);
+            set_extract_progress('N');
+            RETURN;        
+        END IF;
+
+        n_pics := lt_table_extract.extract_pictures; -- SCR 11942
+
+        -- (Check GENBDR sysparm and accordingly encrypt bdr report)
+        DECLARE
+            lv_genbdr  VARCHAR2(1);
+            lv_status  VARCHAR2(2000);
+        BEGIN
+            lv_genbdr := get_param_value('GENBDR');
+            IF lv_genbdr = 'Y' THEN
+                lt_table_extract.process_bdr_files(lv_status);
+                IF lv_status <> 'OK' THEN
+                    p_status := 'Err: In BDR Encrypt - ' || lv_status;
+                    do_log(p_status, false);
+                    set_extract_progress('N');
+                    RETURN;
+                END IF;
+            END IF;
+        END;
+
+        -- Clean up
+        DELETE FROM download_monitor; 
+
+        COMMIT;
+
+        -- Header file process
+        laptop_extracts_insert(header_rec, p_status);
+        IF p_status <> 'OK' THEN
+            do_log('Files extracted successfully. ' || p_status, false);
+            set_extract_progress('N');
+            RETURN;
+        END IF;
+
+        extract_header_file(p_status);
+        IF p_status <> 'OK' THEN
+            do_log('Files extracted successfully. ' || p_status, false);
+            set_extract_progress('N');
+            RETURN;                            
+        END IF;                            
+        --------------------
+
+        p_status := 'OK';
+        do_log('All Processes Generated Successfully.', false);
+        set_extract_progress('N'); 
+
+    EXCEPTION
+        WHEN no_data_found THEN
+            p_status := substr(sqlerrm, 1, 100);
+            do_log(p_status, false);
+            set_extract_progress('N'); -- updates extract_in_progress to N and commits.
+        WHEN OTHERS THEN
+            p_status := substr(sqlerrm, 1, 100);
+            do_log(DBMS_UTILITY.format_call_stack);
+            do_log(DBMS_UTILITY.format_error_stack);
+            do_log(DBMS_UTILITY.format_error_backtrace);   
+            /*
+            dbms_output.put_line('Err: in Start_Job ' || p_status);
+            dbms_output.put_line(DBMS_UTILITY.format_call_stack);
+            dbms_output.put_line(DBMS_UTILITY.format_error_stack);
+            dbms_output.put_line(DBMS_UTILITY.format_error_backtrace);            
+            */
+            do_log(p_status, false);
+            set_extract_progress('N'); -- updates extract_in_progress to N and commits.
+    END start_job;
+  /* Procedure Start_Job */
+    PROCEDURE run_download_fnc (
+        p_err_msg OUT VARCHAR2
+    ) IS
+
+        l_tnam            VARCHAR2(200) := NULL;
+        v_data_source     VARCHAR2(1000) := NULL;
+        v_encrypt_status  VARCHAR2(2000) := NULL;
+        v_inc_flg         VARCHAR2(100) := NULL;
+        v_status          VARCHAR2(1000) := 'OK';
+        PROCEDURE set_nls_date IS
+            lv_sqlStmt VARCHAR2(2000) := 'alter session set nls_date_format= ''MM/DD/YYYY hh24miss'' ';
+            crsr      NUMBER;
+            tmp       NUMBER;
+        BEGIN
+            crsr := dbms_sql.open_cursor;
+            dbms_sql.parse(crsr, lv_sqlStmt, 2);
+            tmp := dbms_sql.execute(crsr);
+            dbms_sql.close_cursor(crsr);       
+        END set_nls_date;        
+    BEGIN
+        SELECT
+            parameter_value
+        INTO v_inc_flg
+        FROM
+            valid_parameters
+        WHERE
+            parameter_code = 'ENCRPT_REQ';
+
+        IF v_inc_flg NOT IN ( 'Y', 'N' ) THEN
+            v_status := 'Err: The parameter value is not correct in valid parameters table for code=ENCRPT_REQ';
+            p_err_msg := v_status;
+            RETURN;
+        END IF;
+
+        g_enc_flag := v_inc_flg; -- SCR 11942
+
+        set_nls_date;
+
+        FOR i IN c1 LOOP
+            v_columns := NULL;
+            FOR col_rec IN c2(i.t) LOOP
+                -- Modified on 05/13/2013; SCR 11942 (Donor_Pictures) to handle BLOB type.
+                IF v_columns IS NULL THEN
+                    IF col_rec.data_type = 'BLOB' THEN
+                        v_columns := 'NULL';
+                    ELSE
+                        v_columns := col_rec.column_name;
+                    END IF;
+
+                ELSE
+                    IF col_rec.data_type = 'BLOB' THEN
+                        v_columns := v_columns
+                                     || ' ,'
+                                     || 'NULL';
+                    ELSE
+                        v_columns := v_columns
+                                     || ' ,'
+                                     || col_rec.column_name;
+                    END IF;
+                END IF;
+            END LOOP;
+
+            v_tname := i.tnam
+                       || '-'
+                       || lv_upload_id
+                       || '.txt';
+            l_tnam := ''''
+                      || i.t
+                      || '''';
+            v_data_source := ''''
+                             || v_tname
+                             || '''';
+            IF v_inc_flg = 'Y' THEN
+                -- Encrypted mode
+                download_prc('select '
+                             || v_columns
+                             || ',b.TRANSACTION_MODE '
+                             || ' from '
+                             || i.tnam
+                             || ' , DOWNLOAD_MONITOR b  WHERE  '
+                             || ' b.TABLE_name = '
+                             || l_tnam
+                             || ' AND '
+                             || i.tnam
+                             || '.AUDIT_KEY = b.TABLE_AUDIT_KEY ',
+                            v_sep,
+                            'UTL_DIR',
+                            v_tname,
+                            v_status);
+
+                -- dbms_output.put_line('Status: ' || v_status);
+            ELSE
+                -- Normal mode
+                l_rows := download_fnc('select '
+                                       || v_columns
+                                       || ',b.TRANSACTION_MODE '
+                                       || ' from '
+                                       || i.tnam
+                                       || ' , DOWNLOAD_MONITOR b  WHERE  '
+                                       || ' b.TABLE_name = '
+                                       || l_tnam
+                                       || ' AND '
+                                       || i.tnam
+                                       || '.AUDIT_KEY = b.TABLE_AUDIT_KEY ',
+                                      v_sep,
+                                      'UTL_DIR',
+                                      v_tname);
+
+                -- dbms_output.put_line(to_char(l_rows) || ' rows extracted to ascii file ' || v_tname);
+            END IF;
+
+        END LOOP;
+    EXCEPTION
+        WHEN no_data_found THEN
+            p_err_msg := 'Err: No data found in valid parameters table for code=ENCRPT_REQ';
+            raise_application_error('-20000', p_err_msg);
+        WHEN OTHERS THEN
+            -- dbms_output.put_line('Err: In run_download_fnc ' || substr(sqlerrm, 1, 150));
+            p_err_msg := 'Err: '
+                         || 'SQL CODE: '
+                         || sqlcode
+                         || ' ErrMsg: '
+                         || substr(sqlerrm, 1, 150);
+
+            raise_application_error('-20000', p_err_msg);
+
+    END;
+  /* Procedure Run_Download_Fnc */
+    FUNCTION download_fnc (
+        p_query      IN  VARCHAR2,
+        p_separator  IN  VARCHAR2 DEFAULT ',',
+        p_dir        IN  VARCHAR2,
+        p_filename   IN  VARCHAR2
+    ) RETURN NUMBER IS
+        l_thecursor INTEGER DEFAULT dbms_sql.open_cursor;
+    BEGIN
+        l_cnt := 0;
+        v_file := utl_file.fopen(p_dir, p_filename, 'w');
+        dbms_sql.parse(l_thecursor, p_query, dbms_sql.native);
+    --insert into log_tmp values(p_query);
+        FOR i IN 1..255 LOOP
+            BEGIN
+                dbms_sql.define_column(l_thecursor, i, l_columnvalue, 2000);
+                l_colcnt := i;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    IF ( sqlcode = -1007 ) THEN
+                        EXIT;
+                    ELSE
+                        RAISE;
+                    END IF;
+            END;
+        END LOOP;
+
+        dbms_sql.define_column(l_thecursor, 1, l_columnvalue, 2000);
+        l_status := dbms_sql.execute(l_thecursor);
+        LOOP
+            EXIT WHEN ( dbms_sql.fetch_rows(l_thecursor) <= 0 );
+            l_separator := '';
+            FOR i IN 1..l_colcnt LOOP
+                dbms_sql.column_value(l_thecursor, i, l_columnvalue);
+                l_columnvalue := replace(replace(l_columnvalue, chr(13), ''), chr(10), ' '); -- V06 (remove linefeeds)
+                utl_file.put(v_file, l_separator || l_columnvalue);
+                l_separator := p_separator;
+            END LOOP;
+
+            utl_file.new_line(v_file);
+            l_cnt := l_cnt + 1;
+            dbms_application_info.set_client_info(l_cnt || ' rows are generated');
+        END LOOP;
+
+        dbms_sql.close_cursor(l_thecursor);
+        utl_file.fclose(v_file);
+        RETURN l_cnt;
+    EXCEPTION
+        WHEN utl_file.invalid_path THEN
+            do_log('Err: Invalid Path', false);
+            utl_file.fclose(v_logfile);
+        WHEN utl_file.invalid_mode THEN
+            do_log('Err: Invalid Mode', false);
+            utl_file.fclose(v_logfile);
+        WHEN utl_file.write_error THEN
+            do_log('Err: Write Error', false);
+            utl_file.fclose(v_logfile);
+        WHEN utl_file.invalid_operation THEN
+            do_log('Err: Invalid Operation', false);
+            utl_file.fclose(v_logfile);
+        WHEN OTHERS THEN
+            do_log('Err: '
+                   || sqlcode
+                   || ': '
+                   || substr(sqlerrm, 1, 100), false);
+
+            utl_file.fclose(v_logfile);
+            raise_application_error('-20000', 'Error in lt_table_extract.Download_Fnc ::  '
+                                              || sqlcode
+                                              || ': '
+                                              || substr(sqlerrm, 1, 100));
+
+    END;
+
+    FUNCTION extract_pictures RETURN NUMBER
+     IS
+
+        l_thecursor  INTEGER DEFAULT dbms_sql.open_cursor;
+        v_lob_loc    BLOB;
+        v_lob_id     VARCHAR2(100);
+        v_rows       INTEGER;
+        l_cnt        NUMBER;
+        v_sql_stmt   CLOB;
+        v_file_ext   VARCHAR2(10);
+        v_file_name  VARCHAR2(500);
+        encrypt_error EXCEPTION;
+        pl_status    VARCHAR2(2000);
+        v_quote VARCHAR2(10) := '''';
+        
+        -- all blob tables except for audit table (currently only donor consents)
+        CURSOR blob_metadata_cur IS
+        SELECT DISTINCT
+            dm.table_name      tabnam,
+            atc.column_name    colnam
+        FROM
+            download_monitor  dm,
+            all_tab_columns   atc
+        WHERE
+                dm.table_name = atc.table_name
+            AND atc.data_type = 'BLOB'
+            AND dm.table_name <> 'DONOR_CONSENTS_ADT';
+
+        CURSOR encrypt_cur IS
+        SELECT
+            parameter_value
+        FROM
+            valid_parameters
+        WHERE
+            parameter_code = 'ENCRPT_REQ';
+
+    BEGIN
+        -- Check if encryption flag is set or not.  If not set, get the encryption flag.
+        IF g_enc_flag IS NULL THEN
+            OPEN encrypt_cur;
+            FETCH encrypt_cur INTO g_enc_flag;
+            CLOSE encrypt_cur;
+        END IF;
+
+        -- Apply file extension based on encryption flag; .enc - if encryption is set, otherwise .tif
+        IF g_enc_flag = 'Y' THEN
+            v_file_ext := '.enc';
+        ELSE
+            v_file_ext := '.tif';
+        END IF;
+        
+        FOR rec IN blob_metadata_cur LOOP
+            l_thecursor := dbms_sql.open_cursor;
+            -- Build dynamic sql
+            v_sql_stmt := 'SELECT ' || rec.colnam || ', b.table_audit_key'
+                        || ' FROM ' || rec.tabnam || ', download_monitor b '
+                        || ' WHERE b.table_name = ' || v_quote || rec.tabnam || v_quote
+                        || ' AND ' || rec.tabnam || '.audit_key = b.table_audit_key'
+                        || ' AND LENGTH (' || v_quote || rec.colnam  || v_quote ||') <> 0';
+            -- Parse the SELECT Satement.
+            dbms_sql.parse(l_thecursor, v_sql_stmt, dbms_sql.native);
+            -- Define the Column type
+            dbms_sql.define_column(l_thecursor, 1, v_lob_loc);
+            dbms_sql.define_column(l_thecursor, 2, v_lob_id, 100);
+            v_rows := dbms_sql.execute(l_thecursor);
+            l_cnt := 0;
+            LOOP
+                EXIT WHEN ( dbms_sql.fetch_rows(l_thecursor) <= 0 );
+                dbms_sql.column_value(l_thecursor, 1, v_lob_loc);
+                dbms_sql.column_value(l_thecursor, 2, v_lob_id);
+                --dbms_output.put_line('processing ' || v_lob_id);
+                IF v_lob_loc IS NOT NULL THEN
+                    -- 08/21/2013;  No need to create images when image column is NULL.
+                    -- Generate image file (Blob Loc and image file name are passed as input).
+                    -- 06/13/2013; SCR 11942
+                    v_file_name := v_lob_id
+                                   || '-'
+                                   || rec.tabnam
+                                   || '-'
+                                   || rec.colnam
+                                   || '-'
+                                   || lv_upload_id
+                                   || v_file_ext;
+
+                    IF g_enc_flag = 'Y' THEN
+                        -- encrypt_images(.enc files only);
+                        encrypt_images(in_blob_loc => v_lob_loc, in_blob_filename => v_file_name,
+                                      out_status => pl_status); -- file name of the generated image;
+                        IF pl_status <> 'OK' THEN
+                            RAISE encrypt_error;
+                        END IF;
+                    ELSE
+                        write_blob_to_file(in_blob_loc => v_lob_loc, in_blob_file => v_file_name -- file name of the generated image;
+                        );
+                    END IF;
+
+                    l_cnt := l_cnt + 1;
+                    -- dbms_output.put_line('Pic count ' || l_cnt);
+                END IF; -- 08/21/2013;
+            END LOOP;
+
+            dbms_sql.close_cursor(l_thecursor);
+        END LOOP;
+
+
+        -- Extract donor consents old_blob column
+        FOR rec IN (SELECT
+                        dca.column_name,
+                        TO_CHAR(dca.audit_insert_dats,'MMDDYYHH24MISS') audit_date,
+                        dca.old_blob,
+                        b.table_audit_key
+                    FROM
+                        donor_consents_adt dca,
+                        download_monitor b
+                    WHERE
+                            b.table_name = 'DONOR_CONSENTS_ADT'
+                        AND dca.audit_key = b.table_audit_key
+                        AND dca.column_name 
+                            IN ('DONOR_SIGNATURE', 'WITNESS_SIGNATURE')
+                        AND LENGTH(dca.old_blob) <> 0
+                     ORDER BY dca.AUDIT_INSERT_DATS ASC)
+        LOOP
+             v_file_name := rec.table_audit_key
+                           || '-'
+                           || 'DONOR_CONSENTS_ADT'
+                           || '-'
+                           || 'OLD_BLOB'
+                           || '-'
+                           || rec.column_name
+                           || '-'            
+                           || rec.audit_date
+                           || '-'                           
+                           || lv_upload_id
+                           || v_file_ext;       
+
+            IF g_enc_flag = 'Y' THEN
+                encrypt_images( in_blob_loc => rec.old_blob, 
+                                in_blob_filename => v_file_name,
+                                out_status => pl_status); 
+                IF pl_status <> 'OK' THEN
+                    RAISE encrypt_error;
+                END IF;
+            ELSE
+                write_blob_to_file( in_blob_loc => rec.old_blob, 
+                                    in_blob_file => v_file_name
+                                  );
+            END IF; 
+            
+            l_cnt := l_cnt + 1;
+        END LOOP;
+
+
+        -- Extract donor consents new_blob column
+        FOR rec IN (SELECT
+                        dca.column_name,
+                        TO_CHAR(dca.audit_insert_dats,'MMDDYYHH24MISS') audit_date,
+                        dca.new_blob,
+                        b.table_audit_key
+                    FROM
+                        donor_consents_adt dca,
+                        download_monitor b
+                    WHERE
+                            b.table_name = 'DONOR_CONSENTS_ADT'
+                        AND dca.audit_key = b.table_audit_key
+                        AND dca.column_name 
+                            IN ('DONOR_SIGNATURE', 'WITNESS_SIGNATURE')
+                        AND LENGTH(dca.new_blob) <> 0
+                     ORDER BY dca.AUDIT_INSERT_DATS ASC)
+        LOOP
+             v_file_name := rec.table_audit_key
+                           || '-'
+                           || 'DONOR_CONSENTS_ADT'
+                           || '-'
+                           || 'NEW_BLOB'
+                           || '-'
+                           || rec.column_name
+                           || '-'            
+                           || rec.audit_date
+                           || '-'                           
+                           || lv_upload_id
+                           || v_file_ext;       
+
+            IF g_enc_flag = 'Y' THEN
+                encrypt_images( in_blob_loc => rec.new_blob, 
+                                in_blob_filename => v_file_name,
+                                out_status => pl_status); 
+                IF pl_status <> 'OK' THEN
+                    RAISE encrypt_error;
+                END IF;
+            ELSE
+                write_blob_to_file( in_blob_loc => rec.new_blob, 
+                                    in_blob_file => v_file_name
+                                  );
+            END IF; 
+            
+            l_cnt := l_cnt + 1;
+        END LOOP;        
+
+
+        RETURN l_cnt;
+    EXCEPTION
+        WHEN encrypt_error THEN
+            dbms_sql.close_cursor(l_thecursor);
+            do_log(pl_status);
+            raise_application_error('-20000', 'Error in lt_table_extract.Extract Pictures ::  ' || pl_status);
+        WHEN OTHERS THEN
+            dbms_sql.close_cursor(l_thecursor);
+            do_log('Err: '
+                   || sqlcode
+                   || ': '
+                   || substr(sqlerrm, 1, 100), false);
+
+            raise_application_error('-20000', 'Error in lt_table_extract.Extract Pictures ::  '
+                                              || sqlcode
+                                              || ': '
+                                              || substr(sqlerrm, 1, 100));
+
+    END extract_pictures;
+
+  -- SCR 11942
+    PROCEDURE encrypt_images (
+        in_blob_loc       IN   BLOB,
+        in_blob_filename  IN   VARCHAR2,
+        out_status        OUT  VARCHAR2
+    ) IS
+
+        encrypted_raw    RAW(2000); -- stores encrypted binary text
+        decrypted_raw    RAW(2000); -- stores decrypted binary text
+        num_key_bytes    NUMBER := 256 / 8; -- key length 256 bits (32 bytes)
+        key_bytes_raw    RAW(2000); -- Max size for raw is 2000 bytes, for LONG RAW - 2GB
+    -- stores 256-bit encryption key
+        encryption_type  PLS_INTEGER :=  -- total encryption type
+         dbms_crypto.encrypt_aes256 + dbms_crypto.chain_cbc + dbms_crypto.pad_pkcs5;
+        temp_blob        BLOB;
+        db_blob          BLOB;
+        dest_blob        BLOB;
+        t_status         VARCHAR2(2000);
+        key_gen_error EXCEPTION;
+
+        FUNCTION generate_key (
+            pl_status OUT VARCHAR2
+        ) RETURN RAW IS
+
+            t_temp_str     VARCHAR2(4000);
+            t_len          NUMBER;
+            t_encrypt_str  VARCHAR2(4000);
+            t_char         VARCHAR2(1);
+            t_new_len      NUMBER;
+            v_new_line     VARCHAR2(2000);
+            t_key_raw      RAW(2000); -- max size of RAW is 2000 Bytes, and for LONG RAW is 2GB.
+      /*
+         ENCRYPT_AES256 is the encryption algorithem AES 256-bit algorithm.
+         CHAIN_CBC for Cipher Block Chaining, a process that hides plain text patterns
+         by XORing blocks with the previous ciphertext block, and then encrypted.
+         PAD_PKCS5 Provides padding which complies with the
+         PKCS #5 Password-Based Cryptography Standard.
+
+         The encryption key for AES256 algorithem, should be 32 bytes or more.
+      */
+        BEGIN
+            pl_status := 'OK';
+            t_temp_str := 'IDEMERAW';
+            t_len := length(t_temp_str);
+            t_encrypt_str := NULL;
+            FOR i IN 1..t_len LOOP
+                t_char := substr(t_temp_str, 1, 1);
+                t_new_len := t_len - i;
+                t_temp_str := substr(t_temp_str,(-1) * t_new_len);
+                t_encrypt_str := t_encrypt_str
+                                 || chr(127 - ascii(t_char));
+            END LOOP;
+
+      -- Generate a 32 byte or more - encryption key;
+            LOOP
+                IF length(t_encrypt_str) >= 32 THEN
+                    EXIT;
+                ELSE
+                    t_encrypt_str := t_encrypt_str || t_encrypt_str;
+                END IF;
+            END LOOP;
+
+            t_key_raw := utl_raw.cast_to_raw(t_encrypt_str);
+            RETURN t_key_raw;
+        EXCEPTION
+            WHEN OTHERS THEN
+                pl_status := 'Err: '
+                             || sqlcode
+                             || ': '
+                             || substr(sqlerrm, 1, 100);
+
+                RETURN NULL;
+        END generate_key;
+
+    BEGIN
+        out_status := 'OK';
+        IF in_blob_loc IS NOT NULL THEN
+      --key_bytes_raw := DBMS_CRYPTO.RANDOMBYTES (num_key_bytes);
+            key_bytes_raw := generate_key(t_status);
+            IF t_status <> 'OK' THEN
+                out_status := t_status;
+                RAISE key_gen_error;
+            END IF;
+
+      -- create temporary clobs and blobs
+            dbms_lob.createtemporary(temp_blob, true, dbms_lob.call);
+      --DBMS_LOB.CREATETEMPORARY(dest_blob, TRUE, DBMS_LOB.CALL);
+            dbms_crypto.encrypt(dst => temp_blob, src => in_blob_loc, typ => encryption_type,
+                               key => key_bytes_raw);
+
+            lt_table_extract.write_blob_to_file(in_blob_loc => temp_blob,
+                                               in_blob_file => in_blob_filename);
+        END IF;
+
+    /*
+        DBMS_CRYPTO.DECRYPT
+        (
+          dst => dest_blob,
+          src => temp_blob,
+          typ => encryption_type,
+          key => key_bytes_raw
+        );
+        LT_TABLE_EXTRACT.Write_BLOB_To_File(in_blob_loc => dest_blob, in_blob_id => 'decrypttoencrypt.tif');
+        dbms_output.put_line('BEFORE WRITE TO BLOB FILE - decrypt to encrypt');
+
+        decrypted_raw := DBMS_CRYPTO.DECRYPT
+          (
+             src => encrypted_raw,
+             typ => encryption_type,
+             key => key_bytes_raw
+          );
+       output_string := UTL_I18N.RAW_TO_CHAR (decrypted_raw, 'AL32UTF8');
+
+       dbms_output.put_line ('Decrypted string: ' || output_string);
+    */
+    EXCEPTION
+        WHEN key_gen_error THEN
+            NULL; -- just to exit out of the routine.
+        WHEN OTHERS THEN
+            out_status := in_blob_filename
+                          || ' Err: '
+                          || sqlcode
+                          || ': '
+                          || substr(sqlerrm, 1, 100);
+    END encrypt_images;
+
+  -- V04
+    PROCEDURE encrypt_blob_to_file (
+        in_blob_loc       IN   BLOB,
+        in_blob_filename  IN   VARCHAR2,
+        out_status        OUT  VARCHAR2
+    ) IS
+    BEGIN
+        encrypt_images(in_blob_loc, in_blob_filename, out_status);
+    END encrypt_blob_to_file;
+
+    PROCEDURE do_log (
+        txt       IN  VARCHAR2,
+        add_date  IN  BOOLEAN DEFAULT true
+    ) IS
+    BEGIN
+        IF v_filename IS NULL THEN
+            v_filename := 'err_file'
+                          || '-'
+                          || v_lt_id
+                          || '_'
+                          || lv_date_token
+                          || '.log';
+        END IF;
+
+        v_logfile := utl_file.fopen(v_directory, v_filename, 'w');
+        utl_file.put(v_logfile, txt);
+        utl_file.new_line(v_logfile);
+        IF add_date THEN
+            logtext := substr(logtext
+                              || to_char(sysdate, 'mm-dd-yyyy hh24:mi:ss:')
+                              || ' ', 1,
+                             32000);
+        END IF;
+
+        logtext := substr(logtext
+                          || txt
+                          || chr(10), 1, 32000);
+
+        IF utl_file.is_open(v_file) THEN
+            utl_file.fclose(v_file);
+        END IF;
+        IF utl_file.is_open(v_logfile) THEN
+            utl_file.fclose(v_logfile);
+        END IF;
+
+    END;
+  /* Procedure Do_Log */
+  /*
+    PROCEDURE do_ddl (
+        p_flg IN VARCHAR2
+    ) IS
+        crsr      NUMBER;
+        tmp       NUMBER;
+        countval  NUMBER;
+        curid     BINARY_INTEGER;
+        retval    NUMBER;
+    BEGIN
+
+        IF p_flg = 'C' THEN
+            BEGIN
+                FOR c1_cur IN c1 LOOP
+                    t_nam := c1_cur.t;
+                    curid := dbms_sql.open_cursor;
+                    dbms_sql.parse(curid, 'BEGIN SELECT count(*) INTO :tab_count FROM '
+                                          || t_nam
+                                          || '; END;',
+                                  dbms_sql.v7);
+
+                    dbms_sql.bind_variable(curid, 'tab_count', countval);
+                    retval := dbms_sql.execute(curid);
+                    dbms_sql.variable_value(curid, 'tab_count', countval);
+                    dbms_sql.close_cursor(curid);
+                    dbms_output.put_line('Count is:= ' || countval);
+                    v_count := ' Total records for '
+                               || t_nam
+                               || ' : '
+                               || countval;
+                    utl_file.put(v_logfile, v_count);
+                    utl_file.new_line(v_logfile);
+                END LOOP;
+
+                utl_file.fclose(v_logfile);
+            END;
+        END IF;
+
+        IF p_flg <> 'C' THEN
+            crsr := dbms_sql.open_cursor;
+            dbms_sql.parse(crsr, sql_stmt, 2);
+            tmp := dbms_sql.execute(crsr);
+            dbms_sql.close_cursor(crsr);
+            sql_stmt := NULL;
+        END IF;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            dbms_output.put_line('Err in do_ddl:  '
+                                 || sqlcode
+                                 || ' '
+                                 || substr(sqlerrm, 1, 200));
+
+            do_log('Error in do_ddl: '
+                   || substr(sqlerrm, 1, 200)
+                   || ':'
+                   || sql_stmt, false);
+
+            IF dbms_sql.is_open(crsr) THEN
+                dbms_sql.close_cursor(crsr);
+            END IF;
+            sql_stmt := NULL;
+            stats := 'ERROR';
+    END;
+*/
+    PROCEDURE parm_val_prc (
+        status_out OUT VARCHAR2
+    ) IS
+    BEGIN
+        SELECT
+            parameter_value
+        INTO v_sep
+        FROM
+            valid_parameters
+        WHERE
+                parameter_code = 'EXTDLT'
+            AND ROWNUM < 2;
+
+        IF v_sep <> '|' THEN
+            status_out := 'Err: parameter value is not correct in valid parameters table for code = EXTDLT';
+        END IF;
+
+        status_out := 'OK';
+
+    EXCEPTION
+        WHEN no_data_found THEN
+            status_out := 'Err: Parameter value is not found in valid parameters table for code = EXTDLT';
+        WHEN OTHERS THEN
+            status_out := substr(sqlerrm, 1, 100);
+    END;
+
+    PROCEDURE download_prc (
+        p_query      IN   VARCHAR2,
+        p_separator  IN   VARCHAR2 DEFAULT ',',
+        p_path       IN   VARCHAR2,
+        p_filename   IN   VARCHAR2,
+        p_status     OUT  VARCHAR2
+    ) IS
+
+        l_thecursor    INTEGER DEFAULT dbms_sql.open_cursor;
+        v_in_file      utl_file.file_type;
+        v_out_file     utl_file.file_type;
+        v_new_line     VARCHAR2(2000);
+        t_filename     VARCHAR2(100);
+        t_temp_str     VARCHAR2(4000); -- 05/02/2012; IM:8527 -- Increased size from 1024 to 4000.
+        t_encrypt_str  VARCHAR2(4000); -- 05/02/2012; IM:8527 -- Increased size from 1024 to 4000.
+        t_len          NUMBER;
+        t_new_len      NUMBER;
+        t_char         VARCHAR2(1);
+    BEGIN
+        l_cnt := 0;
+        p_status := 'OK';
+        dbms_sql.parse(l_thecursor, p_query, dbms_sql.native);
+        t_filename := substr(p_filename, 1, instr(p_filename, '.', -1))
+                      || 'dat';
+        --v_out_file := UTL_FILE.fopen (p_path, t_filename, 'w');
+        v_out_file := utl_file.fopen(p_path, t_filename, 'w', 32767); -- 05/02/2012; IM:8527; Added max line size to be 32767 instead of default - 1024.
+        --insert into log_tmp values(p_query);
+        FOR i IN 1..255 LOOP
+            BEGIN
+                dbms_sql.define_column(l_thecursor, i, l_columnvalue, 2000);
+                l_colcnt := i;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    IF ( sqlcode = -1007 ) THEN
+                        EXIT;
+                    ELSE
+                        RAISE;
+                    END IF;
+            END;
+        END LOOP;
+
+        dbms_sql.define_column(l_thecursor, 1, l_columnvalue, 2000);
+        l_status := dbms_sql.execute(l_thecursor);
+        LOOP
+            EXIT WHEN ( dbms_sql.fetch_rows(l_thecursor) <= 0 );
+            l_separator := '';
+            v_new_line := '';
+            FOR i IN 1..l_colcnt LOOP
+                dbms_sql.column_value(l_thecursor, i, l_columnvalue);
+                v_new_line := v_new_line
+                              || l_separator
+                              || l_columnvalue;
+                l_separator := p_separator;
+            END LOOP;
+
+            BEGIN
+                t_temp_str := v_new_line;
+                t_len := length(v_new_line);
+                t_encrypt_str := NULL;
+                FOR i IN 1..t_len LOOP
+                    t_char := substr(t_temp_str, 1, 1);
+                    t_new_len := t_len - i;
+                    t_temp_str := substr(t_temp_str,(-1) * t_new_len);
+                    t_encrypt_str := t_encrypt_str
+                                     || chr(127 - ascii(t_char)); -- Modified on 04/12/2011; ((127 - ascii) instead of (ascii +17))
+                END LOOP;
+
+                t_encrypt_str := utl_raw.cast_to_raw(t_encrypt_str);
+                utl_file.put_line(v_out_file, t_encrypt_str);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- dbms_output.put_line(sqlerrm);
+                    utl_file.fclose(v_in_file);
+                    utl_file.fclose(v_out_file);
+                    p_status := 'Err: '
+                                || sqlcode
+                                || ': '
+                                || substr(sqlerrm, 1, 100); -- added on 05/02/2012; IM:8527
+                    EXIT;
+            END;
+
+            l_cnt := l_cnt + 1;
+            dbms_application_info.set_client_info(l_cnt || ' rows are generated');
+        END LOOP;
+
+        dbms_sql.close_cursor(l_thecursor);
+        IF utl_file.is_open(v_out_file) THEN
+            utl_file.fclose(v_out_file);
+        END IF;
+    EXCEPTION
+        WHEN utl_file.invalid_mode THEN
+            p_status := 'Invalid Mode Parameter';
+        WHEN utl_file.invalid_path THEN
+            p_status := 'Invalid File Location';
+        WHEN utl_file.invalid_filehandle THEN
+            p_status := 'Invalid Filehandle';
+        WHEN utl_file.invalid_operation THEN
+            p_status := 'Invalid Operation';
+        WHEN utl_file.read_error THEN
+            p_status := 'Read Error';
+        WHEN utl_file.internal_error THEN
+            p_status := 'Internal Error';
+        WHEN utl_file.charsetmismatch THEN
+            p_status := 'Opened With FOPEN_NCHAR. But Later I/O Inconsistent';
+        WHEN utl_file.file_open THEN
+            p_status := 'File Already Opened';
+        WHEN utl_file.invalid_maxlinesize THEN
+            p_status := 'Line Size Exceeds 32K';
+        WHEN utl_file.invalid_filename THEN
+            p_status := 'Invalid File Name';
+        WHEN utl_file.access_denied THEN
+            p_status := 'File Access Denied By';
+        WHEN utl_file.invalid_offset THEN
+            p_status := 'FSEEK Param Less Than 0';
+        WHEN OTHERS THEN
+            p_status := 'Err: '
+                        || sqlcode
+                        || ': '
+                        || substr(sqlerrm, 1, 100);
+    END;
+  /* Procedure download_prc */
+    PROCEDURE write_blob_to_file (
+        in_blob_loc   IN  BLOB,
+        in_blob_file  IN  VARCHAR2
+    ) -- SCR 11942; Donor Pictures
+     AS
+
+        v_buffer       RAW(32767);
+        v_buffer_size  BINARY_INTEGER;
+        v_amount       BINARY_INTEGER;
+        v_offset       NUMBER(38) := 1;
+        v_chunksize    INTEGER;
+        v_out_file     utl_file.file_type;
+        v_file_name    VARCHAR2(100);
+        v_lob_loc      BLOB;
+    BEGIN
+    -- +-------------------------------------------------------------+
+    -- | SELECT THE LOB LOCATOR                                      |
+    -- +-------------------------------------------------------------+
+        v_lob_loc := in_blob_loc;
+        v_file_name := in_blob_file;
+
+    -- +-------------------------------------------------------------+
+    -- | FIND OUT THE CHUNKSIZE FOR THIS LOB COLUMN                  |
+    -- +-------------------------------------------------------------+
+        v_chunksize := dbms_lob.getchunksize(v_lob_loc);
+        IF ( v_chunksize < 32767 ) THEN
+            v_buffer_size := v_chunksize;
+        ELSE
+            v_buffer_size := 32767;
+        END IF;
+
+        v_amount := v_buffer_size;
+    -- +-------------------------------------------------------------+
+    -- | OPENING THE LOB IS OPTIONAL                                 |
+    -- +-------------------------------------------------------------+
+        dbms_lob.open(v_lob_loc, dbms_lob.lob_readonly);
+    -- +-------------------------------------------------------------+
+    -- | WRITE CONTENTS OF THE LOB TO A FILE                         |
+    -- +-------------------------------------------------------------+
+        v_out_file := utl_file.fopen(location => v_directory, filename => v_file_name,
+                                    open_mode => 'wb',
+                                    max_linesize => 32767);
+
+        WHILE v_amount >= v_buffer_size LOOP
+            dbms_lob.read(lob_loc => v_lob_loc, amount => v_amount, offset => v_offset,
+                         buffer => v_buffer);
+
+            v_offset := v_offset + v_amount;
+            utl_file.put_raw(file => v_out_file, buffer => v_buffer,
+                            autoflush => true);
+
+            utl_file.fflush(file => v_out_file);
+      -- +-------------------------------------------------------------+
+    -- | IN 9i THERE IS CURRENTLY A                                  |
+    -- | RESTRICTION OF A MAXIMUM OF 32K THAT CAN BE WRITTEN WITH    |
+    -- | PUT_RAW UNLESS YOU INSERT NEW LINE CHARACTERS IN BETWEEN    |
+    -- | THE DATA. IN 10i THERE IS A NEW BINARY MODE. WHEN FILES ARE |
+    -- | OPENED WITH THIS MODE ANY AMOUNT OF RAW DATA CAN BE WRITTEN |
+    -- | WITHOUT THE NEED FOR NEW LINES. IN SHORT, THIS IS A BUG     |
+    -- | THAT, IF IT CREEPS UP IN ORACLE9i, THERE IS NO SOLUTION!    |
+    -- +-------------------------------------------------------------+
+    -- UTL_FILE.NEW_LINE(file => v_out_file);
+        END LOOP;
+
+        utl_file.fflush(file => v_out_file);
+        utl_file.fclose(v_out_file);
+    -- +-------------------------------------------------------------+
+    -- | CLOSING THE LOB IS MANDATORY IF YOU HAVE OPENED IT          |
+    -- +-------------------------------------------------------------+
+        dbms_lob.close(v_lob_loc);
+    EXCEPTION
+        WHEN OTHERS THEN
+      --DBMS_SQL.CLOSE_CURSOR(l_thecursor);
+            do_log('Err: '
+                   || sqlcode
+                   || ': '
+                   || substr(sqlerrm, 1, 100), false);
+
+            raise_application_error('-20000', 'Error in lt_table_extract.Extract Pictures ::  '
+                                              || sqlcode
+                                              || ': '
+                                              || substr(sqlerrm, 1, 1000));
+
+    END write_blob_to_file;
+
+    FUNCTION load_blob_from_file (
+        p_dir_name   VARCHAR2,
+        p_file_name  VARCHAR2
+    ) RETURN BLOB AS
+        dest_loc  BLOB := empty_blob();
+        src_loc   BFILE := bfilename(p_dir_name, p_file_name);
+    BEGIN
+    -- Open source binary file from OS
+        dbms_lob.open(src_loc, dbms_lob.lob_readonly);
+
+    -- Create temporary LOB object
+        dbms_lob.createtemporary(lob_loc => dest_loc, cache => true, dur => dbms_lob.session);
+
+    -- Open temporary lob
+        dbms_lob.open(dest_loc, dbms_lob.lob_readwrite);
+
+    -- Load binary file into temporary LOB
+        dbms_lob.loadfromfile(dest_lob => dest_loc, src_lob => src_loc, amount => dbms_lob.getlength(src_loc));
+
+    -- Close lob objects
+        dbms_lob.close(dest_loc);
+        dbms_lob.close(src_loc);
+
+    -- Return temporary LOB object
+        RETURN dest_loc;
+    END load_blob_from_file;
+
+  /*
+      This routine reads bdr file from LOGDR db location 
+      and
+      if encryption is set, converts the bdr file to bde and copies the file to UTL_DIR location.
+      if encryption is not set, copies the bdr file to UTL_DIR location. 
+
+      -- file placed in UTL_DIR will have upload_id attached at the end. This format is required for decrypting the file.
+
+  */
+    PROCEDURE process_bdr_files (
+        p_status OUT VARCHAR2
+    ) IS
+
+        lv_logdr         VARCHAR2(100);
+        temp_blob        BLOB := empty_blob();
+        temp_file        VARCHAR2(100);
+        lv_encrypt_flag  VARCHAR2(1);
+    BEGIN
+        p_status := 'OK';
+    -- Get reports directory location
+        BEGIN
+            SELECT
+                code_desc
+            INTO lv_logdr
+            FROM
+                master_codes
+            WHERE
+                    code_type = 'LOGDR'
+                AND code = 'UTIL'
+                AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate + 1);
+
+        EXCEPTION
+            WHEN no_data_found THEN
+                p_status := 'Log Dir not maintained';
+                RETURN;
+            WHEN OTHERS THEN
+                p_status := 'Error in fetching Log Dir: '
+                            || substr(sqlerrm, 1, 500);
+                RETURN;
+        END;
+
+        lv_encrypt_flag := get_param_value('ENCRPT_REQ');
+        FOR rec IN (
+            SELECT
+                file_name
+            FROM
+                files_xt
+            WHERE
+                substr(file_name, - 3) = 'bdr'
+        ) LOOP
+            IF lv_encrypt_flag = 'Y' THEN
+                --dbms_output.put_line('started processing ' || rec.file_name);
+                temp_file := substr(rec.file_name, 1, length(rec.file_name) - 4)
+                             || '-'
+                             || lv_upload_id
+                             || '.'
+                             || 'bde';
+
+                temp_blob := load_blob_from_file(lv_logdr, rec.file_name);
+                encrypt_blob_to_file(temp_blob, temp_file, p_status);
+                --dbms_output.put_line('Status ' || p_status);
+                utl_file.fremove(lv_logdr, rec.file_name);
+            ELSE
+                temp_file := substr(rec.file_name, 1, length(rec.file_name) - 4)
+                             || '-'
+                             || lv_upload_id
+                             || '.'
+                             || 'bdr';
+
+                utl_file.frename(lv_logdr, rec.file_name, v_directory, temp_file);
+            END IF;
+        END LOOP;
+
+    END process_bdr_files;
+
+
+END lt_table_extract;
+
+
+/

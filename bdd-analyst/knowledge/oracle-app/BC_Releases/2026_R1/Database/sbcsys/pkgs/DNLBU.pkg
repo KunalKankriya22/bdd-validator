@@ -1,0 +1,440 @@
+
+/* ***************************************************************************
+
+   Purpose        : Donor To Lab Interface
+   Developped By  : Jeff Centilli
+
+Verion	Date		By		Change
+01 [Moving to ISBT]
+02 08/31/09 		Edwin		Adding the descrepency Check in the 4.3.0 release 
+03 04/18/11		Hussein		Replace user by lt_session_user.get_userid 
+04			Edwin		Removed the chapter id condition in the donor_valid_parameters table
+05			Edwin		change the 'where' clause where in the donor interdictions table (to take care ALL)
+06 05/12/2016		Seshu		Renamed below tables for merging database work
+					DONOR_VALID_PARAMETERS		as	VALID_PARAMETERS
+					DONOR_VALID_INTERDICTIONS	as	VALID_INTERDICTIONS
+
+******************************************************************************
+*/
+
+create or replace PACKAGE DNLBU IS
+
+   PROCEDURE donor_to_lab_unit_data
+             (in_unit_id          IN      VARCHAR2,
+              in_chapter_id       IN      VARCHAR2,
+              in_from_date        IN      DATE,
+              in_to_date          IN      DATE,
+              io_interface_id     IN OUT  VARCHAR2);
+
+   PROCEDURE check_donor_eligibility 
+             (in_donor_id         IN      VARCHAR2,
+              in_chapter_id       IN      VARCHAR2,
+              in_unit_id          IN      VARCHAR2,
+              in_coll_date        IN      DATE,
+              in_proc_code        IN      VARCHAR2,
+              in_don_type         IN      VARCHAR2);
+
+END DNLBU;
+/
+create or replace PACKAGE BODY DNLBU IS
+   global_err_num                   number;
+   global_err_msg                   varchar2(50);
+   global_error_code                varchar2(30);
+
+PROCEDURE donor_to_lab_unit_data
+             (in_unit_id          IN      VARCHAR2,
+              in_chapter_id       IN      VARCHAR2,
+              in_from_date        IN      DATE,
+              in_to_date          IN      DATE,
+              io_interface_id     IN OUT  VARCHAR2) 
+IS
+   session_id              DATE;
+   c1_unit_id              VARCHAR2(15);
+   c1_coll_date            DATE;
+   c1_chapter_id           VARCHAR2(4);
+   c1_drive_id             VARCHAR2(6);
+   c1_return_code          NUMBER(8);
+   c1_test_id              VARCHAR2(10);
+   c1_test_result          VARCHAR2(5);
+   c1_donation_type        VARCHAR2(5);
+   c1_procedure_code       VARCHAR2(5);
+   c1_donor_id             VARCHAR2(10);
+   c1_hold_flag            VARCHAR2(1);
+   c1_no_data_found        VARCHAR2(1);
+   new_interface_flag      VARCHAR2(1);
+   line_number             NUMBER(8);
+   number_of_units         NUMBER(8);
+   number_of_rejects       NUMBER(8);
+   number_of_success       NUMBER(8);
+   interface_id            VARCHAR2(10);
+   new_interface_id        NUMBER(8);
+   default_from_date       NUMBER(8);
+   temp_drive_id           VARCHAR2(6);
+   temp_drive_flag         VARCHAR2(4);
+   cmv_status_flag         VARCHAR2(1);
+   abo_check               VARCHAR2(1);
+   szTestID                VARCHAR2(15);
+   szBloodType             VARCHAR2(10);
+  temp_return_val          VARCHAR2(275);
+---
+CURSOR get_interface_units IS
+   SELECT unit_id, coll_date, chapter_id, donor_decision_code
+     FROM units
+    WHERE coll_date between nvl(in_from_date, decode(in_unit_id, null, 
+             trunc(sysdate)-default_from_date, sysdate)) 
+             and nvl(in_to_date, sysdate)
+      AND chapter_id = in_chapter_id
+      AND nvl(contract_id,'ZZZ') = 'INTERNAL'
+      AND donor_lab_dats is null
+UNION
+   SELECT unit_id, coll_date, chapter_id, donor_decision_code
+     FROM units
+    WHERE chapter_id = in_chapter_id
+      AND unit_id = nvl(in_unit_id, 'ZZZZZZZZZZ')
+      AND nvl(contract_id,'ZZZ') = 'INTERNAL'
+    ORDER BY 1;
+BEGIN
+   line_number := 1;
+   number_of_units := 0;
+   number_of_rejects := 0;
+   number_of_success := 0;
+   --
+   new_interface_flag := 'N';
+/*
+||     create a new interface ID
+*/
+   IF (io_interface_id is null) THEN
+      SELECT nvl(max_number,0) + 1
+        INTO new_interface_id
+        FROM number_generation
+       WHERE number_type = 'INTERFACE_ID'
+         AND chapter_id = in_chapter_id 
+         FOR UPDATE OF max_number;
+      IF (new_interface_id is not null) THEN
+         interface_id := 'DTLU'||
+                          rtrim(ltrim(to_char(new_interface_id, '099999')));
+         io_interface_id := interface_id;
+         UPDATE number_generation
+            SET max_number = new_interface_id
+          WHERE number_type = 'INTERFACE_ID'
+            AND chapter_id = in_chapter_id;
+         COMMIT;
+      END IF;
+   END IF;
+   BEGIN
+      SELECT to_number(parameter_value)
+        INTO default_from_date
+        FROM valid_parameters
+       WHERE parameter_code = 'DNLB_ABO'
+         AND sysdate between eff_date and nvl(term_date, sysdate+1);
+   EXCEPTION
+      WHEN no_data_found THEN
+           default_from_date := 7;
+   END;
+   interface_id := io_interface_id;
+   BEGIN
+      SELECT distinct 'Y'
+        INTO new_interface_flag
+        FROM interface_log
+       WHERE interface_id = io_interface_id;
+   EXCEPTION
+      WHEN no_data_found THEN
+         INSERT INTO interface_log VALUES
+            (interface_id, 'DNLBU', null, 0, sysdate, sysdate,
+             decode(substr(LT_USER_SESSION.get_userid,1,3),'OPS', substr(LT_USER_SESSION.get_userid,5), LT_USER_SESSION.get_userid),
+             0, 0, 0, in_chapter_id, 'UNITS');
+         new_interface_flag := 'N';
+   END;
+   INSERT INTO interface_log_parms VALUES
+      (interface_id, in_chapter_id, in_unit_id, null, null, in_from_date,
+       in_to_date);
+/**/
+   FOR c1 IN get_interface_units LOOP
+      c1_unit_id := c1.unit_id;
+      c1_coll_date := c1.coll_date;
+      c1_chapter_id := c1.chapter_id;
+      c1_donation_type := null;
+      c1_donor_id := null;
+      number_of_units := number_of_units + 1;
+/*
+||    Retrieve donor ID from LifeTrak/Donor
+*/
+      BEGIN
+         SELECT u.donor_id, rtrim(ltrim(u.donation_type)),
+                rtrim(ltrim(u.procedure_code)),
+                substr(u.drive_id,5,6)
+           INTO c1_donor_id, c1_donation_type, c1_procedure_code, 
+                c1_drive_id
+           FROM donations u, donors d
+          WHERE u.unit_id = c1_unit_id
+            AND u.coll_date = c1_coll_date
+            AND u.chapter_id = c1_chapter_id
+            AND nvl(u.donor_id, null) is not null
+            AND nvl(u.donor_id, null) = d.donor_id;
+      EXCEPTION
+         WHEN no_data_found THEN
+            c1_donor_id := null;
+      END;
+      c1_hold_flag := null;
+      IF (c1_donor_id is not null) THEN
+         BEGIN
+            SELECT 'H'
+              INTO c1_hold_flag
+              FROM DUAL
+             WHERE EXISTS
+                   (SELECT 'X'
+                      FROM donor_interdictions di, 
+                           valid_interdictions vi
+                     WHERE di.donor_id = c1_donor_id
+                       --AND di.chapter_id = c1_chapter_id 
+                         AND decode(di.chapter_id, 'ALL', c1_chapter_id,
+                         di.chapter_id) = c1_chapter_id
+                       AND di.term_date is null
+                       AND di.inter_code = vi.inter_code
+                       AND vi.inter_type = 'HOLDS'
+                       AND sysdate between vi.eff_date and 
+                                           nvl(vi.term_date, sysdate+1))
+                OR EXISTS
+                   (SELECT 'X'
+                      FROM donation_interdictions di, 
+                           valid_interdictions vi
+                     WHERE di.unit_id = c1_unit_id
+                       AND di.coll_date = c1_coll_date
+                       AND di.chapter_id = c1_chapter_id
+                       AND di.term_date is null
+                       AND di.inter_code = vi.inter_code
+                       AND vi.inter_type = 'HOLDS'
+                       AND sysdate between vi.eff_date and
+                                   nvl(vi.term_date, sysdate+1));
+         EXCEPTION
+            WHEN no_data_found THEN
+                 c1_hold_flag := null;
+         END;
+  
+         IF (c1_hold_flag is null) THEN
+            BEGIN
+               SELECT 'N'
+                 INTO c1_hold_flag
+                 FROM DUAL
+                WHERE EXISTS
+                      (SELECT 'X'
+                         FROM donations don 
+                        WHERE unit_id = c1_unit_id
+                          AND coll_date = c1_coll_date
+                          AND chapter_id = c1_chapter_id
+                          AND nvl(n_audit_flag, 'N') != 'Y');
+            EXCEPTION
+               WHEN no_data_found THEN
+                    c1_hold_flag := null;
+            END;
+         END IF;
+      END IF;
+
+      IF ((c1_donor_id is not null) and (c1_hold_flag is null)) THEN
+
+       /* Added By Edwin to check the ABORH descrpency on the unit and
+          donor , Added by Edwin: 08/29/09 in the LT 4.2.0 release
+       */
+  
+       abo_check:='Y';
+       Begin
+           SELECT 'ABORH', blood_type into
+           szTestID,szBloodType
+           FROM donors
+           WHERE donor_id = c1_donor_id
+           AND chapter_id = c1_chapter_id
+           AND blood_type is not null;
+
+           ---Calling database procedure for test discrepancy
+
+           savepoint ABOCHK;
+           temp_return_val := test_results.discrepancy(
+                       c1_unit_id, c1_coll_date, c1_chapter_id,
+                        szTestID, szBloodType,interface_id);
+
+           IF (temp_return_val != '0') THEN
+               abo_check:='N';
+               rollback to savepoint ABOCHK;
+               number_of_rejects := number_of_rejects + 1;
+               INSERT INTO interface_log_excp VALUES
+                     (interface_id, c1_unit_id, null, 'DNLBU', 'ABOD', null,
+                      in_chapter_id);  
+           Else
+              abo_check:='Y';
+           End If;
+      Exception 
+        when no_data_found then 
+          null;
+        when others then
+             rollback to savepoint ABOCHK;
+             number_of_rejects := number_of_rejects + 1;
+            INSERT INTO interface_log_excp VALUES
+                    (interface_id, c1_unit_id, null, 'DNLBU', 'ABOD', null,
+                     in_chapter_id);
+             abo_check:='N';
+      End;
+
+   -----Addition over --------------------------
+	
+/*
+||       Set CMV flag to 'N',  call CMV interface,  then check flag.
+*/
+
+     If abo_check = 'Y' then  /* If abo_check is successful */
+
+         cmv_status_flag := 'N';
+         savepoint CMVINT;
+         CMVINT.unit_level_cmv_transfer (c1_unit_id, c1_chapter_id,c1_coll_date,
+                                         interface_id, cmv_status_flag);
+         IF (cmv_status_flag = 'N') THEN
+            rollback to savepoint CMVINT;
+            number_of_rejects := number_of_rejects + 1;
+            INSERT INTO interface_log_excp VALUES
+                 (interface_id, c1_unit_id, null, 'DNLBU', 'FLCMV', null,
+                  in_chapter_id);
+         END IF;
+         IF (cmv_status_flag != 'N') THEN
+/*
+||          check drive ID on both systems, if diff, update lab and notify.
+*/
+            SELECT drive_id 
+              INTO temp_drive_id
+              FROM units
+             WHERE unit_id = c1_unit_id
+               AND coll_date = c1_coll_date
+               AND chapter_id = c1_chapter_id;
+            SELECT DECODE(temp_drive_id, c1_drive_id, 'SAME', 'DIFF')
+              INTO temp_drive_flag
+              FROM DUAL;
+            IF (temp_drive_flag = 'DIFF') THEN
+               INSERT INTO interface_log_excp VALUES
+                    (interface_id, c1_unit_id, null, 'DNLBU', 'DRVUP', null,
+                     in_chapter_id);
+            END IF;   
+--
+/*
+||          Update unit information in LAB*CARE.  
+*/
+            UPDATE units
+               SET donor_lab_dats = sysdate,
+                   drive_id = c1_drive_id,
+                   program_id = 'DNLBU'
+             WHERE unit_id = c1_unit_id
+               AND coll_date = c1_coll_date
+               AND chapter_id = c1_chapter_id;
+--
+            INSERT INTO interface_log_excp VALUES
+               (interface_id, c1_unit_id, null, 'DNLBU', 'INTOK', 'Y',
+                in_chapter_id);
+            number_of_success := number_of_success + 1;
+--
+            IF (rtrim(ltrim(c1_donation_type)) not in ('AU', 'TH')) THEN
+               check_donor_eligibility (c1_donor_id, c1_chapter_id, c1_unit_id,
+                                        c1_coll_date, 
+                                        rtrim(ltrim(c1_procedure_code)),
+                                        rtrim(ltrim(c1_donation_type)));
+            END IF;
+         END IF;  /* Do only if successful CMV INTERFACE */
+      End If;    /* do only if successful abo_check */
+---
+         COMMIT;
+      ELSE    /* Donor ID is null   */
+         number_of_rejects := number_of_rejects + 1;
+         IF (c1_donor_id is null) THEN
+            INSERT INTO interface_log_excp VALUES
+               (interface_id, c1_unit_id, null, 'DNLBU', 'NODON', 'N',
+                in_chapter_id);
+         ELSE
+            IF (c1_hold_flag = 'H') THEN
+               INSERT INTO interface_log_excp VALUES
+                  (interface_id, c1_unit_id, null, 'DNLBU', 'HOLD', 'N',
+                   in_chapter_id);
+            ELSE
+               INSERT INTO interface_log_excp VALUES
+                  (interface_id, c1_unit_id, null, 'DNLBU', 'RAPND', 'N',
+                   in_chapter_id);
+            END IF;
+         END IF;
+         COMMIT;
+      END IF;    /* Donor ID is null   */
+   END LOOP;
+   UPDATE interface_log
+      SET no_of_units = no_of_units + number_of_units,
+          complete_count = complete_count + number_of_success,
+          no_xfer_count = no_xfer_count + number_of_rejects,
+          end_time = sysdate
+    WHERE interface_id = io_interface_id 
+      AND chapter_id = in_chapter_id;
+   COMMIT;
+END donor_to_lab_unit_data;
+/*
+||         Eligibility procedure
+*/
+PROCEDURE check_donor_eligibility
+             (in_donor_id         IN      VARCHAR2,
+              in_chapter_id       IN      VARCHAR2,
+              in_unit_id          IN      VARCHAR2,
+              in_coll_date        IN      DATE,
+              in_proc_code        IN      VARCHAR2,
+              in_don_type         IN      VARCHAR2)
+IS
+   t_elig_status     varchar2(5);
+   t_deff_date       date;
+   t_inter_type      varchar2(5);
+   t_reason          varchar2(300);
+BEGIN
+   don_core.check_eligibility
+            (in_donor_id, in_proc_code, in_don_type, trunc(in_coll_date)-1,null,
+             t_elig_status, t_deff_date, t_inter_type, t_reason);
+   IF ((t_elig_status = 'N') AND 
+       (nvl(t_deff_date, in_coll_date+1) > in_coll_date)) THEN 
+      IF (t_inter_type = 'PERMD') THEN
+         BEGIN
+            INSERT INTO unit_interdictions
+               (unit_id, coll_date, chapter_id, inter_code,
+                insert_dats, inter_user_id, program_id)
+            VALUES
+               (in_unit_id, in_coll_date, in_chapter_id, 'PDEF', sysdate, 
+                decode(substr(LT_USER_SESSION.get_userid,1,3),'OPS',substr(LT_USER_SESSION.get_userid,5),LT_USER_SESSION.get_userid),'DNLBU');
+         EXCEPTION
+            WHEN dup_val_on_index THEN
+                 null;
+         END;
+      ELSIF (t_reason = 'Donor is temporarily deferred.') THEN
+         BEGIN
+            INSERT INTO unit_interdictions
+               (unit_id, coll_date, chapter_id, inter_code,
+                insert_dats, inter_user_id, program_id)
+            VALUES
+               (in_unit_id, in_coll_date, in_chapter_id, 'TDEF', sysdate, 
+                decode(substr(LT_USER_SESSION.get_userid,1,3),'OPS',substr(LT_USER_SESSION.get_userid,5),LT_USER_SESSION.get_userid),'DNLBU');
+         EXCEPTION
+            WHEN dup_val_on_index THEN
+                 null;
+         END;
+      ELSE 
+         BEGIN
+            INSERT INTO unit_interdictions
+               (unit_id, coll_date, chapter_id, inter_code,
+                insert_dats, inter_user_id, program_id)
+            VALUES
+               (in_unit_id, in_coll_date, in_chapter_id, 'ELIG', sysdate, 
+                decode(substr(LT_USER_SESSION.get_userid,1,3),'OPS',substr(LT_USER_SESSION.get_userid,5),LT_USER_SESSION.get_userid),'DNLBU');
+         EXCEPTION
+            WHEN dup_val_on_index THEN
+                 null;
+         END;
+      END IF;
+   END IF;
+   RETURN;
+END check_donor_eligibility;
+        --
+END DNLBU;
+/
+
+
+create or replace public synonym DNLBU for OPS$SBCSYS.DNLBU;
+
+show errors
+
+

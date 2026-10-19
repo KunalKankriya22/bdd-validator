@@ -1,0 +1,439 @@
+<div class="main-content">
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Filter Card -->
+  <div class="filter-card">
+    <div class="controls">
+      <div class="filter-field-wrapper">
+        <mat-form-field appearance="fill" class="filter-field" [class.filter-field--invalid]="sourceIdError">
+          <mat-label>Source ID</mat-label>
+          <mat-select [(value)]="selectedSourceId" [disabled]="false" required
+            (openedChange)="onSourceIdOpenedChange($event)">
+            <mat-select-trigger>{{ selectedSourceId }}</mat-select-trigger>
+            <mat-option>
+              <ngx-mat-select-search [formControl]="sourceIdSearchCtrl"
+                placeholderLabel="Search..." noEntriesFoundLabel="No results found">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (option of filteredSourceIdOptions(); track option.code) {
+              <mat-option [value]="option.code">{{ option.code }}{{ option.description ? ' - ' + option.description : '' }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+        @if (sourceIdError) {
+          <div class="field-error" role="alert">{{ sourceIdError }}</div>
+        }
+      </div>
+
+      <div class="filter-field-wrapper">
+        <mat-form-field appearance="fill" class="filter-field" [class.filter-field--invalid]="targetIdError">
+          <mat-label>Target ID</mat-label>
+          <mat-select [(value)]="selectedTargetId" [disabled]="false" required
+            (openedChange)="onTargetIdOpenedChange($event)">
+            <mat-select-trigger>{{ selectedTargetId }}</mat-select-trigger>
+            <mat-option>
+              <ngx-mat-select-search [formControl]="targetIdSearchCtrl"
+                placeholderLabel="Search..." noEntriesFoundLabel="No results found">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (option of filteredTargetIdOptions(); track option.code) {
+              <mat-option [value]="option.code">{{ option.code }}{{ option.description ? ' - ' + option.description : '' }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+        @if (targetIdError) {
+          <div class="field-error" role="alert">{{ targetIdError }}</div>
+        }
+      </div>
+
+      <button type="button" mat-stroked-button class="retrieve-btn"
+              [disabled]="isRetrieveDisabled"
+              (click)="retrieve()">
+        RETRIEVE
+      </button>
+
+      <button type="button" mat-button class="clear-btn"
+                           (click)="clearAll()">
+        CLEAR ALL
+      </button>
+    </div>
+  </div>
+
+  <!-- Table Card -->
+  <div class="table-card">
+    <!-- Table Header -->
+    @if (hasRetrieved) {
+      <div class="table-header">
+        <div class="table-header__left">
+          <span class="table-header__title">Conversion Codes</span>
+          @if (isEditOrAddMode && showValidationError) {
+            <div class="validation-error-inline" role="alert">
+              <mat-icon aria-hidden="true">error</mat-icon>
+              <span>Please address the fields indicated below.</span>
+            </div>
+          }
+        </div>
+        <div class="table-header__actions">
+          @if (!isEditOrAddMode && !hasError && !isLoading) {
+            <button #addEditBtn type="button" mat-stroked-button class="add-edit-btn" (click)="enterEditMode()"
+              aria-label="Add or edit conversion codes">
+              ADD / EDIT
+            </button>
+            <app-search-bar [config]="searchConfig" [(searchText)]="searchText" (search)="onSearch($event)"></app-search-bar>
+          }
+          @if (isEditOrAddMode) {
+            <div class="edit-mode-actions">
+              <button type="button" mat-stroked-button class="add-new-row-btn" (click)="addNewRow()">
+                <mat-icon aria-hidden="true">add</mat-icon> ADD NEW ROW
+              </button>
+              <span class="btn-divider"></span>
+              <button type="button" mat-stroked-button class="cancel-btn" [disabled]="isSaving" (click)="cancelEdit()">
+                <mat-icon aria-hidden="true">close</mat-icon> CANCEL
+              </button>
+              <button type="button" mat-raised-button class="save-btn"
+                [disabled]="isSaving || !hasAnyDirtyForms || showValidationError"
+                (click)="saveAll()">
+                <mat-icon aria-hidden="true">check</mat-icon> SAVE
+              </button>
+            </div>
+          }
+        </div>
+      </div>
+    }
+
+    <!-- Loading -->
+    @if (isLoading) {
+      <div class="state-container" role="status" aria-live="polite">
+        <mat-spinner diameter="40" aria-label="Loading"></mat-spinner>
+        <p>Loading conversion codes...</p>
+      </div>
+    }
+
+    <!-- Error -->
+    @if (hasError && !isLoading) {
+      <div class="state-container" role="alert">
+        <mat-icon class="state-icon state-icon--error" aria-hidden="true">error_outline</mat-icon>
+        <p>Unable to load conversion codes. Please try again.</p>
+        <button type="button" mat-raised-button color="primary" (click)="retrieve()">Retry</button>
+      </div>
+    }
+
+    <!-- Empty State -->
+    @if (!hasRetrieved && !isLoading) {
+      <div class="state-container">
+        <mat-icon class="state-icon" aria-hidden="true">search</mat-icon>
+        <p class="state-title">No Results to Display</p>
+        <p class="state-subtitle">Please enter search criteria to view results</p>
+      </div>
+    }
+
+    @if (hasRetrieved && !isLoading && !hasError && dataSource.length === 0 && !isEditOrAddMode) {
+      <div class="state-container" role="status" aria-live="polite">
+        <mat-icon class="state-icon" aria-hidden="true">inbox</mat-icon>
+        <p class="state-title">No Records Found</p>
+        <p class="state-subtitle">No conversion codes match your search criteria</p>
+      </div>
+    }
+
+    <!-- Inline Editable Table -->
+    @if ((hasRetrieved && !isLoading && !hasError && dataSource.length > 0) || isEditOrAddMode) {
+      <div class="table-wrapper">
+        <table class="data-table" aria-label="Conversion Codes">
+          <thead>
+            <tr>
+              <th [class.sortable-header]="!isEditOrAddMode"
+                [attr.tabindex]="!isEditOrAddMode ? 0 : null"
+                [attr.role]="!isEditOrAddMode ? 'columnheader' : null"
+                [attr.aria-sort]="!isEditOrAddMode ? getAriaSort() : null"
+                (click)="!isEditOrAddMode && onSort()"
+                (keydown.enter)="!isEditOrAddMode && onSort()"
+                (keydown.space)="!isEditOrAddMode && onSort(); $event.preventDefault()">
+                Source Type
+                @if (!isEditOrAddMode) {
+                  <mat-icon class="sort-icon" aria-hidden="true">{{ getSortIcon() }}</mat-icon>
+                }
+              </th>
+              <th>Source Value</th>
+              <th>Target Type</th>
+              <th>Target Value</th>
+              <th>Procedure Count</th>
+              <th>Effective Date</th>
+              <th>Termination Date</th>
+              @if (isEditOrAddMode && newRows.length > 0) {
+                <th class="col-actions"></th>
+              }
+            </tr>
+          </thead>
+          <tbody>
+            <!-- New Rows -->
+            @for (row of newRows; track row.id; let ni = $index) {
+              <tr class="editable-row" [formGroup]="row.form">
+                <td>
+                  <mat-form-field appearance="fill" class="inline-field"
+                    [class.mat-form-field-invalid]="row.form.get('sourceCodeType')?.invalid && (row.form.get('sourceCodeType')?.touched || row.form.dirty)"
+                    [matTooltip]="getFieldErrorTooltip(row.form, 'sourceCodeType', 'Source Code Type', row.form.dirty)"
+                    matTooltipPosition="below"
+                    [matTooltipDisabled]="!getFieldErrorTooltip(row.form, 'sourceCodeType', 'Source Code Type', row.form.dirty)">
+                    <mat-select formControlName="sourceCodeType"
+                      (openedChange)="!$event && sourceTypeSearchCtrl.setValue('')">
+                      <mat-select-trigger>{{ row.form.get('sourceCodeType')?.value }}</mat-select-trigger>
+                      <mat-option>
+                        <ngx-mat-select-search [formControl]="sourceTypeSearchCtrl"
+                          placeholderLabel="Search..." noEntriesFoundLabel="No results found">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (opt of filteredSourceTypeOptions(); track opt.code) {
+                        <mat-option [value]="opt.code">{{ opt.code }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                </td>
+                <td>
+                  <mat-form-field appearance="fill" class="inline-field"
+                    [class.mat-form-field-invalid]="row.form.get('sourceValue')?.invalid && (row.form.get('sourceValue')?.touched || row.form.dirty)"
+                    [matTooltip]="getFieldErrorTooltip(row.form, 'sourceValue', 'Source Value', row.form.dirty)"
+                    matTooltipPosition="below"
+                    [matTooltipDisabled]="!getFieldErrorTooltip(row.form, 'sourceValue', 'Source Value', row.form.dirty)">
+                    <input matInput formControlName="sourceValue" maxlength="20" />
+                  </mat-form-field>
+                </td>
+                <td>
+                  <mat-form-field appearance="fill" class="inline-field"
+                    [class.mat-form-field-invalid]="row.form.get('targetCodeType')?.invalid && (row.form.get('targetCodeType')?.touched || row.form.dirty)"
+                    [matTooltip]="getFieldErrorTooltip(row.form, 'targetCodeType', 'Target Code Type', row.form.dirty)"
+                    matTooltipPosition="below"
+                    [matTooltipDisabled]="!getFieldErrorTooltip(row.form, 'targetCodeType', 'Target Code Type', row.form.dirty)">
+                    <mat-select formControlName="targetCodeType"
+                      (selectionChange)="onTargetTypeChange($event.value, row)"
+                      (openedChange)="!$event && targetTypeSearchCtrl.setValue('')">
+                      <mat-select-trigger>{{ row.form.get('targetCodeType')?.value }}</mat-select-trigger>
+                      <mat-option>
+                        <ngx-mat-select-search [formControl]="targetTypeSearchCtrl"
+                          placeholderLabel="Search..." noEntriesFoundLabel="No results found">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (opt of filteredTargetTypeOptions(); track opt.code) {
+                        <mat-option [value]="opt.code">{{ opt.code }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                </td>
+                <td>
+                  <mat-form-field appearance="fill" class="inline-field"
+                    [class.mat-form-field-invalid]="row.form.get('targetValue')?.invalid && (row.form.get('targetValue')?.touched || row.form.dirty)"
+                    [matTooltip]="getFieldErrorTooltip(row.form, 'targetValue', 'Target Value', row.form.dirty)"
+                    matTooltipPosition="below"
+                    [matTooltipDisabled]="!getFieldErrorTooltip(row.form, 'targetValue', 'Target Value', row.form.dirty)">
+                    <mat-select formControlName="targetValue"
+                      (openedChange)="!$event && row.targetValueSearchCtrl.setValue('')">
+                      <mat-select-trigger>{{ row.form.get('targetValue')?.value }}</mat-select-trigger>
+                      <mat-option>
+                        <ngx-mat-select-search [formControl]="row.targetValueSearchCtrl"
+                          placeholderLabel="Search..." noEntriesFoundLabel="No results found">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (opt of row.filteredTargetValueOptions; track opt.code) {
+                        <mat-option [value]="opt.code">{{ opt.code }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                </td>
+                <td>
+                  <mat-form-field appearance="fill" class="inline-field"
+                    [class.mat-form-field-invalid]="row.form.get('convProcCall')?.invalid && (row.form.get('convProcCall')?.touched || row.form.dirty)"
+                    [matTooltip]="getFieldErrorTooltip(row.form, 'convProcCall', 'Procedure Count', row.form.dirty)"
+                    matTooltipPosition="below"
+                    [matTooltipDisabled]="!getFieldErrorTooltip(row.form, 'convProcCall', 'Procedure Count', row.form.dirty)">
+                    <input matInput formControlName="convProcCall" maxlength="3" (keypress)="onDigitOnly($event)" />
+                  </mat-form-field>
+                </td>
+                <td>
+                  <mat-form-field appearance="fill" class="inline-field date-field"
+                    [class.mat-form-field-invalid]="isDateFieldInvalid(row.form, 'effDate', row.lastChangedDateField)"
+
+                    [matTooltip]="getEffectiveDateTooltipMessage(row.form, row.lastChangedDateField)"
+                    matTooltipPosition="below"
+                    [matTooltipDisabled]="!getEffectiveDateTooltipMessage(row.form, row.lastChangedDateField)">
+                    <input matInput [matDatepicker]="newEffP" formControlName="effDate"
+                      [min]="getEffectiveDateMin()"
+                      (input)="onEffectiveDateInput($event, row)"
+                      (blur)="onDateInputBlur($event, row, 'effDate')"
+                      (dateChange)="onDateChange(row, 'effDate')" />
+                    <mat-datepicker-toggle matIconSuffix [for]="newEffP"></mat-datepicker-toggle>
+                    <mat-datepicker #newEffP [startAt]="getEffectiveDateMin()"></mat-datepicker>
+                    @if (getEffectiveDateError(row.form, row.lastChangedDateField)) {
+                      <mat-error>{{ getEffectiveDateError(row.form, row.lastChangedDateField) }}</mat-error>
+                    }
+                  </mat-form-field>
+                </td>
+                <td>
+                  <mat-form-field appearance="fill" class="inline-field date-field"
+                    [class.mat-form-field-invalid]="isDateFieldInvalid(row.form, 'termDate', row.lastChangedDateField)"
+
+                    [matTooltip]="getTerminationDateTooltipMessage(row.form, row.lastChangedDateField)"
+                    matTooltipPosition="below"
+                    [matTooltipDisabled]="!getTerminationDateTooltipMessage(row.form, row.lastChangedDateField)">
+                    <input matInput [matDatepicker]="newTermP" formControlName="termDate"
+                      [min]="getTerminationMinDate(row.form)"
+                      (input)="onTerminationDateInput($event, row, false)"
+                      (blur)="onDateInputBlur($event, row, 'termDate')"
+                      (dateChange)="onDateChange(row, 'termDate')" />
+                    <mat-datepicker-toggle matIconSuffix [for]="newTermP"></mat-datepicker-toggle>
+                    <mat-datepicker #newTermP></mat-datepicker>
+                    @if (getTerminationDateError(row.form, row.lastChangedDateField)) {
+                      <mat-error>{{ getTerminationDateError(row.form, row.lastChangedDateField) }}</mat-error>
+                    }
+                  </mat-form-field>
+                </td>
+                <td class="col-actions">
+                  <button mat-icon-button class="delete-btn" (click)="removeNewRow(ni)"
+                    [attr.aria-label]="'Delete new row ' + (ni + 1)">
+                    <mat-icon aria-hidden="true">delete</mat-icon>
+                  </button>
+                </td>
+              </tr>
+            }
+
+            <!-- Existing Data Rows -->
+            @for (row of dataSource; track row.convRefId; let i = $index) {
+              @if (isEditOrAddMode && editableRows[i]) {
+                <tr class="editable-row" [formGroup]="editableRows[i]">
+                  <td>
+                    <mat-form-field appearance="fill" class="inline-field"
+                      [class.mat-form-field-invalid]="editableRowsMeta[i].form.get('sourceCodeType')?.invalid && editableRowsMeta[i].form.get('sourceCodeType')?.touched"
+                      [matTooltip]="getFieldErrorTooltip(editableRowsMeta[i].form, 'sourceCodeType', 'Source Code Type')"
+                      matTooltipPosition="below"
+                      [matTooltipDisabled]="!getFieldErrorTooltip(editableRowsMeta[i].form, 'sourceCodeType', 'Source Code Type')">
+                      <mat-select formControlName="sourceCodeType"
+                        (openedChange)="!$event && sourceTypeSearchCtrl.setValue('')">
+                        <mat-select-trigger>{{ editableRowsMeta[i].form.get('sourceCodeType')?.value }}</mat-select-trigger>
+                        <mat-option>
+                          <ngx-mat-select-search [formControl]="sourceTypeSearchCtrl"
+                            placeholderLabel="Search..." noEntriesFoundLabel="No results found">
+                          </ngx-mat-select-search>
+                        </mat-option>
+                        @for (opt of filteredSourceTypeOptions(); track opt.code) {
+                          <mat-option [value]="opt.code">{{ opt.code }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>
+                        }
+                      </mat-select>
+                    </mat-form-field>
+                  </td>
+                  <td>
+                    <mat-form-field appearance="fill" class="inline-field"
+                      [class.mat-form-field-invalid]="editableRowsMeta[i].form.get('sourceValue')?.invalid && editableRowsMeta[i].form.get('sourceValue')?.touched"
+                      [matTooltip]="getFieldErrorTooltip(editableRowsMeta[i].form, 'sourceValue', 'Source Value')"
+                      matTooltipPosition="below"
+                      [matTooltipDisabled]="!getFieldErrorTooltip(editableRowsMeta[i].form, 'sourceValue', 'Source Value')">
+                      <input matInput formControlName="sourceValue" maxlength="20" />
+                    </mat-form-field>
+                  </td>
+                  <td>
+                    <mat-form-field appearance="fill" class="inline-field"
+                      [class.mat-form-field-invalid]="editableRowsMeta[i].form.get('targetCodeType')?.invalid && editableRowsMeta[i].form.get('targetCodeType')?.touched"
+                      [matTooltip]="getFieldErrorTooltip(editableRowsMeta[i].form, 'targetCodeType', 'Target Code Type')"
+                      matTooltipPosition="below"
+                      [matTooltipDisabled]="!getFieldErrorTooltip(editableRowsMeta[i].form, 'targetCodeType', 'Target Code Type')">
+                      <mat-select formControlName="targetCodeType"
+                        (selectionChange)="onTargetTypeChange($event.value, editableRowsMeta[i])"
+                        (openedChange)="!$event && targetTypeSearchCtrl.setValue('')">
+                        <mat-select-trigger>{{ editableRowsMeta[i].form.get('targetCodeType')?.value }}</mat-select-trigger>
+                        <mat-option>
+                          <ngx-mat-select-search [formControl]="targetTypeSearchCtrl"
+                            placeholderLabel="Search..." noEntriesFoundLabel="No results found">
+                          </ngx-mat-select-search>
+                        </mat-option>
+                        @for (opt of filteredTargetTypeOptions(); track opt.code) {
+                          <mat-option [value]="opt.code">{{ opt.code }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>
+                        }
+                      </mat-select>
+                    </mat-form-field>
+                  </td>
+                  <td>
+                    <mat-form-field appearance="fill" class="inline-field"
+                      [class.mat-form-field-invalid]="editableRowsMeta[i].form.get('targetValue')?.invalid && editableRowsMeta[i].form.get('targetValue')?.touched"
+                      [matTooltip]="getFieldErrorTooltip(editableRowsMeta[i].form, 'targetValue', 'Target Value')"
+                      matTooltipPosition="below"
+                      [matTooltipDisabled]="!getFieldErrorTooltip(editableRowsMeta[i].form, 'targetValue', 'Target Value')">
+                      <mat-select formControlName="targetValue"
+                        (openedChange)="!$event && editableRowsMeta[i].targetValueSearchCtrl.setValue('')">
+                        <mat-select-trigger>{{ editableRowsMeta[i].form.get('targetValue')?.value }}</mat-select-trigger>
+                        <mat-option>
+                          <ngx-mat-select-search [formControl]="editableRowsMeta[i].targetValueSearchCtrl"
+                            placeholderLabel="Search..." noEntriesFoundLabel="No results found">
+                          </ngx-mat-select-search>
+                        </mat-option>
+                        @for (opt of editableRowsMeta[i].filteredTargetValueOptions; track opt.code) {
+                          <mat-option [value]="opt.code">{{ opt.code }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>
+                        }
+                      </mat-select>
+                    </mat-form-field>
+                  </td>
+                  <td>
+                    <mat-form-field appearance="fill" class="inline-field"
+                      [class.mat-form-field-invalid]="editableRowsMeta[i].form.get('convProcCall')?.invalid && editableRowsMeta[i].form.get('convProcCall')?.touched"
+                      [matTooltip]="getFieldErrorTooltip(editableRowsMeta[i].form, 'convProcCall', 'Procedure Count')"
+                      matTooltipPosition="below"
+                      [matTooltipDisabled]="!getFieldErrorTooltip(editableRowsMeta[i].form, 'convProcCall', 'Procedure Count')">
+                      <input matInput formControlName="convProcCall" maxlength="3" (keypress)="onDigitOnly($event)" />
+                    </mat-form-field>
+                  </td>
+                  <td>
+                    <mat-form-field appearance="fill" class="inline-field date-field"
+                      [class.mat-form-field-invalid]="isDateFieldInvalid(editableRowsMeta[i].form, 'effDate', editableRowsMeta[i].lastChangedDateField)"
+
+                      [matTooltip]="getEffectiveDateTooltipMessage(editableRowsMeta[i].form, editableRowsMeta[i].lastChangedDateField)"
+                      matTooltipPosition="below"
+                      [matTooltipDisabled]="!getEffectiveDateTooltipMessage(editableRowsMeta[i].form, editableRowsMeta[i].lastChangedDateField)">
+                      <input matInput [matDatepicker]="editEffP" formControlName="effDate"
+                        (input)="onEffectiveDateInput($event, editableRowsMeta[i])"
+                        (blur)="onDateInputBlur($event, editableRowsMeta[i], 'effDate')"
+                        (dateChange)="onDateChange(editableRowsMeta[i], 'effDate')" />
+                      <mat-datepicker-toggle matIconSuffix [for]="editEffP"></mat-datepicker-toggle>
+                      <mat-datepicker #editEffP></mat-datepicker>
+                      @if (getEffectiveDateError(editableRowsMeta[i].form, editableRowsMeta[i].lastChangedDateField)) {
+                        <mat-error>{{ getEffectiveDateError(editableRowsMeta[i].form, editableRowsMeta[i].lastChangedDateField) }}</mat-error>
+                      }
+                    </mat-form-field>
+                  </td>
+                  <td>
+                    <mat-form-field appearance="fill" class="inline-field date-field"
+                      [class.mat-form-field-invalid]="isDateFieldInvalid(editableRowsMeta[i].form, 'termDate', editableRowsMeta[i].lastChangedDateField)"
+
+                      [matTooltip]="getTerminationDateTooltipMessage(editableRowsMeta[i].form, editableRowsMeta[i].lastChangedDateField)"
+                      matTooltipPosition="below"
+                      [matTooltipDisabled]="!getTerminationDateTooltipMessage(editableRowsMeta[i].form, editableRowsMeta[i].lastChangedDateField)">
+                      <input matInput [matDatepicker]="editTermP" formControlName="termDate"
+                        [min]="getTerminationMinDate(editableRowsMeta[i].form)"
+                        (input)="onTerminationDateInput($event, editableRowsMeta[i], true)"
+                        (blur)="onDateInputBlur($event, editableRowsMeta[i], 'termDate')"
+                        (dateChange)="onDateChange(editableRowsMeta[i], 'termDate')" />
+                      <mat-datepicker-toggle matIconSuffix [for]="editTermP"></mat-datepicker-toggle>
+                      <mat-datepicker #editTermP></mat-datepicker>
+                      @if (getTerminationDateError(editableRowsMeta[i].form, editableRowsMeta[i].lastChangedDateField)) {
+                        <mat-error>{{ getTerminationDateError(editableRowsMeta[i].form, editableRowsMeta[i].lastChangedDateField) }}</mat-error>
+                      }
+                    </mat-form-field>
+                  </td>
+                  @if (newRows.length > 0) {
+                    <td class="col-actions"></td>
+                  }
+                </tr>
+              } @else {
+                <tr>
+                  <td>{{ row.sourceCodeType }}</td>
+                  <td>{{ row.sourceValue }}</td>
+                  <td>{{ row.targetCodeType }}</td>
+                  <td>{{ row.targetValue }}</td>
+                  <td>{{ row.convProcCall ?? '-' }}</td>
+                  <td>{{ formatDate(row.effDate) }}</td>
+                  <td>{{ formatDate(row.termDate) }}</td>
+                </tr>
+              }
+            }
+          </tbody>
+        </table>
+      </div>
+    }
+  </div>
+</div>

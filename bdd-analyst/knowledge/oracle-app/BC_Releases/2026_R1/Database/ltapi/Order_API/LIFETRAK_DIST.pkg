@@ -1,0 +1,423 @@
+/* ************************************************************
+  Name              : LIFETRAK_DIST.pkg
+  Created By        : Basker Edwin 
+  Date Of Creation  : 10/23/08
+  Purpose           : This is an interface between the third party application
+		      and LT.
+		      The external application populats data in a temporary
+		      table. The interface pull the data and populates the
+		      LifeTrak tables
+
+  Version History
+  
+  Date         Version        Description
+  --------------------------------------------------------------------
+  06/15/2008   01             Initial development -Edwin
+  05/13/2009   02             Added a function to add the customer contacts
+  02/01/2012   03             Added Time Zone Logic - Hussein  
+  **********************************************************************   */
+
+CREATE OR REPLACE PACKAGE LIFETRAK_DIST IS
+  
+  function local_time_zone(i_chapter_id in varchar2) return date;
+  
+  Procedure GET_ORDER_NO(i_chapter_id in varchar2,
+			 i_order_no out varchar2,
+			 p_status out varchar2);
+
+  Procedure GET_PROD_PRICE(i_chapter_id in varchar2,
+			   i_prd_type   in varchar2,
+			   i_tier       in varchar2,
+			   i_cust_id    in varchar2,
+			   i_prod_price out number,
+			   p_status     out varchar2);
+
+  Procedure GENERATE_NOTES (p_notes in varchar2,
+			    p_out_note_id out varchar2,
+			    p_status    out varchar2);
+   PROCEDURE POPULATE_ORDER_ITEMS(
+	   		     i_order_no       in varchar2,
+			     i_chapter_id     in varchar2,
+			     i_item_no        in number,
+			     i_prod_type      in varchar2,
+			     i_abo_value      in varchar2,
+			     i_tier_code      in varchar2,
+			     i_item_status    in varchar2,
+			     i_req_qty        in number,
+			     i_allo_qty       in number,
+			     i_ship_qty       in number,
+			     i_sys_can_qty    in number,
+			     i_sub_flag       in varchar2,
+			     i_unit_price     in number,
+			     i_cancel_qty     in number,
+			     i_item_note_id   in varchar2,
+			     i_sub_qty        in number,
+			     i_prog_id        in varchar2,
+			     p_status         out varchar2);
+
+ PROCEDURE POPULATE_ORDERS( i_order_no    in varchar2,
+			   i_chapter_id  in varchar2,
+			   i_ord_type    in varchar2,
+		           i_customer_id in varchar2,
+			   i_cons_id     in varchar2,
+			   i_payee_id    in varchar2,
+		           i_ord_status  in varchar2,
+			   i_ord_class   in varchar2 ,
+			   i_insert_date in date,
+		           i_insert_user in varchar2,
+			   i_last_date   in date,
+			   i_contract_id in varchar2,
+			   i_order_by    in varchar2,
+		           i_cod_flag    in varchar2,
+			   i_est_time    in date,
+			   i_f_ship_date in date,
+		           i_note_id     in number,
+			   i_stdng_ord   in varchar2,
+		           i_ord_mode    in varchar2,
+			   i_prog_id     in varchar2,
+			   p_status      out varchar2);
+
+PROCEDURE POPULATE_ORDER_ITEM_ATTRS(
+                                   i_order_no        in varchar2,
+  		                   i_chapter_id      in varchar2,
+				   i_item_no         in number,
+				   i_attrib_group    in varchar2,
+                                   i_attr_code       in varchar2,
+				   i_unit_price      in number,
+                                   i_prod_type       in varchar2,
+                                   i_req_qty         in varchar2,
+				   i_prog_id         in varchar2,
+				   p_status          out varchar2) ;
+  x_count   NUMBER:=0;
+  p_ext_id               VARCHAR2(50);
+  p_int_id               VARCHAR2(50);
+  p_appl_name            VARCHAR2(20);
+  p_err_msg              VARCHAR2(500);
+END LIFETRAK_DIST;
+/
+
+CREATE OR REPLACE package body LIFETRAK_DIST is
+
+function local_time_zone (i_chapter_id in varchar2) return date is
+v_local_time date;
+
+begin
+
+    if Lifetrack_timezone_convert.is_timezone_enabled then
+    	
+         Lifetrack_timezone_convert.get_local_time(i_chapter_id,sysdate,v_local_time);
+	else
+	v_local_time:=sysdate;
+	end if;	 
+    return v_local_time;
+end;
+
+Procedure GENERATE_NOTES (p_notes in varchar2,
+			  p_out_note_id out varchar2
+			  ,p_status out varchar2) is
+ p_note_id  NUMBER:=0;
+Begin
+
+   p_status:='OK';
+ If p_notes is not null then
+    begin
+       select notebook_seq.nextval into p_note_id from dual;
+    exception when others then
+       p_status:='cannot generate the note id';
+       return;
+    end;
+
+    begin
+       insert into serv_note_books values(p_note_id,p_notes);
+    exception when others then
+       p_status:='Could not insert into note books  '||sqlerrm;
+       return;
+   end;
+
+   p_out_note_id:=p_note_id;
+   dbms_output.put_line('Note is generated -'||p_note_id);
+
+ End If;
+
+Exception when others then
+   p_status:='Cannot generate notes';
+End GENERATE_NOTES;
+
+Procedure GET_ORDER_NO(i_chapter_id in varchar2,
+		       i_order_no out varchar2,
+		       p_status out varchar2) is
+ pl_ord_stat  VARCHAR2(10);
+ v_order_no varchar2(15);
+Begin
+    p_status:='OK';
+    pl_ord_stat:=GEN_ORDER_NO(i_chapter_id,v_order_no); --this is a DB fcn
+    If pl_ord_stat='FAIL' then
+       p_status:='GET_ORDER_NO returns FAIL';
+    Else
+       i_order_no:=v_order_no;
+       dbms_output.put_line('LT order no='||i_order_no);
+    End If;
+Exception when others then
+     p_status:='Could not generate the order no-'||sqlerrm;
+End GET_ORDER_NO;
+
+Procedure GET_PROD_PRICE(i_chapter_id in varchar2,
+			 i_prd_type in varchar2,
+			 i_tier in varchar2,
+		         i_cust_id in varchar2,
+			 i_prod_price out number,
+			 p_status out varchar2) is
+ v_temp_price   NUMBER:=0;
+Begin
+
+  p_status:='OK';
+  begin
+      select nvl(unit_price,0) into v_temp_price
+       from   product_pricing_matrix
+	where  chapter_id   = i_chapter_id
+	and  product_type   = i_prd_type
+	 and  tier          = i_tier
+	 and  customer_id   = i_cust_id
+	 and  local_time_zone(i_chapter_id) between eff_date
+	  and nvl(term_date,local_time_zone(i_chapter_id)+1);
+   exception when no_data_found then
+	begin
+	   select nvl(unit_price,0) into v_temp_price
+	   from   product_pricing_matrix
+	   where  chapter_id = i_chapter_id
+	   and  product_type = i_prd_type
+	   and  tier         = i_tier
+	   and  customer_id  = 'STANDARD'
+           and  local_time_zone(i_chapter_id) between eff_date
+           and nvl(term_date,local_time_zone(i_chapter_id)+1);
+        exception when no_data_found then
+	   null;
+        end;
+  end;
+
+  If v_temp_price = 0 then
+   begin
+    select nvl(std_price,0) into v_temp_price
+    from vserv_product_types
+    where  product_type =i_prd_type
+    and  local_time_zone(i_chapter_id) between eff_date
+    and nvl(term_date,local_time_zone(i_chapter_id)+1);
+  exception
+   when no_data_found then
+       null;
+  end;
+ End If;
+
+  i_prod_price:=v_temp_price;
+
+EXCEPTION WHEN OTHERS then
+ p_status:='Unable to calculate the standard price for the product';
+End GET_PROD_PRICE;
+
+PROCEDURE POPULATE_ORDER_ITEMS(
+			     i_order_no       in varchar2,
+			     i_chapter_id     in varchar2,
+			     i_item_no        in number,
+			     i_prod_type      in varchar2,
+			     i_abo_value      in varchar2,
+			     i_tier_code      in varchar2,
+			     i_item_status    in varchar2,
+			     i_req_qty        in number,
+			     i_allo_qty       in number,
+			     i_ship_qty       in number,
+			     i_sys_can_qty    in number,
+			     i_sub_flag       in varchar2,
+			     i_unit_price     in number,
+			     i_cancel_qty     in number,
+			     i_item_note_id   in varchar2,
+			     i_sub_qty        in number,
+			     i_prog_id        in varchar2,
+			     p_status        out varchar2) IS
+  A    Number:=0;
+
+BEGIN
+   p_status:='OK';
+
+   Begin
+      insert into order_items(ORDER_NO   ,
+                              CHAPTER_ID ,
+                              ITEM_NO    ,
+			      PRODUCT_TYPE,
+	                      BLOOD_TYPE ,
+			      TIER,
+	                      ITEM_STATUS,
+			      REQUIRED_QTY,
+	                      ALLOCATED_QTY,
+			      SHIPPED_QTY,
+	                      SYSTEM_CANCEL_QTY,
+			      SUB_OK,
+	                      UNIT_PRICE,
+			      CANCELED_QTY,
+	                      NOTE_ID,
+			      SUB_QTY,
+	                      AUDIT_KEY,
+			      PROGRAM_ID )
+             VALUES       (
+		              i_order_no,
+			      i_chapter_id,
+			      i_item_no,
+			      i_prod_type,
+			      i_abo_value,
+			      nvl(i_tier_code,1),
+			      i_item_status,
+			      i_req_qty,
+			      i_allo_qty,
+			      i_ship_qty,
+			      i_sys_can_qty,
+			      i_sub_flag,
+			      i_unit_price,
+			      i_cancel_qty,
+			      i_item_note_id,
+			      i_sub_qty,
+			      audit_seq.nextval,
+			      i_prog_id);
+    	   Exception when others then
+	      p_status:='Unable to insert itno ORDER_ITEMS: '||sqlerrm;
+          End;
+
+END POPULATE_ORDER_ITEMS;
+
+PROCEDURE POPULATE_ORDERS( i_order_no    in varchar2,
+			   i_chapter_id  in varchar2,
+			   i_ord_type    in varchar2,
+		           i_customer_id in varchar2,
+			   i_cons_id     in varchar2,
+			   i_payee_id    in varchar2,
+		           i_ord_status  in varchar2,
+			   i_ord_class   in varchar2 ,
+			   i_insert_date in date,
+		           i_insert_user in varchar2,
+			   i_last_date   in date,
+			   i_contract_id in varchar2,
+			   i_order_by    in varchar2,
+		           i_cod_flag    in varchar2,
+			   i_est_time    in date,
+			   i_f_ship_date in date,
+		           i_note_id     in number,
+			   i_stdng_ord   in varchar2,
+		           i_ord_mode    in varchar2,
+			   i_prog_id     in varchar2,
+			   p_status      out varchar2) IS
+
+ x_count   NUMBER:=0;
+ temp_hours  NUMBER:=0;
+ p_est_time  DATE;
+BEGIN
+
+ p_status:='OK';
+
+    --calculate the estimate arrival time if it is null
+   If i_est_time is null then
+
+     begin
+         select process_hours into temp_hours
+         from vserv_order_classes
+         where order_class =i_ord_class
+	 and chapter_id = i_chapter_id
+	 and local_time_zone(i_chapter_id) between eff_date
+	 and nvl(term_date,local_time_zone(i_chapter_id)+365);
+         p_est_time:=sysdate + temp_hours/24;
+     exception
+	when others then
+          p_status:='Cannot calculate estimated arrival time-'||sqlerrm;
+	  return;
+    end;
+
+  End If;
+
+       Begin
+           INSERT INTO ORDERS( ORDER_NO,CHAPTER_ID,ORDER_TYPE ,
+			       CUSTOMER_ID,CONSIGNEE_ID,PAYEE_ID ,
+			       ORDER_STATUS,ORDER_CLASS,INSERT_DATE ,
+			       INSERT_USER_ID , LAST_ACTIVITY_DATE ,
+			       CONTRACT_ID,ORDERED_BY,COD_FLAG,
+			       EST_ARRIVAL_TIME, FIRST_SHIP_DATE,
+			       NOTE_ID,STANDING_ORDER_FLAG,ORDER_MODE ,
+			       AUDIT_KEY , PROGRAM_ID)
+                VALUES(i_order_no,i_chapter_id,i_ord_type,
+		       i_customer_id,i_cons_id,i_payee_id,
+		       i_ord_status,i_ord_class,i_insert_date,
+		       i_insert_user,i_last_date,i_contract_id,i_order_by,
+		       i_cod_flag, p_est_time, i_f_ship_date,
+		       i_note_id,i_stdng_ord,
+		       i_ord_mode,audit_seq.nextval,i_prog_id);
+         Exception
+            when others then
+               p_status:='Unable to insert into ORDERS -'||sqlerrm;
+        End;
+
+      dbms_output.put_line('Order record is populated in LT');
+
+END POPULATE_ORDERS;
+
+PROCEDURE POPULATE_ORDER_ITEM_ATTRS(
+                                   i_order_no        in varchar2,
+  		                   i_chapter_id      in varchar2,
+				   i_item_no         in number,
+				   i_attrib_group    in varchar2,
+                                   i_attr_code       in varchar2,
+				   i_unit_price      in number,
+                                   i_prod_type       in varchar2,
+                                   i_req_qty         in varchar2,
+				   i_prog_id         in varchar2,
+				   p_status         out varchar2) IS
+i_count   NUMBER:=0;
+p_attr_unit_price NUMBER:=0;
+BEGIN
+   p_status:='OK';
+
+ --get the charges for the attribute
+  begin
+   select nvl(price,0) into p_attr_unit_price
+   from  vserv_attributes
+   where  attrib_group = i_attrib_group and
+   attrib_code = i_attr_code and local_time_zone(i_chapter_id) between eff_date
+   and nvl(term_date,local_time_zone(i_chapter_id)+1)
+   AND rownum < 2;
+ exception
+    when others then
+      p_status:='Unable to get the attribute price-'||sqlerrm;
+      return;
+ end;
+
+ begin
+   insert into order_item_attributes (ORDER_NO ,
+                                     CHAPTER_ID,
+                                     ITEM_NO    ,
+                                     ATTRIB_GROUP,
+                                     ATTRIB_CODE  ,
+                                     UNIT_PRICE    ,
+                                     SOURCE_PRODUCT_TYPE,
+                                     SOURCE_QTY         ,
+                                     AUDIT_KEY          ,
+                                     PROGRAM_ID)
+                            values(i_order_no,
+  		                   i_chapter_id,
+				   i_item_no,
+				   i_attrib_group,
+                                   i_attr_code,
+				   p_attr_unit_price,
+                                   i_prod_type,
+                                   0,  ---i_req_qty,
+				   audit_seq.nextval,
+				   i_prog_id);
+        exception when others then
+	  p_status:='Unable to insert into order_item_attributes '
+	  ||sqlerrm;
+        end;
+
+     dbms_output.put_line('Attributes are added in the LT table');
+
+END POPULATE_ORDER_ITEM_ATTRS;
+
+END LIFETRAK_DIST;
+/
+drop public synonym LIFETRAK_DIST;
+create public synonym LIFETRAK_DIST for LIFETRAK_DIST;
+grant execute on LIFETRAK_DIST to public;
+

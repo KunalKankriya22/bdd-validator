@@ -1,0 +1,280 @@
+<div class="side-panel" role="dialog" [attr.aria-labelledby]="elementId('panel-title')" aria-modal="true">
+  <div class="panel-header" [class.panel-header-add]="mode === 'add'">
+    <div class="header-text">
+      <h2 [id]="elementId('panel-title')">{{ panelTitle }}</h2>
+      @if (lastModifiedDisplay) {
+        <span class="last-modified">{{ lastModifiedDisplay }}</span>
+      }
+    </div>
+    <button
+      mat-icon-button
+      (click)="onCancel()"
+      [id]="elementId('close-btn')"
+      aria-label="Close panel">
+      <mat-icon>close</mat-icon>
+    </button>
+  </div>
+
+  <div class="panel-content">
+    <form
+      [formGroup]="contractForm"
+      (ngSubmit)="onSave()"
+      [id]="elementId('form')"
+      novalidate>
+
+      <!-- Row 1: Edit mode → Customer ID, Contract ID, Rotation (read-only) -->
+      @if (mode === 'edit') {
+        <div class="form-row three-col">
+          <div class="field-display">
+            <span class="label">Customer ID</span>
+            <span class="value">{{ data?.customerId || '--' }}</span>
+          </div>
+          <div class="field-display">
+            <span class="label">Contract ID</span>
+            <span class="value">{{ data?.contractId || '--' }}</span>
+          </div>
+          <div class="field-display">
+            <span class="label">Rotation</span>
+            <span class="value">{{ data?.rotationFlag === 'Y' ? 'Yes' : data?.rotationFlag === 'N' ? 'No' : '--' }}</span>
+          </div>
+        </div>
+      }
+
+      <!-- Row 1: Add mode → Rotation dropdown only -->
+      @if (mode === 'add') {
+        <mat-form-field appearance="fill" class="form-field rotation-field">
+          <mat-label [id]="labelId('rotation')">Rotation</mat-label>
+          <mat-select
+            [id]="elementId('rotation')"
+            formControlName="rotation">
+            @for (option of rotationOptions; track option.value) {
+              <mat-option [value]="option.value">{{ option.label }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+      }
+
+      <!-- Row 2: PO Number, Credit Limit -->
+      <div class="form-row two-col">
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label [id]="labelId('poNumber')">PO Number</mat-label>
+          <input
+            matInput
+            [id]="elementId('poNumber')"
+            formControlName="poNumber"
+            maxlength="12"
+            [attr.aria-describedby]="contractForm.get('poNumber')?.invalid && contractForm.get('poNumber')?.touched ? errorId('poNumber') : null">
+          @if (contractForm.get('poNumber')?.invalid && contractForm.get('poNumber')?.touched) {
+            <mat-error [id]="errorId('poNumber')">
+              @if (contractForm.get('poNumber')?.errors?.['maxlength']) {
+                PO Number cannot exceed 12 characters
+              }
+            </mat-error>
+          }
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label [id]="labelId('creditLimit')">Credit Limit </mat-label>
+          <input
+            matInput
+            type="number"
+            inputmode="decimal"
+            [id]="elementId('creditLimit')"
+            formControlName="creditLimit"
+            step="0.01"
+            [attr.aria-invalid]="contractForm.get('creditLimit')?.invalid && contractForm.get('creditLimit')?.touched"
+            [attr.aria-describedby]="contractForm.get('creditLimit')?.invalid && contractForm.get('creditLimit')?.touched ? errorId('creditLimit') : null">
+          @if (contractForm.get('creditLimit')?.invalid && contractForm.get('creditLimit')?.touched) {
+            <mat-error [id]="errorId('creditLimit')">
+              @if (contractForm.get('creditLimit')?.errors?.['required']) {
+                Credit Limit is required
+              }
+              @if (contractForm.get('creditLimit')?.errors?.['min']) {
+                Credit Limit must be 0 or greater
+              }
+              @if (contractForm.get('creditLimit')?.errors?.['max']) {
+                Cannot exceed 9999999.99
+              }
+            </mat-error>
+          }
+        </mat-form-field>
+      </div>
+
+      <!-- Row 3: Start Term, End Term -->
+      <div class="form-row two-col date-row">
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label [id]="labelId('startTerm')">Start Term</mat-label>
+          <input
+            matInput
+            [matDatepicker]="startPicker"
+            [id]="elementId('startTerm')"
+            formControlName="startTerm"
+            [errorStateMatcher]="startTermErrorMatcher"
+            placeholder="DD-MMM-YYYY"
+            (dateChange)="onStartTermChange()"
+            (input)="onStartTermInput($event)"
+            (keydown)="onDateFieldKeyPress($event)"
+            [attr.aria-describedby]="contractForm.get('startTerm')?.invalid && contractForm.get('startTerm')?.touched ? errorId('startTerm') : null">
+          <mat-datepicker-toggle matSuffix [for]="startPicker"></mat-datepicker-toggle>
+          <mat-datepicker #startPicker></mat-datepicker>
+          @if (getStartTermError()) {
+            <mat-error [id]="errorId('startTerm')">{{ getStartTermError() }}</mat-error>
+          }
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label [id]="labelId('endTerm')">End Term</mat-label>
+          <input
+            matInput
+            [matDatepicker]="endPicker"
+            [id]="elementId('endTerm')"
+            formControlName="endTerm"
+            [min]="contractForm.get('startTerm')?.value"
+            [matDatepickerFilter]="endTermDateFilter"
+            [errorStateMatcher]="endTermErrorMatcher"
+            placeholder="DD-MMM-YYYY"
+            (dateChange)="onEndTermChange()"
+            (input)="onEndTermInput($event)"
+            (keydown)="onDateFieldKeyPress($event)"
+            [attr.aria-describedby]="contractForm.get('endTerm')?.invalid && contractForm.get('endTerm')?.touched ? errorId('endTerm') : null">
+          <mat-datepicker-toggle matSuffix [for]="endPicker"></mat-datepicker-toggle>
+          <mat-datepicker #endPicker></mat-datepicker>
+          @if (getEndTermError()) {
+            <mat-error [id]="errorId('endTerm')">{{ getEndTermError() }}</mat-error>
+          }
+        </mat-form-field>
+      </div>
+
+      <!-- Row 4: Effective Date, Termination Date -->
+      <div class="form-row two-col date-row">
+        @if (mode === 'edit') {
+          <div class="field-display">
+            <span class="label">Effective Date</span>
+            <span class="value">{{ effectiveDateDisplay }}</span>
+          </div>
+        } @else {
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label [id]="labelId('effectiveDate')">Effective Date </mat-label>
+            <input
+              matInput
+              [matDatepicker]="effPicker"
+              [min]="minDate"
+              [id]="elementId('effectiveDate')"
+              formControlName="effectiveDate"
+              [errorStateMatcher]="effDateErrorMatcher"
+              (input)="onEffectiveDateInput($event)"
+              (keydown)="onDateFieldKeyPress($event)"
+              placeholder="DD-MMM-YYYY"
+              [attr.aria-required]="true"
+              [attr.aria-invalid]="contractForm.get('effectiveDate')?.invalid && contractForm.get('effectiveDate')?.touched"
+              [attr.aria-describedby]="contractForm.get('effectiveDate')?.invalid && contractForm.get('effectiveDate')?.touched ? errorId('effectiveDate') : null">
+            <mat-datepicker-toggle matSuffix [for]="effPicker"></mat-datepicker-toggle>
+            <mat-datepicker #effPicker></mat-datepicker>
+            @if (getEffectiveDateError()) {
+              <mat-error [id]="errorId('effectiveDate')">{{ getEffectiveDateError() }}</mat-error>
+            }
+          </mat-form-field>
+        }
+
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label [id]="labelId('terminationDate')">Termination Date</mat-label>
+          <input
+            matInput
+            [matDatepicker]="termPicker"
+            [matDatepickerFilter]="terminationDateFilter"
+            [min]="terminationMinDate"
+            [id]="elementId('terminationDate')"
+            formControlName="terminationDate"
+            [errorStateMatcher]="termDateErrorMatcher"
+            (input)="onTerminationDateInput($event)"
+            (keydown)="onDateFieldKeyPress($event)"
+            placeholder="DD-MMM-YYYY"
+            [attr.aria-describedby]="contractForm.get('terminationDate')?.invalid && contractForm.get('terminationDate')?.touched ? errorId('terminationDate') : null">
+          <mat-datepicker-toggle matSuffix [for]="termPicker"></mat-datepicker-toggle>
+          <mat-datepicker #termPicker></mat-datepicker>
+          @if (getTerminationDateError()) {
+            <mat-error [id]="errorId('terminationDate')">{{ getTerminationDateError() }}</mat-error>
+          }
+        </mat-form-field>
+      </div>
+    </form>
+  </div>
+
+  <!-- Footer: Edit mode -->
+  @if (mode === 'edit') {
+    <div class="panel-footer">
+      <button
+        mat-button
+        type="button"
+        class="teal-btn"
+        (click)="onCancel()"
+        [id]="elementId('cancel-btn')"
+        [disabled]="isSaving">
+        CANCEL
+      </button>
+      <div class="footer-right">
+        <button
+          mat-button
+          type="button"
+          class="teal-btn"
+          (click)="onClearAll()"
+          [id]="elementId('clear-btn')"
+          [disabled]="isSaving">
+          CLEAR ALL
+        </button>
+        <button
+          mat-raised-button
+          color="primary"
+          type="submit"
+          (click)="onSave()"
+          [id]="elementId('save-btn')"
+          [disabled]="isSaving || !contractForm.dirty">
+          @if (isSaving) {
+            Saving...
+          } @else {
+            SAVE
+          }
+        </button>
+      </div>
+    </div>
+  }
+
+  <!-- Footer: Add mode -->
+  @if (mode === 'add') {
+    <div class="panel-footer">
+      <button
+        mat-button
+        type="button"
+        class="teal-btn"
+        (click)="onCancel()"
+        [id]="elementId('cancel-btn')"
+        [disabled]="isSaving">
+        CANCEL
+      </button>
+      <div class="footer-right">
+        <button
+          mat-stroked-button
+          type="button"
+          class="create-another-btn"
+          (click)="onAddAndCreateAnother()"
+          [id]="elementId('add-another-btn')"
+          [disabled]="isSaving || !contractForm.dirty">
+          CREATE AND ADD ANOTHER
+        </button>
+        <button
+          mat-raised-button
+          color="primary"
+          type="submit"
+          (click)="onSave()"
+          [id]="elementId('save-btn')"
+          [disabled]="isSaving || !contractForm.dirty">
+          @if (isSaving) {
+            Adding...
+          } @else {
+            ADD
+          }
+        </button>
+      </div>
+    </div>
+  }
+</div>

@@ -1,0 +1,10 @@
+LOAD DATA
+INFILE '/home/donsys/conversion/data/table.415'
+--APPEND
+INTO TABLE mw_donor_comments
+( 
+DONOR_ID        POSITION(1:10)          CHAR  NULLIF (DONOR_ID = BLANKS),
+CHAPTER_ID      POSITION(11:14)         CHAR  NULLIF (CHAPTER_ID = BLANKS),
+SEQ             POSITION(15:18)         INTEGER EXTERNAL  NULLIF (SEQ = BLANKS),
+COMMENTS        POSITION(19:218)        CHAR  NULLIF (COMMENTS = BLANKS)
+)

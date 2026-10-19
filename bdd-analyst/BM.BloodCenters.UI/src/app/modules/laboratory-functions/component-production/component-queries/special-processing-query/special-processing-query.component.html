@@ -1,0 +1,216 @@
+<div class="spq-page">
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Search Controls -->
+  <div class="spq-controls">
+    <form [formGroup]="searchForm" (ngSubmit)="onSearch()" class="spq-controls__form">
+      <mat-form-field appearance="outline" class="spq-controls__unit-id">
+        <mat-label>Unit ID</mat-label>
+        <input matInput formControlName="unitId" maxlength="15" placeholder="Scan or enter Unit ID"
+               (keydown.enter)="onSearch()" autocomplete="off">
+        <button mat-icon-button matSuffix type="submit" [disabled]="loading()"
+                [attr.aria-label]="'Search by Unit ID'">
+          <mat-icon aria-hidden="true">qr_code_scanner</mat-icon>
+        </button>
+        <mat-error *ngIf="f['unitId'].hasError('required')">Unit ID is required</mat-error>
+      </mat-form-field>
+
+      <div class="spq-controls__info" *ngIf="unitData()">
+        <span class="spq-controls__label">Collection Date</span>
+        <span class="spq-controls__value">{{ collectionDate() }}</span>
+      </div>
+
+      <button mat-button type="button" class="spq-controls__clear" (click)="onClear()"
+              [disabled]="loading()">
+        CLEAR
+      </button>
+    </form>
+  </div>
+
+  <!-- Loading Spinner -->
+  <div class="spq-loading" *ngIf="loading()" role="status" aria-live="polite" aria-busy="true">
+    <mat-spinner diameter="40" [attr.aria-label]="'Loading special processing data'"></mat-spinner>
+    <span class="cdk-visually-hidden">Loading, please wait...</span>
+  </div>
+
+  <!-- Empty State -->
+  <div class="spq-empty" *ngIf="!loading() && !unitData()" role="status">
+    <mat-icon class="spq-empty__icon" aria-hidden="true">search</mat-icon>
+    <h2 class="spq-empty__title">No Results to Display</h2>
+    <p class="spq-empty__subtitle">Scan or enter a Unit ID to begin.</p>
+  </div>
+
+  <!-- Results -->
+  <ng-container *ngIf="!loading() && unitData()">
+
+    <!-- Product Details Section -->
+    <div class="spq-section">
+      <h2 class="spq-section__title">Product Details</h2>
+      <div class="spq-table-wrapper">
+        <table class="spq-table" [attr.aria-label]="'Product details'">
+          <thead>
+            <tr>
+              <th scope="col">Product Code</th>
+              <th scope="col">Process Code</th>
+              <th scope="col">Description</th>
+              <th scope="col">Insert Date</th>
+              <th scope="col">User</th>
+              <th scope="col">Link Unit ID</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let record of productRecords(); let i = index"
+                [class.selected]="selectedProductIndex() === i"
+                (click)="onProductRowSelect(i)"
+                tabindex="0"
+                (keydown.enter)="onProductRowSelect(i)"
+                (keydown.space)="onProductRowSelect(i); $event.preventDefault()"
+                role="row"
+                [attr.aria-selected]="selectedProductIndex() === i">
+              <td>{{ record.productCode }}</td>
+              <td>{{ record.processCode }}</td>
+              <td>{{ record.processCodeDescription }}</td>
+              <td>{{ formatDateTime(record.insertDate) }}</td>
+              <td>{{ record.insertUserId }}</td>
+              <td>{{ record.linkUnitId || '' }}</td>
+            </tr>
+            <tr *ngIf="productRecords().length === 0">
+              <td colspan="6" class="spq-table__empty">No product details available</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Differential & Reagents Section (with Stage Sidebar) -->
+    <div class="spq-diff-reag" *ngIf="selectedProduct()">
+      <!-- Stage Sidebar -->
+      <div class="spq-stages" role="tablist" [attr.aria-label]="'Differential stages'">
+        <div class="spq-stages__search">
+          <mat-icon class="spq-stages__search-icon" aria-hidden="true">search</mat-icon>
+          <input type="text" class="spq-stages__search-input"
+                 placeholder="Search by stage"
+                 [attr.aria-label]="'Search differential stages'"
+                 [value]="stageSearchTerm()"
+                 (input)="onStageSearch($event)">
+        </div>
+        <div class="spq-stages__list">
+          <div *ngFor="let stage of filteredStages(); let i = index"
+               class="spq-stages__item"
+               [class.spq-stages__item--active]="selectedStageIndex() === i"
+               (click)="onStageSelect(i)"
+               tabindex="0"
+               (keydown.enter)="onStageSelect(i)"
+               (keydown.space)="onStageSelect(i); $event.preventDefault()"
+               role="tab"
+               [attr.aria-selected]="selectedStageIndex() === i"
+               [id]="'v2-stage-tab-' + i">
+            <span class="spq-stages__item-label">Stage {{ stage.stageCode }}</span>
+            <span class="spq-stages__item-meta">{{ formatDateTime(stage.insertDate) }} | {{ stage.insertUserId }}</span>
+          </div>
+          <div *ngIf="filteredStages().length === 0" class="spq-stages__empty">
+            No stages found
+          </div>
+        </div>
+      </div>
+
+      <!-- Differential + Reagents Tables -->
+      <div class="spq-detail-tables">
+        <!-- Component Differential -->
+        <div class="spq-detail-tables__section">
+          <h3 class="spq-detail-tables__header">Component Differential</h3>
+          <table class="spq-table spq-table--compact" [attr.aria-label]="'Differential cell details'">
+            <thead>
+              <tr>
+                <th scope="col">Cell Code</th>
+                <th scope="col">Description</th>
+                <th scope="col">Count</th>
+              </tr>
+            </thead>
+            <tbody>
+              <ng-container *ngIf="selectedStage() as stage">
+                <tr *ngFor="let detail of stage.differentialDetails">
+                  <td>{{ detail.cellCode }}</td>
+                  <td>{{ detail.cellCodeDescription }}</td>
+                  <td>{{ detail.cellCount }}</td>
+                </tr>
+                <tr *ngIf="stage.differentialDetails.length === 0">
+                  <td colspan="3" class="spq-table__empty">No differential data</td>
+                </tr>
+              </ng-container>
+              <tr *ngIf="!selectedStage()">
+                <td colspan="3" class="spq-table__empty">Select a stage to view data</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Component Reagents -->
+        <div class="spq-detail-tables__section">
+          <h3 class="spq-detail-tables__header">Component Reagents</h3>
+          <table class="spq-table spq-table--compact" [attr.aria-label]="'Reagent details'">
+            <thead>
+              <tr>
+                <th scope="col">Reagent Name</th>
+                <th scope="col">Manufacturer</th>
+                <th scope="col">Lot Number</th>
+              </tr>
+            </thead>
+            <tbody>
+              <ng-container *ngIf="selectedStage() as stage">
+                <tr *ngFor="let detail of stage.reagentDetails">
+                  <td>{{ detail.reagentName }}</td>
+                  <td>{{ detail.manufacturer }}</td>
+                  <td>{{ detail.lotNumber }}</td>
+                </tr>
+                <tr *ngIf="stage.reagentDetails.length === 0">
+                  <td colspan="3" class="spq-table__empty">No reagent data</td>
+                </tr>
+              </ng-container>
+              <tr *ngIf="!selectedStage()">
+                <td colspan="3" class="spq-table__empty">Select a stage to view data</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Component Spiking Section -->
+    <div class="spq-section" *ngIf="selectedProduct()">
+      <h2 class="spq-section__title">Component Spiking</h2>
+      <div class="spq-table-wrapper">
+        <table class="spq-table" [attr.aria-label]="'Spiking records'">
+          <thead>
+            <tr>
+              <th scope="col">Type</th>
+              <th scope="col">Insert Date</th>
+              <th scope="col">User</th>
+              <th scope="col">Lot Number</th>
+              <th scope="col">Filter Lot Number</th>
+              <th scope="col">Number of Bags</th>
+              <th scope="col">Number of Components</th>
+              <th scope="col">Number of used components</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let record of spikingRecords()">
+              <td>{{ record.spikingType }}</td>
+              <td>{{ formatDateTime(record.insertDate) }}</td>
+              <td>{{ record.insertUserId }}</td>
+              <td>{{ record.bagLotNumber }}</td>
+              <td>{{ record.filterLotNumber || '' }}</td>
+              <td>{{ record.bagsSpiked }}</td>
+              <td>{{ record.bagsForComponents }}</td>
+              <td>{{ record.bagsUsed }}</td>
+            </tr>
+            <tr *ngIf="spikingRecords().length === 0">
+              <td colspan="8" class="spq-table__empty">No spiking data available</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </ng-container>
+</div>

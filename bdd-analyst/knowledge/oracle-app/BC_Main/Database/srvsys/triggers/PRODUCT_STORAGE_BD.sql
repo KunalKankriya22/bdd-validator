@@ -1,0 +1,38 @@
+--------------------------------------------------------
+--  DDL for Trigger PRODUCT_STORAGE_BD
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "PRODUCT_STORAGE_BD" before delete on PRODUCT_STORAGE for each row
+begin
+  insert into PRODUCT_STORAGE_AUDIT
+  (	CHAPTER_ID,
+	WAREHOUSE_ID,
+	DEVICE_TYPE,
+	DEVICE_NUMBER,
+	PRODUCT_TYPE,
+	TRAY_CAPACITY,
+	EFFECTIVE_DATE,
+	LAST_MODIFIED_DATE,
+	TERM_DATE,
+    AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  (	:old.CHAPTER_ID,
+	:old.WAREHOUSE_ID,
+	:old.DEVICE_TYPE,
+	:old.DEVICE_NUMBER,
+	:old.PRODUCT_TYPE,
+	:old.TRAY_CAPACITY,
+	:old.EFFECTIVE_DATE,
+	:old.LAST_MODIFIED_DATE,
+	:old.TERM_DATE,
+    :old.AUDIT_KEY,
+	'DELETE',LT_USER_SESSION.GET_USERID,
+    sysdate
+  ) ;
+  end ;
+/
+ALTER TRIGGER "PRODUCT_STORAGE_BD" ENABLE;

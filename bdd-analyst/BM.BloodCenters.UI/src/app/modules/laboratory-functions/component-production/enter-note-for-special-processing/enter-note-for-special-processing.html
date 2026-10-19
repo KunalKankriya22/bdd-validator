@@ -1,0 +1,185 @@
+<app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+<div class="page-content">
+  <!-- S4/M4: Always-present live region for loading state — must exist before state changes for reliable AT announcement -->
+  <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true">{{ loading() ? 'Loading, please wait.' : '' }}</span>
+
+  <!-- Search Bar -->
+  <!-- M6: aria-label distinguishes this form from the notes form for AT landmark navigation -->
+  <form [formGroup]="searchForm" class="search-bar" aria-label="Search filters">
+    <div class="search-bar__fields">
+      <!-- S1: Removed aria-label="Process Code selection" — mat-label handles labeling via AM20's aria-labelledby mechanism -->
+      <mat-form-field appearance="fill" class="search-field">
+        <mat-label>Process Code</mat-label>
+        <mat-select formControlName="processCode"
+                    (selectionChange)="onProcessCodeChange()"
+                    (openedChange)="$event || clearDropdownSearch(processCodeSearch)">
+          <mat-option>
+            <ngx-mat-select-search [formControl]="processCodeSearch"
+              placeholderLabel="Search..." noEntriesFoundLabel="No results found" />
+          </mat-option>
+          @for (item of filteredProcessCodes(); track item.processCode) {
+            <mat-option [value]="item.processCode">{{ item.processCode }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <!-- M3: role="group" + aria-labelledby semantically associates label with value for AT -->
+      <div class="readonly-field" role="group" aria-labelledby="en-proc-desc-lbl">
+        <span class="readonly-field__label" id="en-proc-desc-lbl">Process Description</span>
+        <span class="readonly-field__value"
+              [matTooltip]="processDescription()"
+              [matTooltipDisabled]="processDescription() === '--'"
+              matTooltipPosition="below">{{ processDescription() }}</span>
+      </div>
+
+      <app-unit-id-field
+        [validateFfValue]="'*'"
+        [required]="false"
+        [label]="'Unit ID'"
+        [hintDefault]="''"
+        (validated)="onUnitValidated($event)"
+        (cleared)="onUnitCleared()"
+        class="search-field search-field--unit-id"
+      />
+
+      <!-- M3: role="group" + aria-labelledby for collection date readonly field -->
+      <div class="readonly-field readonly-field--collection-date" role="group" aria-labelledby="en-coll-date-lbl">
+        <span class="readonly-field__label" id="en-coll-date-lbl">Collection Date</span>
+        @if (loadingCollectionDate()) {
+          <!-- aria-label gives the spinner an accessible name so AT knows what is loading -->
+          <mat-spinner diameter="16" aria-label="Loading collection date"></mat-spinner>
+        } @else {
+          <span class="readonly-field__value">{{ collectionDate() }}</span>
+        }
+      </div>
+
+      <!-- S2: Removed aria-label="Product Code selection" — mat-label handles labeling -->
+      <mat-form-field appearance="fill" class="search-field search-field--product-code">
+        <mat-label>Product Code</mat-label>
+        <mat-select formControlName="productCode"
+                    (selectionChange)="onProductCodeChange()"
+                    (openedChange)="$event || clearDropdownSearch(productCodeSearch)">
+          <mat-option>
+            <ngx-mat-select-search [formControl]="productCodeSearch"
+              placeholderLabel="Search..." noEntriesFoundLabel="No results found" />
+          </mat-option>
+          @for (item of filteredProductCodes(); track item.productCode) {
+            <mat-option [value]="item.productCode">{{ item.productCode }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <!-- M3: role="group" + aria-labelledby for product description readonly field -->
+      <div class="readonly-field" role="group" aria-labelledby="en-prod-desc-lbl">
+        <span class="readonly-field__label" id="en-prod-desc-lbl">Product Description</span>
+        <span class="readonly-field__value"
+              [matTooltip]="productDescription()"
+              [matTooltipDisabled]="productDescription() === '--'"
+              matTooltipPosition="below">{{ productDescription() }}</span>
+      </div>
+
+      <!-- S3: Expanded "AI" abbreviation in mat-label; removed aria-label override -->
+      <mat-form-field appearance="fill" class="search-field search-field--ai">
+        <mat-label>Aliquot (AI)</mat-label>
+        <mat-select formControlName="aliquot"
+                    (selectionChange)="onAliquotChange()"
+                    (openedChange)="$event || clearDropdownSearch(aliquotSearch)">
+          <mat-option>
+            <ngx-mat-select-search [formControl]="aliquotSearch"
+              placeholderLabel="Search..." noEntriesFoundLabel="No results found" />
+          </mat-option>
+          @if (loadingAliquots()) {
+            <mat-option disabled>Loading...</mat-option>
+          }
+          @for (item of filteredAliquots(); track item.aliquot) {
+            <mat-option [value]="item.aliquot">{{ item.aliquot }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+    </div>
+
+    <div class="search-bar__actions">
+      <!-- S5: type="button" prevents default form-submit behavior -->
+      <button mat-stroked-button
+              type="button"
+              class="retrieve-btn"
+              (click)="onRetrieve()"
+              [disabled]="retrieveDisabled()">
+        RETRIEVE
+      </button>
+      @if (retrievedData() || hasAnyFilterValue()) {
+        <button mat-button type="button" color="primary" (click)="onClearAll()">CLEAR ALL</button>
+      }
+    </div>
+  </form>
+
+  <!-- Loading Spinner — visual only; AT announcement handled by always-present live region above -->
+  @if (loading()) {
+    <div class="loading-container" aria-hidden="true">
+      <mat-spinner diameter="48"></mat-spinner>
+    </div>
+  }
+
+  <!-- Empty State -->
+  <!-- M5: aria-live="polite" + aria-atomic ensures AT announces state changes; N1: aria-hidden on decorative icon -->
+  @if (!loading() && !retrievedData()) {
+    <div class="empty-state" role="status" aria-live="polite" aria-atomic="true">
+      <div class="empty-state__icon-container">
+        <mat-icon class="empty-state__icon" aria-hidden="true">search</mat-icon>
+      </div>
+      <p class="empty-state__title">No Results to Display</p>
+      @if (hasSearched()) {
+        <p class="empty-state__subtitle">No record found for the selected criteria</p>
+      } @else {
+        <p class="empty-state__subtitle">Please enter search criteria to view results</p>
+      }
+    </div>
+  }
+
+  <!-- Notes Section -->
+  @if (!loading() && retrievedData()) {
+    <!-- M6: aria-label distinguishes this form from the search form above -->
+    <form [formGroup]="noteForm" class="notes-section" aria-label="Component note">
+      <h3 class="notes-section__title">Notes for the component</h3>
+      <mat-form-field appearance="outline" class="notes-section__textarea">
+        <mat-label>Notes</mat-label>
+        <!-- M2: aria-describedby links textarea to character counter for AT context when focused -->
+        <textarea matInput
+                  formControlName="noteText"
+                  rows="6"
+                  [maxlength]="noteMaxLength"
+                  aria-describedby="en-char-counter">
+        </textarea>
+      </mat-form-field>
+      <!-- M1: role="status" + aria-live="polite" announces counter updates as user types -->
+      <div id="en-char-counter"
+           class="notes-section__char-counter"
+           role="status"
+           aria-live="polite"
+           aria-atomic="true">
+        Characters Remaining: {{ charactersRemaining }}/{{ noteMaxLength }}
+      </div>
+    </form>
+
+    <!-- Footer Actions -->
+    <div class="actions-footer">
+      <!-- S5: type="button" prevents default form-submit behavior for CANCEL -->
+      <button mat-button type="button" (click)="onCancel()">CANCEL</button>
+      <!-- S4+S5: type="button" prevents submit; aria-label provides accessible name when spinner replaces text -->
+      <button mat-flat-button
+              type="button"
+              color="primary"
+              (click)="onSave()"
+              [attr.aria-label]="saving() ? 'Saving, please wait' : null"
+              [disabled]="saving() || noteForm.invalid || !noteChanged()">
+        @if (saving()) {
+          <!-- aria-hidden: button's aria-label already communicates saving state -->
+          <mat-spinner diameter="20" class="button-spinner" aria-hidden="true"></mat-spinner>
+        } @else {
+          <span>SAVE</span>
+        }
+      </button>
+    </div>
+  }
+</div>

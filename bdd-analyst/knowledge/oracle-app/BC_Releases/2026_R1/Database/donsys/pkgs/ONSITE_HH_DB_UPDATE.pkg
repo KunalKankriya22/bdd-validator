@@ -1,0 +1,1320 @@
+CREATE OR REPLACE PACKAGE onsite_hh_db_update IS
+
+/* ====== Version history===================================================
+
+     Author  : Basker Edwin
+     Created : 05/16/2019
+     Purpose : The package would do the final DB transaction when the
+               HH is completed from the .NET application. Original logic is
+               taken from the regular onsite ONIHLTHS screen.
+
+  ----------------------------------------------------------------------------
+  Modified by        on             Version      Remarks
+  ----------------------------------------------------------------------------
+  Edwin           05/13/2019         01          MLT - 1237 (original creation)
+
+  Ashok           06/28/2019         02          Added output parameter to FINISH_HEALTH_HISTORY routine.
+
+  Ashok           08/05/2019         03          Commented out insert into donor_hhq_history table.
+
+  Ashok           11/17/2020         04          Pending_health_history routine added.
+
+  Ashok           08/17/2023         05          Removal of deferral ID commented out. 
+                                                 User has to unlink the deferral. (MLT-6151)
+                                                 
+  Ashok           02/21/2024         06          MLT-6594        
+  
+  Ashok           02/27/2024         07          MLT-6642        
+  
+  Ashok           10/25/2024         08          MLT-7351   (Deferral_status routine updated) 
+=========================================================================== */
+
+  /* Called from ONSITE HH Screen - CLOSE button
+     Places interdictions on donor/unit based on the HH responses.
+  */
+    PROCEDURE pending_health_history (
+        pl_donor_id         IN VARCHAR2,
+        pl_transaction_id   IN VARCHAR2,
+        pl_screener_id      IN VARCHAR2,
+        pl_error_message    OUT VARCHAR2,
+        pl_deferral_message OUT VARCHAR2,
+        pl_deferral_reason  OUT VARCHAR2
+    );
+
+-- called from HH screen in .NET
+  /*
+    pl_error_message, - ERROR
+    pl_deferral_message - 'OK' (good) OR deferral message (perm or temp deferral message)
+*/
+    PROCEDURE finish_health_history (
+        pl_donor_id         IN VARCHAR2,
+        pl_transaction_id   IN VARCHAR2,
+        pl_screener_id      IN VARCHAR2,
+        pl_error_message    OUT VARCHAR2,
+        pl_deferral_message OUT VARCHAR2,
+        pl_deferral_reason  OUT VARCHAR2
+    );
+
+    PROCEDURE update_status;
+    
+    /*
+        Called from Oracle ATTACH screen to 
+        place hh related interdictions.
+    */
+    PROCEDURE place_hh_interdictions (
+        pl_transaction_id   IN VARCHAR2,
+        pl_status           OUT VARCHAR2
+    );
+
+    PROCEDURE deferral_status (
+        deferral_flag     OUT VARCHAR2,
+        pl_error_message  OUT VARCHAR2,
+        pl_status_message OUT VARCHAR2
+    );
+
+    PROCEDURE get_def_string (
+        plstring         OUT VARCHAR2,
+        pl_error_message OUT VARCHAR2
+    );
+
+    FUNCTION is_timezone_enabled RETURN BOOLEAN;
+
+    g_transaction_id    VARCHAR2(10);
+    g_screener_id       VARCHAR2(10);
+    err_code            VARCHAR2(240);
+    g_donor_id          VARCHAR2(10);
+    g_drive_date        DATE;
+    g_drive_id          VARCHAR2(10);
+    g_coll_date         DATE;
+    g_donation_type     VARCHAR2(10);
+    g_chapter_id        VARCHAR2(10);
+END onsite_hh_db_update;
+/
+
+CREATE OR REPLACE PACKAGE BODY onsite_hh_db_update IS
+
+    gv_multi_chapter chapters.chapter_id%TYPE;
+    gv_staff_no      system_users.staff_no%TYPE;
+
+    FUNCTION is_timezone_enabled RETURN BOOLEAN IS
+        v_timezone_active CHAR(1);
+    BEGIN
+        SELECT
+            nvl(time_zone_enabled, 'N')
+        INTO v_timezone_active
+        FROM
+            lt_application_config;
+
+        IF v_timezone_active = 'Y' THEN
+            RETURN TRUE;
+        ELSE
+            RETURN FALSE;
+        END IF;
+    EXCEPTION
+        WHEN no_data_found THEN
+            RETURN FALSE;
+        WHEN OTHERS THEN
+            RETURN FALSE;
+    END is_timezone_enabled;
+
+    PROCEDURE init_variables(
+        pl_transaction_id_in    IN VARCHAR2, 
+        pl_status_out           OUT VARCHAR2) IS
+    BEGIN
+        pl_status_out := 'OK';
+        BEGIN
+            SELECT
+                donor_id,
+                donation_type,
+                coll_date,
+                chapter_id,
+                drive_id
+            INTO
+                g_donor_id,
+                g_donation_type,
+                g_coll_date,
+                g_chapter_id,
+                g_drive_id
+            FROM
+                donations
+            WHERE
+                transaction_id = pl_transaction_id_in;
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                pl_status_out := 'Loc-0'
+                                    || ' '
+                                    || sqlerrm;
+                RETURN;
+        END;
+
+        -- get drive date
+        BEGIN
+            SELECT
+                drive_date
+            INTO g_drive_date
+            FROM
+                drives
+            WHERE
+                drive_id = g_drive_id;
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                pl_status_out := 'cannot get drive date :'
+                                    || ' '
+                                    || sqlerrm;
+                RETURN;
+        END;
+
+        BEGIN
+            SELECT
+                decode(multi_chapter, 'Y', 'ALL', g_chapter_id)
+            INTO gv_multi_chapter
+            FROM
+                lt_application_config;
+
+        EXCEPTION
+            WHEN no_data_found THEN
+                pl_status_out := 'multi chapter Configuration missing';
+                RETURN;
+        END;
+
+        g_transaction_id := pl_transaction_id_in;        
+    
+    END init_variables;
+    
+    PROCEDURE place_interdictions (
+        pl_transaction_id   IN VARCHAR2,
+        pl_status           OUT VARCHAR2
+    ) IS
+
+        CURSOR health_cur IS
+        SELECT
+            *
+        FROM
+            health_history
+        WHERE
+                transaction_id = g_transaction_id
+            AND inter_code IS NOT NULL;
+
+        --v_donor_rec        health_history%rowtype;
+        v_inter_owner    VARCHAR2(8);
+        v_routine_status VARCHAR2(500);
+        v_routine_excpt EXCEPTION;
+        v_error_spot     VARCHAR2(2);
+        v_origin_from    VARCHAR2(8);
+        lv_question_seq  VARCHAR2(10);
+
+        PROCEDURE check_owner (
+            pl_inter_code IN VARCHAR2,
+            pl_owner      OUT VARCHAR2
+        ) IS
+            v_owner VARCHAR2(10);
+        BEGIN
+            SELECT
+                inter_owner
+            INTO v_owner
+            FROM
+                valid_interdictions
+            WHERE
+                inter_code = pl_inter_code;
+
+            pl_owner := v_owner;
+        EXCEPTION
+            WHEN OTHERS THEN
+                pl_owner := 'D';
+        END;
+
+        PROCEDURE place_inter_on_unit (
+            pl_origin     IN VARCHAR2,
+            pl_reason     IN VARCHAR2,
+            pl_inter      IN VARCHAR2,
+            pl_user       IN VARCHAR2,
+            pl_program_id IN VARCHAR2
+        ) IS
+            t_coll_date  DATE;
+            v_local_time DATE;
+        BEGIN
+            IF is_timezone_enabled THEN
+                lifetrack_timezone_convert.get_local_time(g_chapter_id, sysdate, v_local_time);
+            ELSE
+                v_local_time := sysdate;
+            END IF;
+
+      -- End of change
+
+            SELECT
+                coll_date
+            INTO t_coll_date
+            FROM
+                donations
+            WHERE
+                transaction_id = g_transaction_id;
+
+      -- Replaced sysdate with t_coll_date for Collection Date. Changed by Kishore on 03/31/2010
+            INSERT INTO donation_interdictions (
+                transaction_id,
+                chapter_id,
+                inter_code,
+                inter_type,
+                source_code,
+                release_user,
+                release_date,
+                unit_id,
+                term_reason,
+                term_date,
+                group_id,
+                originated_from,
+                reason_code,
+                group_mode,
+                program_id,
+                insert_user,
+                insert_date,
+                coll_date,
+                comments
+            ) VALUES (
+                g_transaction_id,
+                g_chapter_id,
+                pl_inter,
+                'INTER',
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                pl_origin,
+                pl_reason,
+                NULL,
+                pl_program_id,
+                pl_user,
+                v_local_time,
+                trunc(t_coll_date),
+                'Deferral override'
+            );
+
+        END place_inter_on_unit;
+
+        PROCEDURE get_question_sequence (
+            pl_template_id   IN VARCHAR2,
+            pl_question_code IN VARCHAR2,
+            pl_donation      IN VARCHAR2,
+            pl_ques_seq      OUT VARCHAR2
+        ) IS
+            v_question_sequence VARCHAR2(10);
+            chp_sysdate         DATE;
+        BEGIN
+            IF is_timezone_enabled THEN
+                lifetrack_timezone_convert.get_local_time(g_chapter_id, sysdate, chp_sysdate);
+            ELSE
+                chp_sysdate := sysdate;
+            END IF;
+    
+            SELECT
+                sort_sequence
+            INTO v_question_sequence
+            FROM
+                health_history_template
+            WHERE
+                    template_id = pl_template_id 
+                --and chapter_id='WAD' 
+                --and chapter_id =:global.chapter_id -- modified on 05192011; Ashok; Health history template institutional.
+                AND question_code = pl_question_code
+                AND donation_type = pl_donation
+                AND chp_sysdate BETWEEN eff_date AND nvl(term_date, chp_sysdate + 1);
+    
+            pl_ques_seq := v_question_sequence;
+        EXCEPTION
+            WHEN OTHERS THEN
+                NULL;
+                pl_ques_seq := pl_question_code;
+        END get_question_sequence;
+    BEGIN
+
+        /* putting Interdictions for unexpected health history values */
+    
+        -- Step 1: first delete the existing interdictions in all the three tables placed by this health history
+
+        DELETE FROM donor_interdictions
+        WHERE
+                transaction_id = g_transaction_id
+            AND program_id IN ( 'ONIHLTHS', 'ONIDNRES', 'ONSITE_HH', 'ONPHLTHS' )
+            AND inter_type = 'INTER'
+            AND originated_from IN (
+                SELECT
+                    sort_sequence
+                FROM
+                    health_history_template
+                WHERE
+                    donation_type = g_donation_type
+            );
+
+        DELETE FROM donation_interdictions
+        WHERE
+                transaction_id = g_transaction_id
+            AND program_id IN ( 'ONIHLTHS', 'ONIDNRES', 'ONSITE_HH', 'ONPHLTHS' )
+            AND inter_type = 'INTER'
+            AND originated_from IN (
+                SELECT
+                    sort_sequence
+                FROM
+                    health_history_template
+                WHERE
+                    donation_type = g_donation_type
+            );
+
+        DELETE FROM inter_transactions
+        WHERE
+                transaction_id = g_transaction_id
+            AND program_id IN ( 'ONIHLTHS', 'ONIDNRES', 'ONSITE_HH', 'ONPHLTHS' )
+            AND inter_type = 'INTER'
+            AND originated_from IN (
+                SELECT
+                    sort_sequence
+                FROM
+                    health_history_template
+                WHERE
+                    donation_type = g_donation_type
+            );
+
+        -- STep 2: Place the interdictions
+
+        FOR health_rec IN health_cur LOOP
+            BEGIN
+                v_routine_status := NULL;
+                v_origin_from := NULL;
+                check_owner(health_rec.inter_code, v_inter_owner);
+                
+                get_question_sequence(
+                    health_rec.template_id,
+                    health_rec.question_code,
+                    g_donation_type,
+                    lv_question_seq);
+                    
+                IF v_inter_owner = 'D' THEN
+                    /* place inter on donor */
+
+                    v_error_spot := 'A';
+                    don_inter.inter_upgrade_place(
+                        g_donor_id, 
+                        gv_multi_chapter, 
+                        NULL,  -- unit_id
+                        g_transaction_id, 
+                        health_rec.inter_code,
+                        lv_question_seq, 
+                        health_rec.answer_code, 
+                        health_rec.insert_user, 
+                        NULL, 
+                        NULL,
+                        health_rec.program_id, 
+                        health_rec.incident_date, 
+                        health_rec.def_thru_date, 
+                        health_rec.comments, 
+                        v_routine_status
+                    );
+
+                    --dbms_output.put_line('inter code=' || health_rec.inter_code || ' status=' || v_routine_status);
+
+                    IF v_routine_status != 'OK' THEN
+                        RAISE v_routine_excpt;
+                    END IF;
+                ELSIF v_inter_owner = 'U' THEN
+                    /* place inter on donation */
+                    v_error_spot := 'B';
+                    place_inter_on_unit(
+                        lv_question_seq, 
+                        health_rec.answer_code, 
+                        health_rec.inter_code, 
+                        health_rec.insert_user, 
+                        health_rec.program_id);
+
+                ELSE
+                    /* place inter on both */
+
+                    v_error_spot := 'C';
+                    place_inter_on_unit(lv_question_seq, 
+                                        health_rec.answer_code, 
+                                        health_rec.inter_code, 
+                                        health_rec.insert_user, 
+                                        health_rec.program_id);
+
+                    v_error_spot := 'D';
+                    don_inter.inter_upgrade_place(
+                        g_donor_id, 
+                        gv_multi_chapter, 
+                        NULL, -- unit_id 
+                        g_transaction_id, 
+                        health_rec.inter_code,
+                        lv_question_seq, 
+                        health_rec.answer_code, 
+                        health_rec.insert_user, 
+                        NULL, 
+                        NULL,
+                        health_rec.program_id, 
+                        health_rec.incident_date, 
+                        health_rec.def_thru_date, 
+                        health_rec.comments, 
+                        v_routine_status);
+
+                    IF v_routine_status != 'OK' THEN
+                        RAISE v_routine_excpt;
+                    END IF;
+                END IF;
+
+            END;
+        END LOOP;
+
+        pl_status := 'OK'; ---- If everything is fine
+
+    EXCEPTION
+        WHEN v_routine_excpt THEN
+            pl_status := v_routine_status
+                         || ' Loc:'
+                         || v_error_spot;
+        WHEN OTHERS THEN
+            pl_status := substr(sqlerrm, 1, 250)
+                         || ' Loc:'
+                         || v_error_spot;
+    END place_interdictions;
+
+    PROCEDURE update_status IS
+        v_def_id VARCHAR2(10);
+    BEGIN
+        SELECT
+            deferral_id
+        INTO v_def_id
+        FROM
+            donations
+        WHERE
+            transaction_id = g_transaction_id;
+
+        IF v_def_id IS NOT NULL THEN
+            UPDATE online_status
+            SET
+                status_flag = 'D'
+            WHERE
+                transaction_id = g_transaction_id;
+
+            COMMIT;
+        END IF;
+
+    END update_status;
+
+    FUNCTION abbr_enabled RETURN BOOLEAN IS
+
+        CURSOR hh_template_cur IS
+        SELECT
+            1
+        FROM
+            health_history_template
+        WHERE
+                donation_type = g_donation_type
+            AND nvl(abbr_flag, 'N') = 'Y'
+            AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate + 1);
+
+        l_dummy     PLS_INTEGER;
+        l_cur_found BOOLEAN;
+    BEGIN
+        OPEN hh_template_cur;
+        FETCH hh_template_cur INTO l_dummy;
+        l_cur_found := hh_template_cur%found;
+        CLOSE hh_template_cur;
+        RETURN l_cur_found;
+    END abbr_enabled;
+
+    FUNCTION donor_already_responded RETURN BOOLEAN IS
+        CURSOR donor_responses_cur IS
+        SELECT
+            1
+        FROM
+            donor_responses
+        WHERE
+            transaction_id = g_transaction_id;
+
+        l_dummy     PLS_INTEGER;
+        l_rec_found BOOLEAN;
+    BEGIN
+        l_rec_found := FALSE;
+        OPEN donor_responses_cur;
+        FETCH donor_responses_cur INTO l_dummy;
+        l_rec_found := donor_responses_cur%found;
+        CLOSE donor_responses_cur;
+        RETURN l_rec_found;
+    END donor_already_responded;
+
+    PROCEDURE pending_health_history (
+        pl_donor_id         IN VARCHAR2,
+        pl_transaction_id   IN VARCHAR2,
+        pl_screener_id      IN VARCHAR2,
+        pl_error_message    OUT VARCHAR2,
+        pl_deferral_message OUT VARCHAR2,
+        pl_deferral_reason  OUT VARCHAR2
+    ) IS
+
+        strstatus          VARCHAR2(300);
+        system_date        DATE;
+        t_deferral_flag    VARCHAR2(1);
+        t_error_message    VARCHAR2(200);
+        t_status_message   VARCHAR2(200);
+        t_deferral_reason  VARCHAR2(500);
+        g_qtype_calc       VARCHAR2(1);
+        g_qtype_actual     VARCHAR2(1);
+        g_qtype_comments   VARCHAR2(1000);
+        g_qtype_reset_flag VARCHAR2(1);
+
+    BEGIN
+        pl_error_message := NULL;
+        pl_deferral_message := NULL;
+        pl_deferral_reason := NULL;
+        
+        init_variables(pl_transaction_id, t_error_message);
+        
+        IF t_error_message != 'OK' THEN
+            pl_error_message := 'Init error - ' || t_error_message;
+            RETURN;
+        END IF;
+
+        BEGIN
+            SELECT
+                staff_no
+            INTO gv_staff_no
+            FROM
+                system_users
+            WHERE
+                    user_id = upper(pl_screener_id)
+                AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate + 1);
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                pl_error_message := 'Could not find staff no. for this user';
+                RETURN;
+        END;
+
+        SELECT
+            sysdate
+        INTO system_date
+        FROM
+            dual;
+
+        strstatus := NULL;
+        
+        place_interdictions(pl_transaction_id, strstatus);
+        
+
+        IF strstatus <> 'OK' THEN
+            pl_error_message := strstatus;
+        END IF;
+        COMMIT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pl_error_message := sqlerrm;
+    END pending_health_history;
+
+
+  -- called from HH screen in .NET
+  /*
+    pl_error_message, - ERROR
+    pl_deferral_message - 'OK' (good) OR deferral message (perm or temp deferral message)
+*/
+    PROCEDURE finish_health_history (
+        pl_donor_id         IN VARCHAR2,
+        pl_transaction_id   IN VARCHAR2,
+        pl_screener_id      IN VARCHAR2,
+        pl_error_message    OUT VARCHAR2,
+        pl_deferral_message OUT VARCHAR2,
+        pl_deferral_reason  OUT VARCHAR2
+    ) IS
+
+        strstatus          VARCHAR2(300);
+        system_date        DATE;
+        t_deferral_flag    VARCHAR2(1);
+        t_error_message    VARCHAR2(200);
+        t_status_message   VARCHAR2(200);
+        t_deferral_reason  VARCHAR2(500);
+        g_qtype_calc       VARCHAR2(1);
+        g_qtype_actual     VARCHAR2(1);
+        g_qtype_comments   VARCHAR2(1000);
+        g_qtype_reset_flag VARCHAR2(1);
+    BEGIN
+        pl_error_message := NULL;
+        pl_deferral_message := NULL;
+        pl_deferral_reason := NULL;
+        
+        init_variables(pl_transaction_id, t_error_message);
+        
+        IF t_error_message != 'OK' THEN
+            pl_error_message := 'Init error - ' || t_error_message;
+            RETURN;
+        END IF;
+
+        BEGIN
+            SELECT
+                staff_no
+            INTO gv_staff_no
+            FROM
+                system_users
+            WHERE
+                    user_id = upper(pl_screener_id)
+                AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate + 1);
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                pl_error_message := 'Could not find staff no. for this user';
+                RETURN;
+        END;
+
+
+        SELECT
+            sysdate
+        INTO system_date
+        FROM
+            dual;
+
+        strstatus := NULL;
+        
+        
+        place_interdictions(pl_transaction_id, strstatus);
+
+        IF strstatus = 'OK' THEN
+            UPDATE donations
+            SET
+                screener_id = gv_staff_no
+            WHERE
+                transaction_id = pl_transaction_id;
+
+              /*
+              pl_status_message = 'OK' => Good status.
+              pl_status_message <> 'OK' AND deferral_flag = 'P' => Perm. Deferral;
+              pl_status_message <> 'OK' AND deferral_flag = 'T' => Temp. Deferral;
+              */
+            deferral_status(t_deferral_flag, t_error_message, t_status_message);
+
+      -- dbms_output.put_line('t_error_message=' || t_error_message || ' t_status_message=' || t_status_message);
+
+            IF t_error_message IS NOT NULL THEN
+                pl_error_message := t_error_message;
+                RETURN;
+            ELSE
+                pl_deferral_message := t_status_message;
+                IF pl_deferral_message <> 'OK' THEN
+                    get_def_string(t_deferral_reason, t_error_message);
+                    pl_deferral_reason := t_deferral_reason;
+                    IF t_error_message IS NOT NULL THEN
+                        pl_error_message := t_error_message;
+                        RETURN;
+                    END IF;
+                END IF;
+
+                BEGIN
+                    UPDATE online_status
+                    SET
+                        hlth_hist_end = system_date,
+                        hlth_updt_by = pl_screener_id,
+                        hlth_updt_time = system_date
+                    WHERE
+                        transaction_id = pl_transaction_id;
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        pl_error_message := 'Local Error 1:' || sqlerrm;
+                        RETURN;
+                END;
+
+        -- 08/05/2019 -- V03
+        -- Insert into donor_hhq_history is being done from c# service.
+        -- Had to comment the below becaue of the new rule to allow partial save of HH.
+        -- Moved to service.
+        /*
+        -- Abbr SCR
+        IF abbr_enabled THEN
+          IF donor_already_responded THEN
+
+            -- Donor already responded => record is already
+            -- created in donor_questionnaire_History
+
+            NULL;
+          ELSE
+            -- Donor did not yet respond using donor response screen OR
+            -- Online Application -> donor did questionnaire from HH button ->
+            -- so insert record into donor_quesitonnaire_history table.
+
+            donor_questionnaire.calc_qtype(donor_id_in    => g_donor_id,
+                                           coll_date_in   => g_coll_date,
+                                           don_type_in    => g_donation_type,
+                                           qtype_out      => g_qtype_calc,
+                                           comments_out   => g_qtype_comments,
+                                           reset_flag_out => g_qtype_reset_flag,
+                                           err_out        => pl_error_message);
+
+            If pl_error_message is not null then
+              return;
+            Else
+
+              INSERT INTO donor_hhq_history -- donor_questionnaire_history; 11/03/2013
+                (donor_id,
+                 transaction_id,
+                 calc_af_qtype,
+                 actual_af_qtype,
+                 reset_flag,
+                 comments,
+                 program_id,
+                 insert_date,
+                 insert_user,
+                 audit_key)
+              VALUES
+                (g_donor_id,
+                 g_transaction_id,
+                 g_qtype_calc,
+                 g_qtype_actual,
+                 g_qtype_reset_flag,
+                 g_qtype_comments,
+                 'ONSITE',
+                 SYSDATE,
+                 pl_screener_id,
+                 NULL);
+            End If;
+          END IF;
+        END IF;
+        */
+
+                COMMIT;
+                update_status;
+            END IF; -- for t_error_code
+        ELSE
+      --dbms_output.put_line('Before update status');
+            update_status;
+      --dbms_output.put_line('After update status');
+
+            pl_error_message := strstatus;
+        END IF;
+
+        COMMIT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            pl_error_message := sqlerrm;
+    END finish_health_history;
+
+  -----
+  /*
+  pl_status_message = 'OK' => Good status.
+  pl_status_message <> 'OK' AND deferral_flag = 'P' => Perm. Deferral;
+  pl_status_message <> 'OK' AND deferral_flag = 'T' => Temp. Deferral;
+  */
+    PROCEDURE deferral_status (
+        deferral_flag     OUT VARCHAR2,
+        pl_error_message  OUT VARCHAR2,
+        pl_status_message OUT VARCHAR2
+    ) IS
+    --cursor donor_cur is select * from health_history where transaction_id=pl_trans_id;
+        CURSOR donor_cur IS
+        SELECT
+            transaction_id,
+            audit_key,
+            question_code,
+            answer_code,
+            response,
+            template_id,
+            inter_code,
+            deferral_period,
+            period_type,
+            incident_date,
+            comments,
+            def_thru_date,
+            program_id,
+            insert_date,
+            insert_user,
+            chapter_id
+        FROM
+            health_history
+        WHERE
+            transaction_id = g_transaction_id
+            AND G_COLL_DATE BETWEEN incident_date and NVL(def_thru_date, G_COLL_DATE +1);
+
+        v_max_def_date    DATE;
+        v_def_until_date  DATE;
+        v_per_status      VARCHAR2(1);
+        v_period_type     VARCHAR2(10);
+        v_dfrl_flag       VARCHAR(1);
+        out_form EXCEPTION;
+        system_date       DATE;
+        szstring          VARCHAR2(90);
+        szdefrsn          VARCHAR2(40);
+        szinttype         VARCHAR2(5);
+        v_stopped_flag    VARCHAR2(1);
+        v_pgm_id          VARCHAR2(30);
+    ----
+        v_transaction_id  health_history.transaction_id%TYPE;
+        v_audit_key       health_history.audit_key%TYPE;
+        v_question_code   health_history.question_code%TYPE;
+        v_answer_code     health_history.answer_code%TYPE;
+        v_response        health_history.response%TYPE;
+        v_template_id     health_history.template_id%TYPE;
+        v_inter_code      health_history.inter_code%TYPE;
+        v_deferral_period health_history.deferral_period%TYPE;
+        v_period_type1    health_history.period_type%TYPE;
+        v_incident_date   health_history.incident_date%TYPE;
+        v_comments        health_history.comments%TYPE;
+        v_def_thru_date   health_history.def_thru_date%TYPE;
+        v_program_id      health_history.program_id%TYPE;
+        v_insert_date     health_history.insert_date%TYPE;
+        v_insert_user     health_history.insert_user%TYPE;
+        v_chapter_id      health_history.chapter_id%TYPE;
+        v_error_message   VARCHAR2(200);
+
+        FUNCTION deferred_at_inqry RETURN BOOLEAN IS
+
+            CURSOR def_at_inqry IS
+            SELECT
+                'X'
+            FROM
+                donor_interdictions
+            WHERE
+                    transaction_id = g_transaction_id
+                AND originated_from = 'INQR';
+
+            v_dummy VARCHAR2(1);
+        BEGIN
+            OPEN def_at_inqry;
+            FETCH def_at_inqry INTO v_dummy;
+            IF def_at_inqry%found THEN
+                RETURN TRUE;
+            ELSE
+                RETURN FALSE;
+            END IF;
+            CLOSE def_at_inqry;
+        END deferred_at_inqry;
+
+    BEGIN
+        SELECT
+            sysdate
+        INTO system_date
+        FROM
+            dual;
+
+        pl_status_message := 'OK';
+
+    /*------Take one def thru date */
+        OPEN donor_cur;
+        LOOP
+            FETCH donor_cur INTO --v_donor_rec;
+                v_transaction_id,
+                v_audit_key,
+                v_question_code,
+                v_answer_code,
+                v_response,
+                v_template_id,
+                v_inter_code,
+                v_deferral_period,
+                v_period_type1,
+                v_incident_date,
+                v_comments,
+                v_def_thru_date,
+                v_program_id,
+                v_insert_date,
+                v_insert_user,
+                v_chapter_id;
+
+            EXIT WHEN donor_cur%notfound;
+            v_max_def_date := v_def_thru_date;
+            IF v_max_def_date IS NOT NULL THEN
+                EXIT;
+            END IF;
+        END LOOP;
+
+        CLOSE donor_cur;
+
+    /*-------------------------------*/
+        OPEN donor_cur;
+    -- dbms_output.put_line('OPEN donor_cur');
+
+        LOOP
+            BEGIN
+                FETCH donor_cur INTO --v_donor_rec;
+                    v_transaction_id,
+                    v_audit_key,
+                    v_question_code,
+                    v_answer_code,
+                    v_response,
+                    v_template_id,
+                    v_inter_code,
+                    v_deferral_period,
+                    v_period_type1,
+                    v_incident_date,
+                    v_comments,
+                    v_def_thru_date,
+                    v_program_id,
+                    v_insert_date,
+                    v_insert_user,
+                    v_chapter_id;
+
+                EXIT WHEN donor_cur%notfound;
+        --dbms_output.put_line('inside the OPEN donor_cur');
+                v_def_until_date := v_def_thru_date;
+                IF v_def_until_date > v_max_def_date THEN
+                    v_max_def_date := v_def_until_date;
+                END IF;
+                IF v_inter_code IS NOT NULL THEN
+          --findout if the interdiction is HOLD or INTER type
+          -- for inter type check the flag and do not check for the HOLDS type
+                    BEGIN
+                        SELECT
+                            inter_type,
+                            period_type,
+                            nvl(deferral_flag, 'X')
+                        INTO
+                            szinttype,
+                            v_period_type,
+                            v_dfrl_flag
+                        FROM
+                            valid_interdictions
+                        WHERE
+                                inter_code = v_inter_code
+                            AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate + 1)
+                            AND ROWNUM = 1;
+
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            RAISE out_form;
+                    END;
+
+                    IF szinttype = 'INTER' THEN
+                        IF
+                            v_period_type = 'P'
+                            AND v_dfrl_flag = 'Y'
+                        THEN
+                            v_per_status := 'P';
+                        END IF;
+                        IF
+                            v_period_type != 'P'
+                            AND v_dfrl_flag = 'Y'
+                        THEN
+                            v_per_status := 'T';
+                        END IF;
+                    ELSIF szinttype = 'HOLDS' THEN
+                        v_per_status := 'T';
+                    END IF;
+
+                END IF;
+
+            END;
+        END LOOP;
+    --dbms_output.put_line('After	a donor_cur=' || v_per_status);
+
+        CLOSE donor_cur;
+        IF v_per_status = 'P' THEN
+            pl_status_message := 'Donor Health History Information shows that the donor is deferred permanently';
+            deferral_flag := 'P';
+
+      -- IF temp interdictions or no interdictions
+
+        ELSIF nvl(v_per_status, ' ') != 'P' THEN
+            IF
+                v_max_def_date IS NOT NULL
+                AND v_per_status = 'T'
+            THEN
+        --3.2.0 (second condition "and v_per_status ='T'" )
+                IF v_max_def_date < g_coll_date THEN
+          --Donor is OK, no problem  passes the def thru date
+                    v_max_def_date := NULL;
+                    get_def_string(szstring, v_error_message);
+                    IF v_error_message IS NULL THEN
+                        UPDATE online_status
+                        SET
+                            hlth_hist_end = system_date,
+                            hlth_hist_ovr_rsn = NULL,
+                            hlth_updt_by = g_screener_id
+                        WHERE
+                            transaction_id = g_transaction_id;
+
+                        UPDATE donations
+                        SET
+                            screener_id = g_screener_id,
+                            deferral_reason = szstring
+                        WHERE
+                            transaction_id = g_transaction_id;
+
+            --check if deferral exists and is due to inquiry if not then set deffera_id to null
+            /* MLT-6151 -- User has to unlink the deferral.
+            If deferred_at_inqry Then
+              NULL; -- do not override the defferal id in donations table
+            Else
+              UPDATE donations
+                 SET deferral_id = NULL
+               WHERE transaction_id = g_transaction_id;
+            End If;
+            */
+                        pl_status_message := 'OK';
+                    ELSE
+            -- for v_error_message
+                        err_code := '16128';
+                        RAISE out_form;
+                    END IF;
+
+                ELSE
+          -- donor interdicted b/c def thru date is beyond coll date
+
+                    pl_status_message := 'Donor is temporarly deferred. Next Eligible Date: '
+                                         || to_char(v_max_def_date + 1, 'mm-dd-yyyy');
+                    deferral_flag := 'T';
+                END IF;
+
+            ELSE
+                UPDATE online_status
+                SET
+                    donor_stopped_at = decode(donor_stopped_at, 'H', NULL, donor_stopped_at)
+                WHERE
+                    transaction_id = g_transaction_id;
+
+                UPDATE online_status
+                SET
+                    hlth_hist_end = system_date,
+                    hlth_hist_ovr_rsn = NULL,
+                    hlth_updt_by = g_screener_id
+                WHERE
+                    transaction_id = g_transaction_id;
+
+                BEGIN
+                    SELECT
+                        nvl(donor_stopped_at, 'X')
+                    INTO v_stopped_flag
+                    FROM
+                        online_status
+                    WHERE
+                        transaction_id = g_transaction_id;
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        NULL;
+                END;
+
+                BEGIN
+                    SELECT
+                        program_id
+                    INTO v_pgm_id
+                    FROM
+                        donations
+                    WHERE
+                        transaction_id = g_transaction_id;
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        NULL;
+                END;
+
+                IF
+                    ( v_stopped_flag IS NULL OR v_stopped_flag = 'X' )
+                    AND v_pgm_id NOT IN ( 'DRIREGIS', 'DRIREDEF' )
+                THEN
+                    UPDATE online_status
+                    SET
+                        status_flag = 'P'
+                    WHERE
+                        transaction_id = g_transaction_id;
+
+                END IF;
+
+                SELECT
+                    deferral_reason
+                INTO szdefrsn
+                FROM
+                    donations
+                WHERE
+                    transaction_id = g_transaction_id;
+
+                IF szdefrsn IS NULL THEN
+                    get_def_string(szstring, v_error_message);
+                    IF v_error_message IS NULL THEN
+                        UPDATE donations
+                        SET
+                            screener_id = g_screener_id,
+                            deferral_reason = szstring
+                        WHERE
+                            transaction_id = g_transaction_id;
+
+            --check if deferral exists and is due to inquiry if not then set deffera_id to null
+            /* MLT-6151 -- User has to unlink the deferral.
+            If deferred_at_inqry Then
+              NULL; -- do not override the defferal id in donations table
+            Else
+              UPDATE donations
+                 SET deferral_id = NULL
+               WHERE transaction_id = g_transaction_id;
+            End If;
+            */
+                    ELSE
+            ---err_message:=v_error_message;
+                        RAISE out_form;
+                    END IF;
+
+                ELSE
+                    UPDATE donations
+                    SET
+                        screener_id = g_screener_id
+                    WHERE
+                        transaction_id = g_transaction_id;
+
+          --check if deferral exists and is due to inquiry if not then set deffera_id to null
+          /* MLT-6151 -- User has to unlink the deferral.
+          IF deferred_at_inqry THEN
+            NULL; -- do not override the defferal id in donations table
+          ELSE
+            UPDATE donations
+               SET deferral_id = NULL
+             WHERE transaction_id = g_transaction_id;
+          END IF;
+          */
+                END IF;
+
+                pl_status_message := 'OK';
+            END IF;
+        END IF;
+
+    EXCEPTION
+        WHEN no_data_found THEN
+            pl_error_message := 'No Data Found';
+        WHEN out_form THEN
+            pl_error_message := v_error_message;
+    END deferral_status;
+
+  ------
+    PROCEDURE get_def_string (
+        plstring         OUT VARCHAR2,
+        pl_error_message OUT VARCHAR2
+    ) IS
+
+        CURSOR ques_cur IS
+        SELECT DISTINCT
+            sort_sequence
+        FROM
+            health_history_template a,
+            health_history          b
+        WHERE
+                b.transaction_id = g_transaction_id
+            AND b.inter_code IS NOT NULL
+            AND g_drive_date BETWEEN b.incident_date AND nvl(b.def_thru_date, sysdate + 10)
+            AND b.question_code = a.question_code
+            AND a.donation_type = g_donation_type
+            AND g_drive_date BETWEEN a.eff_date AND nvl(a.term_date, sysdate + 10)
+        ORDER BY
+            1;
+
+        v_ques_cde VARCHAR2(10);
+        v_strg     VARCHAR2(500);
+        v_len      NUMBER;
+        szphystrg  VARCHAR2(60);
+
+    -----this procedure is within the GET_DEF_STRING-------
+
+        PROCEDURE get_phy_def_string (
+            plstring         OUT VARCHAR2,
+            pl_error_message OUT VARCHAR2
+        ) IS
+
+            CURSOR ques_cur2 IS
+            SELECT DISTINCT
+                sort_sequence_3
+            FROM
+                valid_master_codes a,
+                physical_findings  b
+            WHERE
+                    b.transaction_id = g_transaction_id
+                AND b.inter_code IS NOT NULL
+                AND a.code_type = 'PHYCD'
+                AND a.code = b.physical_code
+                AND g_drive_date BETWEEN a.eff_date AND nvl(a.term_date, sysdate + 1)
+            ORDER BY
+                1;
+
+            v_ques_code VARCHAR2(10);
+            v_strg      VARCHAR2(500);
+            v_len       NUMBER;
+        BEGIN
+
+      ---The following code will bring the qtns. no at the time of query-------
+            OPEN ques_cur2;
+            LOOP
+                BEGIN
+                    FETCH ques_cur2 INTO v_ques_code;
+                    EXIT WHEN ques_cur2%notfound;
+                    v_strg := v_strg
+                              || v_ques_code
+                              || ',';
+                END;
+            END LOOP;
+
+            CLOSE ques_cur2;
+            v_len := nvl(length(v_strg), 0);
+            v_strg := substr(v_strg, 1, v_len - 1);
+            plstring := v_strg;
+        EXCEPTION
+            WHEN OTHERS THEN
+                pl_error_message := 'Loc-3 ' || sqlerrm;
+        END get_phy_def_string;
+
+    BEGIN
+        pl_error_message := NULL;
+        OPEN ques_cur;
+        LOOP
+            BEGIN
+                FETCH ques_cur INTO v_ques_cde;
+                EXIT WHEN ques_cur%notfound;
+                v_strg := v_strg
+                          || v_ques_cde
+                          || ',';
+            END;
+        END LOOP;
+
+        CLOSE ques_cur;
+        v_len := nvl(length(v_strg), 0);
+        v_strg := substr(v_strg, 1, v_len - 1);
+
+    --   message(v_strg);pause;
+        get_phy_def_string(szphystrg, pl_error_message);
+        IF pl_error_message IS NULL THEN
+            IF szphystrg IS NOT NULL THEN
+                IF v_strg IS NOT NULL THEN
+                    v_strg := v_strg
+                              || ','
+                              || szphystrg;
+                ELSE
+                    v_strg := szphystrg;
+                END IF;
+            END IF;
+      --     message(v_strg);pause;
+            IF v_strg IS NULL THEN
+                v_strg := '0';
+            END IF;
+            plstring := v_strg;
+        ELSE
+            plstring := NULL;
+        END IF;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            pl_error_message := 'Loc-2 ' || sqlerrm;
+    END get_def_string;
+
+
+
+    PROCEDURE place_hh_interdictions (
+        pl_transaction_id   IN VARCHAR2,
+        pl_status           OUT VARCHAR2
+    ) IS
+        t_error_msg VARCHAR2(200);
+    BEGIN
+        pl_status := 'OK';
+        
+        init_variables(pl_transaction_id, t_error_msg);
+        
+        IF t_error_msg <> 'OK' THEN
+            pl_status := t_error_msg 
+                             || ' Loc: init_variables';
+        END IF;     
+    
+        place_interdictions(pl_transaction_id, pl_status);
+        
+        commit;
+    END place_hh_interdictions;
+END onsite_hh_db_update;
+/

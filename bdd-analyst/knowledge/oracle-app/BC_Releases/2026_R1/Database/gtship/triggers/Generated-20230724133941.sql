@@ -1,0 +1,19 @@
+--------------------------------------------------------
+--  File created - Monday-July-24-2023   
+--------------------------------------------------------
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\BOX_GELTUBE_TRG.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\COMP_GELTUBE_TRG.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\COMP_INTER_GELTUBE_TRG.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\GELTUBE_EBL_EU_CONFIG_BI.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\GELTUBE_PLASMA_BOXES_BD.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\GELTUBE_PLASMA_BOXES_BI.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\GELTUBE_PLASMA_BOXES_BU.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\GELTUBE_PLASMA_DETAILS_BD.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\GELTUBE_PLASMA_DETAILS_BI.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\GELTUBE_PLASMA_DETAILS_BU.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\GELTUBE_PLASMA_PACK_BD.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\GELTUBE_PLASMA_PACK_BI.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\GELTUBE_PLASMA_PACK_BU.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\GELTUBE_PLASMA_SHIP_BD.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\GELTUBE_PLASMA_SHIP_BI.sql
+@C:\Users\seshus\Desktop\TFS_TO_GIT\DB_OBJECTS\gtship\GELTUBE_PLASMA_SHIP_BU.sql

@@ -1,0 +1,206 @@
+<div class="layout-wrapper" [class.side-panel-active]="sidePanelOpen">
+
+  <!-- Main Content -->
+  <main class="main-content" [class.side-panel-active]="sidePanelOpen">
+
+    <app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+    <div class="content-area">
+
+      <!-- Card Container -->
+      <div class="card-container">
+
+        <!-- Filter & Search Row -->
+        <div class="table-controls">
+          <div class="table-controls-left">
+            <button class="filter-btn" cdkOverlayOrigin #filterOrigin="cdkOverlayOrigin"
+                    (click)="toggleFilter()" [class.active]="isFilterOpen"
+                    aria-label="Toggle filter panel">
+              <mat-icon>filter_list</mat-icon>
+              <span>FILTER</span>
+            </button>
+
+            <!-- Filter overlay -->
+            <ng-template cdkConnectedOverlay [cdkConnectedOverlayOrigin]="filterOrigin"
+                         [cdkConnectedOverlayOpen]="isFilterOpen" [cdkConnectedOverlayHasBackdrop]="true"
+                         cdkConnectedOverlayBackdropClass="cdk-overlay-transparent-backdrop"
+                         (backdropClick)="onFilterClose()">
+              <app-territory-filter-panel
+                [currentFilters]="currentFilters"
+                [groups]="groups"
+                [types]="types"
+                (apply)="onFilterApply($event)"
+                (close)="onFilterClose()">
+              </app-territory-filter-panel>
+            </ng-template>
+
+            <!-- Inline Filter Chips -->
+            @if (filterChips.length > 0) {
+              <app-filter-chips
+                [chips]="filterChips"
+                [maxVisible]="3"
+                (removeChip)="removeFilterChip($event)"
+                (clearAll)="clearAllFilters()">
+              </app-filter-chips>
+            }
+          </div>
+
+          <div class="table-controls-right">
+            <app-search-bar [config]="searchConfig" (search)="onSearch($event)" (cleared)="onSearchCleared()">
+            </app-search-bar>
+          </div>
+        </div>
+
+        <!-- Data Table -->
+        <div class="table-wrapper">
+        @if (isLoading) {
+          <div class="loading-overlay">
+            <mat-spinner diameter="40"></mat-spinner>
+          </div>
+        }
+
+        <table mat-table [dataSource]="dataSource" multiTemplateDataRows class="territory-table">
+
+          <!-- Expand Column -->
+          <ng-container matColumnDef="expand">
+            <th mat-header-cell *matHeaderCellDef class="expand-col">
+              <button mat-icon-button (click)="toggleExpandAll()"
+                      [attr.aria-label]="allExpanded ? 'Collapse all rows' : 'Expand all rows'"
+                      class="expand-btn">
+                <mat-icon>{{ allExpanded ? 'keyboard_arrow_up' : 'keyboard_arrow_down' }}</mat-icon>
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row" class="expand-col">
+              <button mat-icon-button (click)="toggleRow(row); $event.stopPropagation()"
+                      [attr.aria-label]="isExpanded(row) ? 'Collapse row' : 'Expand row'"
+                      class="expand-btn">
+                <mat-icon>{{ isExpanded(row) ? 'keyboard_arrow_up' : 'keyboard_arrow_down' }}</mat-icon>
+              </button>
+            </td>
+          </ng-container>
+
+          <!-- ID Column (Sortable) -->
+          <ng-container matColumnDef="territoryId">
+            <th mat-header-cell *matHeaderCellDef class="id-col">
+              <div class="header-with-sort">
+                <span>ID</span>
+                <button mat-icon-button class="sort-btn" (click)="onSort()" aria-label="Sort by ID">
+                  <mat-icon>{{ getSortIcon() }}</mat-icon>
+                </button>
+              </div>
+            </th>
+            <td mat-cell *matCellDef="let row" class="id-col">{{ row.territoryId }}</td>
+          </ng-container>
+
+          <!-- Short Name Column -->
+          <ng-container matColumnDef="territoryShortName">
+            <th mat-header-cell *matHeaderCellDef>Short Name</th>
+            <td mat-cell *matCellDef="let row">{{ row.territoryShortName }}</td>
+          </ng-container>
+
+          <!-- Full Name Column -->
+          <ng-container matColumnDef="territoryName">
+            <th mat-header-cell *matHeaderCellDef>Full Name</th>
+            <td mat-cell *matCellDef="let row">{{ row.territoryName }}</td>
+          </ng-container>
+
+          <!-- Group Column -->
+          <ng-container matColumnDef="territoryGroup">
+            <th mat-header-cell *matHeaderCellDef>Group</th>
+            <td mat-cell *matCellDef="let row">{{ row.territoryGroup || '-' }}</td>
+          </ng-container>
+
+          <!-- Type Column -->
+          <ng-container matColumnDef="territoryType">
+            <th mat-header-cell *matHeaderCellDef>Type</th>
+            <td mat-cell *matCellDef="let row">{{ row.territoryType }}</td>
+          </ng-container>
+
+          <!-- Effective Date Column -->
+          <ng-container matColumnDef="effDate">
+            <th mat-header-cell *matHeaderCellDef>Effective Date</th>
+            <td mat-cell *matCellDef="let row">{{ row.effDate | date:'dd-MMM-yyyy' | uppercase }}</td>
+          </ng-container>
+
+          <!-- Termination Date Column -->
+          <ng-container matColumnDef="termDate">
+            <th mat-header-cell *matHeaderCellDef>Termination Date</th>
+            <td mat-cell *matCellDef="let row">{{ row.termDate | date:'dd-MMM-yyyy' | uppercase }}</td>
+          </ng-container>
+
+          <!-- Actions Column -->
+          <ng-container matColumnDef="actions">
+            <th mat-header-cell *matHeaderCellDef class="actions-col"></th>
+            <td mat-cell *matCellDef="let row" class="actions-col">
+              <button mat-icon-button (click)="openEditPanel(row); $event.stopPropagation()"
+                      aria-label="Edit territory">
+                <mat-icon class="edit-icon">edit</mat-icon>
+              </button>
+            </td>
+          </ng-container>
+
+          <!-- Expanded Detail Row -->
+          <ng-container matColumnDef="expandedDetail">
+            <td mat-cell *matCellDef="let row" [attr.colspan]="displayedColumns.length">
+              <div class="detail-row" [@detailExpand]="isExpanded(row) ? 'expanded' : 'collapsed'">
+                <div class="detail-content">
+                  <span class="detail-label">Description</span>
+                  <span class="detail-value">{{ row.comments || 'No description available' }}</span>
+                </div>
+              </div>
+            </td>
+          </ng-container>
+
+          <!-- Header & Row Definitions -->
+          <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+          <tr mat-row *matRowDef="let row; columns: displayedColumns;"
+              class="data-row"
+              [class.expanded-row]="isExpanded(row)"
+              [class.selected-row]="isSelectedRow(row)">
+          </tr>
+          <tr mat-row *matRowDef="let row; columns: ['expandedDetail']"
+              class="detail-row-container">
+          </tr>
+        </table>
+
+        <!-- Empty State -->
+        @if (!isLoading && dataSource.length === 0) {
+          <div class="empty-state">
+            <mat-icon>inbox</mat-icon>
+            <p>No Territories data found.</p>
+          </div>
+        }
+      </div>
+
+        <!-- Pagination -->
+        @if (totalRecords > 0) {
+          <mat-paginator
+            [length]="totalRecords"
+            [pageSize]="pageSize"
+            [pageSizeOptions]="pageSizeOptions"
+            [pageIndex]="pageIndex"
+            (page)="onPageChange($event)"
+            showFirstLastButtons
+            aria-label="Select page">
+          </mat-paginator>
+        }
+
+      </div> <!-- End card-container -->
+
+    </div>
+  </main>
+
+  <!-- Side Panel -->
+  @if (sidePanelOpen) {
+    <div class="side-panel-container">
+      <app-add-edit-territory
+        [mode]="sidePanelMode"
+        [data]="sidePanelData"
+        (closePanel)="closeSidePanel()"
+        (saveSuccess)="onSaveSuccess()"
+        (modeChange)="onModeChange($event)">
+      </app-add-edit-territory>
+    </div>
+  }
+
+</div>

@@ -1,0 +1,232 @@
+<!-- Root container -->
+<div class="notification-log-dialog">
+
+  <!-- Header with title and close -->
+  <div class="dialog-header">
+    <h3 class="dialog-title">Notification Log</h3>
+    <button
+      type="button"
+      mat-icon-button
+      class="close-button"
+      (click)="onClose()"
+      aria-label="Close notification log dialog">
+      <mat-icon>close</mat-icon>
+    </button>
+  </div>
+
+  <!-- Custom cell template for Comment column - Must be outside *ngIf for ViewChild to resolve -->
+  <ng-template #commentCell let-row>
+    <button
+      mat-icon-button
+      (click)="$event.stopPropagation(); onRowClick(row)"
+      [attr.aria-label]="'View comment for communication ' + row.communicationCode">
+      <img src="assets/images/icons/message.svg" alt="comment" class="comment-icon">
+    </button>
+  </ng-template>
+
+  <!-- Scrollable content (vertical scrolling enabled) -->
+  <div class="dialog-content" [class.content-padding-top]="shouldAddTopPadding()" #dialogContent>
+
+    <!-- Initial Loading State - Centered Spinner -->
+    <div class="loading-container" *ngIf="initialLoading()">
+      <mat-spinner diameter="50"></mat-spinner>
+      <p class="loading-text">Loading donor information...</p>
+    </div>
+
+    <!-- Main Content - Hidden during initial load -->
+    <ng-container *ngIf="!initialLoading()">
+      <!-- Donor Info Section - Read-only field display cards (matching add-interdiction-codes pattern) -->
+      <div class="donor-info-section" *ngIf="donorInfo()">
+      <div class="info-row">
+        <div class="field-display-card">
+          <div class="field-label">Name</div>
+          <div class="field-value">{{ donorInfo()?.donorName || '-' }}</div>
+        </div>
+        <div class="field-display-card">
+          <div class="field-label">DOB</div>
+          <div class="field-value">{{ donorInfo()?.dateOfBirth || '-' }}</div>
+        </div>
+        <div class="field-display-card">
+          <div class="field-label">Sex</div>
+          <div class="field-value">{{ donorInfo()?.sex || '-' }}</div>
+        </div>
+        <div class="field-display-card">
+          <div class="field-label">ABO</div>
+          <div class="field-value">{{ donorInfo()?.abo || '-' }}</div>
+        </div>
+      </div>
+      <div class="info-row">
+        <div class="field-display-card">
+          <div class="field-label">Address</div>
+          <div class="field-value">{{ donorInfo()?.address || '-' }}</div>
+        </div>
+        <div class="field-display-card">
+          <div class="field-label">Home Phone Number</div>
+          <div class="field-value">{{ donorInfo()?.homePhone || '-' }}</div>
+        </div>
+        <div class="field-display-card">
+          <div class="field-label">Business Phone Number</div>
+          <div class="field-value">{{ donorInfo()?.businessPhone || '-' }}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filter row with searchable dropdowns -->
+    <div class="filter-row">
+      <mat-form-field appearance="fill" class="filter-field">
+        <mat-label>Communication Type</mat-label>
+        <mat-select
+          [value]="selectedComType()"
+          (valueChange)="selectedComType.set($event)"
+          (selectionChange)="onComTypeChange()">
+
+          <!-- Searchable dropdown (only show if data exists) -->
+          <mat-option *ngIf="communicationTypes().length > 0">
+            <ngx-mat-select-search
+              [formControl]="comTypeSearchControl"
+              placeholderLabel="Search types..."
+              noEntriesFoundLabel="No matching types">
+            </ngx-mat-select-search>
+          </mat-option>
+
+          <mat-option
+            *ngFor="let type of filteredComTypes(); trackBy: trackByValue"
+            [value]="type.value">
+            {{ type.label }}
+          </mat-option>
+
+          <mat-option *ngIf="filteredComTypes().length === 0" disabled>
+            No Data Available
+          </mat-option>
+        </mat-select>
+      </mat-form-field>
+
+      <mat-form-field appearance="fill" class="filter-field">
+        <mat-label>Communication Code</mat-label>
+        <mat-select
+          [value]="selectedComCode()"
+          (valueChange)="selectedComCode.set($event)"
+          (selectionChange)="onComCodeChange()"
+          [disabled]="!selectedComType() || loadingCodes()">
+
+          <mat-option *ngIf="communicationCodes().length > 0 && !loadingCodes()">
+            <ngx-mat-select-search
+              [formControl]="comCodeSearchControl"
+              placeholderLabel="Search codes..."
+              noEntriesFoundLabel="No matching codes">
+            </ngx-mat-select-search>
+          </mat-option>
+
+          <mat-option
+            *ngFor="let code of filteredComCodes(); trackBy: trackByValue"
+            [value]="code.value">
+            {{ code.label }}
+          </mat-option>
+
+          <mat-option *ngIf="loadingCodes()" disabled>
+            Loading...
+          </mat-option>
+
+          <mat-option *ngIf="filteredComCodes().length === 0 && !loadingCodes()" disabled>
+            No Data Available
+          </mat-option>
+        </mat-select>
+      </mat-form-field>
+
+      <button
+        mat-stroked-button
+        color="accent"
+        (click)="onRetrieve()"
+        [disabled]="!selectedComType() || !selectedComCode()"
+        class="retrieve-button">
+        RETRIEVE
+      </button>
+      <button
+        mat-stroked-button
+        color="accent"
+        (click)="onClearAll()"
+        *ngIf="selectedComType() && selectedComCode()"
+        class="clear-all-button">
+        CLEAR ALL
+      </button>
+    </div>
+
+    <!-- Horizontal divider after RETRIEVE button -->
+    <hr class="section-divider">
+
+    <!-- Combined Search Bar and Table Container (single border as per screenshot) -->
+    <div class="search-table-container">
+      <!-- Search Bar (using SearchBar component from view-interdiction-codes pattern) -->
+      <div class="search-row">
+        <app-search-bar
+          [config]="searchConfig"
+          (search)="onSearch($event)"
+          (cleared)="onSearchCleared()" />
+      </div>
+
+      <!-- Data Table (using DataTable component from view-interdiction-codes pattern) -->
+      <div class="table-container">
+        <app-data-table
+          *ngIf="dataSource().length > 0 || loading()"
+          [config]="tableConfig"
+          [data]="dataSource()"
+          [loading]="loading()"
+          [keepActiveRow]="true"
+          (sortChange)="onSortChange($event)"
+          (rowClick)="onRowClick($event)">
+        </app-data-table>
+
+        <!-- ===== EMPTY STATE ===== -->
+        <div class="empty-state" *ngIf="dataSource().length === 0 && !loading()">
+          <mat-icon class="empty-state-icon">edit</mat-icon>
+          <p>No communications available to display</p>
+        </div>
+      </div>
+    </div>
+    </ng-container>
+
+  </div>
+
+  <!-- Bottom Section (from screenshot) - Sticky at bottom, outside scrollable content -->
+  <div class="bottom-section" *ngIf="selectedRow()">
+    <div class="bottom-info">
+      <span class="info-label">{{ selectedRow()?.insertUserName || '-' }}</span>
+    </div>
+
+    <!-- Horizontal divider between bottom-info sections -->
+    <hr class="sub-section-divider">
+
+    <div class="bottom-info">
+      <span class="info-label">Note :</span>
+      <span class="info-value">{{ selectedRow()?.comments || '-' }}</span>
+    </div>
+  </div>
+
+  <!-- Fixed Footer with Action Buttons (from screenshot - bottom right) -->
+  <div class="dialog-footer">
+    <div class="action-buttons">
+      <button mat-stroked-button color="accent" (click)="onClose()">CLOSE</button>
+      <button
+        mat-stroked-button
+        color="accent"
+        [disabled]="!donorInfo()"
+        (click)="openNewCommunication()">
+        NEW
+      </button>
+      <button
+        mat-stroked-button
+        color="accent"
+        [disabled]="!(selectedRow() && selectedRow()?.letterId)"
+        (click)="selectedRow() && openLetterDetails(selectedRow()!)">
+        LETTER DETAILS
+      </button>
+      <button
+        mat-stroked-button
+        color="accent"
+        [disabled]="!selectedRow()"
+        (click)="selectedRow() && openDetails(selectedRow()!)">
+        DETAILS
+      </button>
+    </div>
+  </div>
+</div>

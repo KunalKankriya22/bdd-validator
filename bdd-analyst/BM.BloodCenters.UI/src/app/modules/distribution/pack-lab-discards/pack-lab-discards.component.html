@@ -1,0 +1,228 @@
+<app-page-header-with-breadcrumb [config]="headerConfig()"></app-page-header-with-breadcrumb>
+
+<section
+  class="pack-lab-discards-container"
+  aria-labelledby="page-title"
+  role="region">
+
+  @if (loading()) {
+    <div class="loading-overlay" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="50" aria-hidden="true"></mat-spinner>
+      <span class="loading-text">Processing...</span>
+    </div>
+  }
+
+  <form [formGroup]="packForm" (ngSubmit)="onPackProduct()" novalidate>
+    <!-- Header Panel: Discard Destination + Filters -->
+    <div class="header-panel">
+      <!-- Row 1: Consignee, Address, Order, Product Type, Description -->
+      <div class="header-row header-row--filters">
+        <mat-form-field appearance="fill" class="header-field">
+          <mat-label>Discard Destination</mat-label>
+          <mat-select formControlName="consigneeId">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="consigneeSearchCtrl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="No consignees found">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (c of filteredConsignees(); track c.consigneeId) {
+              <mat-option [value]="c.consigneeId">{{ c.consigneeId }} - {{ c.customerId }} - {{ c.consigneeName }}</mat-option>
+            }
+          </mat-select>
+          @if (f['consigneeId'].touched && f['consigneeId'].hasError('required')) {
+            <mat-error>Discard Destination is required</mat-error>
+          }
+        </mat-form-field>
+
+        <dl class="info-field">
+          <dt class="field-label">Address</dt>
+          <dd class="field-value">{{ getSelectedConsigneeAddress() || '-' }}</dd>
+        </dl>
+
+        <mat-form-field appearance="fill" class="header-field">
+          <mat-label>Discard Order</mat-label>
+          <mat-select formControlName="orderNo">
+            <mat-option value="">Auto-generate</mat-option>
+            @for (order of orders(); track order.orderNo) {
+              <mat-option [value]="order.orderNo">{{ order.orderNo }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="header-field">
+          <mat-label>Product Type</mat-label>
+          <mat-select formControlName="productType">
+            <mat-option value="">All</mat-option>
+            @for (pt of productTypes(); track pt.productType) {
+              <mat-option [value]="pt.productType">{{ pt.productType }} - {{ pt.productDesc }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <dl class="info-field">
+          <dt class="field-label">Description</dt>
+          <dd class="field-value">{{ getSelectedProductTypeDesc() || '-' }}</dd>
+        </dl>
+      </div>
+
+      <!-- Row 2: Pick Slip, NFT/BIO, Box ID -->
+      <div class="header-row header-row--options">
+        <dl class="info-field">
+          <dt class="field-label">Pick Slip ID</dt>
+          <dd class="field-value">{{ pickSlipId() || '-' }}</dd>
+        </dl>
+
+        <mat-form-field appearance="fill" class="header-field">
+          <mat-label>NFT/BIO</mat-label>
+          <mat-select formControlName="discardType">
+            <mat-option value="">All</mat-option>
+            @for (dt of discardTypes(); track dt.discardType) {
+              <mat-option [value]="dt.discardType">{{ dt.discardType }} - {{ dt.discardTypeDesc }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="header-field">
+          <mat-label>Box ID</mat-label>
+          <mat-select formControlName="boxId">
+            <mat-option value="">Auto-generate</mat-option>
+            @for (box of boxes(); track box.boxId) {
+              <mat-option [value]="box.boxId">{{ box.boxId }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+      </div>
+    </div>
+
+    <!-- Action Bar + Entry Section (connected card) -->
+    <div class="scan-card">
+      <div class="action-bar">
+        <div class="action-bar-right">
+          <button type="button" class="btn-clear" [disabled]="loading()" (click)="onCancel()" [attr.aria-label]="'Cancel'">
+            CANCEL
+          </button>
+          <button type="button" class="btn-stroked"
+            [disabled]="loading()"
+            (click)="onViewDiscardProducts()" [attr.aria-label]="'Discard products'">
+            DISCARD PRODUCTS
+          </button>
+          <button type="button" class="btn-stroked"
+            [disabled]="loading() || !selectedBoxId()"
+            (click)="onViewBoxContents()" [attr.aria-label]="'Box contents'">
+            BOX CONTENTS
+          </button>
+          <button type="button" class="btn-stroked"
+            [disabled]="loading()"
+            (click)="onNewBox()" [attr.aria-label]="'New box'">
+            NEW BOX
+          </button>
+          <button mat-raised-button color="primary" type="button"
+            [disabled]="loading() || !selectedBoxId()"
+            (click)="onCloseBox()">
+            CLOSE BOX
+          </button>
+        </div>
+      </div>
+
+      <div class="entry-section">
+        <div class="entry-row">
+          <app-unit-id-field
+            #unitIdField
+            label="Unit ID"
+            [required]="false"
+            [showBarcodeIcon]="true"
+            class="entry-field"
+            (validated)="onUnitValidated($event)"
+            (cleared)="onUnitCleared()">
+          </app-unit-id-field>
+
+          <app-scan-select-field
+            #productCodeField
+            [label]="'Product Code'"
+            [placeholder]="'Scan or select product code'"
+            [showBarcodeIcon]="true"
+            [disabled]="!validatedUnitId()"
+            [scanPatterns]="SCAN_PATTERNS.PRODUCT"
+            [options]="productCodeOptions()"
+            [parseFn]="parseProductCode"
+            (valueChanged)="onProductCodeChange($event)"
+            class="entry-field">
+          </app-scan-select-field>
+
+          <app-scan-select-field
+            #aboRhField
+            [label]="'ABORh'"
+            [placeholder]="'Scan or select ABORh'"
+            [showBarcodeIcon]="true"
+            [disabled]="!selectedProductCode()"
+            [scanPatterns]="SCAN_PATTERNS.ABO"
+            [options]="aboRhOptions()"
+            [parseFn]="parseAboRh"
+            (valueChanged)="onAboRhChanged($event)"
+            (cleared)="onAboRhCleared()"
+            class="entry-field">
+          </app-scan-select-field>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Content: Packed Products Grid + Tests Panel -->
+    <div class="main-content">
+      <!-- Packed Products Grid -->
+      <div class="packed-grid-section">
+        <app-data-table
+          [config]="packedProductsTableConfig"
+          [data]="packedProducts()"
+          [loading]="loading()"
+          (rowAction)="onPackedProductAction($event)">
+        </app-data-table>
+      </div>
+
+      <!-- Tests Panel (shown when BIO selected) -->
+      @if (showTestIds()) {
+        <aside class="tests-panel" [attr.aria-label]="'Tests panel'">
+          <h3 class="tests-title">Tests</h3>
+
+          <div class="tests-search-row">
+            <mat-form-field appearance="fill" class="tests-search-field">
+              <mat-label>Search by Test ID</mat-label>
+              <mat-icon matPrefix aria-hidden="true">search</mat-icon>
+              <input matInput placeholder="Search by Test ID" [formControl]="testIdSearchCtrl">
+            </mat-form-field>
+            <button mat-mini-fab color="primary" type="button" (click)="onAddTest()" [attr.aria-label]="'Add test'">
+              <mat-icon aria-hidden="true">add</mat-icon>
+            </button>
+          </div>
+
+          <div class="tests-header">
+            <span class="tests-header-label">Test ID</span>
+          </div>
+
+          <span class="cdk-visually-hidden" role="status" aria-live="polite" aria-atomic="true">
+            {{ selectedTestIds().length }} test{{ selectedTestIds().length === 1 ? '' : 's' }} selected
+          </span>
+          <ul class="tests-list" style="list-style: none; padding: 0; margin: 0;">
+            @for (test of selectedTestIds(); track test.testId) {
+              <li class="test-item">
+                <div class="test-item-info">
+                  <span class="test-id">{{ test.testId }}</span>
+                  <span class="test-desc">{{ test.testDesc }}</span>
+                </div>
+                <button mat-icon-button (click)="onRemoveTest(test.testId)"
+                        [attr.aria-label]="'Remove test ' + test.testId">
+                  <mat-icon aria-hidden="true">delete</mat-icon>
+                </button>
+              </li>
+            }
+            @if (selectedTestIds().length === 0) {
+              <p class="no-tests">No tests added. Click + to add tests.</p>
+            }
+          </ul>
+        </aside>
+      }
+    </div>
+
+  </form>
+</section>

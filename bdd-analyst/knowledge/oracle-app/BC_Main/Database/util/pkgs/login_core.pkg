@@ -1,0 +1,1013 @@
+CREATE OR REPLACE PACKAGE LOGIN_CORE IS
+    
+    -- Constants for authentication types
+    C_AUTH_TYPE_SIMPLE  CONSTANT VARCHAR2(10) := 'SIMPLE';
+    C_AUTH_TYPE_CAC     CONSTANT VARCHAR2(10) := 'CAC';
+    C_AUTH_TYPE_AD      CONSTANT VARCHAR2(10) := 'AD';
+    C_AUTH_TYPE_OKTA    CONSTANT VARCHAR2(10) := 'OKTA';
+
+    C_SUCCESS           CONSTANT  VARCHAR2(10) := 'SUCCESS';
+    C_FAIL              CONSTANT  VARCHAR2(10) := 'FAIL';
+
+    -- Constants for boolean flags
+    C_YES               CONSTANT VARCHAR2(1) := 'Y';
+    C_NO                CONSTANT VARCHAR2(1) := 'N';
+
+    -- Maximum length for auth type
+    C_AUTH_TYPE_LENGTH  CONSTANT NUMBER := 200;
+
+    -- Log directory constant
+    C_LOG_DIR           CONSTANT VARCHAR2(50) := 'LOGDR';
+
+    -- Package version constant
+    C_PACKAGE_VERSION   CONSTANT VARCHAR2(10) := '01';
+
+    -- State.
+    B_PWD_UPDATED BOOLEAN := FALSE;
+
+    -- Record type for authentication configuration
+    TYPE typ_auth_config IS RECORD (
+        external_auth   VARCHAR2(1),
+        okta_auth       VARCHAR2(1),
+        ad_enabled      VARCHAR2(1)
+    );
+
+    -- Record type for application configuration
+    TYPE typ_app_config IS RECORD (
+        strong_pwd_enabled  VARCHAR2(1),
+        default_dbase       VARCHAR2(1),
+        single_user         VARCHAR2(1),
+        time_zone_enabled   VARCHAR2(1)
+    );
+
+
+    -- Exception for configuration conflicts
+    ex_config_conflict EXCEPTION;
+    PRAGMA EXCEPTION_INIT(ex_config_conflict, -20001);
+
+    -- Exception for invalid configuration
+    ex_invalid_config EXCEPTION;
+    PRAGMA EXCEPTION_INIT(ex_invalid_config, -20002);
+
+    -- Public procedures and functions
+    FUNCTION get_pwd_updated_status RETURN BOOLEAN;
+    PROCEDURE set_pwd_updated_status(p_status IN BOOLEAN);
+    FUNCTION get_package_version RETURN VARCHAR2;
+    PROCEDURE initialise(status_out OUT VARCHAR2);
+    PROCEDURE validate_configuration;
+    FUNCTION get_auth_type RETURN VARCHAR2;
+    FUNCTION get_auth_config RETURN typ_auth_config;
+    FUNCTION get_app_config RETURN typ_app_config;
+    FUNCTION is_external_auth_enabled RETURN BOOLEAN;
+    FUNCTION is_strong_password_enabled RETURN BOOLEAN;
+    FUNCTION is_user_expired(userid_in IN VARCHAR2) RETURN BOOLEAN;
+    FUNCTION is_user_locked(userid_in IN VARCHAR2)  RETURN BOOLEAN;
+    FUNCTION is_user_reset_request(userid_in IN VARCHAR2)  RETURN BOOLEAN;
+    PROCEDURE reset_configuration;
+    PROCEDURE log_login_event(
+        app_user     IN VARCHAR2,
+        workstation  IN VARCHAR2,
+        audit_event  IN VARCHAR2,
+        audit_msg   IN VARCHAR2 DEFAULT NULL);
+    PROCEDURE handle_simple_authentication( userid_in       IN VARCHAR2, 
+                                            pwd_in          IN VARCHAR2,
+                                            workstation_in  IN VARCHAR2,
+                                            status_out      OUT VARCHAR2,
+                                            status_msg      OUT VARCHAR2);
+
+    PROCEDURE handle_ad_authentication( userid_in       IN VARCHAR2, 
+                                        pwd_in          IN VARCHAR2,
+                                        workstation_in  IN VARCHAR2,
+                                        status_out      OUT VARCHAR2,
+                                        status_msg      OUT VARCHAR2,
+                                        app_user        OUT VARCHAR2);    
+    PROCEDURE cac_auth_user_type(
+        uid_in      IN VARCHAR2, 
+        status_out  OUT VARCHAR2,
+        status_msg  OUT VARCHAR2);     
+
+    PROCEDURE okta_auth_user_type(
+        uid_in      IN VARCHAR2, 
+        status_out  OUT VARCHAR2,
+        status_msg  OUT VARCHAR2);                                               
+END LOGIN_CORE;
+
+/
+
+
+CREATE OR REPLACE PACKAGE BODY LOGIN_CORE IS
+
+    -- Global variable for current authentication type
+    g_auth_type VARCHAR2(200) := C_AUTH_TYPE_SIMPLE;
+
+    -- Global configuration variables (initialized with default values)
+    g_auth_config   typ_auth_config := typ_auth_config(C_NO, C_NO, C_NO);
+    g_app_config    typ_app_config := typ_app_config(C_NO, C_YES, C_YES, C_NO);
+
+    gb_intialised BOOLEAN := FALSE; -- Flag to check if package is initialized
+    g_debug_enabled BOOLEAN := FALSE; -- Flag to control debug logging
+
+    g_err_9410 VARCHAR2(500);
+    g_err_9411 VARCHAR2(500);
+    g_err_9412 VARCHAR2(500);
+    g_err_9413 VARCHAR2(500);
+
+
+    -- Enhanced procedure to log messages with file-based logging when debug is enabled
+    PROCEDURE log_message(p_message VARCHAR2, p_level VARCHAR2 DEFAULT 'INFO') IS
+        l_log_file VARCHAR2(200);
+        l_file_handle UTL_FILE.FILE_TYPE;
+        l_log_entry VARCHAR2(4000);
+        l_instance_name VARCHAR2(10);
+    BEGIN
+        -- Only proceed with file logging if debug is enabled
+        IF g_debug_enabled THEN
+            BEGIN
+                -- Get instance name for log file naming
+                SELECT SYS_CONTEXT('USERENV', 'DB_NAME') INTO l_instance_name FROM DUAL;
+
+                -- Create daily log file name: LOGIN_CORE_YYYYMMDD.log
+                l_log_file := 'LOGIN_CORE_' || TO_CHAR(SYSDATE, 'YYYYMMDD') || '.log';
+
+                -- Format log entry with timestamp, level, instance, version, and message
+                l_log_entry := '[' || p_level || '] ' || 
+                               TO_CHAR(SYSDATE, 'YYYY-MM-DD HH24:MI:SS') || 
+                               ' [' || l_instance_name || '] [v' || C_PACKAGE_VERSION || '] - ' || p_message;
+
+                -- Open file in append mode, write entry, and close
+                l_file_handle := UTL_FILE.FOPEN(C_LOG_DIR, l_log_file, 'A');
+                UTL_FILE.PUT_LINE(l_file_handle, l_log_entry);
+                UTL_FILE.FFLUSH(l_file_handle);
+                UTL_FILE.FCLOSE(l_file_handle);
+
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- Close file handle if still open
+                    IF UTL_FILE.IS_OPEN(l_file_handle) THEN
+                        UTL_FILE.FCLOSE(l_file_handle);
+                    END IF;
+                    DBMS_OUTPUT.PUT_LINE('Error writing to log file: ' || SQLERRM);
+            END;
+        END IF;
+
+        -- Keep existing DBMS_OUTPUT for backward compatibility
+        DBMS_OUTPUT.PUT_LINE('[' || p_level || '] ' || TO_CHAR(SYSDATE, 'YYYY-MM-DD HH24:MI:SS') || ' - ' || p_message);
+
+    END log_message;
+
+    FUNCTION err_msg(err_code_in IN VARCHAR2) RETURN VARCHAR2 IS
+        l_err_msg			 	 VARCHAR2 (500);
+        CURSOR error_cur IS 
+        SELECT error 
+            FROM valid_errors
+            WHERE error_code = err_code_in;	
+    BEGIN
+        l_err_msg := NULL;
+        OPEN error_cur;
+        FETCH error_cur INTO l_err_msg;
+        CLOSE error_cur;
+
+        IF l_err_msg IS NULL THEN
+            l_err_msg:= 'Err: No error description for error code ' || err_code_in;
+        ELSE
+            l_err_msg := 'Err:' || err_code_in ||': '|| l_err_msg;
+        END IF;  	
+
+        RETURN l_err_msg;
+    END err_msg;
+
+    FUNCTION get_pwd_updated_status RETURN BOOLEAN IS   
+    BEGIN
+        RETURN B_PWD_UPDATED;
+    END get_pwd_updated_status;
+
+    PROCEDURE set_pwd_updated_status(p_status IN BOOLEAN) IS
+    BEGIN
+        B_PWD_UPDATED := p_status;
+    END set_pwd_updated_status;
+
+    FUNCTION get_package_version RETURN VARCHAR2 IS
+    BEGIN
+        RETURN C_PACKAGE_VERSION;
+    END get_package_version;
+
+    -- Private procedure to load configuration from database
+    PROCEDURE load_configuration IS
+        l_count NUMBER;
+    BEGIN
+        log_message('Loading configuration from lt_application_config');
+
+        -- Check if configuration table has data
+        SELECT COUNT(*)
+        INTO l_count
+        FROM lt_application_config;
+
+        IF l_count = 0 THEN
+            RAISE NO_DATA_FOUND;
+        ELSIF l_count > 1 THEN
+            log_message('Multiple configuration rows found, using first row', 'WARNING');
+        END IF;
+
+        -- Load configuration data
+        SELECT NVL(external_auth,'N'), NVL(okta_auth, 'N'), NVL(ad_enabled, 'N'),
+               NVL(strong_pwd_enabled,'N'), NVL(default_dbase,'Y'), NVL(single_user,'Y'), 
+               NVL(time_zone_enabled, 'N')
+        INTO g_auth_config.external_auth, g_auth_config.okta_auth, g_auth_config.ad_enabled,
+             g_app_config.strong_pwd_enabled, g_app_config.default_dbase, g_app_config.single_user,
+             g_app_config.time_zone_enabled
+        FROM lt_application_config
+        WHERE ROWNUM = 1;
+
+        log_message('Configuration loaded successfully');
+
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            log_message('No configuration found in lt_application_config', 'ERROR');
+            -- Set default values
+            g_auth_config.external_auth := C_NO;
+            g_auth_config.okta_auth := C_NO;
+            g_auth_config.ad_enabled := C_NO;
+            g_app_config.strong_pwd_enabled := C_YES;
+            g_app_config.default_dbase := C_YES;
+            g_app_config.single_user := C_YES;
+            RAISE ex_invalid_config;
+        WHEN OTHERS THEN
+            log_message('Error loading configuration: ' || SQLERRM, 'ERROR');
+            RAISE;
+    END load_configuration;
+
+    -- Private procedure to load debug configuration from DEBUG_CONTROLS table
+    PROCEDURE load_debug_configuration IS
+        l_count NUMBER;
+    BEGIN
+        -- Check if debug is enabled for LOGIN_CORE
+        SELECT COUNT(*)
+        INTO l_count
+        FROM DEBUG_CONTROLS
+        WHERE OBJECT_NAME = 'LOGIN_CORE'
+          AND DEBUG_MODE = 'Y';
+
+        g_debug_enabled := (l_count > 0);
+
+        log_message('Debug mode ' || CASE WHEN g_debug_enabled THEN 'ENABLED' ELSE 'DISABLED' END, 'INFO');
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            g_debug_enabled := FALSE;
+            log_message('Error loading debug configuration, debug disabled: ' || SQLERRM, 'ERROR');
+    END load_debug_configuration;
+
+    -- Private procedure to determine authentication type based on priority
+    PROCEDURE determine_auth_type IS
+        l_auth_count NUMBER := 0;
+    BEGIN
+        log_message('Determining authentication type');
+
+        -- Count enabled authentication methods
+        IF g_auth_config.external_auth = C_YES THEN
+            l_auth_count := l_auth_count + 1;
+        END IF;
+
+        IF g_auth_config.okta_auth = C_YES THEN
+            l_auth_count := l_auth_count + 1;
+        END IF;
+
+        IF g_auth_config.ad_enabled = C_YES THEN
+            l_auth_count := l_auth_count + 1;
+        END IF;
+
+        -- Enforce business rule: only one authentication method can be enabled
+        IF l_auth_count > 1 THEN
+            log_message('Multiple authentication methods enabled - this violates business rules', 'ERROR');
+            RAISE ex_config_conflict;
+        END IF;
+
+        IF g_auth_config.external_auth = C_YES THEN
+            g_auth_type := C_AUTH_TYPE_CAC;
+            log_message('Authentication type set to: ' || C_AUTH_TYPE_CAC);
+        ELSIF g_auth_config.ad_enabled = C_YES THEN
+            g_auth_type := C_AUTH_TYPE_AD;
+            log_message('Authentication type set to: ' || C_AUTH_TYPE_AD);
+        ELSIF g_auth_config.okta_auth = C_YES THEN
+            g_auth_type := C_AUTH_TYPE_OKTA;
+            log_message('Authentication type set to: ' || C_AUTH_TYPE_OKTA);
+        ELSE
+            g_auth_type := C_AUTH_TYPE_SIMPLE; -- Default
+            log_message('Authentication type set to: ' || C_AUTH_TYPE_SIMPLE || ' (default)');
+        END IF;
+
+    END determine_auth_type;
+
+    -- Public procedure to validate configuration for conflicts
+    PROCEDURE validate_configuration IS
+        l_auth_methods_enabled NUMBER := 0;
+        l_error_message VARCHAR2(4000);
+    BEGIN
+        log_message('Validating configuration');
+
+        -- Count enabled authentication methods
+        IF g_auth_config.external_auth = C_YES THEN
+            l_auth_methods_enabled := l_auth_methods_enabled + 1;
+        END IF;
+
+        IF g_auth_config.okta_auth = C_YES THEN
+            l_auth_methods_enabled := l_auth_methods_enabled + 1;
+        END IF;
+
+        IF g_auth_config.ad_enabled = C_YES THEN
+            l_auth_methods_enabled := l_auth_methods_enabled + 1;
+        END IF;
+
+        -- Business rule validations
+        IF l_auth_methods_enabled > 1 THEN
+            l_error_message := g_err_9410 || --'Configuration conflict: Multiple authentication methods enabled simultaneously. ' ||
+                             ' External Auth: ' || g_auth_config.external_auth || ',' ||
+                             ' OKTA Auth: ' || g_auth_config.okta_auth || ',' ||
+                             ' AD Auth: ' || g_auth_config.ad_enabled;
+            log_message(l_error_message, 'ERROR');
+            RAISE_APPLICATION_ERROR(-20001, g_err_9410);
+        END IF;
+
+        -- Validate Y/N values
+        IF g_auth_config.external_auth NOT IN (C_YES, C_NO) OR
+           g_auth_config.okta_auth NOT IN (C_YES, C_NO) OR
+           g_auth_config.ad_enabled NOT IN (C_YES, C_NO) OR
+           g_app_config.strong_pwd_enabled NOT IN (C_YES, C_NO) OR
+           g_app_config.default_dbase NOT IN (C_YES, C_NO) OR
+           g_app_config.single_user NOT IN (C_YES, C_NO) THEN
+            l_error_message := 'Invalid configuration values: All flags must be Y or N';
+            log_message(l_error_message, 'ERROR');
+            RAISE_APPLICATION_ERROR(-20002, l_error_message);
+        END IF;
+
+        log_message('Configuration validation completed successfully');
+
+    END validate_configuration;
+
+    -- Public procedure to initialize the package
+    PROCEDURE initialise(status_out OUT VARCHAR2) IS
+    BEGIN
+        log_message('Initializing LOGIN_CORE package');
+
+        BEGIN
+            -- Load configuration from database
+            load_configuration;
+
+            -- Load debug configuration
+            load_debug_configuration;
+
+            -- Set globals
+            g_err_9410 := err_msg('9410'); -- Multiple authentication methods enabled simultaneously;
+            g_err_9411 := err_msg('9411'); 
+            g_err_9412 := err_msg('9412');
+            g_err_9413 := err_msg('9413');
+
+            -- Validate configuration
+            validate_configuration;
+
+            -- Determine authentication type
+            determine_auth_type;
+
+
+            gb_intialised := TRUE; -- Set initialized flag
+
+            status_out := 'OK';
+
+            log_message('LOGIN_CORE package v' || C_PACKAGE_VERSION || ' initialized successfully');
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                log_message('Unexpected error during initialization: ' || SQLERRM, 'ERROR');
+                -- Set safe defaults
+                g_auth_type := C_AUTH_TYPE_SIMPLE;
+                status_out := SUBSTR(SQLERRM, 12);
+        END;
+
+    END initialise;
+
+    -- Public function to get current authentication type
+    FUNCTION get_auth_type RETURN VARCHAR2 IS
+    BEGIN
+        RETURN g_auth_type;
+    END get_auth_type;
+
+    -- Public function to get authentication configuration
+    FUNCTION get_auth_config RETURN typ_auth_config IS
+    BEGIN
+        RETURN g_auth_config;
+    END get_auth_config;
+
+    -- Public function to get application configuration
+    FUNCTION get_app_config RETURN typ_app_config IS
+    BEGIN
+        RETURN g_app_config;
+    END get_app_config;
+
+    -- Public function to check if external authentication is enabled
+    FUNCTION is_external_auth_enabled RETURN BOOLEAN IS
+    BEGIN
+        RETURN (g_auth_config.external_auth = C_YES OR 
+                g_auth_config.okta_auth = C_YES OR 
+                g_auth_config.ad_enabled = C_YES);
+    END is_external_auth_enabled;
+
+    -- Public function to check if strong password is enabled
+    FUNCTION is_strong_password_enabled RETURN BOOLEAN IS
+    BEGIN
+        RETURN (g_app_config.strong_pwd_enabled = C_YES);
+    END is_strong_password_enabled;
+
+    -- Public procedure to reset and reload configuration
+    PROCEDURE reset_configuration IS
+        lv_status VARCHAR2(2000);
+    BEGIN
+        log_message('Resetting configuration');
+
+        -- Reset global variables to default values
+        g_auth_type := C_AUTH_TYPE_SIMPLE;
+        g_auth_config := typ_auth_config(C_NO, C_NO, C_NO);
+        g_app_config := typ_app_config(C_NO, C_YES, C_NO);
+        g_debug_enabled := FALSE;
+
+        -- Reinitialize
+        initialise(lv_status);
+
+    END reset_configuration;
+
+    -- Public function to check if a user account is expired
+    -- Returns TRUE if user is expired/inactive, FALSE if user is active
+    FUNCTION is_user_expired(userid_in IN VARCHAR2) RETURN BOOLEAN IS
+        l_user_count    NUMBER;
+        l_user_expired  BOOLEAN := TRUE;
+        l_current_date  DATE;
+        l_chapter_id    VARCHAR2(10);
+        l_status        VARCHAR2(2000);
+        l_tz_enabled    VARCHAR2(1);
+    BEGIN
+        -- Input validation
+        IF userid_in IS NULL THEN
+            log_message('is_user_expired: userid_in parameter is NULL', 'ERROR');
+            RAISE_APPLICATION_ERROR(-20006, 'User ID cannot be NULL');
+        END IF;
+
+        log_message('Checking if user is expired: ' || userid_in);
+
+        BEGIN
+            SELECT NVL(time_zone_enabled, C_NO)
+            INTO l_tz_enabled
+            FROM lt_application_config;
+        EXCEPTION
+            WHEN OTHERS THEN
+                log_message('is_user_expired: Error in retrieving configuration for time_zone_enabled', 'ERROR');
+                RAISE_APPLICATION_ERROR(-20007, 'Error retrieving time zone configuration');
+        END;
+
+        -- Get appropriate date based on timezone configuration
+        IF l_tz_enabled = C_YES THEN
+            -- Note: chapter_id should be obtained from context or passed as parameter
+            -- For now, using NULL which should default to system timezone
+            l_chapter_id := lifetrack_timezone_convert.get_chapter_id_db(userid_in);
+            l_current_date := Lifetrack_timezone_convert.get_local_time(l_chapter_id, SYSDATE);
+        ELSE
+            l_current_date := SYSDATE;
+        END IF;
+
+        SELECT COUNT(*) INTO l_user_count
+          FROM system_users
+         WHERE user_id = userid_in
+           AND l_current_date >= eff_date 
+           AND (term_date IS NULL OR l_current_date <= term_date);
+
+        l_user_expired := (l_user_count = 0);
+
+        RETURN (l_user_expired);
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_message('Unexpected error in is_user_expired for user ' || userid_in || ': ' || SQLERRM, 'ERROR');
+            -- In case of error, assume user is expired for security
+            RETURN TRUE;
+    END is_user_expired;
+
+    FUNCTION is_user_locked(userid_in IN VARCHAR2) 
+        RETURN BOOLEAN IS
+        lv_user_locked VARCHAR2(1);
+        ld_lockout_until DATE;
+    BEGIN
+        IF userid_in IS NOT NULL THEN
+            SELECT NVL (is_password_locked, 'N'), lockout_until
+            INTO lv_user_locked, ld_lockout_until
+            FROM system_users
+            WHERE user_id = userid_in;
+
+            IF lv_user_locked = 'Y' THEN
+                IF ld_lockout_until > SYSDATE THEN
+                    log_message('User is locked: ' || userid_in, 'INFO');
+                    RETURN TRUE;
+                ELSE
+                    -- User is locked but lockout period has expired, reset lock
+                    UPDATE system_users
+                    SET is_password_locked = 'N', lockout_until = NULL
+                    WHERE user_id = userid_in;
+                    COMMIT;
+                    log_message('User lock expired, resetting lock for user: ' || userid_in, 'INFO');
+                END IF;    
+            END IF;
+        END IF;
+
+        RETURN FALSE;     
+    END is_user_locked;
+
+
+    FUNCTION is_user_reset_request(userid_in IN VARCHAR2) 
+        RETURN BOOLEAN IS
+        lv_reset_request VARCHAR2(1);
+    BEGIN
+        IF userid_in IS NOT NULL THEN
+            SELECT NVL (reset_request, 'N')
+            INTO lv_reset_request
+            FROM system_users
+            WHERE user_id = userid_in;
+
+            IF lv_reset_request = 'Y' THEN
+                log_message('User rest requested: ' || userid_in, 'INFO');
+                RETURN TRUE;
+            END IF;
+        END IF;
+
+        RETURN FALSE;     
+    END is_user_reset_request;
+
+
+    PROCEDURE log_login_event(
+        app_user     IN VARCHAR2,
+        workstation  IN VARCHAR2,
+        audit_event  IN VARCHAR2,
+        audit_msg    IN VARCHAR2 DEFAULT NULL) IS   
+    BEGIN
+        insert into cac_audit_log
+            (   AUDIT_USER_NAME,
+                AUDIT_PASSWORD,
+                AUDIT_DATE_TIME,
+                WORK_STATION,
+                AUDIT_EVENT,
+                AUDIT_MSG)
+        values
+            (   APP_USER, 
+                NULL, 
+                SYSDATE,
+                workstation, 
+                audit_event,
+                audit_msg
+            );
+        COMMIT;   
+    END log_login_event;
+    -- Handle SIMPLE AUTHENTICATION
+    /*
+    status_out - status_msg
+        OK      -   NULL
+        ERROR   -   Error Message
+        WARNING  -   Expired 
+        RESET   -   Err: 16315 Creation of new Application password is required.
+        WARNING -   Expire Warning Message
+        WARNING -   Reset
+    */
+    PROCEDURE handle_simple_authentication( userid_in       IN VARCHAR2, 
+                                            pwd_in          IN VARCHAR2,
+                                            workstation_in  IN VARCHAR2,
+                                            status_out      OUT VARCHAR2,
+                                            status_msg      OUT VARCHAR2) IS
+        lv_status           VARCHAR2(2000);
+        lb_success          BOOLEAN;
+
+        pwd_status_out      VARCHAR2(20);
+        pwd_expire_warning  NUMBER := 0;
+
+        ex_reset_request_warning    EXCEPTION;
+        ex_pwd_policy_warning       EXCEPTION;
+        ex_pwd_expired_warning      EXCEPTION;
+        ex_pwd_expire_warning       EXCEPTION;
+        ex_login_error              EXCEPTION;
+
+        lv_error_code     VARCHAR2(20);
+        lv_error_msg      VARCHAR2(2000);
+        lv_event         VARCHAR2(20);
+
+    BEGIN
+        log_message('Handling SIMPLE authentication');
+
+        status_out := 'OK';
+        status_msg := NULL;
+
+        initialise(lv_status);
+
+        if(lv_status != 'OK') THEN
+            RAISE_APPLICATION_ERROR(-20001, lv_status);
+        END IF;
+
+        IF userid_in IS NULL OR pwd_in IS NULL THEN
+            RAISE ex_login_error;
+        END IF;
+
+        -- check valid username/password
+        lb_success := lt_password_policy.check_hash(userid_in, pwd_in );
+
+        IF lb_success THEN
+            lv_event := C_SUCCESS;
+        ELSE
+            lv_event := C_FAIL;
+        END IF;
+
+
+        log_login_event(
+            app_user     => userid_in,
+            workstation  => workstation_in,
+            audit_event  => lv_event
+        );
+
+
+        IF NOT lb_success THEN  
+            RAISE ex_login_error;
+        END IF;
+
+        -- check user expired.
+        IF is_user_expired(userid_in) THEN
+            RAISE_APPLICATION_ERROR(-20005, 'You are not authroized to access the system. Login Denied');
+        END IF;
+
+
+        --IF g_app_config.strong_pwd_enabled = C_YES THEN
+            -- check if user is locked.
+        IF is_user_locked(userid_in) THEN
+            RAISE_APPLICATION_ERROR(-20006, 'ERR: 16314 Application User is locked, password attempts exceeds.');
+        END IF;
+        --END IF;
+
+        IF is_user_reset_request(userid_in) THEN
+            RAISE ex_reset_request_warning;
+        END IF;
+
+        IF g_app_config.strong_pwd_enabled = C_YES THEN
+            -- check strong password requirement.
+            LT_PASSWORD_POLICY.ONS_CHECK_STRONG_PASSWORD(pwd_in, lv_error_code, lv_error_msg);
+            IF lv_error_msg IS NOT NULL THEN
+                RAISE ex_pwd_policy_warning;
+            END IF;
+        END IF;
+
+        -- status OK, EXPIRED, PWD_EXPIRE_WARNING
+        LT_PASSWORD_POLICY.ONS_CHECK_PASSWORD_AGE(userid_in, pwd_status_out, pwd_expire_warning);
+        IF pwd_status_out = 'EXPIRED' THEN                
+            RAISE ex_pwd_expired_warning;
+        ELSIF pwd_status_out = 'OK' AND pwd_expire_warning > 0 THEN
+            RAISE ex_pwd_expire_warning;
+        ELSIF pwd_status_out <> 'OK' THEN
+            RAISE_APPLICATION_ERROR(-20009, 'Unexpected password status: ' || pwd_status_out);    
+        END IF;
+
+
+        status_out := 'OK';
+        status_msg := NULL;   
+
+    EXCEPTION
+        WHEN ex_login_error THEN
+            log_message('Invalid login attempt for user: ' || userid_in, 'ERROR');
+            status_out := 'LOGIN_ERR';
+            status_msg := 'Invalid Username/Password. Login Denied';
+            RETURN;
+        WHEN ex_reset_request_warning THEN
+            log_message('User has requested a password reset: ' || userid_in, 'INFO');
+            status_out := 'RESET_REQD';
+            status_msg := 'Err: 16315 Creation of new Application password is required.';
+            RETURN;
+        WHEN ex_pwd_policy_warning THEN
+            log_message('Strong password requirement not met for user: ' || userid_in, 'INFO');
+            status_out := 'RESET_REQD';
+            status_msg := 'Err: 16315 Creation of new Application password is required.';
+            RETURN;
+        WHEN ex_pwd_expired_warning THEN
+            log_message('Password expired for user: ' || userid_in, 'INFO');
+            status_out := 'RESET_REQD';
+            status_msg := 'Err: 16316 Application Password has expired! Creation of new password is required.';
+            RETURN;   
+        WHEN ex_pwd_expire_warning THEN
+            log_message('Password expiry warning for user: ' || userid_in || ', expires in ' || pwd_expire_warning || ' days', 'INFO');
+            status_out := 'PWD_EXPIRE_WARNING';
+            status_msg := 'Warning: Your Application password will expire in ' || pwd_expire_warning || ' days. Please change your password.';
+            RETURN;    
+        WHEN OTHERS THEN
+            log_message('Error in handle_simple_authentication for user: ' || userid_in || ' - ' || SQLERRM, 'ERROR');
+            IF SUBSTR(SQLERRM, 1, 4) = 'ORA-' THEN
+                status_msg := SUBSTR(SQLERRM, 12); -- remove ORA-20001 FROM THE MESSAGE.
+            ELSE
+                status_msg := SQLERRM;
+            END IF;            
+            status_out := 'ERROR';
+            RETURN;
+    END handle_simple_authentication;
+
+    -- Handle AD AUTHENTICATION
+    -- Handle AD AUTHENTICATION
+    PROCEDURE handle_ad_authentication( userid_in       IN VARCHAR2, 
+                                        pwd_in          IN VARCHAR2,
+                                        workstation_in  IN VARCHAR2,
+                                        status_out      OUT VARCHAR2,
+                                        status_msg      OUT VARCHAR2,
+                                        app_user        OUT VARCHAR2) IS
+
+        ex_ad_skipped EXCEPTION;
+        ex_mul_users EXCEPTION;
+        ex_login_error EXCEPTION;
+        lv_status   VARCHAR2(2000);
+        lv_app_user_id VARCHAR2(50);
+        lv_mul_app_users VARCHAR2(1) := 'N';
+        lv_event    VARCHAR2(20);
+
+        -- LT2013R2 - SCR 20552 - 04152014
+        -- Before AD User to App User link check, verify if skip_ad flag is set or not for the user.
+        FUNCTION is_skip_ad_auth(userid_in IN VARCHAR2) RETURN BOOLEAN IS
+            CURSOR skipad_cur IS
+            SELECT
+                skip_ad
+            FROM
+                system_users
+            WHERE
+                    upper(user_id) = upper(userid_in)
+                AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate + 1);
+
+            l_skip_ad VARCHAR2(1) := 'N'; -- default;
+        BEGIN
+            OPEN skipad_cur;
+            FETCH skipad_cur INTO l_skip_ad;
+            CLOSE skipad_cur;
+
+            RETURN NVL(l_skip_ad, 'N') = 'Y';
+        END is_skip_ad_auth;
+
+
+    BEGIN
+        log_message('Handling AD authentication');
+
+        status_out := 'OK';
+        status_msg := NULL;
+
+        initialise(lv_status);
+
+        if(lv_status != 'OK') THEN
+            RAISE_APPLICATION_ERROR(-20001, 'Initialization failed: ' || lv_status);
+        END IF;
+
+        IF userid_in IS NULL OR pwd_in IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20003, 'Invalid Username/Password');
+        END IF;
+
+        -- Check if skip_ad flag is set for the user.
+        IF is_skip_ad_auth(userid_in) THEN
+            RAISE ex_ad_skipped;
+        END IF;
+
+        -- TODO CHECK IF THIS CHECK CAN GO INTO AD_AUTHENTICATE PACKAGE.
+        --LT2013R2 - SCR 20552 - 04152014;                   	
+        -- Before authenticating active directory user, first check if the AD User is in the system.
+
+        BEGIN
+            SELECT
+                user_id
+            INTO lv_app_user_id
+            FROM
+                system_users
+            WHERE
+                    upper(ad_user_id) = upper(userid_in)
+                AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate + 1);
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                log_message('AD user '|| userid_in || ' not found in the system.', 'ERROR');
+                RAISE_APPLICATION_ERROR(-20004, g_err_9413);
+            WHEN TOO_MANY_ROWS THEN
+                lv_mul_app_users := 'Y';
+                log_message('Multiple App users linked with a network user ' || userid_in, 'INFO');
+        END;
+
+        -- Call lt_ldap_interface package to authenticate active directory users.
+        lv_status := lt_ldap_interface.ad_authenticate
+                                        (   ad_user_in      => userid_in, 
+                                            ad_passwd_in    => pwd_in);
+
+        IF lv_status = 'OK' THEN
+            lv_event := C_SUCCESS;
+        ELSE
+            lv_event := C_FAIL;
+        END IF;
+
+        log_login_event(
+            app_user     => userid_in,
+            workstation  => workstation_in,
+            audit_event  => lv_event
+        );
+
+        IF lv_status != 'OK' THEN
+            status_msg := 'Login Denied. ' || lv_status;
+            RAISE ex_login_error;
+        END IF;             
+
+        IF lv_mul_app_users = 'Y' THEN
+            -- Multiple application users found for the AD user.
+            RAISE ex_mul_users;
+        END IF;
+
+        -- check user expired.
+        IF is_user_expired(lv_app_user_id) THEN
+            RAISE_APPLICATION_ERROR(-20005, 'You are not authroized to access the system. Login Denied');
+        END IF;
+
+        -- Check if the application user is locked.
+        IF is_user_locked(lv_app_user_id) THEN
+            RAISE_APPLICATION_ERROR(-20006, 'ERR: 16314 Application User is locked, password attempts exceeds.');
+        END IF;
+
+        status_out := 'OK';
+        status_msg := NULL;
+        app_user := lv_app_user_id; -- Return the application user ID
+
+    EXCEPTION
+        WHEN ex_login_error THEN
+            log_message('Invalid login attempt for user: ' || userid_in, 'ERROR');
+            status_out := 'LOGIN_ERR';
+            -- already assigned before exception raised.
+            --status_msg := 'Invalid Username/Password. Login Denied';
+            RETURN;    
+        WHEN ex_mul_users THEN
+            log_message('Multiple application users found for AD user: ' || userid_in, 'INFO');
+            status_out := 'MUL_APP_USERS';
+            status_msg := NULL;   
+            RETURN;       
+        WHEN ex_ad_skipped THEN
+            log_message('Skip AD authentication for user: ' || userid_in, 'INFO');
+            status_out := 'SKIPPED';
+            status_msg := 'AD authentication skipped for user: ' || userid_in;
+            RETURN; -- Skip AD authentication if skip_ad flag is set.
+        WHEN OTHERS THEN
+            log_message('Error in HANDLE_AD_AUTHENTICATION for user: ' || userid_in || ' - ' || SQLERRM, 'ERROR');
+            IF SUBSTR(SQLERRM, 1, 4) = 'ORA-' THEN
+                status_msg := SUBSTR(SQLERRM, 12); -- remove ORA-20001 FROM THE MESSAGE.
+            ELSE
+                status_msg := SQLERRM;
+            END IF;
+            status_out := 'ERROR';       
+    END handle_ad_authentication;
+
+    -- Handle CAC Authentication
+
+    /**
+        * @file handle_cac_authentication
+        * @brief Handles CAC authentication for a user.
+        *
+        * This procedure checks if the user has a valid EDI PN ID and whether it exists in the system.
+        * If the EDI PN ID is found, it returns 'EXISTING', otherwise it returns 'NEW'.
+        * If an error occurs, it logs the error and returns an appropriate status message.
+        *
+        * @param uid_in      The EDI PIN ID to authenticate.
+        * @param status_out  The output status of the authentication ('OK', 'ERROR').
+        * @param status_msg  The output message providing additional information about the status. 
+        * (indicates if the user is 'EXISTING' or 'NEW') for 'OK' status.
+
+    **/
+    PROCEDURE cac_auth_user_type(
+        uid_in      IN VARCHAR2, 
+        status_out  OUT VARCHAR2,
+        status_msg  OUT VARCHAR2) IS
+
+        cac_edi_pn_id VARCHAR2(50) := NULL;
+        ln_cnt NUMBER;
+        ex_new_edi_pn_id EXCEPTION;
+    BEGIN
+        log_message('In cac_auth_user_type');
+
+        status_out := 'OK';
+        status_msg := NULL;
+
+        IF uid_in IS NULL THEN
+            log_message('UID is empty.', 'ERROR');
+            RAISE_APPLICATION_ERROR(-20003, 'Please insert the authentication card and Try Again');
+        END IF;
+
+        BEGIN
+            SELECT evalue 
+            INTO cac_edi_pn_id
+            FROM edi
+            WHERE ename = uid_in;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                log_message('No EDI entry found for the user');
+                RAISE_APPLICATION_ERROR(-20001, 'Please insert the authentication card and Try Again');
+        END;
+
+        IF NVL(cac_edi_pn_id,'0') = '0' THEN
+            log_message('No EDI entry found for the user');
+            RAISE_APPLICATION_ERROR(-20002, 'Please insert the authentication card and Try Again');
+        END IF;
+
+        BEGIN
+            SELECT COUNT(1)
+                INTO ln_cnt
+                FROM system_users
+            WHERE edi_pn_id = cac_edi_pn_id;
+
+            IF ln_cnt = 0 THEN
+                RAISE ex_new_edi_pn_id;
+            ELSIF ln_cnt > 1 THEN
+                RAISE_APPLICATION_ERROR(-20003, 'Multiple users found with the same EDI PN ID');
+            END IF;
+        END;
+
+        -- If we reach here, it means we have a valid EDI PN ID
+        status_out := 'EXISTING';
+        status_msg := NULL;
+
+
+    EXCEPTION 
+        WHEN ex_new_edi_pn_id THEN
+            log_message('No system user found for the EDI PN ID');
+            status_out := 'NEW';
+            status_msg := NULL;
+            RETURN;
+        WHEN OTHERS THEN
+            log_message('Error in cac_auth_user_type: ' || SQLERRM, 'ERROR');
+            IF SUBSTR(SQLERRM, 1, 4) = 'ORA-' THEN
+                status_msg := SUBSTR(SQLERRM, 12); -- remove ORA-20001 FROM THE MESSAGE.
+            ELSE
+                status_msg := SQLERRM;
+            END IF;
+            status_out := 'ERROR';
+            RETURN;
+    END cac_auth_user_type;
+
+    PROCEDURE okta_auth_user_type(
+        uid_in      IN VARCHAR2, 
+        status_out  OUT VARCHAR2,
+        status_msg  OUT VARCHAR2) IS
+
+        okta_email_id VARCHAR2(200) := NULL;
+        ln_cnt NUMBER;
+    BEGIN
+        log_message('In okta_auth_user_type');
+
+        status_out := 'OK';
+        status_msg := NULL;
+
+        IF uid_in IS NULL THEN
+            log_message('UID is empty.', 'ERROR');
+            RAISE_APPLICATION_ERROR(-20003, err_msg('9420')); --'Okta session is not valid. Please try again'
+        END IF;
+
+        BEGIN
+            SELECT evalue 
+            INTO okta_email_id
+            FROM edi
+            WHERE ename = uid_in;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                log_message('No EDI entry found for the user');
+                RAISE_APPLICATION_ERROR(-20001, 'Something went wrong. EDI entry not found for UID: ' || uid_in);
+        END;
+
+        IF NVL(okta_email_id,'0') = '0' THEN
+            log_message('No EDI entry found for the user');
+            RAISE_APPLICATION_ERROR(-20002, 'Something went wrong. Please Try Again');
+        END IF;
+
+        BEGIN
+            SELECT COUNT(1)
+                INTO ln_cnt
+                FROM system_users
+            WHERE UPPER(user_email) = UPPER(okta_email_id);
+
+            IF ln_cnt = 0 THEN
+                log_message('No system user found for the Okta email ID: ' || okta_email_id, 'ERROR');
+                RAISE_APPLICATION_ERROR(-20003, err_msg('9421') ); --'User not found with the provided email ID'
+            ELSIF ln_cnt > 1 THEN
+                log_message('Multiple users found with the same email ID: ' || okta_email_id, 'ERROR');
+                RAISE_APPLICATION_ERROR(-20004, err_msg('9422'));
+            END IF;
+        END;
+
+        -- If we reach here, it means we have a valid EDI PN ID
+        status_out := 'EXISTING';
+        status_msg := NULL;
+
+
+    EXCEPTION 
+        WHEN OTHERS THEN
+            log_message('Error in okta_auth_user_type: ' || SQLERRM, 'ERROR');
+            IF SUBSTR(SQLERRM, 1, 4) = 'ORA-' THEN
+                status_msg := SUBSTR(SQLERRM, 12); -- remove ORA-20001 FROM THE MESSAGE.
+            ELSE
+                status_msg := SQLERRM;
+            END IF;
+            status_out := 'ERROR';   
+
+            RETURN;
+    END okta_auth_user_type;
+END LOGIN_CORE;
+
+/

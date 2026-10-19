@@ -1,0 +1,417 @@
+<!-- Cell templates — must be outside conditional blocks for static ViewChild resolution -->
+<ng-template #valueTemplate let-row>
+  @if (isValueEditable() && row.techNo === 1) {
+    @switch (row.datatype) {
+      <!-- DATE: datepicker with FormControl validation -->
+      @case ('DATE') {
+        <div class="value-cell-date">
+          <mat-form-field appearance="fill" class="value-cell-field">
+            <mat-label>Date</mat-label>
+            <input matInput [matDatepicker]="datePicker"
+              [formControl]="getDateControl(row.parmCode, row.parmValue)"
+              placeholder="DD-MMM-YYYY"
+              [max]="today"
+              (dateChange)="onDateChange($event, row)"
+              [attr.aria-label]="'Date for ' + row.description" />
+            <mat-datepicker-toggle matIconSuffix [for]="datePicker"></mat-datepicker-toggle>
+            <mat-datepicker #datePicker></mat-datepicker>
+            @if (getDateControl(row.parmCode, row.parmValue).hasError('matDatepickerParse')) {
+              <mat-error>Invalid date format</mat-error>
+            } @else if (getDateControl(row.parmCode, row.parmValue).hasError('matDatepickerMax')) {
+              <mat-error>Future date not allowed</mat-error>
+            }
+          </mat-form-field>
+        </div>
+      }
+
+      <!-- DATETIME: datepicker + time input with FormControl validation -->
+      @case ('DATETIME') {
+        <div class="value-cell-datetime">
+          <mat-form-field appearance="fill" class="value-cell-field value-cell-field--date">
+            <mat-label>Date</mat-label>
+            <input matInput [matDatepicker]="dtDatePicker"
+              [formControl]="getDateControl(row.parmCode, row.parmValue)"
+              placeholder="DD-MMM-YYYY"
+              [max]="today"
+              (dateChange)="onDatetimeDateChange($event, row)"
+              [attr.aria-label]="'Date for ' + row.description" />
+            <mat-datepicker-toggle matIconSuffix [for]="dtDatePicker"></mat-datepicker-toggle>
+            <mat-datepicker #dtDatePicker></mat-datepicker>
+            @if (getDateControl(row.parmCode, row.parmValue).hasError('matDatepickerParse')) {
+              <mat-error>Invalid date format</mat-error>
+            } @else if (getDateControl(row.parmCode, row.parmValue).hasError('matDatepickerMax')) {
+              <mat-error>Future date not allowed</mat-error>
+            }
+          </mat-form-field>
+          <mat-form-field appearance="fill" class="value-cell-field value-cell-field--time">
+            <mat-label>Time</mat-label>
+            <input matInput
+              [formControl]="getTimeControl(row.parmCode, row.parmValue)"
+              placeholder="HH:MM"
+              maxlength="5"
+              (blur)="onDatetimeTimeBlur($event, row)"
+              (keydown.enter)="$event.target.blur()"
+              [attr.aria-label]="'Time for ' + row.description" />
+            @if (getTimeControl(row.parmCode, row.parmValue).touched && !parseTimePart(row.parmValue)) {
+              <mat-error>Required</mat-error>
+            }
+          </mat-form-field>
+        </div>
+      }
+
+      <!-- NUMBER: plain text input -->
+      @case ('NUMBER') {
+        <div class="value-cell-number">
+          <input class="value-input"
+            [value]="row.parmValueDisplay || row.parmValue || ''"
+            placeholder="Enter value"
+            maxlength="14"
+            (blur)="onValueBlur($event, row)"
+            (keydown.enter)="$event.target.blur()"
+            [attr.aria-label]="'Value for ' + row.description" />
+        </div>
+      }
+
+      <!-- DEVICE: dropdown from LOV -->
+      @case ('DEVICE') {
+        <div class="value-cell-lov">
+          <mat-form-field appearance="fill" class="value-cell-field">
+            <mat-label>Device</mat-label>
+            <mat-select [value]="row.parmValue"
+              (selectionChange)="onDeviceSelect($event.value, row)"
+              (openedChange)="onDeviceLovOpen($event, row)"
+              [attr.aria-label]="'Device for ' + row.description">
+              @if (isLoadingDeviceLov) {
+                <mat-option disabled><div class="panel-loading"><mat-spinner diameter="18"></mat-spinner><span>Loading...</span></div></mat-option>
+              } @else if (deviceOptions().length === 0) {
+                <mat-option disabled>No devices available</mat-option>
+              } @else {
+                @for (dev of deviceOptions(); track dev.equipId) {
+                  <mat-option [value]="dev.equipId">{{ dev.equipId }} - {{ dev.serialNumber }}</mat-option>
+                }
+              }
+            </mat-select>
+          </mat-form-field>
+        </div>
+      }
+
+      <!-- REAGENT: dropdown from LOV -->
+      @case ('REAGENT') {
+        <div class="value-cell-lov">
+          <mat-form-field appearance="fill" class="value-cell-field">
+            <mat-label>Reagent</mat-label>
+            <mat-select [value]="row.parmValue"
+              (selectionChange)="onReagentSelect($event.value, row)"
+              (openedChange)="onReagentLovOpen($event, row)"
+              [attr.aria-label]="'Reagent for ' + row.description">
+              @if (isLoadingReagentLov) {
+                <mat-option disabled><div class="panel-loading"><mat-spinner diameter="18"></mat-spinner><span>Loading...</span></div></mat-option>
+              } @else if (reagentLovOptions().length === 0) {
+                <mat-option disabled>No reagents available</mat-option>
+              } @else {
+                @for (rea of reagentLovOptions(); track rea.reagentId) {
+                  <mat-option [value]="rea.reagentId">{{ rea.reagentId }} - {{ rea.expiryDate }}</mat-option>
+                }
+              }
+            </mat-select>
+          </mat-form-field>
+        </div>
+      }
+
+      <!-- Fallback: plain text -->
+      @default {
+        <input class="value-input"
+          [value]="row.parmValueDisplay || row.parmValue || ''"
+          placeholder="Enter value"
+          maxlength="14"
+          (blur)="onValueBlur($event, row)"
+          (keydown.enter)="$event.target.blur()"
+          [attr.aria-label]="'Value for ' + row.description" />
+      }
+    }
+  } @else {
+    <span class="value-readonly">{{ row.parmValueDisplay || row.parmValue || '-' }}</span>
+  }
+</ng-template>
+
+<ng-template #statusTemplate let-row>
+  @switch (getStatus(row)) {
+    @case ('Acceptable') {
+      <span class="badge badge--accept"><mat-icon class="badge-icon" aria-hidden="true">check_circle</mat-icon> Acceptable</span>
+    }
+    @case ('Not Acceptable') {
+      <span class="badge badge--reject"><mat-icon class="badge-icon" aria-hidden="true">cancel</mat-icon> Not Acceptable</span>
+    }
+    @default {
+      <span class="badge badge--pending"><mat-icon class="badge-icon" aria-hidden="true">info</mat-icon> Pending</span>
+    }
+  }
+</ng-template>
+
+<h1 class="cdk-visually-hidden">{{ headerConfig().title }}</h1>
+
+<div class="enter-control-values-container">
+  <app-page-header-with-breadcrumb [config]="headerConfig()"></app-page-header-with-breadcrumb>
+
+  <div class="page-layout" [class.side-panel-active]="reagentPanelOpen() || unitsPanelOpen()">
+    <div class="main-content">
+
+      <!-- Search Card -->
+      <section class="search-card" aria-label="Search filters">
+        <div class="filter-row">
+          <!-- Test Batch -->
+          <mat-form-field appearance="fill" class="filter-field">
+            <mat-label>Test Batch *</mat-label>
+            <mat-select [formControl]="testBatchControl" #tbSelect
+                        (selectionChange)="onTestBatchChange($event.value)"
+                        (openedChange)="onDropdownOpened($event)"
+                        aria-label="Test Batch">
+              @if (isLoadingBatches) {
+                <mat-option disabled>
+                  <div class="panel-loading"><mat-spinner diameter="20"></mat-spinner><span>Loading...</span></div>
+                </mat-option>
+              } @else if (testBatchOptions().length === 0) {
+                <mat-option disabled>No data available</mat-option>
+              } @else if (testBatchOptions().length <= 3) {
+                @for (opt of testBatchOptions(); track opt.tbId) {
+                  <mat-option [value]="opt.tbId">{{ opt.tbId }} - {{ opt.statusMessage }}</mat-option>
+                }
+              } @else {
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="tbSearchControl"
+                    placeholderLabel="Search..." noEntriesFoundLabel="">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (opt of filteredTestBatches(); track opt.tbId) {
+                  <mat-option [value]="opt.tbId">{{ opt.tbId }} - {{ opt.statusMessage }}</mat-option>
+                }
+                @if (filteredTestBatches().length === 0) {
+                  <mat-option disabled>No data available</mat-option>
+                }
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <!-- Test -->
+          <mat-form-field appearance="fill" class="filter-field">
+            <mat-label>Test *</mat-label>
+            <mat-select [formControl]="testControl" #testSelect
+                        (selectionChange)="onTestChange($event.value)"
+                        (openedChange)="onDropdownOpened($event)"
+                        [disabled]="!testBatchControl.value"
+                        aria-label="Test">
+              @if (isLoadingTests) {
+                <mat-option disabled>
+                  <div class="panel-loading"><mat-spinner diameter="20"></mat-spinner><span>Loading...</span></div>
+                </mat-option>
+              } @else if (testOptions().length === 0) {
+                <mat-option disabled>{{ testBatchControl.value ? 'No data available' : 'Select Test Batch first' }}</mat-option>
+              } @else if (testOptions().length <= 3) {
+                @for (opt of testOptions(); track opt.testId) {
+                  <mat-option [value]="opt.testId">{{ opt.testId }} - {{ opt.testDesc }}</mat-option>
+                }
+              } @else {
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="testSearchControl"
+                    placeholderLabel="Search..." noEntriesFoundLabel="">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (opt of filteredTests(); track opt.testId) {
+                  <mat-option [value]="opt.testId">{{ opt.testId }} - {{ opt.testDesc }}</mat-option>
+                }
+                @if (filteredTests().length === 0) {
+                  <mat-option disabled>No data available</mat-option>
+                }
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <!-- Run (disabled until batch detail loaded — needs parmType) -->
+          <mat-form-field appearance="fill" class="filter-field">
+            <mat-label>Run</mat-label>
+            <mat-select [formControl]="runControl" #runSelect
+                        (openedChange)="onDropdownOpened($event)"
+                        [disabled]="!batchDetail() || isLoadingBatchDetail"
+                        aria-label="Run">
+              @if (isLoadingRuns) {
+                <mat-option disabled>
+                  <div class="panel-loading"><mat-spinner diameter="20"></mat-spinner><span>Loading...</span></div>
+                </mat-option>
+              } @else if (runOptions().length === 0) {
+                <mat-option disabled>{{ batchDetail() ? 'No runs available' : 'Select Test first' }}</mat-option>
+              } @else {
+                @for (opt of runOptions(); track opt.runId) {
+                  <mat-option [value]="opt.runId">{{ opt.runId }} - {{ opt.insertDate }}</mat-option>
+                }
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <!-- Kit (disabled until batch detail loaded — needs kitLotNumber for filter) -->
+          <mat-form-field appearance="fill" class="filter-field">
+            <mat-label>Kit</mat-label>
+            <mat-select [formControl]="kitControl" #kitSelect
+                        (openedChange)="onDropdownOpened($event)"
+                        [disabled]="!batchDetail() || isLoadingBatchDetail"
+                        aria-label="Kit">
+              @if (isLoadingKits) {
+                <mat-option disabled>
+                  <div class="panel-loading"><mat-spinner diameter="20"></mat-spinner><span>Loading...</span></div>
+                </mat-option>
+              } @else if (kitOptions().length === 0) {
+                <mat-option disabled>{{ batchDetail() ? 'No kits available' : 'Select Test first' }}</mat-option>
+              } @else if (kitOptions().length <= 3) {
+                @for (opt of kitOptions(); track opt.testKitId) {
+                  <mat-option [value]="opt.testKitId">{{ opt.testKitId }}</mat-option>
+                }
+              } @else {
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="kitSearchControl"
+                    placeholderLabel="Search..." noEntriesFoundLabel="">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (opt of filteredKits(); track opt.testKitId) {
+                  <mat-option [value]="opt.testKitId">{{ opt.testKitId }}</mat-option>
+                }
+                @if (filteredKits().length === 0) {
+                  <mat-option disabled>No kits available</mat-option>
+                }
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <!-- Action buttons -->
+          <div class="action-col">
+            <button class="btn-retrieve" [disabled]="isRetrieveDisabled()" (click)="onRetrieve()">RETRIEVE</button>
+            <button class="btn-clear" [disabled]="!testBatchControl.value && !testControl.value" (click)="onClearAll()">CLEAR ALL</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Results Section -->
+      <section class="results-section" aria-label="Control batch parameters">
+        <!-- Loading -->
+        @if (isLoading()) {
+          <div class="loading-container" role="status" aria-live="polite">
+            <mat-spinner diameter="40" aria-label="Loading"></mat-spinner>
+            <span class="loading-text">Loading results, please wait...</span>
+          </div>
+        }
+
+        <!-- Empty State (before retrieve) -->
+        @if (!hasSearched() && !isLoading()) {
+          <div class="empty-container" role="status">
+            <div class="empty-state-icon" aria-hidden="true"><mat-icon>search</mat-icon></div>
+            <h2 class="empty-state-title">No Results to Display</h2>
+            <p class="empty-state-message">Please enter search criteria to view results</p>
+          </div>
+        }
+
+        <!-- No results after retrieve -->
+        @if (hasSearched() && !isLoading() && parameters().length === 0) {
+          <div class="empty-container" role="status" aria-live="polite">
+            <div class="empty-state-icon" aria-hidden="true"><mat-icon>edit</mat-icon></div>
+            <p class="empty-state-message">No parameters available to display</p>
+          </div>
+        }
+
+        <!-- Results with data -->
+        @if (hasSearched() && !isLoading() && parameters().length > 0) {
+          <!-- Batch Info Bar -->
+          <div class="batch-info-bar">
+            <div class="batch-info-left">
+              <span class="batch-id">{{ batchInfo()?.tbId }}</span>
+              <span class="batch-separator" aria-hidden="true">|</span>
+              <span class="batch-test">{{ batchInfo()?.testDesc }}</span>
+              <span class="batch-separator" aria-hidden="true">|</span>
+              <span class="batch-units">{{ batchInfo()?.unitCount }} Units</span>
+              @if (batchInfo()?.configMessage) {
+                <span class="batch-config-msg">{{ batchInfo()?.configMessage }}</span>
+              }
+            </div>
+            <div class="batch-info-right">
+              <button class="btn-action" (click)="onPlaceGroupHold()" aria-label="Place group interdiction or hold for this batch">PLACE GROUP INTERDICTION/HOLD</button>
+              <button class="btn-action" (click)="openReagentPanel()" aria-label="View reagents in selected test kit">VIEW REAGENTS</button>
+              <button class="btn-action" (click)="openUnitsPanel()" aria-label="View units in this batch">VIEW UNITS</button>
+
+              @if (showConfirmBatchBtn()) {
+                <button class="btn-action-secondary" [disabled]="!isConfirmBatchEnabled()" (click)="onConfirmBatch()" aria-label="Confirm all batch parameters">CONFIRM BATCH</button>
+              }
+              @if (showFinalizeBatchBtn()) {
+                <button class="btn-action-primary" (click)="onFinalizeBatch()" aria-label="Finalize batch and transfer results">FINALIZE BATCH</button>
+              }
+
+              <button class="btn-cancel-action" (click)="onCancel()" aria-label="Cancel and clear all results">
+                <mat-icon aria-hidden="true">close</mat-icon> CANCEL
+              </button>
+              <button class="btn-save-action" [class.btn-save-active]="isSaveEnabled()"
+                      [disabled]="!isSaveEnabled() || isLoading()" (click)="onSave()" aria-label="Save parameter values">
+                <mat-icon aria-hidden="true">check</mat-icon> SAVE
+              </button>
+            </div>
+          </div>
+
+          <!-- Parameters Table -->
+          <app-data-table
+            [config]="parmsTableConfig"
+            [data]="displayedParameters()"
+            [loading]="isLoading()">
+          </app-data-table>
+        }
+      </section>
+    </div>
+
+    <!-- Gray Backdrop -->
+    @if (reagentPanelOpen() || unitsPanelOpen()) {
+      <div class="panel-backdrop" (click)="closeReagentPanel(); closeUnitsPanel()" aria-hidden="true"></div>
+    }
+
+    <!-- Side Panel: Reagents -->
+    <aside class="side-panel" [class.open]="reagentPanelOpen()" role="complementary" aria-label="Reagents panel" #reagentPanel>
+      @if (reagentPanelOpen()) {
+        <div class="side-panel-container">
+          <div class="side-panel-header">
+            <h2 class="side-panel-title" id="reagent-panel-title">Reagents in Kit {{ batchInfo()?.testKitId }}</h2>
+            <button mat-icon-button (click)="closeReagentPanel()" aria-label="Close reagents panel">
+              <mat-icon>close</mat-icon>
+            </button>
+          </div>
+          <div class="side-panel-body">
+            <app-data-table
+              [config]="reagentTableConfig"
+              [data]="reagents()"
+              [loading]="false">
+            </app-data-table>
+          </div>
+          <div class="side-panel-footer">
+            <button class="btn-panel-cancel" (click)="closeReagentPanel()">CANCEL</button>
+          </div>
+        </div>
+      }
+    </aside>
+
+    <!-- Side Panel: Units -->
+    <aside class="side-panel" [class.open]="unitsPanelOpen()" role="complementary" aria-label="Units panel" #unitsPanel>
+      @if (unitsPanelOpen()) {
+        <div class="side-panel-container">
+          <div class="side-panel-header">
+            <h2 class="side-panel-title" id="units-panel-title">View Units in Batch {{ batchInfo()?.tbId }}</h2>
+            <button mat-icon-button (click)="closeUnitsPanel()" aria-label="Close units panel">
+              <mat-icon>close</mat-icon>
+            </button>
+          </div>
+          <div class="side-panel-body">
+            <app-data-table
+              [config]="unitsTableConfig"
+              [data]="units()"
+              [loading]="false">
+            </app-data-table>
+          </div>
+          <div class="side-panel-footer">
+            <button class="btn-panel-cancel" (click)="closeUnitsPanel()">CANCEL</button>
+          </div>
+        </div>
+      }
+    </aside>
+  </div>
+</div>

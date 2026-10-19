@@ -1,0 +1,259 @@
+<app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+<div class="modify-component-weight-container">
+  <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true">{{ isLoading() ? 'Loading, please wait.' : '' }}</span>
+
+  <!-- Unit ID and Product Selection Section -->
+  <section class="modify-component-weight__primary-controls" [attr.aria-labelledby]="elementId('heading')" role="region">
+    <h2 [id]="elementId('heading')" class="visually-hidden">Component Weight Entry</h2>
+    <div class="primary-controls-row">
+      <!-- Unit ID Field -->
+      <app-unit-id-field
+        [validateFfValue]="'*'"
+        [label]="'Unit ID'"
+        [required]="true"
+        (validated)="onUnitValidated($event)"
+        (cleared)="onUnitCleared()"
+        class="unit-id-field"
+      />
+
+      <!-- Product Dropdown -->
+      <mat-form-field appearance="fill" class="product-field">
+        <mat-label>Product</mat-label>
+        <mat-select
+          [formControl]="productControl"
+          [disabled]="!unitData()"
+          placeholder="Select"
+          required
+        >
+          <mat-option>
+            <ngx-mat-select-search
+              [formControl]="productSearchCtrl"
+              placeholderLabel="Search..."
+              noEntriesFoundLabel="No products found">
+            </ngx-mat-select-search>
+          </mat-option>
+          @for (product of filteredProducts(); track product.productCode) {
+            <mat-option [value]="product.productCode">
+              {{ product.productCode }} — {{ extractShortDescription(product.productDesc) }}
+            </mat-option>
+          }
+        </mat-select>
+        @if (productControl.invalid && productControl.touched) {
+          <mat-error>Product is required</mat-error>
+        }
+      </mat-form-field>
+
+      <!-- Product Description (Read-only) -->
+      <mat-form-field appearance="fill" class="product-desc-field">
+        <mat-label>Product Description</mat-label>
+        <input matInput [value]="productDescription() || '-'" readonly />
+      </mat-form-field>
+
+      <!-- Collection Date (Read-only) -->
+      <mat-form-field appearance="fill" class="collection-date-field">
+        <mat-label>Collection Date</mat-label>
+        <input matInput [value]="formatDate(collectionDate()) || '-'" readonly />
+      </mat-form-field>
+
+      <!-- Component Prefix: ISBT auto-derived from product code (read-only) -->
+      @if (isISBT()) {
+        <mat-form-field appearance="fill" class="component-prefix-field">
+          <mat-label>Component Prefix</mat-label>
+          <input matInput [value]="isbtPrefix() || '-'" readonly />
+        </mat-form-field>
+      }
+
+      <!-- Component Prefix: Codabar LOV dropdown -->
+      @if (!isISBT()) {
+        <mat-form-field appearance="fill" class="component-prefix-field">
+          <mat-label>Component Prefix</mat-label>
+          <mat-select
+            [formControl]="componentPrefixControl"
+            [disabled]="!unitData() || !productControl.value"
+            placeholder="Select"
+            required
+          >
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="componentPrefixSearchCtrl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="No prefixes found">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (item of filteredComponentPrefixes(); track item.componentPrefix) {
+              <mat-option [value]="item.componentPrefix">
+                {{ item.componentPrefix }}
+              </mat-option>
+            }
+          </mat-select>
+          @if (componentPrefixControl.invalid && componentPrefixControl.touched) {
+            <mat-error>Component prefix is required</mat-error>
+          }
+        </mat-form-field>
+      }
+
+      <!-- Weight (g) - Editable Input -->
+      <mat-form-field appearance="fill" class="weight-field">
+        <mat-label>Weight (g)</mat-label>
+        <input
+          matInput
+          type="number"
+          inputmode="decimal"
+          step="0.01"
+          required
+          [attr.aria-describedby]="elementId('weight-error')"
+          [attr.aria-invalid]="weightError() ? 'true' : null"
+          [value]="currentWeight() ?? ''"
+          (input)="onWeightChange($any($event.target).value)"
+          [disabled]="!productControl.value"
+        />
+        @if (weightError()) {
+          <mat-error [id]="elementId('weight-error')" role="alert">{{ weightError() }}</mat-error>
+        }
+      </mat-form-field>
+
+      <!-- Volume (mL) - Read-only (Auto-calculated) -->
+      <mat-form-field appearance="fill" class="volume-field">
+        <mat-label>Volume (mL)</mat-label>
+        <input matInput [value]="formatNumber(currentVolume()) || '-'" readonly />
+      </mat-form-field>
+
+      <!-- Anticoagulant Volume (mL) - Editable Input -->
+      <mat-form-field appearance="fill" class="anticoag-field">
+        <mat-label>Anticoagulant Volume (mL)</mat-label>
+        <input
+          matInput
+          type="number"
+          inputmode="numeric"
+          min="1"
+          step="1"
+          pattern="[0-9]*"
+          [attr.aria-describedby]="elementId('anticoag-error')"
+          [attr.aria-invalid]="anticoagulantVolumeError() ? 'true' : null"
+          [value]="currentAnticoagulantVolume() ?? ''"
+          (input)="onAnticoagulantVolumeChange($any($event.target).value)"
+          (keydown)="handleAnticoagKeydown($event)"
+          [disabled]="!productControl.value"
+        />
+        @if (anticoagulantVolumeError()) {
+          <mat-error [id]="elementId('anticoag-error')" role="alert">{{ anticoagulantVolumeError() }}</mat-error>
+        }
+      </mat-form-field>
+
+      <!-- Save Entry Button -->
+      <button
+        mat-raised-button
+        color="primary"
+        class="save-entry-btn"
+        [disabled]="!productControl.value || !currentWeight() || (!isISBT() && !componentPrefixControl.value)"
+        (click)="saveCurrentEntry()"
+      >
+        Save Entry
+      </button>
+    </div>
+  </section>
+
+  <!-- Saved Entries Table Section -->
+  @if (hasSavedEntries()) {
+  <section class="table-section" aria-label="Saved Component Entries">
+    <div class="table-wrapper">
+      <table
+        mat-table
+        [dataSource]="paginatedEntries()"
+        matSort
+        (matSortChange)="onSortChange($event)"
+        class="component-table"
+        [attr.aria-label]="'Saved component weight entries table'"
+      >
+        <!-- Unit ID Column -->
+        <ng-container matColumnDef="unitId">
+          <th mat-header-cell *matHeaderCellDef mat-sort-header>
+            Unit ID
+          </th>
+          <td mat-cell *matCellDef="let entry">
+            {{ entry.unitId }}
+          </td>
+        </ng-container>
+
+        <!-- Product Column -->
+        <ng-container matColumnDef="product">
+          <th mat-header-cell *matHeaderCellDef>Product</th>
+          <td mat-cell *matCellDef="let entry">
+            {{ entry.productCode }}
+          </td>
+        </ng-container>
+
+        <!-- Product Description Column -->
+        <ng-container matColumnDef="productDescription">
+          <th mat-header-cell *matHeaderCellDef>Product Description</th>
+          <td mat-cell *matCellDef="let entry">
+            {{ extractShortDescription(entry.productDesc) }}
+          </td>
+        </ng-container>
+
+        <!-- Component Prefix (Aliquot) Column -->
+        <ng-container matColumnDef="componentPrefix">
+          <th mat-header-cell *matHeaderCellDef><abbr title="Aliquot">Al</abbr></th>
+          <td mat-cell *matCellDef="let entry">
+            {{ entry.componentPrefix }}
+          </td>
+        </ng-container>
+
+        <!-- Collection Date Column -->
+        <ng-container matColumnDef="collectionDate">
+          <th mat-header-cell *matHeaderCellDef>Collection Date</th>
+          <td mat-cell *matCellDef="let entry">
+            {{ formatDate(entry.collectionDate) }}
+          </td>
+        </ng-container>
+
+        <!-- Weight Column (Read-only) -->
+        <ng-container matColumnDef="weight">
+          <th mat-header-cell *matHeaderCellDef>Weight (g)</th>
+          <td mat-cell *matCellDef="let entry">
+            {{ formatNumber(entry.weight) }}
+          </td>
+        </ng-container>
+
+        <!-- Volume Column (Read-only) -->
+        <ng-container matColumnDef="volume">
+          <th mat-header-cell *matHeaderCellDef>Volume (mL)</th>
+          <td mat-cell *matCellDef="let entry">
+            {{ formatNumber(entry.volume) }}
+          </td>
+        </ng-container>
+
+        <!-- Anticoagulant Volume Column (Read-only) -->
+        <ng-container matColumnDef="anticoagulantVolume">
+          <th mat-header-cell *matHeaderCellDef>Anticoagulant Volume (mL)</th>
+          <td mat-cell *matCellDef="let entry">
+            {{ entry.anticoagulantVolume !== null ? entry.anticoagulantVolume : '-' }}
+          </td>
+        </ng-container>
+
+        <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+        <tr mat-row *matRowDef="let row; columns: displayedColumns" [class.pre-existing-entry]="row.savedAt.getTime() === 0"></tr>
+      </table>
+    </div>
+
+    <!-- Pagination -->
+    <mat-paginator
+      [length]="totalCount()"
+      [pageSize]="pageSize()"
+      [pageSizeOptions]="pageSizeOptions"
+      [pageIndex]="pageIndex()"
+      [showFirstLastButtons]="true"
+      (page)="onPageChange($event)"
+      [attr.aria-label]="'Saved entries table pagination'"
+    >
+    </mat-paginator>
+  </section>
+  } @else {
+    <div class="empty-state" role="status" [attr.aria-live]="'polite'">
+      <mat-icon class="empty-icon" aria-hidden="true">search</mat-icon>
+      <p class="empty-message">No Results to Display</p>
+      <p class="empty-hint">Select a product, enter a weight, and select <strong>Save Entry</strong> (or press Enter in Anticoagulant Volume) to record each entry.</p>
+    </div>
+  }
+</div>

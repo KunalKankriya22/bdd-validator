@@ -1,0 +1,247 @@
+<div class="layout-wrapper">
+
+  <main class="abo-labeling-isbt main-content" role="main">
+    <h1 class="cdk-visually-hidden">ABO Labeling (ISBT)</h1>
+    <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+    <div class="abo-labeling-isbt__body">
+      <!-- TOP ROW: Form Fields + Blood Type Card -->
+      <div class="abo-labeling-isbt__top-row">
+
+        <!-- LEFT: Form Card -->
+        <div class="form-card">
+
+          <!-- Row 1: Unit Identification -->
+          <div class="form-row form-row--row1">
+            <app-unit-id-field
+              #primaryUnitIdField
+              [validateFfValue]="'N'"
+              [showBarcodeIcon]="true"
+              [required]="true"
+              [label]="'Unit ID'"
+              [placeholder]="'Scan or type unit ID'"
+              [scanPatterns]="SCAN_PATTERNS.UNIT_ID"
+              (postValidate)="onUnitPostValidate($event)"
+              (validated)="onUnitValidated($event)"
+              (cleared)="onUnitCleared()"
+              class="form-field"
+            />
+
+            <div class="readonly-field">
+              <span class="readonly-field__label">Collection Date</span>
+              <span class="readonly-field__value">{{ unitData()?.collDate | date:'dd-MMM-yyyy' | uppercase }}</span>
+            </div>
+
+            <app-scan-select-field
+              #row1ProductCodeField
+              [label]="'Product Code'"
+              [placeholder]="'Scan or select product code'"
+              [showBarcodeIcon]="true"
+              [disabled]="row1ProductCodeDisabled()"
+              [scanPatterns]="SCAN_PATTERNS.PRODUCT"
+              [options]="row1ProductCodeOptions()"
+              [parseFn]="parseProductCode"
+              (valueChanged)="onRow1ProductCodeChanged($event)"
+              class="form-field"
+            />
+
+            <div class="readonly-field">
+              <span class="readonly-field__label">Description</span>
+              <span class="readonly-field__value">{{ selectedComponent()?.productDescription }}</span>
+            </div>
+          </div>
+
+          <!-- Rows 2-4: Verification Fields -->
+          <div [formGroup]="verificationForm">
+
+          <!-- Row 2: Scan Unit/ABO (Phase 2) -->
+          <div class="form-row form-row--row2" >
+            <mat-form-field appearance="fill" class="form-field">
+              <mat-label>Scan Unit/ABO</mat-label>
+              <input #scanUnitAboInput matInput formControlName="scanUnitAbo"
+                     (blur)="onScanUnitAboBlur()" (input)="onAutoScan($event, SCAN_PATTERNS.UNIT_ABO)" aria-label="Scan Unit/ABO" />
+              @if (fieldProcessing['scanUnitAbo']) { <mat-hint class="field-validating">Validating scan...</mat-hint> }
+              @if (verificationForm.get('scanUnitAbo')?.hasError('scanError')) { <mat-error>{{ fieldErrors['scanUnitAbo'] }}</mat-error> }
+              <img matSuffix src="assets/images/icons/ScanOnly.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+
+            <app-unit-id-field
+              #verifyUnitIdField
+              [validateFfValue]="'N'"
+              [showBarcodeIcon]="true"
+              [required]="false"
+              [disabled]="phase() !== 'labeled'"
+              [label]="'Unit ID'"
+              [placeholder]="'Scan or type unit ID'"
+              [scanPatterns]="SCAN_PATTERNS.UNIT_ID"
+              [skipDoubleEntry]="true"
+              (postValidate)="onVerifyUnitPostValidate($event)"
+              (validated)="onVerifyUnitValidated($event)"
+              (cleared)="onVerifyUnitCleared()"
+              class="form-field verify-unit-id"
+            />
+
+            <app-scan-select-field
+              #aboField
+              [label]="'ABO'"
+              [placeholder]="'Scan or select ABO'"
+              [showBarcodeIcon]="true"
+              [uppercase]="false"
+              [disabled]="phase() !== 'labeled'"
+              [scanPatterns]="SCAN_PATTERNS.ABO"
+              [options]="aboLovOptions()"
+              [parseFn]="parseAbo"
+              (valueChanged)="onAboFieldChanged($event)"
+              (cleared)="onAboFieldCleared()"
+              class="form-field"
+            />
+
+            <div class="readonly-field">
+              <span class="readonly-field__label">Description</span>
+              <span class="readonly-field__value">{{ scannedAboDescription() }}</span>
+            </div>
+          </div>
+
+          <!-- Row 3: Scan Product/Exp or Product/CollDate -->
+          <div class="form-row form-row--row3" >
+            @if (isMfOrRplFlow()) {
+              <mat-form-field appearance="fill" class="form-field">
+                <mat-label>Scan Coll Date</mat-label>
+                <input matInput formControlName="scanCollDate"
+                       (blur)="onScanCollDateBlur()" aria-label="Scan Collection Date" />
+                @if (fieldProcessing['scanCollDate']) { <mat-hint class="field-validating">Validating scan...</mat-hint> }
+                @if (verificationForm.get('scanCollDate')?.hasError('scanError')) { <mat-error>{{ fieldErrors['scanCollDate'] }}</mat-error> }
+                <img matSuffix src="assets/images/icons/ScanOnly.svg" alt="" aria-hidden="true" class="scan-icon" />
+              </mat-form-field>
+            } @else {
+              <mat-form-field appearance="fill" class="form-field">
+                <mat-label>Scan Product/Expiration</mat-label>
+                <input #scanProdExpInput matInput formControlName="scanProdExp"
+                       (blur)="onScanProdExpBlur()" (input)="onAutoScan($event, SCAN_PATTERNS.PRODUCT_EXPIRY)" aria-label="Scan Product/Expiration" />
+                @if (fieldProcessing['scanProdExp']) { <mat-hint class="field-validating">Validating scan...</mat-hint> }
+                @if (verificationForm.get('scanProdExp')?.hasError('scanError')) { <mat-error>{{ fieldErrors['scanProdExp'] }}</mat-error> }
+                <img matSuffix src="assets/images/icons/ScanOnly.svg" alt="" aria-hidden="true" class="scan-icon" />
+              </mat-form-field>
+            }
+
+            <mat-form-field appearance="fill" class="form-field">
+              <mat-label>Product Code</mat-label>
+              <input matInput placeholder="Scan or type product code" formControlName="scanProductCode"
+                     [attr.disabled]="phase() !== 'labeled' ? true : null"
+                     (blur)="onScanProductCodeBlur()" (input)="onAutoScan($event, SCAN_PATTERNS.PRODUCT)" aria-label="Scan Product Code" />
+              @if (fieldProcessing['scanProductCode']) { <mat-hint class="field-validating">Validating...</mat-hint> }
+              @if (verificationForm.get('scanProductCode')?.hasError('scanError')) { <mat-error>{{ fieldErrors['scanProductCode'] }}</mat-error> }
+              <img matSuffix src="assets/images/icons/ScanOnly.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+
+            @if (isMfOrRplFlow()) {
+              <mat-form-field appearance="fill" class="form-field">
+                <mat-label>Collection Date</mat-label>
+                <input matInput formControlName="colldate"
+                       (blur)="onCollDateBlur()" aria-label="Collection Date" />
+                @if (verificationForm.get('colldate')?.hasError('scanError')) { <mat-error>{{ fieldErrors['colldate'] }}</mat-error> }
+                <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+              </mat-form-field>
+            } @else {
+              <mat-form-field appearance="fill" class="form-field">
+                <mat-label>Expiration Date</mat-label>
+                <input matInput formControlName="scanExpDate"
+                       (blur)="onScanExpDateBlur()" (input)="onAutoScan($event, SCAN_PATTERNS.EXPIRY)" aria-label="Scan Expiration Date" />
+                @if (fieldProcessing['scanExpDate']) { <mat-hint class="field-validating">Validating...</mat-hint> }
+                @if (verificationForm.get('scanExpDate')?.hasError('scanError')) { <mat-error>{{ fieldErrors['scanExpDate'] }}</mat-error> }
+                <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+              </mat-form-field>
+            }
+
+            <div class="spacer"></div>
+          </div>
+
+          <!-- Row 4: Special Testing + Tested ABO -->
+          <div class="form-row form-row--row4" >
+            <app-scan-select-field
+              #specialTestField
+              [label]="'Special Testing'"
+              [placeholder]="'Scan or select special test'"
+              [showBarcodeIcon]="true"
+              [disabled]="phase() !== 'labeled' || !labelResult()?.specialTestingCode"
+              [scanPatterns]="SCAN_PATTERNS.SPECIAL_TEST"
+              [options]="specialTestLovOptions()"
+              [parseFn]="parseSpTest"
+              (valueChanged)="onSpecialTestFieldChanged($event)"
+              (cleared)="onSpecialTestFieldCleared()"
+              class="form-field"
+            />
+
+            <div class="spacer"></div>
+
+            <div class="readonly-field">
+              <span class="readonly-field__label">Tested ABO</span>
+              <span class="readonly-field__value">{{ labelResult()?.testedAboCode }}</span>
+            </div>
+
+            <div class="readonly-field">
+              <span class="readonly-field__label">Description</span>
+              <span class="readonly-field__value">{{ labelResult()?.testedAboDescription }}</span>
+            </div>
+          </div>
+
+          </div><!-- /formGroup wrapper -->
+
+          <div class="clear-all-wrapper">
+            <button mat-button type="button" (click)="onClearAll()" [disabled]="phase() === 'init' || phase() === 'ready'">
+              CLEAR ALL
+            </button>
+          </div>
+        </div>
+
+        <!-- RIGHT: Blood Type Card -->
+        <div class="blood-type-card" [class.blood-type-card--active]="labelResult()">
+          @if (isSecondScan()) {
+            <div class="blood-type-card__second-label-banner">*** This is SECOND LABEL ***</div>
+          }
+          <div class="blood-type-card__center">
+            @if (loading()) {
+              <mat-spinner diameter="40"></mat-spinner>
+            } @else if (bloodTypeDisplay(); as bt) {
+              <div class="blood-type-card__type">{{ bt.labelDecisionDisplay }}</div>
+              <div class="blood-type-card__rh">{{ bt.rhDisplay }}</div>
+              <div class="blood-type-card__use">{{ bt.intendedUse }}</div>
+            }
+          </div>
+          <button mat-stroked-button class="reprint-button"
+                  [disabled]="reprintDisabled()"
+                  (click)="onReprint()">
+            REPRINT
+          </button>
+        </div>
+      </div>
+
+      <!-- BOTTOM ROW: Interdictions + Attributes -->
+      <div class="abo-labeling-isbt__bottom-row">
+        <div class="panel-card">
+          <h3 class="panel-card__title">Interdictions</h3>
+          @if (labelResult()?.overrideReasons?.length) {
+            <ul class="panel-card__list">
+              <li><strong>***:1800: {{ labelResult()!.overrideMessage }}</strong></li>
+              <li>Following interdictions are overridden</li>
+              @for (reason of labelResult()!.overrideReasons; track reason) {
+                <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{{ reason }}</li>
+              }
+            </ul>
+          }
+        </div>
+
+        <div class="panel-card">
+          <h3 class="panel-card__title">Attributes</h3>
+          @if (labelResult()?.attributes?.length) {
+            <ul class="panel-card__list">
+              @for (item of labelResult()!.attributes; track item.attribDescription) {
+                <li>{{ item.attribDescription }}</li>
+              }
+            </ul>
+          }
+        </div>
+      </div>
+    </div>
+  </main>
+</div>

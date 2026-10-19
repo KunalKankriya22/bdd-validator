@@ -1,0 +1,420 @@
+<div class="print-auto-directed-tie-tag-page">
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <div class="page-wrapper">
+    <!-- Search Card -->
+    <div class="search-card">
+      <form [formGroup]="filterForm" (ngSubmit)="onRetrieve()" class="search-form">
+        <!-- Patient ID (LOV) -->
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label>Patient ID</mat-label>
+          <mat-select formControlName="patientId" aria-label="Patient ID">
+            <mat-select-trigger>
+              <span #patientTrigger class="select-trigger-text"
+                    (mouseenter)="checkPatientTruncation(patientTrigger)"
+                    [matTooltip]="selectedPatientDisplay()"
+                    [matTooltipDisabled]="!isPatientTruncated"
+                    matTooltipPosition="above">
+                {{ selectedPatientDisplay() }}
+              </span>
+            </mat-select-trigger>
+            @if (isLoadingPatients) {
+              <mat-option disabled>Loading...</mat-option>
+            } @else if (patientOptions().length === 0) {
+              <mat-option disabled>No data available</mat-option>
+            } @else if (patientOptions().length <= 3) {
+              @for (patient of patientOptions(); track patient.patientId) {
+                <mat-option [value]="patient.patientId">
+                  {{ patient.patientId }}{{ patient.lastName ? ' - ' + patient.lastName + (patient.firstName ? ' ' + patient.firstName : '') : '' }}
+                </mat-option>
+              }
+            } @else {
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="patientSearchControl"
+                  placeholderLabel="Search..."
+                  noEntriesFoundLabel="">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (patient of filteredPatients(); track patient.patientId) {
+                <mat-option [value]="patient.patientId">
+                  {{ patient.patientId }}{{ patient.lastName ? ' - ' + patient.lastName + (patient.firstName ? ' ' + patient.firstName : '') : '' }}
+                </mat-option>
+              }
+              @if (filteredPatients().length === 0) {
+                <mat-option disabled>No data available</mat-option>
+              }
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Patient Search -->
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label>Patient Search</mat-label>
+          <input matInput formControlName="patientSearch"
+                 aria-label="Patient Search"
+                 style="text-transform: uppercase" />
+        </mat-form-field>
+
+        <!-- Option (LOV) -->
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label>Option</mat-label>
+          <mat-select formControlName="searchOption" aria-label="Search Option" required>
+            @for (option of searchOptions; track option.value) {
+              <mat-option [value]="option.value">{{ option.label }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Action Buttons -->
+        <button type="submit" class="btn-retrieve"
+                [disabled]="isRetrieveDisabled"
+                aria-label="Retrieve patient results">
+          RETRIEVE
+        </button>
+        <button type="button" mat-button class="btn-clear" (click)="onClearAll()"
+                [disabled]="isClearAllDisabled"
+                aria-label="Clear all filters">
+          CLEAR ALL
+        </button>
+      </form>
+    </div>
+
+    <!-- Loading Details State -->
+    @if (isLoadingDetails) {
+      <div class="table-panel">
+        <div class="empty-state-container" role="status" aria-live="polite">
+          <mat-spinner diameter="40"></mat-spinner>
+          <span class="loading-text">Loading patient details...</span>
+        </div>
+      </div>
+    }
+
+    <!-- Patient Details Card -->
+    @else if (patientDetails) {
+      <div class="details-card">
+        <div class="patient-header">
+          <h2 class="patient-name">{{ patientDetails.patientName }}</h2>
+          <div class="patient-meta">
+            <span>{{ patientDetails.patientId }}</span>
+            <span>{{ formatDate(patientDetails.dateOfBirth) }}</span>
+            <span class="gender-label">{{ patientDetails.sex === 'M' ? 'Male' : patientDetails.sex === 'F' ? 'Female' : patientDetails.sex || '--' }}</span>
+          </div>
+        </div>
+
+        <hr class="details-divider" />
+
+        <div class="details-grid">
+          <div class="details-row">
+            <div class="detail-item">
+              <span class="detail-label">Type</span>
+              <span class="detail-value">{{ patientDetails.patientTypeDescription || patientDetails.patientType || '--' }}</span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">Surgery Type</span>
+              <span #surgeryTypeEl class="detail-value detail-value--truncate"
+                    #surgeryTypeTooltip="matTooltip"
+                    [matTooltip]="patientDetails.surgeryType ? patientDetails.surgeryType + ' ' + (patientDetails.surgeryDescription || '') : ''"
+                    matTooltipPosition="above"
+                    (mouseenter)="showTooltipIfOverflowing(surgeryTypeEl, surgeryTypeTooltip)">{{ patientDetails.surgeryType ? patientDetails.surgeryType + ' ' + (patientDetails.surgeryDescription || '') : '--' }}</span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">Surgery ID</span>
+              <span class="detail-value">{{ patientDetails.surgeryId || '--' }}</span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">Surgery Date</span>
+              <span class="detail-value">{{ formatDate(patientDetails.surgeryDate) }}</span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">Needed By Date</span>
+              <span class="detail-value">{{ formatDate(patientDetails.dateNeededBy) }}</span>
+            </div>
+          </div>
+
+          <div class="details-row details-row--bottom">
+            <div class="detail-item">
+              <span class="detail-label">Physician</span>
+              <span #physicianEl class="detail-value detail-value--truncate"
+                    #physicianTooltip="matTooltip"
+                    [matTooltip]="patientDetails.physicianId ? patientDetails.physicianId + ' ' + (patientDetails.physicianName || '') : ''"
+                    matTooltipPosition="above"
+                    (mouseenter)="showTooltipIfOverflowing(physicianEl, physicianTooltip)">{{ patientDetails.physicianId ? patientDetails.physicianId + ' ' + (patientDetails.physicianName || '') : '--' }}</span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">Hospital</span>
+              <span #hospitalEl class="detail-value detail-value--truncate"
+                    #hospitalTooltip="matTooltip"
+                    [matTooltip]="patientDetails.hospitalId ? patientDetails.hospitalId + ' ' + (patientDetails.hospitalName || '') : ''"
+                    matTooltipPosition="above"
+                    (mouseenter)="showTooltipIfOverflowing(hospitalEl, hospitalTooltip)">{{ patientDetails.hospitalId ? patientDetails.hospitalId + ' ' + (patientDetails.hospitalName || '') : '--' }}</span>
+            </div>
+            <div class="detail-item detail-item--wide">
+              <span class="detail-label">Comments</span>
+              <span #commentsEl class="detail-value detail-value--truncate"
+                    #commentsTooltip="matTooltip"
+                    [matTooltip]="patientDetails.comments || ''"
+                    matTooltipPosition="above"
+                    (mouseenter)="showTooltipIfOverflowing(commentsEl, commentsTooltip)">{{ patientDetails.comments || '--' }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Donations Table Card -->
+      <div class="donations-card">
+        @if (isLoadingDonations) {
+          <div class="empty-state-container" role="status" aria-live="polite">
+            <mat-spinner diameter="40"></mat-spinner>
+            <span class="loading-text">Loading donations...</span>
+          </div>
+        } @else if (donations.length > 0) {
+          <div class="table-responsive">
+            <table mat-table [dataSource]="donations" class="donations-table">
+
+              <!-- Donor ID -->
+              <ng-container matColumnDef="donorId">
+                <th mat-header-cell *matHeaderCellDef>Donor ID</th>
+                <td mat-cell *matCellDef="let row">{{ row.donorId || '--' }}</td>
+              </ng-container>
+
+              <!-- Tag -->
+              <ng-container matColumnDef="tag">
+                <th mat-header-cell *matHeaderCellDef>Tag <span class="required-marker">*</span></th>
+                <td mat-cell *matCellDef="let row">
+                  <mat-select [(value)]="row.donType" class="inline-select" placeholder="Select"
+                              [class.tag-invalid]="row.tagError"
+                              [matTooltip]="row.tagError ? 'Tag type is required' : ''"
+                              matTooltipPosition="below"
+                              (selectionChange)="onTagChange(row)"
+                              (openedChange)="onTagDropdownOpened($event)">
+                    <mat-option>
+                      <ngx-mat-select-search
+                        [formControl]="tagSearchControl"
+                        placeholderLabel="Search..."
+                        noEntriesFoundLabel="">
+                      </ngx-mat-select-search>
+                    </mat-option>
+                    @for (pt of filteredPatientTypes(); track pt.code) {
+                      <mat-option [value]="pt.code">{{ pt.description }}</mat-option>
+                    }
+                    @if (filteredPatientTypes().length === 0) {
+                      <mat-option disabled>No data available</mat-option>
+                    }
+                  </mat-select>
+                </td>
+              </ng-container>
+
+              <!-- Unit ID -->
+              <ng-container matColumnDef="unitId">
+                <th mat-header-cell *matHeaderCellDef>Unit ID</th>
+                <td mat-cell *matCellDef="let row">
+                  <span #unitIdEl class="cell-truncate"
+                        #unitIdTooltip="matTooltip"
+                        [matTooltip]="(row.unitId || '--') + (row.checkDigit ? '-' + row.checkDigit : '')"
+                        matTooltipPosition="above"
+                        (mouseenter)="showTooltipIfOverflowing(unitIdEl, unitIdTooltip)">{{ row.unitId || '--' }}{{ row.checkDigit ? '-' + row.checkDigit : '' }}</span>
+                </td>
+              </ng-container>
+
+              <!-- Collection Date -->
+              <ng-container matColumnDef="collectionDate">
+                <th mat-header-cell *matHeaderCellDef>Collection Date</th>
+                <td mat-cell *matCellDef="let row">{{ formatDate(row.collectionDate) }}</td>
+              </ng-container>
+
+              <!-- Component 1 -->
+              <ng-container matColumnDef="component1">
+                <th mat-header-cell *matHeaderCellDef>Component 1</th>
+                <td mat-cell *matCellDef="let row">
+                  <div class="component-cell">
+                    <input type="text" [value]="row.product1 || ''" readonly class="component-input" />
+                    <mat-select [(value)]="row.copies1" class="copies-select" [disabled]="!row.product1">
+                      @for (n of copyOptions; track n) {
+                        <mat-option [value]="n">{{ n }}</mat-option>
+                      }
+                    </mat-select>
+                  </div>
+                </td>
+              </ng-container>
+
+              <!-- Component 2 -->
+              <ng-container matColumnDef="component2">
+                <th mat-header-cell *matHeaderCellDef>Component 2</th>
+                <td mat-cell *matCellDef="let row">
+                  <div class="component-cell">
+                    <input type="text" [value]="row.product2 || ''" readonly class="component-input" />
+                    <mat-select [(value)]="row.copies2" class="copies-select" [disabled]="!row.product2">
+                      @for (n of copyOptions; track n) {
+                        <mat-option [value]="n">{{ n }}</mat-option>
+                      }
+                    </mat-select>
+                  </div>
+                </td>
+              </ng-container>
+
+              <!-- Component 3 -->
+              <ng-container matColumnDef="component3">
+                <th mat-header-cell *matHeaderCellDef>Component 3</th>
+                <td mat-cell *matCellDef="let row">
+                  <div class="component-cell">
+                    <input type="text" [value]="row.product3 || ''" readonly class="component-input" />
+                    <mat-select [(value)]="row.copies3" class="copies-select" [disabled]="!row.product3">
+                      @for (n of copyOptions; track n) {
+                        <mat-option [value]="n">{{ n }}</mat-option>
+                      }
+                    </mat-select>
+                  </div>
+                </td>
+              </ng-container>
+
+              <!-- CMV -->
+              <ng-container matColumnDef="cmv">
+                <th mat-header-cell *matHeaderCellDef>CMV <span class="required-marker">*</span></th>
+                <td mat-cell *matCellDef="let row">
+                  <mat-select [(value)]="row.cmv" class="inline-select" placeholder="Select"
+                              [class.tag-invalid]="row.cmvError"
+                              [matTooltip]="row.cmvError ? 'CMV is required' : ''"
+                              matTooltipPosition="below"
+                              (selectionChange)="onAttributeChange(row, 'cmv')">
+                    <mat-option value="Yes">Yes</mat-option>
+                    <mat-option value="No">No</mat-option>
+                  </mat-select>
+                </td>
+              </ng-container>
+
+              <!-- IR -->
+              <ng-container matColumnDef="ir">
+                <th mat-header-cell *matHeaderCellDef>IR <span class="required-marker">*</span></th>
+                <td mat-cell *matCellDef="let row">
+                  <mat-select [(value)]="row.ir" class="inline-select" placeholder="Select"
+                              [class.tag-invalid]="row.irError"
+                              [matTooltip]="row.irError ? 'IR is required' : ''"
+                              matTooltipPosition="below"
+                              (selectionChange)="onAttributeChange(row, 'ir')">
+                    <mat-option value="Yes">Yes</mat-option>
+                    <mat-option value="No">No</mat-option>
+                  </mat-select>
+                </td>
+              </ng-container>
+
+              <!-- IF -->
+              <ng-container matColumnDef="ifFlag">
+                <th mat-header-cell *matHeaderCellDef>IF <span class="required-marker">*</span></th>
+                <td mat-cell *matCellDef="let row">
+                  <mat-select [(value)]="row.ifFlag" class="inline-select" placeholder="Select"
+                              [class.tag-invalid]="row.ifError"
+                              [matTooltip]="row.ifError ? 'IF is required' : ''"
+                              matTooltipPosition="below"
+                              (selectionChange)="onAttributeChange(row, 'ifFlag')">
+                    <mat-option value="Yes">Yes</mat-option>
+                    <mat-option value="No">No</mat-option>
+                  </mat-select>
+                </td>
+              </ng-container>
+
+              <tr mat-header-row *matHeaderRowDef="donationColumns; sticky: true"></tr>
+              <tr mat-row *matRowDef="let row; columns: donationColumns;"></tr>
+            </table>
+          </div>
+
+        } @else {
+          <div class="empty-state-container" role="status">
+            <div class="empty-state-icon">
+              <mat-icon>edit</mat-icon>
+            </div>
+            <p class="empty-state-message">No donation records available</p>
+          </div>
+        }
+
+        @if (!isLoadingDonations && donations.length > 0) {
+          <div class="print-actions-bar">
+            <button mat-raised-button color="primary" class="btn-print"
+              (click)="onPrint()"
+              [disabled]="noProductsDefined"
+              aria-label="Print tie tags">
+              Print
+            </button>
+          </div>
+        }
+      </div>
+    }
+
+    <!-- Table Panel (Search Results) -->
+    @else {
+      <div class="table-panel">
+        @if (isLoading) {
+          <div class="empty-state-container" role="status" aria-live="polite">
+            <mat-spinner diameter="40"></mat-spinner>
+            <span class="loading-text">Loading patient results...</span>
+          </div>
+        }
+
+        @if (!hasRetrievedData && !isLoading) {
+          <div class="empty-state-container" role="status">
+            <div class="empty-state-icon">
+              <mat-icon>search</mat-icon>
+            </div>
+            <h3 class="empty-state-title">No Results to Display</h3>
+            <p class="empty-state-message">Please enter search criteria to view results</p>
+          </div>
+        }
+
+        @if (hasRetrievedData && dataSource.length === 0 && !isLoading) {
+          <div class="empty-state-container" role="status">
+            <div class="empty-state-icon">
+              <mat-icon>edit</mat-icon>
+            </div>
+            <p class="empty-state-message">No patient records available to display</p>
+          </div>
+        }
+
+        @if (dataSource.length > 0 && !isLoading) {
+          <div class="table-wrapper">
+            <div class="table-responsive">
+              <table mat-table [dataSource]="dataSource" class="patients-table">
+                <ng-container matColumnDef="patientId">
+                  <th mat-header-cell *matHeaderCellDef>Patient ID</th>
+                  <td mat-cell *matCellDef="let row">{{ row.patientId }}</td>
+                </ng-container>
+                <ng-container matColumnDef="lastName">
+                  <th mat-header-cell *matHeaderCellDef>Last Name</th>
+                  <td mat-cell *matCellDef="let row">{{ row.lastName || '--' }}</td>
+                </ng-container>
+                <ng-container matColumnDef="firstName">
+                  <th mat-header-cell *matHeaderCellDef>First Name</th>
+                  <td mat-cell *matCellDef="let row">{{ row.firstName || '--' }}</td>
+                </ng-container>
+                <ng-container matColumnDef="dateOfBirth">
+                  <th mat-header-cell *matHeaderCellDef>Date of Birth</th>
+                  <td mat-cell *matCellDef="let row">{{ formatDate(row.dateOfBirth) }}</td>
+                </ng-container>
+                <ng-container matColumnDef="surgeryId">
+                  <th mat-header-cell *matHeaderCellDef>Surgery ID</th>
+                  <td mat-cell *matCellDef="let row">{{ row.surgeryId || '--' }}</td>
+                </ng-container>
+                <ng-container matColumnDef="surgeryDate">
+                  <th mat-header-cell *matHeaderCellDef>Surgery Date</th>
+                  <td mat-cell *matCellDef="let row">{{ formatDate(row.surgeryDate) }}</td>
+                </ng-container>
+                <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+                <tr mat-row *matRowDef="let row; columns: displayedColumns;"></tr>
+              </table>
+            </div>
+            <div class="pagination-wrapper" #paginatorWrapper>
+              <mat-paginator
+                [length]="totalRecords"
+                [pageSize]="pageSize"
+                [pageIndex]="pageIndex"
+                [pageSizeOptions]="pageSizeOptions"
+                (page)="onPageChange($event)"
+                showFirstLastButtons
+                aria-label="Select page">
+              </mat-paginator>
+            </div>
+          </div>
+        }
+      </div>
+    }
+  </div>
+</div>

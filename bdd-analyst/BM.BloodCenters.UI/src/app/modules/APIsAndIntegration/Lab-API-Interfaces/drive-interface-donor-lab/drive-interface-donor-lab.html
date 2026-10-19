@@ -1,0 +1,226 @@
+<div class="drive-interface-donor-lab-page">
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Main Content -->
+  <div class="content-container">
+    <mat-card class="form-card">
+      <mat-card-content>
+
+        <!-- Filter Section -->
+        <div class="filter-section">
+          <form [formGroup]="filterForm" class="filter-form" aria-label="Drive transfer filters">
+            <div class="filter-row">
+              <!-- Filter Type Dropdown -->
+              <div class="filter-field compact">
+                <mat-form-field appearance="fill" class="compact-field">
+                  <mat-label>Transfer By <span class="required" aria-hidden="true">*</span></mat-label>
+                  <mat-select #filterTypeSelect formControlName="filterType" required (selectionChange)="onTransferByChange($event.value)" placeholder="Select Transfer Type">
+                    @for (option of transferByOptions(); track option.code) {
+                      <mat-option [value]="option.code">
+                        {{ option.description }}
+                      </mat-option>
+                    }
+                  </mat-select>
+                </mat-form-field>
+              </div>
+
+              <!-- Drive ID Search -->
+              @if (showSearchField()) {
+                <div class="filter-field compact">
+                  <mat-form-field appearance="fill" class="compact-field has-validation">
+                    <mat-label>Search Drive ID <span class="required" aria-hidden="true">*</span></mat-label>
+                    <input
+                      matInput
+                      #driveIdInput
+                      formControlName="driveId"
+                      [attr.aria-required]="true"
+                      autocomplete="off"
+                      maxlength="15"
+                      (input)="onDriveIdInput($event)"
+                      (keydown)="onDriveIdKeyPress($event)"
+                      (blur)="onDriveIdBlur()"
+                      placeholder="Press Enter to search"
+                    />
+                    @if (driveIdError()) {
+                      <mat-error>{{ driveIdError() }}</mat-error>
+                    }
+                  </mat-form-field>
+                </div>
+              }
+
+              <!-- Start Date -->
+              @if (showDateFields()) {
+                <div class="filter-field compact">
+                  <mat-form-field appearance="fill" class="compact-field has-validation">
+                    <mat-label>Start Date</mat-label>
+                    <input
+                      matInput
+                      [matDatepicker]="startDatePicker"
+                      formControlName="startDate"
+                      [errorStateMatcher]="startDateErrorMatcher"
+                      (dateChange)="onDateChange('start')"
+                      (input)="onStartDateInput($event)"
+                      placeholder="DD-MON-YYYY"
+                    />
+                    <mat-datepicker-toggle matIconSuffix [for]="startDatePicker" [attr.aria-label]="'Open start date calendar'"></mat-datepicker-toggle>
+                    <mat-datepicker #startDatePicker></mat-datepicker>
+                    @if (getStartDateError()) {
+                      <mat-error>{{ getStartDateError() }}</mat-error>
+                    }
+                  </mat-form-field>
+                </div>
+
+                <!-- End Date -->
+                <div class="filter-field compact">
+                  <mat-form-field appearance="fill" class="compact-field has-validation">
+                    <mat-label>End Date</mat-label>
+                    <input
+                      matInput
+                      [matDatepicker]="endDatePicker"
+                      formControlName="endDate"
+                      [errorStateMatcher]="endDateErrorMatcher"
+                      (dateChange)="onDateChange('end')"
+                      (input)="onEndDateInput($event)"
+                      placeholder="DD-MON-YYYY"
+                    />
+                    <mat-datepicker-toggle matIconSuffix [for]="endDatePicker" [attr.aria-label]="'Open end date calendar'"></mat-datepicker-toggle>
+                    <mat-datepicker #endDatePicker></mat-datepicker>
+                    @if (getEndDateError()) {
+                      <mat-error>{{ getEndDateError() }}</mat-error>
+                    }
+                  </mat-form-field>
+                </div>
+              }
+
+              <!-- Start Transfer Button -->
+              <div class="filter-field transfer-button-field">
+                <button
+                  mat-stroked-button
+                  type="button"
+                  (click)="onStartTransfer()"
+                  [disabled]="isTransferring() || drives().length === 0"
+                  class="transfer-btn"
+                >
+                  @if (isTransferring()) {
+                    <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+                    <span>TRANSFERRING...</span>
+                  } @else {
+                    START TRANSFER
+                  }
+                </button>
+              </div>
+            </div>
+            <p class="mat-caption" style="color: #5f6368; margin: 0.5rem 0 0; text-align: left; font-size: 12px;">
+              <span aria-hidden="true">*</span> Indicates required field
+            </p>
+
+            <!-- Live region for transfer status announcements -->
+            <span class="cdk-visually-hidden" role="status" aria-live="polite" aria-atomic="true">
+              {{ isTransferring() ? 'Transferring drive ' + transferStatus().currentDrive + ' of ' + transferStatus().totalDrives : (showSuccessMessage() ? 'Transfer completed successfully' : '') }}
+            </span>
+
+            <!-- Process Status Row (inside filter section) -->
+            @if (drives().length > 0) {
+              <div class="process-status-row">
+                <!-- Process Start Time -->
+                <div class="time-field-group">
+                  <span class="time-label" id="start-time-label">Process Start Time</span>
+                  <span class="time-value" [attr.aria-labelledby]="'start-time-label'">
+                    @if (transferStatus().processStartTime) {
+                      {{ formatDateTime(transferStatus().processStartTime) }}
+                    } @else {
+                      --:--
+                    }
+                  </span>
+                </div>
+
+                <!-- Process End Time -->
+                <div class="time-field-group">
+                  <span class="time-label" id="end-time-label">Process End Time</span>
+                  <span class="time-value" [attr.aria-labelledby]="'end-time-label'">
+                    @if (showSuccessMessage() && transferStatus().processEndTime) {
+                      {{ formatDateTime(transferStatus().processEndTime) }}
+                    } @else {
+                      --:--
+                    }
+                  </span>
+                </div>
+
+                <!-- Status Indicator: Transfer Progress OR Success Message -->
+                @if (isTransferring() || showSuccessMessage()) {
+                  <div class="status-indicator-wrapper">
+                    @if (isTransferring()) {
+                      <!-- Transfer Progress (during transfer) -->
+                      <div class="status-indicator processing">
+                        <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+                        <span class="status-text">
+                          (Drive {{ transferStatus().currentDrive }} of {{ transferStatus().totalDrives }})
+                        </span>
+                      </div>
+                    } @else if (showSuccessMessage()) {
+                      <!-- Success Message (after completion) -->
+                      <div class="status-indicator success">
+                        <mat-icon class="status-icon" aria-hidden="true">check_circle</mat-icon>
+                        <span class="status-text">Transfer Completed Successfully</span>
+                      </div>
+                    }
+                  </div>
+                }
+              </div>
+            }
+
+          </form>
+        </div>
+
+        <!-- Live region for loading state announcements -->
+        <span class="cdk-visually-hidden" role="status" aria-live="polite" aria-atomic="true">
+          {{ isLoadingDrives() ? 'Loading drives, please wait' : '' }}
+        </span>
+
+        <!-- Data Table Section -->
+        <div class="table-section">
+          @if (isLoadingDrives()) {
+            <div class="loading-state">
+              <mat-spinner diameter="40" aria-hidden="true"></mat-spinner>
+              <p>Loading drives...</p>
+            </div>
+          } @else if (drives().length > 0) {
+            <!-- Selected Drive Count Header -->
+            <div class="table-header">
+              <h2 class="table-title">Selected Drives ({{ drives().length }})</h2>
+            </div>
+
+            <app-data-table
+              [config]="tableConfig()"
+              [data]="drives()"
+              [loading]="isLoadingDrives()"
+              (sortChange)="onSortChange($event)"
+            />
+          } @else {
+            <!-- Initial State: No filter selected -->
+            @if (!filterForm.get('filterType')?.value) {
+              <div class="empty-state-container">
+                <div class="empty-state-content">
+                  <mat-icon class="empty-state-icon" aria-hidden="true">search</mat-icon>
+                  <h2 class="empty-state-title">No Search Criteria Selected</h2>
+                  <div class="empty-state-message">Search by Specific Drive or Drive ID to view all drives in the system<br>before you transfer them to the lab.</div>
+                </div>
+              </div>
+            } @else {
+              <!-- After Search: No results found -->
+              <div class="empty-state-container">
+                <div class="empty-state-content">
+                  <mat-icon class="empty-state-icon" aria-hidden="true">folder_open</mat-icon>
+                  <h2 class="empty-state-title">No drives found</h2>
+                  <div class="empty-state-message">Try adjusting your search criteria to find drives</div>
+                </div>
+              </div>
+            }
+          }
+        </div>
+
+      </mat-card-content>
+    </mat-card>
+  </div>
+</div>

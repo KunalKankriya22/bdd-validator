@@ -1,0 +1,62 @@
+---
+tags:
+  - trigger
+  - SRVSYS
+---
+# RACK_DETAILS_BU
+
+**Schema**: [[schemas/SRVSYS/SRVSYS|SRVSYS]]
+**Table**: [[schemas/SRVSYS/Tables/RACK_DETAILS|RACK_DETAILS]]
+**Type**: BEFORE EACH ROW
+**Event**: UPDATE
+**Status**: ENABLED
+
+## Trigger Body
+
+```plsql
+begin
+  insert into RACK_DETAILS_AUDIT
+  (	CHAPTER_ID,
+	WAREHOUSE_ID,
+	DEVICE_TYPE,
+	DEVICE_NUMBER,
+	RACK_NUMBER,
+	PRODUCT_TYPE,
+	RACK_DESCRIPTION,
+	SHELF_COUNT,
+	TRAY_COUNT,
+	BLOOD_TYPE,
+	STORAGE_CLASS,
+	MIX_ABO,
+	MIX_PRODUCT,
+	EFFECTIVE_DATE,
+	LAST_MODIFIED_DATE,
+	TERM_DATE,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  (	:new.CHAPTER_ID,
+	:new.WAREHOUSE_ID,
+	:new.DEVICE_TYPE,
+	:new.DEVICE_NUMBER,
+	:new.RACK_NUMBER,
+	:new.PRODUCT_TYPE,
+	:new.RACK_DESCRIPTION,
+	:new.SHELF_COUNT,
+	:new.TRAY_COUNT,
+	:new.BLOOD_TYPE,
+	:new.STORAGE_CLASS,
+	:new.MIX_ABO,
+	:new.MIX_PRODUCT,
+	:new.EFFECTIVE_DATE,
+	:new.LAST_MODIFIED_DATE,
+	:new.TERM_DATE,
+	:new.AUDIT_KEY,
+	'UPDATE',LT_USER_SESSION.GET_USERID,
+    sysdate
+  ) ;
+  end ;
+```

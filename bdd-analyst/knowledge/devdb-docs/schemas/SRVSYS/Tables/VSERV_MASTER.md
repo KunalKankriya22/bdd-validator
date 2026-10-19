@@ -1,0 +1,98 @@
+---
+tags:
+  - table
+  - SRVSYS
+---
+# VSERV_MASTER
+
+**Schema**: [[schemas/SRVSYS/SRVSYS|SRVSYS]]
+**Tablespace**: BC_DATA
+**Estimated Rows**: 601
+**Last Analyzed**: 2026-04-18 11:00:13
+**Partitioned**: NO
+
+## Columns
+
+| # | Column | Type | Nullable | Default | Comment |
+| --- | --- | --- | --- | --- | --- |
+| 1 | CODE_TYPE | VARCHAR2(5) | No |  |  |
+| 2 | CODE | VARCHAR2(5) | No |  |  |
+| 3 | CODE_DESC | VARCHAR2(50) | No |  |  |
+| 4 | EFF_DATE | DATE | No |  |  |
+| 5 | TERM_DATE | DATE | Yes |  |  |
+| 6 | LAST_MODIFIED_DATE | DATE | No |  |  |
+| 7 | AUDIT_KEY | NUMBER | No |  |  |
+| 8 | PROGRAM_ID | VARCHAR2(30) | No |  |  |
+| 9 | CHANGE_CONTROL_FLAG | VARCHAR2(1) | Yes |  |  |
+| 10 | NUMERAL_VALUE | NUMBER | Yes |  |  |
+| 11 | SORT_SEQUENCE_1 | NUMBER(3) | Yes |  |  |
+| 12 | SORT_SEQUENCE_2 | NUMBER(3) | Yes |  |  |
+| 13 | SORT_SEQUENCE_3 | NUMBER(3) | Yes |  |  |
+
+## Primary Key
+
+**VSERV_MASTER_PK**: `CODE_TYPE, CODE`
+
+## Foreign Keys
+
+_None_
+
+## Referenced By
+
+_None_
+
+## Indexes
+
+| Index | Type | Unique | Columns | Status |
+| --- | --- | --- | --- | --- |
+| VSERV_MASTER_PK | NORMAL | UNIQUE | CODE_TYPE, CODE | VALID |
+
+## Triggers
+
+- [[schemas/SRVSYS/Triggers/VSERV_MASTER_BEFORE_DEL|VSERV_MASTER_BEFORE_DEL]] — BEFORE EACH ROW DELETE (ENABLED)
+- [[schemas/SRVSYS/Triggers/VSERV_MASTER_BEFORE_INSERT|VSERV_MASTER_BEFORE_INSERT]] — BEFORE EACH ROW INSERT (ENABLED)
+- [[schemas/SRVSYS/Triggers/VSERV_MASTER_BEFORE_UP|VSERV_MASTER_BEFORE_UP]] — BEFORE EACH ROW UPDATE (ENABLED)
+
+## Grants
+
+| Grantee | Privilege | Grantable |
+| --- | --- | --- |
+| BLOODC_ROLE | DELETE | NO |
+| BLOODC_ROLE | INSERT | NO |
+| BLOODC_ROLE | SELECT | NO |
+| BLOODC_ROLE | UPDATE | NO |
+
+## Depended On By
+
+| Object | Type | Schema |
+| --- | --- | --- |
+| VSERV_ABO_ENTRIES | VIEW | SRVSYS |
+| VSERV_ABO_TYPE | VIEW | SRVSYS |
+| VSERV_BOX_STATUS | VIEW | SRVSYS |
+| VSERV_BOX_TYPES | VIEW | SRVSYS |
+| VSERV_CANCEL_CODES | VIEW | SRVSYS |
+| VSERV_CONTACT_TYPES | VIEW | SRVSYS |
+| VSERV_CUSTOMER_TYPE | VIEW | SRVSYS |
+| VSERV_DISCARD_TYPES | VIEW | SRVSYS |
+| VSERV_INVENTORY_CLASS | VIEW | SRVSYS |
+| VSERV_INVENTORY_TYPES | VIEW | SRVSYS |
+| VSERV_ITEM_STATUS | VIEW | SRVSYS |
+| VSERV_ORDER_MODES | VIEW | SRVSYS |
+| VSERV_ORDER_STATUS | VIEW | SRVSYS |
+| VSERV_ORDER_TYPES | VIEW | SRVSYS |
+| VSERV_PICK_SLIP_STATUS | VIEW | SRVSYS |
+| VSERV_PICK_SLIP_TYPES | VIEW | SRVSYS |
+| VSERV_PRODUCT_CATEGORIES | VIEW | SRVSYS |
+| VSERV_PRODUCT_GROUPINGS | VIEW | SRVSYS |
+| VSERV_PRODUCT_STATUS | VIEW | SRVSYS |
+| VSERV_QUARANTINE_TYPES | VIEW | SRVSYS |
+| VSERV_SALUTATION | VIEW | SRVSYS |
+| VSERV_SHIPMENT_STATUS | VIEW | SRVSYS |
+| VSERV_SHIPMENT_TYPES | VIEW | SRVSYS |
+| VSERV_SHIPPERS | VIEW | SRVSYS |
+| VSERV_STATE_CODES | VIEW | SRVSYS |
+| VSERV_STOCK_STATE | VIEW | SRVSYS |
+| VSERV_STOCK_STATUS | VIEW | SRVSYS |
+| VSERV_STORAGE_CLASS | VIEW | SRVSYS |
+| VSERV_WORK_ORDER_STATUS | VIEW | SRVSYS |
+| VSERV_WORK_ORDER_TYPES | VIEW | SRVSYS |

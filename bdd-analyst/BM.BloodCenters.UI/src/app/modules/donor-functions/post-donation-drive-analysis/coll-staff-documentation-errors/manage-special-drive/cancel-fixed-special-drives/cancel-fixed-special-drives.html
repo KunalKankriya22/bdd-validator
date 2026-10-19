@@ -1,0 +1,265 @@
+<div class="main-content">
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Search Filter Card -->
+  <div class="filter-card" [formGroup]="searchForm">
+    <div class="field-row field-row--four-col">
+      <!-- Drive ID LOV -->
+      <mat-form-field appearance="fill">
+        <mat-label>Drive ID</mat-label>
+        <mat-select formControlName="driveId">
+          <mat-option>
+            <ngx-mat-select-search
+              [formControl]="driveIdSearchCtrl"
+              placeholderLabel="Search..."
+              noEntriesFoundLabel="No drives found">
+            </ngx-mat-select-search>
+          </mat-option>
+          <mat-option [value]="null">— All Drives —</mat-option>
+          @for (drive of filteredDrivesLookup(); track drive.driveId) {
+            <mat-option [value]="drive.driveId">
+              {{ drive.driveId }}
+              @if (drive.sponsorName) { — {{ drive.sponsorName }} }
+            </mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <!-- Drive Date -->
+      <mat-form-field appearance="fill">
+        <mat-label>Drive Date</mat-label>
+        <input matInput [matDatepicker]="driveDatePicker" formControlName="driveDate"
+               placeholder="DD-MON-YYYY" />
+        <mat-datepicker-toggle matSuffix [for]="driveDatePicker" />
+        <mat-datepicker #driveDatePicker />
+      </mat-form-field>
+
+      <!-- Sponsor Name -->
+      <mat-form-field appearance="fill">
+        <mat-label>Sponsor Name</mat-label>
+        <input matInput formControlName="sponsorName" placeholder="Partial match" />
+      </mat-form-field>
+
+      <!-- Location ID -->
+      <mat-form-field appearance="fill">
+        <mat-label>Location ID</mat-label>
+        <input matInput formControlName="locationId" placeholder="Location ID" />
+      </mat-form-field>
+    </div>
+
+    <div class="search-actions">
+      <button type="button" mat-button class="clear-btn" (click)="onClearSearch()" [attr.aria-label]="'Clear search'">
+        CLEAR
+      </button>
+      <button
+        type="button"
+        mat-raised-button
+        color="primary"
+        class="search-btn"
+        [disabled]="isSearching()"
+        (click)="onSearch()"
+        [attr.aria-label]="'Search drives'">
+        @if (isSearching()) {
+          <mat-spinner diameter="16" class="btn-spinner"></mat-spinner>
+        } @else {
+          <mat-icon aria-hidden="true">search</mat-icon>
+        }
+        SEARCH
+      </button>
+    </div>
+  </div>
+
+  <!-- Results Table -->
+  @if (hasSearched()) {
+    <div class="content-card">
+      <app-data-table
+        [config]="tableConfig"
+        [data]="drives()"
+        [loading]="isSearching()"
+        (pageChange)="onPageChange($event)"
+        (sortChange)="onSortChange($event)"
+        (rowClick)="onRowClick($event)"
+        [attr.aria-label]="'Drives eligible for cancellation'">
+      </app-data-table>
+    </div>
+  }
+
+  <!-- Drive Details + Cancel Form -->
+  @if (isLoadingDetails()) {
+    <div class="loading-details" role="status" aria-live="polite" aria-atomic="true">
+      <mat-spinner diameter="32"></mat-spinner>
+      <span>Loading drive details...</span>
+    </div>
+  }
+
+  @if (selectedDrive(); as drive) {
+    <div class="details-card">
+      <!-- Drive Details Header -->
+      <div class="details-header">
+        <h3 class="details-title">Drive Details — {{ drive.driveId }}</h3>
+        @if (drive.hasPiggybackGroups) {
+          <div class="piggyback-warning">
+            <mat-icon aria-hidden="true">warning</mat-icon>
+            <span>This drive has piggyback groups and cannot be cancelled.</span>
+          </div>
+        }
+        @if (!drive.canBeCancelled && !drive.hasPiggybackGroups) {
+          <div class="piggyback-warning">
+            <mat-icon aria-hidden="true">block</mat-icon>
+            <span>This drive is not eligible for cancellation.</span>
+          </div>
+        }
+      </div>
+
+      <!-- Drive Info Grid -->
+      <div class="details-grid">
+        <div class="detail-field">
+          <span class="detail-label">Drive Date</span>
+          <span class="detail-value">{{ formatDate(drive.driveDate) }}</span>
+        </div>
+        <div class="detail-field">
+          <span class="detail-label">Status</span>
+          <span class="detail-value">{{ formatStatus(drive.status) }}</span>
+        </div>
+        <div class="detail-field">
+          <span class="detail-label">Drive Type</span>
+          <span class="detail-value">{{ drive.driveTypeDesc || drive.driveType || '—' }}</span>
+        </div>
+        <div class="detail-field">
+          <span class="detail-label">Category</span>
+          <span class="detail-value">{{ drive.driveCategoryDesc || drive.driveCategory || '—' }}</span>
+        </div>
+        <div class="detail-field">
+          <span class="detail-label">Location</span>
+          <span class="detail-value">{{ drive.locationName || drive.locationId || '—' }}</span>
+        </div>
+        <div class="detail-field">
+          <span class="detail-label">Recruiter</span>
+          <span class="detail-value">{{ drive.recruiterName || drive.recruiterId || '—' }}</span>
+        </div>
+        <div class="detail-field">
+          <span class="detail-label">Start Time</span>
+          <span class="detail-value">{{ formatTime(drive.scheduleStartTime) || '—' }}</span>
+        </div>
+        <div class="detail-field">
+          <span class="detail-label">End Time</span>
+          <span class="detail-value">{{ formatTime(drive.scheduleEndTime) || '—' }}</span>
+        </div>
+        <div class="detail-field">
+          <span class="detail-label">Projected Show</span>
+          <span class="detail-value">{{ drive.totalProjectedShow }}</span>
+        </div>
+        <div class="detail-field">
+          <span class="detail-label">Projected Draw</span>
+          <span class="detail-value">{{ drive.totalProjectedDraw }}</span>
+        </div>
+      </div>
+
+      <!-- Sponsors Table -->
+      @if (drive.sponsors?.length) {
+        <div class="sponsors-section">
+          <h4 class="section-title">Sponsors</h4>
+          <table class="sponsors-table" [attr.aria-label]="'Drive sponsors'">
+            <thead>
+              <tr>
+                <th>Sponsor ID</th>
+                <th>Sponsor Name</th>
+                <th>Contact</th>
+                <th>Projected Show</th>
+                <th>Projected Draw</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (sponsor of drive.sponsors; track sponsor.sponsorId) {
+                <tr>
+                  <td>{{ sponsor.sponsorId }}</td>
+                  <td>{{ sponsor.sponsorName || '—' }}</td>
+                  <td>{{ sponsor.contactName || '—' }}</td>
+                  <td>{{ sponsor.projectedShow ?? '—' }}</td>
+                  <td>{{ sponsor.projectedDraw ?? '—' }}</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      }
+
+      <mat-divider class="section-divider" aria-hidden="true" />
+
+      <!-- Cancel Form -->
+      @if (drive.canBeCancelled && !drive.hasPiggybackGroups) {
+        <div class="cancel-section" [formGroup]="cancelForm">
+          <h4 class="section-title">Cancellation Details</h4>
+          <div class="cancel-fields">
+            <!-- Cancel Reason Code -->
+            <div class="cancel-code-row">
+              <mat-form-field appearance="fill" class="cancel-code-field">
+                <mat-label>Cancel Reason Code <span class="required-marker">*</span></mat-label>
+                <mat-select formControlName="cancelReasonCode" required>
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="cancelCodeSearchCtrl"
+                      placeholderLabel="Search..."
+                      noEntriesFoundLabel="No codes found">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @for (code of filteredCancelReasonCodes(); track code.code) {
+                    <mat-option [value]="code.code">{{ code.code }}</mat-option>
+                  }
+                </mat-select>
+                @if (cancelForm.get('cancelReasonCode')?.hasError('required') && cancelForm.get('cancelReasonCode')?.touched) {
+                  <mat-error>Cancel reason code is required</mat-error>
+                }
+              </mat-form-field>
+
+              <div class="code-description">
+                <span class="detail-label">Description</span>
+                <span class="detail-value">{{ selectedCodeDescription() || '—' }}</span>
+              </div>
+            </div>
+
+            <!-- Cancel Reason Comments -->
+            <mat-form-field appearance="fill" class="comments-field">
+              <mat-label>Comments <span class="required-marker">*</span></mat-label>
+              <textarea
+                matInput
+                formControlName="cancelReason"
+                rows="3"
+                maxlength="100"
+                placeholder="Explain the reason for cancellation (max 100 characters)"
+                required>
+              </textarea>
+              @if (cancelForm.get('cancelReason')?.hasError('required') && cancelForm.get('cancelReason')?.touched) {
+                <mat-error>Comments are required</mat-error>
+              }
+              @if (cancelForm.get('cancelReason')?.hasError('maxlength')) {
+                <mat-error>Comments must not exceed 100 characters</mat-error>
+              }
+              <mat-hint align="end">
+                {{ cancelForm.get('cancelReason')?.value?.length || 0 }}/100
+              </mat-hint>
+            </mat-form-field>
+          </div>
+
+          <div class="cancel-actions">
+            <button
+              type="button"
+              mat-raised-button
+              color="warn"
+              [disabled]="!canCancelDrive || isCancelling()"
+              (click)="onCancelDrive()"
+              [attr.aria-label]="'Cancel this drive'">
+              @if (isCancelling()) {
+                <mat-spinner diameter="16" class="btn-spinner"></mat-spinner>
+              } @else {
+                <mat-icon aria-hidden="true">cancel</mat-icon>
+              }
+              CANCEL DRIVE
+            </button>
+          </div>
+        </div>
+      }
+    </div>
+  }
+</div>

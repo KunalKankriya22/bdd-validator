@@ -1,0 +1,835 @@
+<app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+<div class="page-container">
+
+  <!-- ─── Search Bar ─────────────────────────────────────────────────────────── -->
+  <div class="search-bar-section" role="search" aria-label="Patient search">
+    <div class="search-bar-row">
+      <mat-form-field appearance="fill" class="search-field" subscriptSizing="dynamic">
+        <mat-label>Last Name</mat-label>
+        <mat-select
+          [value]="selectedPatientId()"
+          aria-label="Select patient by last name"
+          [disabled]="isLoadingPatients()"
+          (selectionChange)="onPatientDropdownChange($event.value)"
+        >
+          <mat-option>
+            <ngx-mat-select-search
+              [formControl]="patientSearchFilterCtrl"
+              placeholderLabel="Search by name..."
+              noEntriesFoundLabel="No matching patients">
+            </ngx-mat-select-search>
+          </mat-option>
+          @for (patient of filteredPatients(); track patient.patId) {
+            <mat-option [value]="patient.patId">
+              {{ patient.patLastName }}{{ patient.patFirstName ? ', ' + patient.patFirstName : '' }}
+            </mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <button
+        mat-stroked-button
+        class="search-action-btn"
+        aria-label="Retrieve patient"
+        [disabled]="!selectedPatientId() || isLoadingPatients()"
+        (click)="onRetrieve()"
+      >
+        RETRIEVE
+      </button>
+      <button
+        mat-stroked-button
+        class="search-action-btn"
+        aria-label="Create new recipient"
+        (click)="onCreateNewRecipient()"
+      >
+        CREATE NEW
+      </button>
+      <button
+        mat-button
+        class="search-clear-btn"
+        aria-label="Clear search"
+        (click)="onClearSearch()"
+        [disabled]="!selectedPatientId() && !isCreateNew()"
+      >
+        CLEAR
+      </button>
+    </div>
+  </div>
+
+  <!-- ─── Sections ──────────────────────────────────────────────────────────── -->
+  @if (sectionsVisible()) {
+    <form [formGroup]="requestForm" novalidate>
+      <div class="sections-wrapper">
+
+      <!-- ══ Section 1: Recipient Information ══ -->
+      <div class="section-card">
+        <div
+          class="section-header"
+          [class.section-header--expanded]="isRecipientExpanded()"
+          role="button"
+          tabindex="0"
+          aria-label="Toggle Recipient Information section"
+          [attr.aria-expanded]="isRecipientExpanded()"
+          (click)="toggleSection('recipient')"
+          (keydown.enter)="toggleSection('recipient')"
+          (keydown.space)="$event.preventDefault(); toggleSection('recipient')"
+        >
+          <div class="section-icon-badge" aria-hidden="true">
+            <mat-icon>lock</mat-icon>
+          </div>
+          <h2 class="section-title">Recipient Information</h2>
+        </div>
+
+        @if (isRecipientExpanded()) {
+          <div class="section-body">
+            <div class="recipient-row">
+
+              <!-- Patient ID (read-only) -->
+              <div class="field-display">
+                <span class="field-display-label">Patient ID</span>
+                <span class="field-display-value">{{ requestForm.get('patientId')?.value || '-' }}</span>
+              </div>
+
+              <!-- Last Name -->
+              <mat-form-field appearance="fill" class="flex-field" subscriptSizing="dynamic">
+                <mat-label>Last Name</mat-label>
+                <input matInput formControlName="lastName" maxlength="30" aria-required="true" />
+                @if (hasError('lastName')) {
+                  <mat-error>{{ getError('lastName') }}</mat-error>
+                }
+              </mat-form-field>
+
+              <!-- First Name -->
+              <mat-form-field appearance="fill" class="flex-field" subscriptSizing="dynamic">
+                <mat-label>First Name</mat-label>
+                <input matInput formControlName="firstName" maxlength="25" />
+              </mat-form-field>
+
+              <!-- Sex -->
+              <mat-form-field appearance="fill" class="flex-field-sm" subscriptSizing="dynamic">
+                <mat-label>Sex</mat-label>
+                <mat-select formControlName="sex">
+                  @for (opt of sexOptions; track opt.value) {
+                    <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+
+              <!-- Date of Birth -->
+              <mat-form-field appearance="fill" class="flex-field" subscriptSizing="dynamic">
+                <mat-label>Date of Birth</mat-label>
+                <input
+                  #dobInput
+                  matInput
+                  [matDatepicker]="dobPicker"
+                  [formControl]="dobDateControl"
+                  [max]="maxDate()"
+                  [errorStateMatcher]="dobErrorMatcher"
+                  placeholder="DD-MMM-YYYY"
+                  (input)="onDobInput($event)"
+                  (blur)="onDobBlur()"
+                />
+                <mat-datepicker-toggle matIconSuffix [for]="dobPicker"></mat-datepicker-toggle>
+                <mat-datepicker #dobPicker></mat-datepicker>
+                @if (getDobError()) {
+                  <mat-error>{{ getDobError() }}</mat-error>
+                }
+              </mat-form-field>
+
+              <!-- ABO -->
+              <mat-form-field appearance="fill" class="flex-field-sm" subscriptSizing="dynamic">
+                <mat-label>ABO</mat-label>
+                <mat-select formControlName="abo" panelClass="abo-select-panel">
+                  <mat-option><ngx-mat-select-search [formControl]="aboSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                  @for (opt of filteredAbo(); track opt.value) {
+                    <mat-option [value]="opt.value">{{ opt.value }} - {{ opt.label }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+
+              <!-- Status -->
+              <mat-form-field appearance="fill" class="flex-field-sm" subscriptSizing="dynamic">
+                <mat-label>Status</mat-label>
+                <mat-select formControlName="status" aria-required="true">
+                  @for (opt of statusOptions; track opt.value) {
+                    <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                  }
+                </mat-select>
+                @if (hasError('status')) {
+                  <mat-error>{{ getError('status') }}</mat-error>
+                }
+              </mat-form-field>
+
+            </div>
+
+            <!-- Comments -->
+            <div class="comments-row">
+              <mat-form-field appearance="fill" class="full-width" subscriptSizing="dynamic">
+                <mat-label>Comments</mat-label>
+                <input matInput formControlName="comments" maxlength="240" />
+              </mat-form-field>
+            </div>
+          </div>
+        }
+      </div>
+
+      <!-- ══ Section 2: Match Criteria ══ -->
+      <div class="section-card">
+        <div
+          class="section-header"
+          [class.section-header--expanded]="isMatchCriteriaExpanded()"
+          role="button"
+          tabindex="0"
+          aria-label="Toggle Match Criteria section"
+          [attr.aria-expanded]="isMatchCriteriaExpanded()"
+          (click)="toggleSection('matchCriteria')"
+          (keydown.enter)="toggleSection('matchCriteria')"
+          (keydown.space)="$event.preventDefault(); toggleSection('matchCriteria')"
+        >
+          <div class="section-icon-badge" aria-hidden="true">
+            <mat-icon>lock</mat-icon>
+          </div>
+          <h2 class="section-title">Match Criteria</h2>
+        </div>
+
+        @if (isMatchCriteriaExpanded()) {
+          <div class="section-body">
+
+            <!-- Match Criteria Selection -->
+            <div class="match-criteria-selection">
+              <p class="match-criteria-label">
+                Match Criteria Selection<span class="req-star" aria-hidden="true">*</span>
+              </p>
+              <p class="match-criteria-hint">
+                Select the basis used to match the recipient with compatible donors or units.
+              </p>
+
+              @if (matchTypeDisplay()) {
+                <div class="field-display" style="margin-bottom: 12px;">
+                  <span class="field-display-label">Match Type</span>
+                  <span class="field-display-value">{{ matchTypeDisplay() }}</span>
+                </div>
+              }
+
+              <div class="match-basis-row">
+                <mat-form-field appearance="fill" class="match-basis-field" subscriptSizing="dynamic">
+                  <mat-label>With ABO</mat-label>
+                  <mat-select formControlName="withAbo" panelClass="abo-select-panel">
+                    <mat-option><ngx-mat-select-search [formControl]="withAboSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                    @for (opt of filteredWithAbo(); track opt.value) {
+                      <mat-option [value]="opt.value">{{ opt.value }} - {{ opt.label }}</mat-option>
+                    }
+                  </mat-select>
+                </mat-form-field>
+                <mat-checkbox formControlName="exactMatch" class="exact-match-cb" (change)="onExactMatchChange()">
+                  Exact Match
+                </mat-checkbox>
+              </div>
+            </div>
+
+            <!-- 4 Match Type Panels (content always shown) -->
+            <mat-radio-group formControlName="matchCriteriaType" class="match-panels-row">
+
+              <!-- ── HLA Phenotype ── -->
+              <div class="match-panel">
+                <mat-radio-button value="HP" class="panel-checkbox">
+                  <strong>HLA Phenotype</strong>
+                </mat-radio-button>
+                <div class="match-panel-content">
+                  <div class="panel-table">
+                    <div class="panel-table-body">
+                      @for (row of hlaPhenotypeArray.controls; track $index) {
+                        <div class="hla-pheno-row">
+                          <div class="hla-pheno-sub-header">
+                            <span>A1</span>
+                            <span>A2</span>
+                          </div>
+                          <div class="hla-pheno-fields">
+                            <mat-form-field appearance="fill" class="pheno-field" subscriptSizing="dynamic">
+                              <mat-select [formControl]="controlAt(hlaPhenotypeArray, $index, 'a1')" panelClass="pheno-select-panel" (openedChange)="onSelectPanelChange($event, hlaASearchCtrl)">
+                                <mat-option><ngx-mat-select-search [formControl]="hlaASearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                                @for (opt of optionsWithSelected(filteredHlaA(), hlaAOptions(), controlAt(hlaPhenotypeArray, $index, 'a1').value); track opt.value) {
+                                  <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                                }
+                              </mat-select>
+                            </mat-form-field>
+                            <mat-form-field appearance="fill" class="pheno-field" subscriptSizing="dynamic">
+                              <mat-select [formControl]="controlAt(hlaPhenotypeArray, $index, 'a2')" panelClass="pheno-select-panel" (openedChange)="onSelectPanelChange($event, hlaASearchCtrl)">
+                                <mat-option><ngx-mat-select-search [formControl]="hlaASearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                                @for (opt of optionsWithSelected(filteredHlaA(), hlaAOptions(), controlAt(hlaPhenotypeArray, $index, 'a2').value); track opt.value) {
+                                  <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                                }
+                              </mat-select>
+                            </mat-form-field>
+                          </div>
+                          @if (hlaPhenotypeArray.at($index).hasError('a1a2Duplicate')) {
+                            <div class="pheno-error-message" role="alert" style="color: #d32f2f; font-size: 13px; margin-top: 4px; margin-bottom: 8px;">
+                              <span>A1 and A2 cannot be the same</span>
+                            </div>
+                          }
+                          <div class="hla-pheno-sub-header">
+                            <span>B1</span>
+                            <span>B2</span>
+                          </div>
+                          <div class="hla-pheno-fields">
+                            <mat-form-field appearance="fill" class="pheno-field" subscriptSizing="dynamic">
+                              <mat-select [formControl]="controlAt(hlaPhenotypeArray, $index, 'b1')" panelClass="pheno-select-panel" (openedChange)="onSelectPanelChange($event, hlaBSearchCtrl)">
+                                <mat-option><ngx-mat-select-search [formControl]="hlaBSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                                @for (opt of optionsWithSelected(filteredHlaB(), hlaBOptions(), controlAt(hlaPhenotypeArray, $index, 'b1').value); track opt.value) {
+                                  <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                                }
+                              </mat-select>
+                            </mat-form-field>
+                            <mat-form-field appearance="fill" class="pheno-field" subscriptSizing="dynamic">
+                              <mat-select [formControl]="controlAt(hlaPhenotypeArray, $index, 'b2')" panelClass="pheno-select-panel" (openedChange)="onSelectPanelChange($event, hlaBSearchCtrl)">
+                                <mat-option><ngx-mat-select-search [formControl]="hlaBSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                                @for (opt of optionsWithSelected(filteredHlaB(), hlaBOptions(), controlAt(hlaPhenotypeArray, $index, 'b2').value); track opt.value) {
+                                  <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                                }
+                              </mat-select>
+                            </mat-form-field>
+                          </div>
+                          @if (hlaPhenotypeArray.at($index).hasError('b1b2Duplicate')) {
+                            <div class="pheno-error-message" role="alert" style="color: #d32f2f; font-size: 13px; margin-top: 4px; margin-bottom: 8px;">
+                              <span>B1 and B2 cannot be the same</span>
+                            </div>
+                          }
+                        </div>
+                      }
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- ── HLA Antibodies ── -->
+              <div class="match-panel">
+                <mat-radio-button value="HA" class="panel-checkbox">
+                  <strong>HLA Antibodies</strong>
+                </mat-radio-button>
+                <div class="match-panel-content">
+                  <div class="panel-table">
+                    <div class="ab-grid-header two-col">
+                      <span>Locus</span>
+                      <span>Value</span>
+                      <span></span>
+                    </div>
+                    <div class="panel-table-body">
+                      @for (row of hlaAntibodiesArray.controls; track $index) {
+                        <div class="ab-grid-row two-col">
+                          <mat-form-field appearance="fill" class="ab-field" subscriptSizing="dynamic">
+                            <mat-select
+                              [formControl]="controlAt(hlaAntibodiesArray, $index, 'locus')"
+                              (selectionChange)="onHlaLocusChange($index)"
+                              (openedChange)="onSelectPanelChange($event, hlaLocusSearchCtrl)"
+                              panelWidth="auto"
+                            >
+                              <mat-option><ngx-mat-select-search [formControl]="hlaLocusSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                              @for (opt of optionsWithSelected(filteredHlaLocus(), hlaLocusOptions(), controlAt(hlaAntibodiesArray, $index, 'locus').value); track opt.value) {
+                                <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                              }
+                            </mat-select>
+                          </mat-form-field>
+                          <mat-form-field appearance="fill" class="ab-field" subscriptSizing="dynamic">
+                            <mat-select [formControl]="controlAt(hlaAntibodiesArray, $index, 'epitopeId')" panelWidth="auto" (openedChange)="onSelectPanelChange($event, hlaEpitopeSearchCtrl)">
+                              <mat-option><ngx-mat-select-search [formControl]="hlaEpitopeSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                              @for (opt of optionsWithSelected(filteredEpitopeOptions($index), getEpitopeOptions($index), controlAt(hlaAntibodiesArray, $index, 'epitopeId').value); track opt.value) {
+                                <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                              }
+                            </mat-select>
+                          </mat-form-field>
+                          <button
+                            mat-icon-button
+                            type="button"
+                            class="row-delete-btn"
+                            aria-label="Remove HLA antibody row"
+                            (click)="removeHlaAntibodyRow($index)"
+                            [disabled]="hlaAntibodiesArray.length <= 1"
+                          >
+                            <mat-icon>delete</mat-icon>
+                          </button>
+                        </div>
+                      }
+                    </div>
+                    @if (hlaAntibodiesArray.length < 5) {
+                      <div class="panel-table-footer">
+                        <button mat-button type="button" class="add-row-btn" (click)="addHlaAntibodyRow()">
+                          + ADD NEW OPTION
+                        </button>
+                      </div>
+                    }
+                  </div>
+                </div>
+              </div>
+
+              <!-- ── RBC Antibodies ── -->
+              <div class="match-panel">
+                <mat-radio-button value="RA" class="panel-checkbox">
+                  <strong>RBC Antibodies</strong>
+                </mat-radio-button>
+                <div class="match-panel-content">
+                  <div class="panel-table">
+                    <div class="ab-grid-header one-col">
+                      <span>Antibody</span>
+                      <span></span>
+                    </div>
+                    <div class="panel-table-body">
+                      @for (row of rbcAntibodiesArray.controls; track $index) {
+                        <div class="ab-grid-row one-col">
+                          <mat-form-field appearance="fill" class="ab-field" subscriptSizing="dynamic">
+                            <mat-select [formControl]="controlAt(rbcAntibodiesArray, $index, 'testId')" panelWidth="auto" (openedChange)="onSelectPanelChange($event, rbcTestSearchCtrl)">
+                              <mat-option><ngx-mat-select-search [formControl]="rbcTestSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                              @for (opt of optionsWithSelected(filteredRbcTests(), rbcTestOptions(), controlAt(rbcAntibodiesArray, $index, 'testId').value); track opt.value) {
+                                <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                              }
+                            </mat-select>
+                          </mat-form-field>
+                          <button
+                            mat-icon-button
+                            type="button"
+                            class="row-delete-btn"
+                            aria-label="Remove RBC antibody row"
+                            (click)="removeRbcAntibodyRow($index)"
+                            [disabled]="rbcAntibodiesArray.length <= 1"
+                          >
+                            <mat-icon>delete</mat-icon>
+                          </button>
+                        </div>
+                      }
+                    </div>
+                    @if (rbcAntibodiesArray.length < 5) {
+                      <div class="panel-table-footer">
+                        <button mat-button type="button" class="add-row-btn" (click)="addRbcAntibodyRow()">
+                          + ADD NEW OPTION
+                        </button>
+                      </div>
+                    }
+                  </div>
+                </div>
+              </div>
+
+              <!-- ── RBC Phenotype ── -->
+              <div class="match-panel">
+                <mat-radio-button value="RP" class="panel-checkbox">
+                  <strong>RBC Phenotype</strong>
+                </mat-radio-button>
+                <div class="match-panel-content">
+                  <div class="panel-table">
+                    <div class="ab-grid-header two-col">
+                      <span>Antigen</span>
+                      <span>Test Result</span>
+                      <span></span>
+                    </div>
+                    <div class="panel-table-body">
+                      @for (row of rbcAntigensArray.controls; track $index) {
+                        <div class="ab-grid-row two-col">
+                          <mat-form-field appearance="fill" class="ab-field" subscriptSizing="dynamic">
+                            <mat-select [formControl]="controlAt(rbcAntigensArray, $index, 'testId')" panelWidth="auto" (openedChange)="onSelectPanelChange($event, rbcTestSearchCtrl)">
+                              <mat-option><ngx-mat-select-search [formControl]="rbcTestSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                              @for (opt of optionsWithSelected(filteredRbcTests(), rbcTestOptions(), controlAt(rbcAntigensArray, $index, 'testId').value); track opt.value) {
+                                <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                              }
+                            </mat-select>
+                          </mat-form-field>
+                          <mat-form-field appearance="fill" class="ab-field" subscriptSizing="dynamic">
+                            <mat-select [formControl]="controlAt(rbcAntigensArray, $index, 'resultCode')" panelWidth="auto">
+                              @for (opt of resultCodeOptions; track opt.value) {
+                                <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                              }
+                            </mat-select>
+                          </mat-form-field>
+                          <button
+                            mat-icon-button
+                            type="button"
+                            class="row-delete-btn"
+                            aria-label="Remove RBC phenotype row"
+                            (click)="removeRbcAntigenRow($index)"
+                            [disabled]="rbcAntigensArray.length <= 1"
+                          >
+                            <mat-icon>delete</mat-icon>
+                          </button>
+                        </div>
+                      }
+                    </div>
+                    @if (rbcAntigensArray.length < 4) {
+                      <div class="panel-table-footer">
+                        <button mat-button type="button" class="add-row-btn" (click)="addRbcAntigenRow()">
+                          + ADD NEW OPTION
+                        </button>
+                      </div>
+                    }
+                  </div>
+                </div>
+              </div>
+
+            </mat-radio-group><!-- /match-panels-row -->
+          </div>
+        }
+      </div>
+
+      <!-- ══ Section 3: Request Details ══ -->
+      <div class="section-card">
+        <div
+          class="section-header"
+          [class.section-header--expanded]="isRequestDetailsExpanded()"
+          role="button"
+          tabindex="0"
+          aria-label="Toggle Request Details section"
+          [attr.aria-expanded]="isRequestDetailsExpanded()"
+          (click)="toggleSection('requestDetails')"
+          (keydown.enter)="toggleSection('requestDetails')"
+          (keydown.space)="$event.preventDefault(); toggleSection('requestDetails')"
+        >
+          <div class="section-icon-badge" aria-hidden="true">
+            <mat-icon>lock</mat-icon>
+          </div>
+          <h2 class="section-title">Request Details</h2>
+        </div>
+
+        @if (isRequestDetailsExpanded()) {
+          <div class="section-body">
+
+            <!-- Row 1: Request ID | CREATE NEW | Hospital -->
+            <div class="details-row">
+              <div class="request-id-group">
+                <mat-form-field appearance="fill" class="request-id-field" subscriptSizing="dynamic">
+                  <mat-label>Request ID</mat-label>
+                  <mat-select formControlName="requestId"
+                    [disabled]="isNewRequest()"
+                    (selectionChange)="onRequestSelectChange($event.value)">
+                    <mat-option><ngx-mat-select-search [formControl]="requestIdSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                    @for (req of filteredRequestIds(); track req.requestId) {
+                      <mat-option [value]="req.requestId">{{ req.requestId }}</mat-option>
+                    }
+                  </mat-select>
+                </mat-form-field>
+                <button
+                  mat-stroked-button
+                  type="button"
+                  class="inline-create-btn"
+                  aria-label="Create new request"
+                  (click)="onCreateNewRequest()"
+                >
+                  CREATE NEW
+                </button>
+              </div>
+
+              <mat-form-field appearance="fill" class="hospital-field" subscriptSizing="dynamic">
+                <mat-label>Hospital</mat-label>
+                <mat-select formControlName="hospital" aria-required="true">
+                  <mat-option><ngx-mat-select-search [formControl]="hospitalSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                  @for (opt of filteredHospitals(); track opt.value) {
+                    <mat-option [value]="opt.value">{{ opt.value }} - {{ opt.label }}</mat-option>
+                  }
+                </mat-select>
+                @if (hasError('hospital')) {
+                  <mat-error>{{ getError('hospital') }}</mat-error>
+                }
+              </mat-form-field>
+            </div>
+
+            <!-- Row 2: Contact | Phone | International Phone -->
+            <div class="details-row">
+              <mat-form-field appearance="fill" class="contact-field" subscriptSizing="dynamic">
+                <mat-label>Contact</mat-label>
+                <input matInput formControlName="contact" maxlength="50" />
+              </mat-form-field>
+              <mat-form-field appearance="fill" class="contact-field" subscriptSizing="dynamic">
+                <mat-label>Phone</mat-label>
+                <input matInput formControlName="phone" maxlength="12" />
+              </mat-form-field>
+              <mat-form-field appearance="fill" class="contact-field" subscriptSizing="dynamic">
+                <mat-label>International Phone</mat-label>
+                <input matInput formControlName="intlPhone" maxlength="15" />
+              </mat-form-field>
+            </div>
+
+            <!-- Row 3: Physician | Diagnosis | Product Type | Priority | Request Date -->
+            <div class="details-row">
+              <mat-form-field appearance="fill" class="flex-field" subscriptSizing="dynamic">
+                <mat-label>Physician</mat-label>
+                <mat-select formControlName="physician" panelClass="physician-select-panel">
+                  <mat-option><ngx-mat-select-search [formControl]="physicianSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                  @for (opt of filteredPhysicians(); track opt.value) {
+                    <mat-option [value]="opt.value">{{ opt.value }} - {{ opt.label }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+              <mat-form-field appearance="fill" class="flex-field" subscriptSizing="dynamic">
+                <mat-label>Diagnosis</mat-label>
+                <input matInput formControlName="diagnosis" maxlength="250" />
+              </mat-form-field>
+              <mat-form-field appearance="fill" class="flex-field" subscriptSizing="dynamic">
+                <mat-label>Product Type</mat-label>
+                <mat-select formControlName="productType" panelClass="ellipsis-panel">
+                  <mat-option><ngx-mat-select-search [formControl]="productSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                  @for (opt of filteredProducts(); track opt.value) {
+                    <mat-option [value]="opt.value" [title]="opt.value + ' - ' + opt.label">{{ opt.value }} - {{ opt.label }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+              <mat-form-field appearance="fill" class="flex-field" subscriptSizing="dynamic">
+                <mat-label>Priority</mat-label>
+                <mat-select formControlName="priority">
+                  <mat-option><ngx-mat-select-search [formControl]="prioritySearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                  @for (opt of filteredPriorities(); track opt.value) {
+                    <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+              <mat-form-field appearance="fill" class="flex-field" subscriptSizing="dynamic">
+                <mat-label>Request Date</mat-label>
+                <input
+                  #requestDateInput
+                  matInput
+                  [matDatepicker]="requestDatePicker"
+                  [formControl]="requestDateControl"
+                  [min]="minTargetDate"
+                  [errorStateMatcher]="requestDateErrorMatcher"
+                  aria-required="true"
+                  placeholder="DD-MMM-YYYY"
+                  (input)="onRequestDateInput($event)"
+                  (blur)="onRequestDateBlur()"
+                />
+                <mat-datepicker-toggle matIconSuffix [for]="requestDatePicker"></mat-datepicker-toggle>
+                <mat-datepicker #requestDatePicker></mat-datepicker>
+                @if (getRequestDateError()) {
+                  <mat-error>{{ getRequestDateError() }}</mat-error>
+                }
+              </mat-form-field>
+            </div>
+
+            <!-- Inventory Search toggle -->
+            <div class="inventory-search-row">
+              <mat-slide-toggle formControlName="inventorySearch" class="inventory-cb" [hideIcon]="true" (change)="onInventorySearchChange()">
+                Inventory Search
+              </mat-slide-toggle>
+              <span class="inventory-hint">Include inventory results in this search.</span>
+            </div>
+
+            <!-- Scheduled Dates + Groups & Attributes side by side -->
+            <div class="sub-sections-row">
+
+              <!-- Scheduled Dates -->
+              <div class="sub-section sub-section--dates">
+                <h3 class="sub-section-title">Scheduled Dates</h3>
+                <div class="panel-table">
+                  <div class="sub-grid-header dates-grid">
+                    <span>Target Date</span>
+                    <span>Units</span>
+                    <span></span>
+                  </div>
+                  <div class="panel-table-body">
+                    @for (row of scheduledDatesArray.controls; track $index) {
+                      <div class="sub-grid-row dates-grid">
+                        <mat-form-field appearance="fill" class="sub-field" subscriptSizing="dynamic">
+                          <input
+                            matInput
+                            [matDatepicker]="targetDatePicker"
+                            [formControl]="controlAt(scheduledDatesArray, $index, 'targetDate')"
+                            [min]="minTargetDate"
+                            placeholder="DD-MMM-YYYY"
+                            (input)="onTargetDateInput($event, controlAt(scheduledDatesArray, $index, 'targetDate'))"
+                            (blur)="onTargetDateBlur($event, controlAt(scheduledDatesArray, $index, 'targetDate')); onScheduledDateChange($index)"
+                          />
+                          <mat-datepicker-toggle matIconSuffix [for]="targetDatePicker"></mat-datepicker-toggle>
+                          <mat-datepicker #targetDatePicker (selectedChanged)="onScheduledDateChange($index)"></mat-datepicker>
+                          @if (getTargetDateError(controlAt(scheduledDatesArray, $index, 'targetDate'))) {
+                            <mat-error>{{ getTargetDateError(controlAt(scheduledDatesArray, $index, 'targetDate')) }}</mat-error>
+                          }
+                        </mat-form-field>
+                        <mat-form-field appearance="fill" class="sub-field" subscriptSizing="dynamic">
+                          <mat-label>Units</mat-label>
+                          <mat-select [formControl]="controlAt(scheduledDatesArray, $index, 'units')" (openedChange)="onSelectPanelChange($event, unitsSearchCtrl)">
+                            <mat-option><ngx-mat-select-search [formControl]="unitsSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                            @for (opt of optionsWithSelected(filteredUnits(), unitOptions, controlAt(scheduledDatesArray, $index, 'units').value); track opt.value) {
+                              <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                            }
+                          </mat-select>
+                          @if (controlAt(scheduledDatesArray, $index, 'units').hasError('required')) {
+                            <mat-error>Units required</mat-error>
+                          }
+                        </mat-form-field>
+                        <button
+                          mat-icon-button
+                          type="button"
+                          class="row-delete-btn"
+                          aria-label="Remove scheduled date"
+                          (click)="removeScheduledDate($index)"
+                          [disabled]="scheduledDatesArray.length <= 1"
+                        >
+                          <mat-icon>delete</mat-icon>
+                        </button>
+                      </div>
+                    }
+                  </div>
+                  @if (scheduledDatesArray.length < 7) {
+                    <div class="panel-table-footer">
+                      <button mat-button type="button" class="add-row-btn" (click)="addScheduledDate()">
+                        + ADD NEW DATE
+                      </button>
+                    </div>
+                  }
+                </div>
+              </div>
+
+              <!-- Groups & Attributes -->
+              <div class="sub-section sub-section--attribs">
+                <h3 class="sub-section-title">Groups &amp; Attributes</h3>
+                <div class="panel-table">
+                  <div class="sub-grid-header attribs-grid">
+                    <span>Group</span>
+                    <span>Attribute</span>
+                    <span></span>
+                  </div>
+                  <div class="panel-table-body">
+                    @for (row of requestAttributesArray.controls; track $index) {
+                      <div class="sub-grid-row attribs-grid">
+                        <mat-form-field appearance="fill" class="sub-field" subscriptSizing="dynamic">
+                          <mat-select
+                            [formControl]="controlAt(requestAttributesArray, $index, 'attribGroup')"
+                            (selectionChange)="onAttribGroupChange($index)"
+                            (openedChange)="onSelectPanelChange($event, attribGroupSearchCtrl)"
+                          >
+                            <mat-option><ngx-mat-select-search [formControl]="attribGroupSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                            @for (opt of optionsWithSelected(filteredAttribGroups(), attribGroupOptions(), controlAt(requestAttributesArray, $index, 'attribGroup').value); track opt.value) {
+                              <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                            }
+                          </mat-select>
+                        </mat-form-field>
+                        <mat-form-field appearance="fill" class="sub-field" subscriptSizing="dynamic">
+                          <mat-select [formControl]="controlAt(requestAttributesArray, $index, 'attribCode')" (openedChange)="onSelectPanelChange($event, attribCodeSearchCtrl)">
+                            <mat-option><ngx-mat-select-search [formControl]="attribCodeSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No matches"></ngx-mat-select-search></mat-option>
+                            @for (opt of optionsWithSelected(filteredAttribCodeOptions($index), getAttribCodeOptions($index), controlAt(requestAttributesArray, $index, 'attribCode').value); track opt.value) {
+                              <mat-option [value]="opt.value">{{ opt.value }} - {{ opt.label }}</mat-option>
+                            }
+                          </mat-select>
+                        </mat-form-field>
+                        <button
+                          mat-icon-button
+                          type="button"
+                          class="row-delete-btn"
+                          aria-label="Remove attribute group"
+                          (click)="removeRequestAttribute($index)"
+                          [disabled]="requestAttributesArray.length <= 1"
+                        >
+                          <mat-icon>delete</mat-icon>
+                        </button>
+                      </div>
+                    }
+                  </div>
+                  @if (requestAttributesArray.length < 10) {
+                    <div class="panel-table-footer">
+                      <button mat-button type="button" class="add-row-btn" (click)="addRequestAttribute()">
+                        + ADD NEW GROUP
+                      </button>
+                    </div>
+                  }
+                </div>
+              </div>
+
+            </div><!-- /sub-sections-row -->
+
+            <!-- Search Results Info (visible when request is loaded) -->
+            @if (currentRequestDetail()) {
+              <div class="search-results-info" style="margin-top: 24px; padding: 16px; background-color: #f5f5f5; border-radius: 4px; display: flex; gap: 32px; flex-wrap: wrap;">
+                @if (currentRequestDetail()!.lastSearchDateTime) {
+                  <div class="field-display">
+                    <span class="field-display-label">Last Search Date/Time</span>
+                    <span class="field-display-value">{{ currentRequestDetail()!.lastSearchDateTime }}</span>
+                  </div>
+                }
+                @if (currentRequestDetail()!.donorCount !== undefined && currentRequestDetail()!.donorCount !== null) {
+                  <div class="field-display">
+                    <span class="field-display-label">Donor Count</span>
+                    <span class="field-display-value" style="font-weight: 600; color: #1976d2;">{{ currentRequestDetail()!.donorCount }}</span>
+                  </div>
+                }
+                @if (currentRequestDetail()!.unitCount !== undefined && currentRequestDetail()!.unitCount !== null) {
+                  <div class="field-display">
+                    <span class="field-display-label">Unit Count</span>
+                    <span class="field-display-value" style="font-weight: 600; color: #1976d2;">{{ currentRequestDetail()!.unitCount }}</span>
+                  </div>
+                }
+              </div>
+            }
+          </div>
+        }
+
+        <!-- Form-level validation errors -->
+        @if (getFormDuplicateError()) {
+          <div class="form-error-message" role="alert" style="color: #d32f2f; padding: 16px; margin: 16px 0; background-color: #fdecea; border-left: 4px solid #d32f2f; border-radius: 4px; display: flex; align-items: center; gap: 8px;">
+            <mat-icon style="color: #d32f2f;">error</mat-icon>
+            <span>{{ getFormDuplicateError() }}</span>
+          </div>
+        }
+
+        <!-- ─── Bottom Actions (inside Request Details card) ─────────────── -->
+        <div class="bottom-actions" role="group" aria-label="Form actions">
+          <button mat-button type="button" class="query-btn"
+            [disabled]="!hasSubmittedSearch()"
+            (click)="onQueryRequest()">
+            QUERY REQUEST
+          </button>
+          @if (currentRequestDetail() && currentRequestDetail()!.status !== 'CLOSE') {
+            <button
+              mat-stroked-button
+              type="button"
+              class="close-btn"
+              [disabled]="!currentRequestDetail()?.requestId"
+              (click)="onCloseRequest()"
+            >
+              CLOSE REQUEST
+            </button>
+          }
+          <button
+            mat-stroked-button
+            type="button"
+            class="save-btn"
+            [disabled]="isSaveDisabled()"
+            (click)="onSave(false)"
+          >
+            SAVE
+          </button>
+          <button
+            mat-flat-button
+            color="primary"
+            type="button"
+            class="save-search-btn"
+            [disabled]="isSaveDisabled()"
+            (click)="onSave(true)"
+          >
+            SAVE &amp; SEARCH
+          </button>
+        </div>
+
+      </div><!-- /section-card Request Details -->
+
+      </div><!-- /sections-wrapper -->
+    </form>
+
+  } @else {
+    <!-- Collapsed placeholder sections -->
+    <div class="sections-collapsed">
+      <div class="section-card">
+        <div class="section-header section-header--locked">
+          <div class="section-icon-badge section-icon-badge--locked" aria-hidden="true"><mat-icon>lock</mat-icon></div>
+          <h2 class="section-title">Recipient Information</h2>
+        </div>
+      </div>
+      <div class="section-card">
+        <div class="section-header section-header--locked">
+          <div class="section-icon-badge section-icon-badge--locked" aria-hidden="true"><mat-icon>lock</mat-icon></div>
+          <h2 class="section-title">Match Criteria</h2>
+        </div>
+      </div>
+      <div class="section-card">
+        <div class="section-header section-header--locked">
+          <div class="section-icon-badge section-icon-badge--locked" aria-hidden="true"><mat-icon>lock</mat-icon></div>
+          <h2 class="section-title">Request Details</h2>
+        </div>
+      </div>
+    </div>
+  }
+
+</div>

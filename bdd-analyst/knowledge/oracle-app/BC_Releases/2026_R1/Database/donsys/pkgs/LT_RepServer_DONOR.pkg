@@ -1,0 +1,233 @@
+/* Formatted on 2012/04/10 14:24 (Formatter Plus v4.8.5) */
+CREATE OR REPLACE PACKAGE LT_RepServer_Donor
+IS
+     /*-----------------------------------------------------------------------------
+     PACKAGE     :  LT_REP_SERVER_CHECK_DONOR
+     PURPOSE     :  Get Report server that has least active jobs and get report server URL.
+     DEVELOPER   :  Ashok Vardhan
+     DEV. DATE   :  04/10/2012
+     NOTES       :  Initial version.
+     Ver         :  01
+
+     Modification History
+     -------------------------------------------------------------------------------
+     Modified by    on    Version  Remarks
+     -------------------------------------------------------------------------------
+
+     -----------------------------------------------------------------------------
+     */
+   -- This routine is used to return least active jobs server name.
+   PROCEDURE get_reports_server (
+      out_server_name   OUT   VARCHAR2,
+      out_error_msg     OUT   VARCHAR2
+   );
+
+   -- This routine is used to return the URL link for the reports server on which the input job id was submitted.	 
+   PROCEDURE get_reports_url (
+      in_server_name   IN       VARCHAR2,
+      out_server_url   OUT      VARCHAR2,
+      out_error_msg    OUT      VARCHAR2
+   );
+END LT_RepServer_Donor;
+/
+
+CREATE OR REPLACE PACKAGE BODY LT_RepServer_Donor
+IS
+	/*-----------------------------------------------------------------------------
+	PACKAGE     :  LT_REP_SERVER_CHECK_DONOR
+	PURPOSE     :  Get Report server that has least active jobs and get report server URL.
+	DEVELOPER   :  Ashok Vardhan
+	DEV. DATE   :  04/10/2012
+	NOTES       :  Initial version.
+	Ver         :  01
+	
+	Modification History
+	-------------------------------------------------------------------------------
+	Modified by    on    Version  Remarks
+	-------------------------------------------------------------------------------
+	
+	-----------------------------------------------------------------------------
+	*/
+
+   -- This routine is used to return least active jobs server name.
+   PROCEDURE get_reports_server (
+      out_server_name   OUT   VARCHAR2,
+      out_error_msg     OUT   VARCHAR2
+   )
+   IS
+      -- local global variables used in this routine
+      lg_svr_name    VARCHAR2 (100);
+      lg_err_msg     VARCHAR2 (100);
+      -- local variable to hold count of servers configured.
+      l_svr_cnt      NUMBER;
+      -- Exception to exit the routine and to assign out variables for this routine.
+      exit_process   EXCEPTION;
+
+      -- Cursor to fetch default reports server name from VALID_MASTER_CODES table.
+      CURSOR default_svr_cur
+      IS
+         SELECT description
+           FROM valid_master_codes
+          WHERE code_type = 'OASVR'
+            AND code LIKE 'R%'
+            AND numeral_value IS NOT NULL
+            AND SYSDATE BETWEEN eff_date AND NVL (term_date, SYSDATE + 1);
+			
+	   FUNCTION least_ActiveJobs_Server RETURN VARCHAR2 IS
+			cntr NUMBER := NULL;
+			l_cnt NUMBER;
+			l_svr_name VARCHAR2(100);
+			CURSOR vmc_svr_cur IS
+			  SELECT description
+			    FROM valid_master_codes
+			   WHERE code_type = 'OASVR'
+			     AND code LIKE 'R%'
+				 AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE+1);
+		BEGIN		
+			FOR vmc_svr_rec IN vmc_svr_cur LOOP
+			 SELECT count(*) INTO l_cnt
+			   FROM rw_server_job_queue
+			  WHERE lower(server) = lower(vmc_svr_rec.description)
+			    AND status_code IN
+			                   (1,                           -- ENQUEUED
+			                    2,                          -- OPENING
+			                    3)                        -- RUNNING
+			    AND job_type != 'Scheduled';		
+					  
+			  IF cntr IS NULL THEN
+			    cntr  	   := l_cnt;
+				l_svr_name := vmc_svr_rec.description;
+			  ELSE
+			    IF l_cnt < cntr THEN
+				  cntr := l_cnt;
+				  l_svr_name := vmc_svr_rec.description;
+				END IF;
+			  END IF;			  
+			  --DBMS_OUTPUT.PUT_LINE('Server: ' || vmc_svr_rec.description || ' and count: ' || l_cnt);
+			  --DBMS_OUTPUT.PUT_LINE('Description ' || l_svr_name);
+			END LOOP;  
+			
+			RETURN l_svr_name;
+		END least_ActiveJobs_Server;				
+   BEGIN
+      -- Initialise local global variables to null.
+      lg_svr_name := NULL;
+      lg_err_msg := NULL;
+
+      -- Check if only one server is configured.
+      SELECT COUNT (*) INTO l_svr_cnt
+        FROM valid_master_codes
+       WHERE code_type = 'OASVR'
+         AND UPPER (code) LIKE 'R%'
+         AND SYSDATE BETWEEN eff_date AND NVL (term_date, SYSDATE + 1);
+
+      -- If No servers are configured, assign message to error variable and exit.
+      IF l_svr_cnt = 0 THEN
+         --DBMS_OUTPUT.put_line ('No servers');
+         lg_err_msg := 'Report server is not defined in the MASTER CODES table for OASVR';
+         RAISE exit_process;
+      END IF;
+
+      -- Only if Single Server is configured.  Get the default server.
+      IF l_svr_cnt = 1 THEN
+         --DBMS_OUTPUT.put_line ('Single Server');
+         -- Fetch only one record
+         OPEN default_svr_cur;
+         FETCH default_svr_cur INTO lg_svr_name;
+         CLOSE default_svr_cur;
+
+         -- If server name is null, there might be an error configuring the master code.  Assign error message and exit.
+         IF lg_svr_name IS NULL THEN
+            lg_err_msg := 'Master code OASVR is not configured properly, check numeral_value (port number)';
+         END IF;
+
+         RAISE exit_process;
+      END IF;
+
+      -- Only if Multiple Servers are configured.
+      IF l_svr_cnt > 1 THEN
+      -- DBMS_OUTPUT.put_line ('Multiple servers');
+
+         -- Get the least active jobs server from RW_SERVER_JOB_QUEUE. Least_ActiveJobs_Server will return the least active job. 
+		 -- There should be some value returned into lg_svr_name.  If not, master code might not be configured properly.
+		 lg_svr_name := least_ActiveJobs_Server;
+
+         -- If server name is null, there might be an error configuring the master code.  Assign error message and exit.
+         IF lg_svr_name IS NULL THEN
+            lg_err_msg := 'Master code OASVR is not configured properly';
+         END IF;
+
+         RAISE exit_process;
+      END IF;
+   EXCEPTION
+      WHEN exit_process THEN
+         out_error_msg := lg_err_msg;
+         out_server_name := lg_svr_name;
+      WHEN OTHERS THEN
+         out_error_msg := SQLCODE || '-' || SUBSTR (SQLERRM, 1, 75);
+         out_server_name := NULL;
+   END get_reports_server;
+
+   --------------------------------------------------------------------------------------------------
+   -- This routine is used to return the URL link for the reports server on which the input job id was submitted.
+   PROCEDURE get_reports_url (
+      in_server_name   IN       VARCHAR2,
+      out_server_url   OUT      VARCHAR2,
+      out_error_msg    OUT      VARCHAR2
+   )
+   IS
+      lg_svr_url    VARCHAR2 (500) := NULL;
+      lg_err_msg    VARCHAR2 (100) := NULL;
+      lg_port_no    NUMBER         := NULL;
+      error_exit    EXCEPTION;
+	  
+      -- Get the Port number of the URL ('OASVR' - Code Type, Server Name - Description, Port Number - Numeral sequence).
+      CURSOR vmc_svr_cur (p_svr_name VARCHAR2)
+      IS
+         SELECT numeral_value
+           FROM valid_master_codes
+          WHERE code_type = 'OASVR'
+            AND LOWER (description) = LOWER (p_svr_name)
+            AND SYSDATE BETWEEN eff_date AND NVL (term_date, SYSDATE + 1);
+
+      -- Get the URL for the report server.  ( 'OASVR' - Code Type, Port Number - Code , URL - Description )
+      CURSOR vmc_url_cur (p_port_no VARCHAR2)
+      IS
+         SELECT description
+           FROM valid_master_codes
+          WHERE code_type = 'OASVR'
+            AND code = p_port_no
+            AND SYSDATE BETWEEN eff_date AND NVL (term_date, SYSDATE + 1);
+   BEGIN
+      -- Get the Port number of the URL ('OASVR' - Code Type, Server Name - Description, Port Number - Numeral sequence).
+      OPEN vmc_svr_cur (in_server_name);
+      FETCH vmc_svr_cur INTO lg_port_no;
+      CLOSE vmc_svr_cur;
+
+      IF lg_port_no IS NULL THEN
+         lg_err_msg := 'Report Server is not defined in Master Codes OR Numeral value is empty';
+         RAISE error_exit;
+      END IF;
+
+      -- Get the URL for the report server.  ( 'OASVR' - Code Type, Port Number - Code , URL - Description )
+      OPEN vmc_url_cur (TO_CHAR (lg_port_no));
+      FETCH vmc_url_cur INTO lg_svr_url;
+      CLOSE vmc_url_cur;
+
+      IF lg_svr_url IS NULL THEN
+         lg_err_msg := 'Report Server URL is not defined in Master Code';
+         RAISE error_exit;
+      END IF;
+	  
+      out_server_url  := lg_svr_url;
+   EXCEPTION
+      WHEN error_exit THEN
+         out_error_msg := lg_err_msg;
+      WHEN OTHERS THEN
+         out_error_msg := SQLCODE || '-' || SUBSTR (SQLERRM, 1, 75);
+   END get_reports_url;
+   -------------------------------------------------------------------------------------
+END LT_RepServer_Donor;
+/
+create public synonym LT_REPSERVER_DONOR for LT_REPSERVER_DONOR;
+grant execute on LT_REPSERVER_DONOR to public;

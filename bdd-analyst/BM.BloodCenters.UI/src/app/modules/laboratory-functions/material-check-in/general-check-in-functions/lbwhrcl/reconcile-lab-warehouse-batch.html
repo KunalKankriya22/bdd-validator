@@ -1,0 +1,193 @@
+<app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+<main class="reconcile-container" [attr.aria-labelledby]="elementId('heading')">
+  <h1 [id]="elementId('heading')" class="sr-only">{{ headerConfig.title }}</h1>
+
+  <!-- Search Section -->
+  <div class="search-card" role="search" [attr.aria-label]="'Search for batch to reconcile'">
+    <form [formGroup]="searchForm" [id]="elementId('search-form')" novalidate>
+      <div class="search-row">
+        <!-- Batch ID Dropdown -->
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label [id]="labelId('batchId')">
+            Batch ID <span class="required-marker" aria-hidden="true">*</span>
+          </mat-label>
+          <mat-select
+            [id]="elementId('batchId')"
+            formControlName="batchId"
+            placeholder="Select Batch ID"
+            [attr.aria-invalid]="f['batchId'].invalid && f['batchId'].touched"
+            [attr.aria-describedby]="f['batchId'].invalid && f['batchId'].touched ? errorId('batchId') : null"
+            [attr.aria-required]="true">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="batchSearchControl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (batch of filteredBatches(); track batch.batchId) {
+              <mat-option [value]="batch.batchId">
+                {{ batch.batchId }}
+              </mat-option>
+            }
+            @if (batches().length > 0 && filteredBatches().length === 0) {
+              <mat-option disabled>No matching batch IDs</mat-option>
+            }
+          </mat-select>
+          @if (f['batchId'].invalid && f['batchId'].touched) {
+            <mat-error [id]="errorId('batchId')">
+              @if (f['batchId'].errors?.['required']) {
+                Batch ID is required
+              }
+            </mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Created on (readonly display) -->
+        <div class="display-field">
+          <span class="display-field__label">Created on</span>
+          <div class="display-field__value">{{ batchHeader()?.createDate || '-' }}</div>
+        </div>
+
+        <!-- Send to Warehouse (readonly display) -->
+        <div class="display-field">
+          <span class="display-field__label">Send to Warehouse</span>
+          <div class="display-field__value">{{ batchHeader()?.toWarehouse ? (batchHeader()!.toWarehouse + ' - ' + batchHeader()!.toWhDesc) : '-' }}</div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="search-actions">
+          <button
+            mat-stroked-button
+            class="retrieve-btn"
+            type="button"
+            (click)="onRetrieve()"
+            [disabled]="loading() || searchForm.invalid"
+            [id]="elementId('retrieve-btn')"
+            aria-label="Retrieve batch details">
+            RETRIEVE
+          </button>
+          <button
+            mat-button
+            class="clear-btn"
+            type="button"
+            (click)="clearAll()"
+            [disabled]="!searchForm.get('batchId')?.value"
+            [id]="elementId('clear-btn')"
+            aria-label="Clear search form">
+            CLEAR
+          </button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <!-- Results Card (Warehouse Transfer + Table + Footer) -->
+  @if (batchHeader()) {
+    <div class="results-card">
+      <!-- Warehouse Transfer Indicator with Action Buttons -->
+      <div class="warehouse-transfer" role="status" [attr.aria-label]="'Warehouse transfer from ' + currentWarehouse() + ' to ' + batchHeader()!.toWarehouse">
+        <div class="transfer-info">
+          <div class="transfer-item">
+            <svg class="warehouse-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <path d="M2.89844 20V16H18.8984V20H2.89844ZM4.67622 19H6.45399V17H4.67622V19ZM2.89844 8V4H18.8984V8H2.89844ZM4.67622 7H6.45399V5H4.67622V7ZM2.89844 14V10H18.8984V14H2.89844ZM4.67622 13H6.45399V11H4.67622V13Z" fill="currentColor"/>
+            </svg>
+            <span>{{ currentWarehouse() }}</span>
+          </div>
+          <mat-icon class="transfer-arrow" aria-hidden="true">arrow_forward</mat-icon>
+          <div class="transfer-item">
+            <svg class="warehouse-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <path d="M2.89844 20V16H18.8984V20H2.89844ZM4.67622 19H6.45399V17H4.67622V19ZM2.89844 8V4H18.8984V8H2.89844ZM4.67622 7H6.45399V5H4.67622V7ZM2.89844 14V10H18.8984V14H2.89844ZM4.67622 13H6.45399V11H4.67622V13Z" fill="currentColor"/>
+            </svg>
+            <span>{{ batchHeader()!.toWarehouse }} - {{ batchHeader()!.toWhDesc }}</span>
+          </div>
+        </div>
+        @if (showTable()) {
+          <div class="table-actions" role="group" aria-label="Table actions">
+            @if (!allReasonsAssigned()) {
+              <button
+                mat-stroked-button
+                class="add-reason-btn"
+                type="button"
+                (click)="openAddReconciliationDialog()"
+                [disabled]="!hasSelectedRows()"
+                [id]="elementId('add-reason-btn')"
+                [attr.aria-label]="'Add reconciliation reason to ' + selectedRowCount() + ' selected units'">
+                ADD RECONCILIATION REASON ({{ selectedRowCount() }})
+              </button>
+            }
+            <button
+              mat-button
+              class="clear-all-btn"
+              type="button"
+              (click)="clearAllReasons()"
+              [disabled]="!hasAnyReasonAssigned()"
+              [id]="elementId('clear-all-btn')"
+              aria-label="Clear all reconciliation reasons">
+              CLEAR ALL
+            </button>
+            <button
+              mat-flat-button
+              class="save-btn"
+              type="button"
+              (click)="onSave()"
+              [disabled]="saving() || !canSave()"
+              [id]="elementId('save-btn')"
+              aria-label="Save reconciliation">
+              @if (saving()) {
+                <span>SAVING...</span>
+              } @else {
+                <span>SAVE</span>
+              }
+            </button>
+          </div>
+        }
+      </div>
+
+      <!-- Data Table -->
+      @if (showTable()) {
+        <div class="table-container">
+          <app-data-table
+            [config]="tableConfig"
+            [data]="batchDetails()"
+            [loading]="loading()"
+            (sortChange)="onSortChange($event)"
+            (rowAction)="onRowAction($event)"
+            (selectionChange)="onSelectionChange($event)">
+          </app-data-table>
+        </div>
+      }
+
+      <!-- Footer Information -->
+      @if (showTable()) {
+        <div class="footer-info" role="contentinfo">
+          <div class="footer-item">
+            <span class="footer-label">Total Reconcile Units</span>
+            <div class="footer-value">{{ totalReconcileUnits() }}</div>
+          </div>
+          <div class="footer-item">
+            <span class="footer-label">Current Warehouse</span>
+            <div class="footer-value">{{ currentWarehouse() }}</div>
+          </div>
+        </div>
+      }
+    </div>
+  }
+
+  <!-- Empty State -->
+  @if (showEmptyState()) {
+    <div class="empty-state" role="status" aria-live="polite">
+      <mat-icon class="empty-state__icon" aria-hidden="true">search</mat-icon>
+      <p class="empty-state__title">No Results to Display</p>
+      <p class="empty-state__subtitle">Please enter search criteria to view results</p>
+    </div>
+  }
+
+  <!-- Loading State -->
+  @if (loading()) {
+    <div class="loading-state" role="status" aria-live="polite" aria-busy="true">
+      <p>Loading batch details...</p>
+    </div>
+  }
+</main>

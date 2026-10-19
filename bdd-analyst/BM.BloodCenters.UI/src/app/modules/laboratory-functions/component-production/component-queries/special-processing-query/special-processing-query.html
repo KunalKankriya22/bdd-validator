@@ -1,0 +1,241 @@
+<app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+<div class="spq-page">
+  <!-- Search Strip -->
+  <div class="spq-search-strip">
+    <div class="spq-search-fields">
+      <app-unit-id-field
+        [validateFfValue]="'N'"
+        [required]="true"
+        [showBarcodeIcon]="true"
+        (validated)="onUnitValidated($event)"
+        (cleared)="onUnitCleared()"
+        class="spq-unit-id-field"
+      />
+
+      <div class="spq-display-field">
+        <span class="spq-display-field__label">Collection Date</span>
+        @if (isLoading()) {
+          <mat-spinner diameter="16" class="spq-display-field__spinner" [attr.aria-label]="'Loading collection date'"></mat-spinner>
+        } @else {
+          <span class="spq-display-field__value">{{ collectionDateDisplay() ? formatDate(collectionDateDisplay()) : '-' }}</span>
+        }
+      </div>
+
+      @if (hasResults()) {
+        <button type="button" class="spq-clear-btn"
+          (click)="unitIdField.clear()" aria-label="Clear all results">
+          CLEAR
+        </button>
+      }
+    </div>
+  </div>
+
+  <!-- Loading State -->
+  @if (isLoading()) {
+    <div class="spq-loading" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading data"></mat-spinner>
+      <p>Loading special processing data...</p>
+    </div>
+  }
+
+  <!-- Results -->
+  @if (hasResults() && !isLoading()) {
+    <!-- Product Details Card -->
+    <div class="spq-card">
+      <section aria-labelledby="product-details-heading">
+        <div class="spq-section-header">
+          <h2 id="product-details-heading" class="spq-section-title">Product Details</h2>
+        </div>
+        <div class="spq-table-wrapper">
+          <table class="spq-table" role="grid" aria-label="Product details">
+            <thead>
+              <tr>
+                <th scope="col">Product Code</th>
+                <th scope="col">Process Code</th>
+                <th scope="col">Description</th>
+                <th scope="col">Insert Date</th>
+                <th scope="col">User</th>
+                <th scope="col">Link Unit ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (record of productRecords(); track record.productCode + record.processCode; let i = $index) {
+                <tr [class.spq-row--selected]="isProductSelected(i)"
+                    (click)="selectProduct(i)"
+                    tabindex="0"
+                    (keydown.enter)="selectProduct(i)"
+                    (keydown.space)="selectProduct(i); $event.preventDefault()"
+                    role="row"
+                    [attr.aria-selected]="isProductSelected(i)">
+                  <td>{{ record.productCode || '-' }}</td>
+                  <td>{{ record.processCode || '-' }}</td>
+                  <td>{{ record.processCodeDescription || '-' }}</td>
+                  <td>{{ formatDateTime(record.insertDate) }}</td>
+                  <td>{{ record.insertUserId || '-' }}</td>
+                  <td>{{ record.linkUnitId || '-' }}</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- Middle Section Card: Stage List + Differential + Reagents -->
+    @if (selectedRecord()) {
+      <div class="spq-card">
+        <div class="spq-middle-section">
+          <!-- Left: Stage List + Differential -->
+          <section class="spq-differential-panel" aria-labelledby="diff-heading">
+            <div class="spq-panel-layout">
+              <!-- Stage List -->
+              <div class="spq-stage-list" role="tablist" aria-label="Differential stages">
+                <div class="spq-stage-search">
+                  <app-search-bar
+                    [config]="stageSearchConfig"
+                    (search)="onStageSearch($event)">
+                  </app-search-bar>
+                </div>
+
+                @for (stage of stages(); track stage.stageCode; let si = $index) {
+                  <div class="spq-stage-item"
+                       [class.spq-stage-item--selected]="selectedStageIndex() === si"
+                       (click)="selectStage(si)"
+                       tabindex="0"
+                       (keydown.enter)="selectStage(si)"
+                       (keydown.space)="selectStage(si); $event.preventDefault()"
+                       role="tab"
+                       [attr.aria-selected]="selectedStageIndex() === si"
+                       [id]="'stage-tab-' + si">
+                    <span class="spq-stage-item__label">Stage {{ stage.stageCode }}</span>
+                  </div>
+                }
+
+                @if (stages().length === 0) {
+                  <div class="spq-no-data-small">No stages</div>
+                }
+              </div>
+
+              <!-- Differential Detail -->
+              <div class="spq-diff-detail" role="tabpanel" [attr.aria-labelledby]="'stage-tab-' + selectedStageIndex()">
+                <div class="spq-section-header">
+                  <h2 id="diff-heading" class="spq-section-title">Component&nbsp;&nbsp;Differential</h2>
+                </div>
+                @if (selectedStage(); as stage) {
+                  <div class="spq-table-wrapper">
+                    <table class="spq-table spq-table--compact" aria-label="Differential cell details">
+                      <thead>
+                        <tr>
+                          <th scope="col">Cell Code</th>
+                          <th scope="col">Description</th>
+                          <th scope="col">Count</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        @for (detail of stage.details; track detail.cellCode) {
+                          <tr>
+                            <td>{{ detail.cellCode || '-' }}</td>
+                            <td>{{ detail.cellCodeDescription || '-' }}</td>
+                            <td>{{ detail.cellCount ?? '-' }}</td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
+                  </div>
+                } @else {
+                  <div class="spq-no-data-small">Select a stage to view details</div>
+                }
+              </div>
+            </div>
+          </section>
+
+          <!-- Right: Component Reagents -->
+          <section class="spq-reagent-panel" aria-labelledby="reagent-heading">
+            <div class="spq-section-header">
+              <h2 id="reagent-heading" class="spq-section-title">Component Reagents</h2>
+            </div>
+            @if (selectedReagentHeader(); as reagentHdr) {
+              <div class="spq-table-wrapper">
+                <table class="spq-table spq-table--compact" aria-label="Reagent details">
+                  <thead>
+                    <tr>
+                      <th scope="col">Reagent Name</th>
+                      <th scope="col">Manufacturer</th>
+                      <th scope="col">Lot Number</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (detail of reagentHdr.details; track detail.reagentName + detail.lotNumber) {
+                      <tr>
+                        <td>{{ detail.reagentName || '-' }}</td>
+                        <td>{{ detail.manufacturer || '-' }}</td>
+                        <td>{{ detail.lotNumber || '-' }}</td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            } @else {
+              <div class="spq-no-data-small">No reagent records</div>
+            }
+          </section>
+        </div>
+      </div>
+
+      <!-- Component Spiking Card -->
+      <div class="spq-card">
+        <section aria-labelledby="spiking-heading">
+          <div class="spq-section-header">
+            <h2 id="spiking-heading" class="spq-section-title">Component Spiking</h2>
+          </div>
+          @if (spikingRecords().length > 0) {
+            <div class="spq-table-wrapper">
+              <table class="spq-table" aria-label="Spiking records">
+                <thead>
+                  <tr>
+                    <th scope="col">Type</th>
+                    <th scope="col">Insert Date</th>
+                    <th scope="col">User</th>
+                    <th scope="col">Lot Number</th>
+                    <th scope="col">Filter Lot Number</th>
+                    <th scope="col">Number of Bags</th>
+                    <th scope="col">Number of Components</th>
+                    <th scope="col">Number of used components</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (spike of spikingRecords(); track spike.spikingType + spike.insertDate) {
+                    <tr>
+                      <td>{{ spike.spikingType || '-' }}</td>
+                      <td>{{ formatDateTime(spike.insertDate) }}</td>
+                      <td>{{ spike.insertUserId || '-' }}</td>
+                      <td>{{ spike.bagLotNumber || '-' }}</td>
+                      <td>{{ spike.filterLotNumber || '-' }}</td>
+                      <td>{{ spike.bagsSpiked ?? '-' }}</td>
+                      <td>{{ spike.bagsForComponents ?? '-' }}</td>
+                      <td>{{ spike.bagsUsed ?? '-' }}</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+          } @else {
+            <div class="spq-no-data-small">No spiking records</div>
+          }
+        </section>
+      </div>
+    }
+  }
+
+  <!-- Empty State -->
+  @if (!hasResults() && !isLoading()) {
+    <div class="spq-empty-state" role="status">
+      <div class="spq-empty-state__icon">
+        <mat-icon aria-hidden="true">search</mat-icon>
+      </div>
+      <h2 class="spq-empty-state__title">No Results to Display</h2>
+      <p class="spq-empty-state__subtitle">Please enter a unit ID to view special processing records</p>
+    </div>
+  }
+</div>

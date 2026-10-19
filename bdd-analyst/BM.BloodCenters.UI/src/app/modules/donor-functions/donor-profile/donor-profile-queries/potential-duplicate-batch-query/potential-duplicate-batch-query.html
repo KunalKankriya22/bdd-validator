@@ -1,0 +1,388 @@
+<div class="page-wrapper">
+  <div class="sticky-header">
+    <app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+  </div>
+
+<div class="page-layout" [class.side-panel-active]="sidePanelOpen()">
+  <div class="main-content" [class.side-panel-active]="sidePanelOpen()">
+    <div class="potential-duplicate-batch-query-container">
+
+  <!-- Section 1: Filter Bar -->
+  <section class="section-card filter-section" aria-labelledby="filter-heading">
+    <h2 id="filter-heading" class="sr-only">Search Filters</h2>
+
+    <form [formGroup]="filterForm" class="filter-form">
+      <div class="filter-row">
+        <!-- Batch Status -->
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Batch Status</mat-label>
+          <mat-select
+            formControlName="batchStatus"
+            id="batchStatus">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="batchStatusSearchControl"
+                placeholderLabel="Search status..."
+                noEntriesFoundLabel="No matching status">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (status of filteredBatchStatusOptions; track status.value) {
+              <mat-option [value]="status.value">
+                {{ status.label }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Last Name Filter -->
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Last Name</mat-label>
+          <mat-select
+            formControlName="lastName"
+            id="lastName"
+            (selectionChange)="onLastNameSelected($event)">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="lastNameSearchControl"
+                placeholderLabel="Search last names..."
+                noEntriesFoundLabel="No matching names">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (option of filteredLastNameOptions; track option.setId) {
+              <mat-option [value]="option.lastName">
+                {{ option.lastName }} — {{ option.setId }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Batch ID -->
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Batch ID</mat-label>
+          <mat-select
+            formControlName="batchId"
+            id="batchId">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="batchSearchControl"
+                placeholderLabel="Search batches..."
+                noEntriesFoundLabel="No matching batches">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (batch of filteredBatches; track batch.batchId) {
+              <mat-option [value]="batch.batchId">
+                {{ batch.batchId }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Found On (Display Only) -->
+        <div class="field-label-display">
+          <span class="label">Found On</span>
+          <span class="value">{{ foundOnDisplay }}</span>
+        </div>
+
+        <!-- Retrieve Button -->
+        <button
+          mat-stroked-button
+          type="button"
+          class="retrieve-button"
+          (click)="onRetrieve()"
+          [disabled]="isRetrieveDisabled"
+          aria-label="Retrieve duplicate batch data">
+          @if (isLoading()) {
+            <mat-spinner diameter="20" class="button-spinner"></mat-spinner>
+          } @else {
+            RETRIEVE
+          }
+        </button>
+      </div>
+    </form>
+  </section>
+
+  <!-- Loading State -->
+  @if (isLoading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading batch data"></mat-spinner>
+      <span class="loading-text">Loading duplicate pairs...</span>
+    </div>
+  }
+
+  <!-- Cell Templates (always in DOM for ViewChild resolution) -->
+  <ng-template #donorIdCellTemplate let-row>
+    <span class="donor-id-cell">
+      {{ row.donorId }}
+      @if (isInvestigationPending(row.donorId)) {
+        <mat-icon
+          class="investigation-icon"
+          [matTooltip]="getMatchTooltip(row.donorId)"
+          matTooltipPosition="above"
+          matTooltipClass="multiline-tooltip">
+          info_outline
+        </mat-icon>
+      }
+    </span>
+  </ng-template>
+
+  <ng-template #diffCellDonorName let-row>
+    <div [class.diff-cell]="row.highlightDonorName">{{ row.donorName }}</div>
+  </ng-template>
+  <ng-template #diffCellSsn let-row>
+    <div [class.diff-cell]="row.highlightSsn">{{ row.ssn }}</div>
+  </ng-template>
+  <ng-template #diffCellDob let-row>
+    <div [class.diff-cell]="row.highlightDob">{{ row.dateOfBirth }}</div>
+  </ng-template>
+  <ng-template #diffCellSex let-row>
+    <div [class.diff-cell]="row.highlightSex">{{ row.sex }}</div>
+  </ng-template>
+  <ng-template #diffCellWorkNumber let-row>
+    <div [class.diff-cell]="row.highlightWorkNumber">{{ row.workNumber }}</div>
+  </ng-template>
+  <ng-template #diffCellHomeNumber let-row>
+    <div [class.diff-cell]="row.highlightHomeNumber">{{ row.homeNumber }}</div>
+  </ng-template>
+  <ng-template #diffCellMobileNumber let-row>
+    <div [class.diff-cell]="row.highlightMobileNumber">{{ row.mobileNumber }}</div>
+  </ng-template>
+  <ng-template #diffCellAddress let-row>
+    <div [class.diff-cell]="row.highlightAddress"
+      class="address-cell"
+      [matTooltip]="row.address"
+      matTooltipPosition="above"
+      [matTooltipDisabled]="!row.address || row.address === '-'">
+      {{ row.address }}
+    </div>
+  </ng-template>
+
+  <!-- Section 2: Results Table -->
+  @if (hasRetrieved() && !isLoading() && tableData().length > 0) {
+    <section class="section-card results-section" aria-labelledby="results-heading">
+      <h2 id="results-heading" class="sr-only">Duplicate Donor Results</h2>
+
+      <app-data-table
+        [config]="tableConfig"
+        [data]="tableData()"
+        [loading]="isLoading()"
+        [highlightedRow]="selectedDonor()"
+        (rowClick)="onRowClicked($event)">
+      </app-data-table>
+
+    </section>
+  }
+
+    </div>
+
+    <!-- Initial blank state — clean white fill before any search -->
+    @if (!isLoading() && !hasRetrieved()) {
+      <div class="empty-state"></div>
+    }
+
+    <!-- No results after search -->
+    @if (!isLoading() && hasRetrieved() && tableData().length === 0) {
+      <div class="empty-state" role="status">
+        <mat-icon class="empty-icon">search</mat-icon>
+        <p class="empty-title">No Results to Display</p>
+        <p class="empty-subtitle">Please enter search criteria to view results</p>
+      </div>
+    }
+
+    <!-- Section 3: Investigation Panel (full-width, outside container) -->
+    @if (hasRetrieved() && !isLoading() && tableData().length > 0) {
+      <section class="investigation-section" aria-labelledby="investigation-heading">
+        <div class="investigation-inner">
+          <div class="investigation-header">
+            <span class="investigation-label">Investigation for</span>
+            <span class="investigation-donor-name">{{ selectedDonor()?.donorName || (tableData().length > 0 ? tableData()[0].donorName : '') }}</span>
+          </div>
+
+          <div class="investigation-cards">
+            <div class="investigation-card">
+              <span class="card-label">Demographics</span>
+              @if (getReviewStatus('demographics'); as review) {
+                <span class="review-badge">
+                  <mat-icon class="review-check-icon">check_circle</mat-icon>
+                  {{ review.user }} {{ review.date }}
+                </span>
+              }
+              <button
+                mat-stroked-button
+                class="open-button"
+                (click)="onOpenInvestigation('demographics')"
+                type="button"
+                aria-label="Open Demographics for investigation">
+                OPEN DEMOGRAPHICS
+              </button>
+            </div>
+
+            <div class="investigation-card">
+              <span class="card-label">Interdictions</span>
+              @if (getReviewStatus('interdictions'); as review) {
+                <span class="review-badge">
+                  <mat-icon class="review-check-icon">check_circle</mat-icon>
+                  {{ review.user }} {{ review.date }}
+                </span>
+              }
+              <button
+                mat-stroked-button
+                class="open-button"
+                (click)="onOpenInvestigation('interdictions')"
+                type="button"
+                aria-label="Open Interdictions for investigation">
+                OPEN INTERDICTIONS
+              </button>
+            </div>
+
+            <div class="investigation-card">
+              <span class="card-label">Donations</span>
+              @if (getReviewStatus('donations'); as review) {
+                <span class="review-badge">
+                  <mat-icon class="review-check-icon">check_circle</mat-icon>
+                  {{ review.user }} {{ review.date }}
+                </span>
+              }
+              <button
+                mat-stroked-button
+                class="open-button"
+                type="button"
+                disabled
+                aria-label="Open Donations for investigation">
+                OPEN DONATIONS
+              </button>
+            </div>
+
+            <div class="investigation-card">
+              <span class="card-label">Attributes</span>
+              @if (getReviewStatus('attributes'); as review) {
+                <span class="review-badge">
+                  <mat-icon class="review-check-icon">check_circle</mat-icon>
+                  {{ review.user }} {{ review.date }}
+                </span>
+              }
+              <button
+                mat-stroked-button
+                class="open-button"
+                (click)="onOpenInvestigation('attributes')"
+                type="button"
+                aria-label="Open Attributes for investigation">
+                OPEN ATTRIBUTES
+              </button>
+            </div>
+          </div>
+
+          <!-- Action Buttons -->
+          <div class="action-buttons">
+            <button
+              mat-raised-button
+              color="accent"
+              type="button"
+              class="save-changes-button"
+              (click)="onSaveChanges()"
+              [disabled]="isSaving()"
+              aria-label="Save current investigation changes">
+              @if (isSaving()) {
+                <mat-spinner diameter="20" class="button-spinner"></mat-spinner>
+              } @else {
+                SAVE CHANGES
+              }
+            </button>
+            <button
+              mat-raised-button
+              color="primary"
+              type="button"
+              class="commit-investigation-button"
+              (click)="onCommitInvestigation()"
+              [disabled]="!canCommitInvestigation() || isCommitting()"
+              aria-label="Complete and commit investigation">
+              @if (isCommitting()) {
+                <mat-spinner diameter="20" class="button-spinner"></mat-spinner>
+              } @else {
+                COMMIT INVESTIGATION
+              }
+            </button>
+          </div>
+        </div>
+      </section>
+    }
+  </div>
+
+  <!-- Gray Backdrop -->
+  @if (sidePanelOpen()) {
+    <div class="panel-backdrop"></div>
+  }
+
+  <!-- Side Window Panel -->
+  <div class="side-panel" [class.open]="sidePanelOpen()" [style.width]="sidePanelOpen() ? sidePanelWidth() : '0'">
+    @if (sidePanelOpen()) {
+      @switch (currentSection()) {
+        @case ('donations') {
+          <app-donor-within-test-dialog
+            [donorId]="currentCheckDonorId()"
+            [donorName]="currentCheckDonorName()"
+            [dob]="getSelectedDonorField('dateOfBirth')"
+            [sex]="getSelectedDonorField('sex')"
+            [abo]="''"
+            (closePanel)="onPanelClose()">
+          </app-donor-within-test-dialog>
+        }
+        @case ('demographics') {
+          <app-donor-demographics
+            [inputDonorId]="currentCheckDonorId()"
+            [inputReadOnly]="true"
+            (closePanelEvent)="onPanelClose()"
+            (panelWidthChange)="onPanelWidthChange($event)">
+          </app-donor-demographics>
+        }
+        @case ('attributes') {
+          <app-donor-attributes
+            [inputDonorId]="currentCheckDonorId()"
+            [inputDonorName]="currentCheckDonorName()"
+            [inputDob]="getSelectedDonorField('dateOfBirth')"
+            [inputSex]="getSelectedDonorField('sex')"
+            [inputAbo]="getSelectedDonorField('abo')"
+            [inputReadOnly]="true"
+            (closePanelEvent)="onPanelClose()">
+          </app-donor-attributes>
+        }
+        @default {
+          <div class="side-panel-container">
+            <div class="side-panel-header">
+              <h2 class="side-panel-title">
+                @switch (currentSection()) {
+                  @case ('interdictions') { Donor Interdictions }
+                }
+              </h2>
+              <button
+                type="button"
+                mat-icon-button
+                class="side-panel-close"
+                aria-label="Close panel"
+                (click)="onPanelClose()">
+                <mat-icon>close</mat-icon>
+              </button>
+            </div>
+            <div class="side-panel-content-wrapper">
+              <div class="side-panel-content">
+                @switch (currentSection()) {
+                  @case ('interdictions') {
+                    <app-donor-interdictions-content
+                      [donorId]="currentCheckDonorId()"
+                      (closePanel)="onPanelClose()">
+                    </app-donor-interdictions-content>
+                  }
+                  @default {
+                    <div class="panel-placeholder">
+                      <p>Content for {{ currentSection() }} will be displayed here.</p>
+                    </div>
+                  }
+                }
+              </div>
+            </div>
+          </div>
+        }
+      }
+    }
+  </div>
+</div>
+</div>

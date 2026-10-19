@@ -1,0 +1,186 @@
+<!-- Layout Wrapper for Side Panel Management -->
+<div class="layout-wrapper" [class.side-panel-active]="sidePanelOpen()">
+
+  <!-- Main Content Area -->
+  <main class="release-quarantine-container main-content"
+        [class.side-panel-active]="sidePanelOpen()"
+        role="main">
+
+    <!-- Page Header -->
+    <app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+  <!-- Search Section -->
+  <div class="search-card">
+    <h2 [id]="elementId('search-heading')" class="sr-only">Search for Product</h2>
+
+    <form
+      [formGroup]="searchForm"
+      [id]="elementId('search-form')"
+      class="search-form">
+
+      <div class="search-row">
+        <!-- Quarantine Release Type -->
+        <mat-form-field appearance="fill" class="form-field form-field-type" subscriptSizing="dynamic">
+          <mat-label [id]="labelId('quarantineType')">
+            Quarantine Release Type
+          </mat-label>
+          <mat-select
+            [id]="elementId('quarantineType')"
+            formControlName="quarantineType"
+            [attr.aria-invalid]="f['quarantineType'].invalid && f['quarantineType'].touched"
+            [attr.aria-describedby]="f['quarantineType'].invalid && f['quarantineType'].touched ? errorId('quarantineType') : null">
+            @if (isLoadingReleaseTypes()) {
+              <mat-option [value]="selectPanelLoadingValue" disabled class="panel-option--status">
+                <span class="panel-loading">
+                  <mat-spinner diameter="20" class="panel-field-spinner" aria-hidden="true"></mat-spinner>
+                  <span>Loading...</span>
+                </span>
+              </mat-option>
+            } @else if (quarantineTypes().length === 0) {
+              <mat-option [value]="selectPanelEmptyValue" disabled class="panel-option--status">
+                No data available
+              </mat-option>
+            } @else if (quarantineTypes().length <= 3) {
+              @for (type of quarantineTypes(); track type.code) {
+                <mat-option [value]="type.code">{{ type.code }} - {{ type.description }}</mat-option>
+              }
+            } @else {
+              <mat-option>
+                <ngx-mat-select-search [formControl]="releaseTypeSearchControl"
+                  placeholderLabel="Search..." noEntriesFoundLabel="">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (type of filteredReleaseTypes(); track type.code) {
+                <mat-option [value]="type.code">{{ type.code }} - {{ type.description }}</mat-option>
+              }
+              @if (filteredReleaseTypes().length === 0) {
+                <mat-option disabled class="panel-option--status">No data available</mat-option>
+              }
+            }
+          </mat-select>
+          @if (f['quarantineType'].invalid && f['quarantineType'].touched) {
+            <mat-error [id]="errorId('quarantineType')">
+              Please select a quarantine release type
+            </mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Unit ID -->
+        <div class="unit-field-wrapper">
+          @if (!unitIdDisabled()) {
+            <app-unit-id-field
+              [validateFfValue]="'N'"
+              [required]="true"
+              [showBarcodeIcon]="true"
+              [scanPatterns]="SCAN_PATTERNS.UNIT_ID"
+              (validated)="onUnitValidated($event)"
+              (cleared)="onUnitCleared()"
+              class="form-field"
+            />
+          } @else {
+            <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+              <mat-label>Unit ID</mat-label>
+              <input matInput disabled aria-label="Unit ID" />
+            </mat-form-field>
+          }
+          <img src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-indicator" />
+        </div>
+
+        <!-- Product Code -->
+        <app-scan-select-field
+          #productCodeField
+          [label]="'Product Code'"
+          [placeholder]="'Scan or select product code'"
+          [showBarcodeIcon]="true"
+          [disabled]="productCodeDisabled()"
+          [scanPatterns]="SCAN_PATTERNS.PRODUCT"
+          [options]="productCodeOptions()"
+          [parseFn]="parseProductCode"
+          (valueChanged)="onProductCodeChanged($event)"
+          class="form-field"
+        />
+
+        <!-- CLEAR Button -->
+        <button
+          mat-stroked-button
+          type="button"
+          class="clear-button"
+          [id]="elementId('clear-btn')"
+          [disabled]="isClearDisabled()"
+          (click)="onClear()"
+          aria-label="Clear all search criteria">
+          CLEAR ALL
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Data Table Section -->
+  <section
+    class="table-section"
+    [attr.aria-labelledby]="elementId('table-heading')"
+    role="region">
+    <h2 [id]="elementId('table-heading')" class="sr-only">Quarantined Products</h2>
+
+    @if (loading()) {
+      <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+        <mat-spinner diameter="40" aria-label="Loading"></mat-spinner>
+        <span>Loading product information...</span>
+      </div>
+    } @else if (tableData().length === 0) {
+      <div class="empty-state-container">
+        <div class="empty-state-icon">
+          <mat-icon>search</mat-icon>
+        </div>
+        <h3 class="empty-state-title">No Results to Display</h3>
+        <p class="empty-state-message">
+          Please enter search criteria to view Results
+        </p>
+      </div>
+    } @else {
+      <div class="table-wrapper">
+        <app-data-table
+          [config]="dataTableConfig"
+          [data]="tableData()"
+          [highlightedRow]="selectedGridRow()"
+          [keepActiveRow]="sidePanelOpen()"
+          (sortChange)="onSortChange($event)"
+          (rowClick)="onRowClick($event)">
+        </app-data-table>
+      </div>
+    }
+  </section>
+
+  <!-- Status Cell Template -->
+  <ng-template #statusCellTemplate let-row>
+    @if (row.status) {
+      <span class="status-chip" [ngClass]="{
+        'status-chip--in-inventory': row.status === 'I',
+        'status-chip--discard': row.status === 'D'
+      }">
+        <mat-icon class="status-chip__icon">
+          {{ row.status === 'I' ? 'check_circle' : 'cancel' }}
+        </mat-icon>
+        <span class="status-chip__text">{{ row.status === 'I' ? 'In Inventory' : 'Discard' }}</span>
+      </span>
+    }
+  </ng-template>
+
+  </main>
+
+  <!-- Side Panel Container -->
+  @if (sidePanelOpen()) {
+  <div class="side-panel-container">
+    <app-release-quarantine-side-panel
+      [productInfo]="selectedProduct()"
+      [quarantineType]="selectedType()"
+      [gridRowData]="selectedGridRow()"
+      [rejectCodes]="rejectCodes"
+      [codeScheme]="codeScheme"
+      (released)="onProductReleased($event)"
+      (cancelled)="closeSidePanel()">
+    </app-release-quarantine-side-panel>
+  </div>
+  }
+
+</div>

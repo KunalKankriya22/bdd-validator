@@ -1,0 +1,358 @@
+<main class="notification-letters-page">
+  <!-- PAGE HEADER WITH BREADCRUMB -->
+  <app-page-header-with-breadcrumb [config]="pageHeaderConfig"></app-page-header-with-breadcrumb>
+
+  <!-- FILTER SECTION -->
+  <div class="filter-card" role="search" aria-label="Filter notification letters">
+    <div class="filter-row">
+      <!-- Show Terminated Dropdown -->
+      <mat-form-field appearance="fill" class="filter-field show-terminated-field">
+        <mat-label>Show Terminated</mat-label>
+        <mat-select [(ngModel)]="filterCriteria.showTerminated">
+          <mat-option [value]="false">No</mat-option>
+          <mat-option [value]="true">Yes</mat-option>
+        </mat-select>
+      </mat-form-field>
+
+      <!-- Letter Code Dropdown -->
+      <div class="letter-code-wrapper">
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Letter Code</mat-label>
+          <mat-select [formControl]="letterCodeControl" [attr.aria-describedby]="letterCodeControl.touched && letterCodeControl.hasError('required') ? 'letter-code-error' : null">
+            @if (letterCodeOptions().length > 3) {
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="letterCodeSearchControl"
+                  placeholderLabel="Search..."
+                  noEntriesFoundLabel="No matches found. Clear search to see all options."
+                  [clearSearchInput]="true">
+                </ngx-mat-select-search>
+              </mat-option>
+            }
+            @for (option of filteredLetterCodeOptions(); track option.code) {
+              <mat-option [value]="option.code">
+                {{ option.code }}{{ option.description ? ' - ' + option.description : '' }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+        @if (letterCodeControl.touched && letterCodeControl.hasError('required')) {
+          <span class="field-error" id="letter-code-error" role="alert">Letter Code is required</span>
+        }
+      </div>
+
+      <!-- Title Display with label -->
+      <div class="title-display">
+        <span class="title-label" id="title-display-label">Title</span>
+        <span class="title-value"
+              [matTooltip]="selectedLetterDescription"
+              matTooltipPosition="above"
+              matTooltipClass="letter-title-tooltip"
+              [matTooltipShowDelay]="500"
+              [matTooltipDisabled]="titleTooltipDisabled"
+              (mouseenter)="onTitleHover($event)"
+              aria-labelledby="title-display-label">{{ selectedLetterDescription || '-' }}</span>
+      </div>
+
+      <!-- Filter Action Buttons (left-aligned with filter fields) -->
+      <button
+        mat-stroked-button
+        type="button"
+        class="retrieve-btn"
+        [disabled]="loading() || !letterCodeControl.value"
+        (click)="onRetrieve()">
+        RETRIEVE
+      </button>
+
+      <button
+        mat-button
+        type="button"
+        class="clear-all-btn"
+        [disabled]="loading()"
+        (click)="clearAllFilters()">
+        CLEAR ALL
+      </button>
+
+      <!-- Create New Letter Button (right-aligned, separated from filter actions) -->
+      <button
+        mat-raised-button
+        color="primary"
+        type="button"
+        class="new-letter-btn"
+        [disabled]="loading() || hasSearched"
+        (click)="onCreateNewLetter()">
+        CREATE NEW LETTER
+      </button>
+    </div>
+
+    <!-- Filter Chips - Hidden as CLEAR ALL is now in top row -->
+    <!-- @if (filterChips.length > 0) {
+      <div class="filter-chips-container">
+        <app-filter-chips
+          [chips]="filterChips"
+          (removeChip)="onRemoveChip($event)"
+          (clearAll)="clearAllFilters()">
+        </app-filter-chips>
+      </div>
+    } -->
+  </div>
+
+  <!-- LOADING STATE -->
+  @if (loading()) {
+    <div class="loading-container" role="status" aria-live="polite">
+      <mat-spinner diameter="50" aria-label="Loading notification letters"></mat-spinner>
+      <p>Loading notification letters...</p>
+    </div>
+  }
+
+  <!-- ERROR STATE -->
+  @if (error() && !loading()) {
+    <div class="error-container" role="alert">
+      <mat-icon class="error-icon" aria-hidden="true">error_outline</mat-icon>
+      <p class="error-message">{{ error() }}</p>
+      <button mat-raised-button color="primary" (click)="onRetrieve()">
+        Retry
+      </button>
+    </div>
+  }
+
+  <!-- EMPTY STATE (Before search) -->
+  @if (!hasSearched && !loading() && !error()) {
+    <div class="empty-state-container" role="status">
+      <div class="empty-state">
+        <div class="empty-state-icon">
+          <mat-icon aria-hidden="true">search</mat-icon>
+        </div>
+        <h3 class="empty-state-title">No Results to Display</h3>
+        <p class="empty-state-subtitle">Please enter search criteria to view results</p>
+      </div>
+    </div>
+  }
+
+  <!-- EMPTY STATE (No results after search) -->
+  @if (hasSearched && !loading() && !error() && !hasData) {
+    <div class="empty-state-container" role="status" aria-live="polite">
+      <div class="empty-state">
+        <div class="empty-state-icon">
+          <mat-icon aria-hidden="true">search_off</mat-icon>
+        </div>
+        @if (isSearchFiltering) {
+          <h3 class="empty-state-title">No Matching Results</h3>
+          <p class="empty-state-subtitle">No letters match your search term. Clear the search or try different keywords.</p>
+        } @else {
+          <h3 class="empty-state-title">No Notification Letters Found</h3>
+          <p class="empty-state-subtitle">Try adjusting your filter criteria or create a new letter</p>
+        }
+      </div>
+    </div>
+  }
+
+  <!-- CURRENT VERSION TABLE -->
+  @if (hasSearched && !loading() && hasCurrentData) {
+    <div class="table-section current-version-section">
+      <div class="table-header">
+        <h2 class="table-title">Current Version</h2>
+      </div>
+
+      <!-- Table -->
+      <div class="table-container">
+        <table mat-table [dataSource]="filteredCurrentLetters" class="notification-letters-table"
+               aria-label="Current version notification letters">
+          <!-- Letter Code Column -->
+          <ng-container matColumnDef="letterCode">
+            <th mat-header-cell *matHeaderCellDef class="sortable-header"
+                [attr.aria-sort]="getAriaSort('current', 'letterCode')"
+                (click)="onSortCurrent('letterCode')"
+                (keydown.enter)="onSortCurrent('letterCode')"
+                (keydown.space)="$event.preventDefault(); onSortCurrent('letterCode')"
+                tabindex="0">
+              Letter Code
+              <mat-icon class="sort-icon" aria-hidden="true">{{ getSortIcon('current', 'letterCode') }}</mat-icon>
+            </th>
+            <td mat-cell *matCellDef="let letter">{{ letter.letterCode }}</td>
+          </ng-container>
+
+          <!-- Title Column -->
+          <ng-container matColumnDef="description">
+            <th mat-header-cell *matHeaderCellDef>Title</th>
+            <td mat-cell *matCellDef="let letter">
+              <span class="description-text"
+                    [matTooltip]="letter.title || letter.description || ''"
+                    matTooltipPosition="above"
+                    matTooltipClass="letter-title-tooltip"
+                    [matTooltipShowDelay]="500"
+                    [matTooltipDisabled]="descriptionTooltipDisabled.get(letter.letterCode + '_current') === true"
+                    (mouseenter)="onDescriptionHover($event, letter.letterCode + '_current')">
+                {{ letter.title || letter.description || '-' }}
+              </span>
+            </td>
+          </ng-container>
+
+          <!-- Version No Column -->
+          <ng-container matColumnDef="versionNo">
+            <th mat-header-cell *matHeaderCellDef>Version No.</th>
+            <td mat-cell *matCellDef="let letter">{{ letter.currentVersion?.versionNo || '-' }}</td>
+          </ng-container>
+
+          <!-- Version Date Column -->
+          <ng-container matColumnDef="versionDate">
+            <th mat-header-cell *matHeaderCellDef>Version Date</th>
+            <td mat-cell *matCellDef="let letter">{{ letter.currentVersion?.createdDate || '-' }}</td>
+          </ng-container>
+
+          <!-- Effective Date Column -->
+          <ng-container matColumnDef="effectiveDate">
+            <th mat-header-cell *matHeaderCellDef>Effective Date</th>
+            <td mat-cell *matCellDef="let letter">{{ letter.currentVersion?.effectiveDate || '-' }}</td>
+          </ng-container>
+
+          <!-- Termination Date Column -->
+          <ng-container matColumnDef="terminationDate">
+            <th mat-header-cell *matHeaderCellDef>Termination Date</th>
+            <td mat-cell *matCellDef="let letter">{{ letter.currentVersion?.terminationDate || '-' }}</td>
+          </ng-container>
+
+          <!-- Actions Column -->
+          <ng-container matColumnDef="actions">
+            <th mat-header-cell *matHeaderCellDef class="actions-column"></th>
+            <td mat-cell *matCellDef="let letter" class="actions-column">
+              <button
+                mat-icon-button
+                [matMenuTriggerFor]="currentRowMenu"
+                [matMenuTriggerData]="{letter: letter}"
+                aria-label="Row actions">
+                <mat-icon>more_vert</mat-icon>
+              </button>
+            </td>
+          </ng-container>
+
+          <tr mat-header-row *matHeaderRowDef="displayedColumns"></tr>
+          <tr
+            mat-row
+            *matRowDef="let letter; columns: displayedColumns"
+            [class.selected-row]="isLetterSelected(letter)"
+            (click)="onSelectLetter(letter)">
+          </tr>
+        </table>
+      </div>
+    </div>
+  }
+
+  <!-- VERSION HISTORY TABLE -->
+  @if (hasSearched && !loading() && hasHistoryData) {
+    <div class="table-section history-version-section">
+      <div class="table-header">
+        <h2 class="table-title">Version History</h2>
+      </div>
+
+      <!-- Table -->
+      <div class="table-container">
+        <table mat-table [dataSource]="filteredHistoryLetters" class="notification-letters-table"
+               aria-label="Version history notification letters">
+          <!-- Letter Code Column -->
+          <ng-container matColumnDef="letterCode">
+            <th mat-header-cell *matHeaderCellDef class="sortable-header"
+                [attr.aria-sort]="getAriaSort('history', 'letterCode')"
+                (click)="onSortHistory('letterCode')"
+                (keydown.enter)="onSortHistory('letterCode')"
+                (keydown.space)="$event.preventDefault(); onSortHistory('letterCode')"
+                tabindex="0">
+              Letter Code
+              <mat-icon class="sort-icon" aria-hidden="true">{{ getSortIcon('history', 'letterCode') }}</mat-icon>
+            </th>
+            <td mat-cell *matCellDef="let letter">{{ letter.letterCode }}</td>
+          </ng-container>
+
+          <!-- Title Column -->
+          <ng-container matColumnDef="description">
+            <th mat-header-cell *matHeaderCellDef>Title</th>
+            <td mat-cell *matCellDef="let letter">
+              <span class="description-text"
+                    [matTooltip]="letter.title || letter.description || ''"
+                    matTooltipPosition="above"
+                    matTooltipClass="letter-title-tooltip"
+                    [matTooltipShowDelay]="500"
+                    [matTooltipDisabled]="descriptionTooltipDisabled.get(letter.letterCode + '_history') === true"
+                    (mouseenter)="onDescriptionHover($event, letter.letterCode + '_history')">
+                {{ letter.title || letter.description || '-' }}
+              </span>
+            </td>
+          </ng-container>
+
+          <!-- Version No Column -->
+          <ng-container matColumnDef="versionNo">
+            <th mat-header-cell *matHeaderCellDef>Version No.</th>
+            <td mat-cell *matCellDef="let letter">{{ letter.currentVersion?.versionNo || '-' }}</td>
+          </ng-container>
+
+          <!-- Version Date Column -->
+          <ng-container matColumnDef="versionDate">
+            <th mat-header-cell *matHeaderCellDef>Version Date</th>
+            <td mat-cell *matCellDef="let letter">{{ letter.currentVersion?.createdDate || '-' }}</td>
+          </ng-container>
+
+          <!-- Effective Date Column -->
+          <ng-container matColumnDef="effectiveDate">
+            <th mat-header-cell *matHeaderCellDef>Effective Date</th>
+            <td mat-cell *matCellDef="let letter">{{ letter.currentVersion?.effectiveDate || '-' }}</td>
+          </ng-container>
+
+          <!-- Termination Date Column -->
+          <ng-container matColumnDef="terminationDate">
+            <th mat-header-cell *matHeaderCellDef>Termination Date</th>
+            <td mat-cell *matCellDef="let letter">{{ letter.currentVersion?.terminationDate || '-' }}</td>
+          </ng-container>
+
+          <!-- Actions Column -->
+          <ng-container matColumnDef="actions">
+            <th mat-header-cell *matHeaderCellDef class="actions-column"></th>
+            <td mat-cell *matCellDef="let letter" class="actions-column">
+              <button
+                mat-icon-button
+                [matMenuTriggerFor]="historyRowMenu"
+                [matMenuTriggerData]="{letter: letter}"
+                aria-label="Row actions">
+                <mat-icon>more_vert</mat-icon>
+              </button>
+            </td>
+          </ng-container>
+
+          <tr mat-header-row *matHeaderRowDef="displayedColumns"></tr>
+          <tr
+            mat-row
+            *matRowDef="let letter; columns: displayedColumns"
+            [class.selected-row]="isLetterSelected(letter)"
+            (click)="onSelectLetter(letter)">
+          </tr>
+        </table>
+      </div>
+    </div>
+  }
+</main>
+
+<!-- ROW ACTION MENU - Current Version (includes Revise) -->
+<mat-menu #currentRowMenu="matMenu" class="notification-letter-menu" (closed)="onMenuClosed()">
+  <ng-template matMenuContent let-letter="letter">
+    <button mat-menu-item (click)="openReviseDialog(letter)">
+      <span>Revise Letter</span>
+    </button>
+    <button mat-menu-item (click)="openViewDialog(letter)">
+      <span>View Letter</span>
+    </button>
+    <button mat-menu-item (click)="openPreviewDialog(letter)">
+      <span>Preview Letter</span>
+    </button>
+  </ng-template>
+</mat-menu>
+
+<!-- ROW ACTION MENU - History Version (no Revise) -->
+<mat-menu #historyRowMenu="matMenu" class="notification-letter-menu" (closed)="onMenuClosed()">
+  <ng-template matMenuContent let-letter="letter">
+    <button mat-menu-item (click)="openViewDialog(letter)">
+      <span>View Letter</span>
+    </button>
+    <button mat-menu-item (click)="openPreviewDialog(letter)">
+      <span>Preview Letter</span>
+    </button>
+  </ng-template>
+</mat-menu>

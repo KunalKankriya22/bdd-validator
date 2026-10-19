@@ -1,0 +1,295 @@
+<app-page-header-with-breadcrumb [config]="headerConfig" />
+
+<section
+  class="wks-container"
+  [formGroup]="form"
+  [attr.aria-labelledby]="elementId('heading')"
+  role="region">
+
+  <!-- Header Section -->
+  <div class="header-section">
+    <div class="header-row">
+      <mat-form-field appearance="fill" class="batch-select-field">
+        <mat-label [id]="labelId('testBatchId')">Test Batch / Worksheet</mat-label>
+        <mat-select
+          formControlName="testBatchId"
+          [id]="elementId('testBatchId')"
+          [attr.aria-labelledby]="labelId('testBatchId')"
+          placeholder="Select Test Batch/Worksheet">
+          @for (option of testBatchOptions(); track option.tbId) {
+            <mat-option [value]="option.tbId">
+              {{ option.tbId }}@if (option.description) { - {{ option.description }} }
+            </mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <mat-form-field appearance="fill" class="sequence-field">
+        <mat-label [id]="labelId('startingSequence')">Starting Sequence</mat-label>
+        <input
+          matInput
+          type="text"
+          formControlName="startingSequence"
+          [id]="elementId('startingSequence')"
+          [attr.aria-labelledby]="labelId('startingSequence')"
+          [attr.aria-invalid]="f['startingSequence'].invalid && (f['startingSequence'].touched || submitted())"
+          [attr.aria-describedby]="f['startingSequence'].invalid && (f['startingSequence'].touched || submitted()) ? errorId('startingSequence') : null"
+          maxlength="4" />
+        @if (f['startingSequence'].invalid && (f['startingSequence'].touched || submitted())) {
+          <mat-error [id]="errorId('startingSequence')">
+            @if (f['startingSequence'].errors?.['required']) {
+              Starting Sequence is required
+            }
+            @if (f['startingSequence'].errors?.['min']) {
+              Starting Sequence must be at least 1
+            }
+            @if (f['startingSequence'].errors?.['max']) {
+              Starting Sequence cannot exceed 9999
+            }
+          </mat-error>
+        }
+      </mat-form-field>
+
+      <mat-form-field appearance="fill" class="lab-code-field">
+        <mat-label [id]="labelId('testingLabCode')">Testing Lab Code <span class="required-marker">*</span></mat-label>
+        <mat-select
+          formControlName="testingLabCode"
+          [id]="elementId('testingLabCode')"
+          [attr.aria-required]="true"
+          [attr.aria-labelledby]="labelId('testingLabCode')"
+          [attr.aria-invalid]="f['testingLabCode'].invalid && (f['testingLabCode'].touched || submitted())"
+          [attr.aria-describedby]="f['testingLabCode'].invalid && (f['testingLabCode'].touched || submitted()) ? errorId('testingLabCode') : null">
+          @for (option of labCodeOptions(); track option.labCode) {
+            <mat-option [value]="option.labCode">
+              {{ option.labCode }}@if (option.description) { - {{ option.description }} }
+            </mat-option>
+          }
+        </mat-select>
+        @if (f['testingLabCode'].invalid && (f['testingLabCode'].touched || submitted())) {
+          <mat-error [id]="errorId('testingLabCode')">
+            Testing Lab Code is required
+          </mat-error>
+        }
+      </mat-form-field>
+    </div>
+
+    <div class="header-actions">
+      <button
+        mat-stroked-button
+        (click)="onRetrieve()"
+        [id]="elementId('retrieve-btn')"
+        [disabled]="loading() || !f['testBatchId'].value"
+        type="button">
+        RETRIEVE
+      </button>
+
+      <button
+        mat-raised-button
+        color="primary"
+        (click)="onCreateNewBatch()"
+        [id]="elementId('create-batch-btn')"
+        [disabled]="saving() || loading()"
+        type="button">
+        @if (saving()) {
+          <mat-spinner diameter="20"></mat-spinner>
+        } @else {
+          CREATE NEW BATCH
+        }
+      </button>
+
+      <button
+        mat-button
+        (click)="onClear()"
+        [id]="elementId('clear-btn')"
+        [disabled]="loading() || saving()"
+        type="button">
+        CLEAR
+      </button>
+    </div>
+  </div>
+
+  <!-- Loading State -->
+  @if (loadingBatch()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading batch data"></mat-spinner>
+      <span class="sr-only">Loading batch data, please wait...</span>
+    </div>
+  }
+
+  <!-- Empty State -->
+  @if (showEmptyState()) {
+    <div class="empty-state" role="status">
+      <mat-icon aria-hidden="true">search</mat-icon>
+      <h3>No Results to Display</h3>
+      <p>Enter Test batch/worksheet to begin.</p>
+    </div>
+  }
+
+  <!-- Data Tables Section -->
+  @if (hasData() && !loadingBatch()) {
+    <div class="tables-section">
+      <!-- Select Tests Table -->
+      <div class="tests-section">
+        <div class="section-header">
+          <h3>Select Tests</h3>
+          <button
+            mat-icon-button
+            (click)="onAddTest()"
+            [id]="elementId('add-test-btn')"
+            matTooltip="Add Test"
+            aria-label="Add test to batch">
+            <mat-icon>add</mat-icon>
+          </button>
+        </div>
+
+        <div class="table-container tests-table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th class="test-id-col">
+                  Test ID ({{ tests().length }})
+                  <mat-icon aria-hidden="true" class="sort-icon">arrow_downward</mat-icon>
+                </th>
+                <th class="description-col">Description</th>
+                <th class="test-kit-col">Test Kit</th>
+                <th class="actions-col"></th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (row of tests(); track row.id) {
+                <tr>
+                  <td class="test-id-col">
+                    <mat-form-field appearance="fill" class="table-field">
+                      <mat-select
+                        [value]="row.testId"
+                        (selectionChange)="onTestChange(row, $event.value)"
+                        [id]="elementId('test-' + row.id)"
+                        placeholder="-">
+                        @for (test of testOptions(); track test.testId) {
+                          <mat-option [value]="test.testId">
+                            {{ test.testId }}
+                          </mat-option>
+                        }
+                      </mat-select>
+                    </mat-form-field>
+                  </td>
+                  <td class="description-col">
+                    {{ row.testDesc || '-' }}
+                  </td>
+                  <td class="test-kit-col">
+                    <div class="test-kit-cell">
+                      <span>{{ row.testKitId || '' }}</span>
+                      <button
+                        mat-stroked-button
+                        (click)="onTestKitLookup(row)"
+                        [id]="elementId('lookup-' + row.id)"
+                        [disabled]="!row.testId"
+                        class="lookup-btn"
+                        type="button">
+                        LOOKUP
+                      </button>
+                    </div>
+                  </td>
+                  <td class="actions-col">
+                    <button
+                      mat-icon-button
+                      (click)="onRemoveTest(row)"
+                      [id]="elementId('remove-test-' + row.id)"
+                      aria-label="Remove test"
+                      class="delete-btn">
+                      <mat-icon>delete</mat-icon>
+                    </button>
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Units Table -->
+      <div class="units-section">
+        <div class="section-header">
+          <h3>
+            Unit <span class="required-marker">*</span>
+          </h3>
+          <mat-icon aria-hidden="true" class="table-icon">table_chart</mat-icon>
+        </div>
+
+        <div class="unit-scan-container">
+          <app-unit-id-field
+            [validateFfValue]="'N'"
+            [label]="'Unit ID'"
+            [placeholder]="'Scan or type unit ID'"
+            (validated)="onUnitValidated($event)"
+            (cleared)="onUnitCleared()"
+            class="unit-scan-field"
+          />
+        </div>
+
+        <div class="table-container units-table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th class="sequence-col">Sequence</th>
+                <th class="unit-id-col">Unit ID</th>
+                <th class="collection-date-col">Collection Date</th>
+                <th class="actions-col"></th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (row of units(); track row.id) {
+                <tr>
+                  <td class="sequence-col">{{ row.seqNo }}</td>
+                  <td class="unit-id-col">{{ row.unitId }}</td>
+                  <td class="collection-date-col">{{ row.collDate || '-' }}</td>
+                  <td class="actions-col">
+                    <button
+                      mat-icon-button
+                      (click)="onRemoveUnit(row)"
+                      [id]="elementId('remove-unit-' + row.id)"
+                      aria-label="Remove unit"
+                      class="delete-btn">
+                      <mat-icon>delete</mat-icon>
+                    </button>
+                  </td>
+                </tr>
+              }
+              @if (units().length === 0) {
+                <tr class="empty-row">
+                  <td colspan="4">No units added yet. Scan a unit ID to begin.</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer Actions -->
+    <div class="footer-actions" role="group" [attr.aria-label]="'Form actions'">
+      <button
+        mat-button
+        (click)="onCancel()"
+        [id]="elementId('cancel-btn')"
+        [disabled]="loading() || saving()"
+        type="button">
+        CANCEL
+      </button>
+
+      <button
+        mat-raised-button
+        color="primary"
+        (click)="onSave()"
+        [id]="elementId('save-btn')"
+        [disabled]="!canSave()"
+        type="button">
+        @if (saving()) {
+          <mat-spinner diameter="20"></mat-spinner>
+        } @else {
+          SAVE
+        }
+      </button>
+    </div>
+  }
+</section>

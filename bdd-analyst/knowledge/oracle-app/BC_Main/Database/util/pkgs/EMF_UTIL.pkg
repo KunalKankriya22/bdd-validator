@@ -1,0 +1,2600 @@
+CREATE OR REPLACE PACKAGE emf_util IS
+/*-----------------------------------------------------------------------------
+PACKAGE		:	emf_util
+PURPOSE   	:	Enhanced Manufacturing Utilities
+DEVELOPER 	:	Ashok
+DEV. DATE 	:	23 Jan 2018
+NOTES     	:	Initial version.
+Ver       	:	01
+
+Modification History
+-------------------------------------------------------------------------------
+Modified by		on  		Version	Remarks
+-------------------------------------------------------------------------------
+Ashok           04/22/2020  02 - Check for process code eff_date and term_date (V02) 
+Ashok           09/09/2025  03 - Allow removal of unit interdiction without a source test id.. (V03) (MLT-8184 - 2022R4 and 2026R1)
+-----------------------------------------------------------------------------*/
+  -- Session tables to store process responses.
+  TYPE resp_aat IS TABLE OF emf_source_process.response%TYPE INDEX BY VARCHAR2(10);
+  TYPE proc_resp_aat IS TABLE OF resp_aat INDEX BY VARCHAR2(100);
+  proc_resp_aa proc_resp_aat;
+  ----
+  TYPE sql_stmt_aat IS TABLE OF emf_source_process.sql_stmt%TYPE INDEX BY PLS_INTEGER;
+  TYPE proc_sql_aat IS TABLE OF sql_stmt_aat INDEX BY VARCHAR2(10);
+  proc_sql_aa proc_sql_aat;
+
+  TYPE sqlOut_aat IS TABLE OF emf_source_process.sql_out%TYPE INDEX BY PLS_INTEGER;
+  TYPE proc_sqlOut_aat IS TABLE OF sqlOut_aat INDEX BY VARCHAR2(10);
+  proc_sqlOut_aa proc_sqlOut_aat;
+
+  -- AAT to keep track of process codes that needs to have the responses cached
+  -- could be an initial load or when respones are changed.
+  -- Use the loaded_ arrays to keep track of whcih one to load (TRUE - loaded, FALSE - reload again). 
+  -- once loaded, it will be marked to TRUE.
+  TYPE loaded_resp_aat IS TABLE OF BOOLEAN INDEX BY emf_source_process.process_code%TYPE;
+  loaded_responses loaded_resp_aat;
+  TYPE loaded_sql_aat IS TABLE OF BOOLEAN INDEX BY emf_source_process.process_code%TYPE;
+  loaded_sqls loaded_sql_aat;
+
+  -- table of strings passed as parameters.
+  TYPE strings_t IS TABLE OF VARCHAR2(2000);
+
+  -- table of placeholders (pulled from the query)
+  TYPE placeholder_aat IS TABLE OF VARCHAR2(100) INDEX BY PLS_INTEGER;
+  placeholders placeholder_aat;
+  --
+  TYPE typ_sql_tab IS TABLE OF VARCHAR2(200) INDEX BY PLS_INTEGER;
+
+  TYPE typ_nest_tab IS TABLE OF typ_sql_tab INDEX BY PLS_INTEGER;
+
+  PROCEDURE tab_metadata(sql_in IN VARCHAR2, nest_tab IN OUT typ_nest_tab);
+  ---------------------
+
+  PROCEDURE RECHECK_DONOR;
+
+  PROCEDURE run_process(name_in        IN VARCHAR2,
+                        action_in      IN VARCHAR2,
+                        actionSeq_in   IN VARCHAR2,
+                        bind_values_in IN strings_t);
+
+  PROCEDURE clear_process_cache(name_in IN VARCHAR2);
+
+  PROCEDURE write_to_screen(flag_in IN BOOLEAN);
+  PROCEDURE write_to_file(dir_in IN VARCHAR2, file_in IN VARCHAR2);
+
+  PROCEDURE generate_sql(name_in IN VARCHAR2);
+
+  PROCEDURE run_target_process;
+
+  PROCEDURE staging_insert(tblName_in  IN VARCHAR2,
+                           audKey_in   IN VARCHAR2,
+                           srcFnc_in   IN VARCHAR2,
+                           srcAppl_in  IN VARCHAR2,
+                           pgm_in      IN VARCHAR2,
+                           modeFlag_in IN VARCHAR2);
+
+  FUNCTION utrs_test_result(p_unit_id IN VARCHAR2,
+                            p_test_id IN VARCHAR2,
+                            p_chp_id  IN VARCHAR2) RETURN VARCHAR2;                         
+END emf_util;
+
+/
+
+
+CREATE OR REPLACE PACKAGE BODY emf_util IS
+  gv_process_in    emf_source_process.process_code%TYPE;
+  gv_action_in     emf_target_process.action_code%TYPE;
+  gv_actionSeq_in  emf_target_process.action_seq%TYPE; --V02
+  gv_process_order emf_target_process.process_order%TYPE;
+
+  TYPE lines_t IS TABLE OF VARCHAR2(20000) INDEX BY BINARY_INTEGER;
+
+  output       lines_t;
+  gb_to_screen BOOLEAN := FALSE;
+  gv_dir_in    VARCHAR2(200);
+  gv_file_in   VARCHAR2(200);
+  -- Now pl simply writes to the array.
+  PROCEDURE pl(str IN VARCHAR2) IS
+  BEGIN
+    output(NVL(output.LAST, 0) + 1) := str;
+  END;
+
+  PROCEDURE write_to_screen(flag_in IN BOOLEAN) IS
+  BEGIN
+    gb_to_screen := flag_in;
+  END write_to_screen;
+
+  PROCEDURE write_to_file(dir_in IN VARCHAR2, file_in IN VARCHAR2) IS
+  BEGIN
+    gv_dir_in  := dir_in;
+    gv_file_in := file_in;
+  END write_to_file;
+
+  PROCEDURE dump_output IS
+  BEGIN
+    IF gb_to_screen THEN
+      FOR indx IN output.FIRST .. output.LAST LOOP
+        dbms_output.put_line(output(indx));
+      END LOOP;
+    END IF;
+
+    IF gv_file_in IS NOT NULL THEN
+      -- Send output to the specified file.
+      DECLARE
+        fid UTL_FILE.file_type;
+      BEGIN
+        fid := UTL_FILE.fopen(gv_dir_in, gv_file_in, 'W');
+
+        FOR indx IN output.FIRST .. output.LAST LOOP
+          UTL_FILE.put_line(fid, output(indx));
+        END LOOP;
+
+        UTL_FILE.fclose(fid);
+      EXCEPTION
+        WHEN OTHERS THEN
+          dbms_output.put_line('Failure to write output to ' || gv_dir_in || '/' ||
+                               gv_file_in);
+          UTL_FILE.fclose(fid);
+      END;
+    END IF;
+
+    output.DELETE;
+
+  END dump_output;
+
+  PROCEDURE clear_process_cache(name_in IN VARCHAR2) IS
+  BEGIN
+    IF name_in IS NOT NULL THEN
+      IF loaded_responses.EXISTS(name_in) THEN
+        loaded_responses(name_in) := FALSE;
+      END IF;
+
+      IF loaded_sqls.EXISTS(name_in) THEN
+        loaded_sqls(name_in) := FALSE;
+      END IF;
+    ELSE
+      proc_resp_aa.DELETE;
+      loaded_responses.DELETE;
+      loaded_sqls.DELETE;
+    END IF;
+  END clear_process_cache;
+
+  PROCEDURE emf_assert(condition_in IN BOOLEAN, msg_in IN VARCHAR2) IS
+  BEGIN
+    IF NOT condition_in OR condition_in IS NULL THEN
+      pl('emf_util Error: ' || msg_in);
+
+      raise_application_error(-20000, 'emf_util Error: ' || msg_in);
+    END IF;
+  END emf_assert;
+
+  FUNCTION only_identifier_from(string_in   IN VARCHAR2,
+                                position_in IN PLS_INTEGER) RETURN VARCHAR2 IS
+    c_delimiters CONSTANT VARCHAR2(100) := '!@%^&*()-=+\|`~{[]};:''",<.>/? ' ||
+                                           CHR(10) || CHR(13) || CHR(9);
+    l_end PLS_INTEGER;
+  BEGIN
+    l_end := INSTR(TRANSLATE(string_in,
+                             c_delimiters,
+                             RPAD(CHR(2), LENGTH(c_delimiters), CHR(2))),
+                   CHR(2),
+                   position_in);
+
+    IF l_end = 0 THEN
+      RETURN SUBSTR(string_in, position_in);
+    ELSE
+      RETURN SUBSTR(string_in, position_in, l_end - position_in);
+    END IF;
+  END only_identifier_from;
+
+  FUNCTION all_in_string(string_in    IN VARCHAR2,
+                         dyn_plsql_in IN BOOLEAN DEFAULT FALSE)
+    RETURN placeholder_aat IS
+    c_is_dynplsql CONSTANT BOOLEAN := NVL(dyn_plsql_in,
+                                          SUBSTR(string_in, -1) = ';');
+    l_start        PLS_INTEGER := 1;
+    l_loc          PLS_INTEGER;
+    l_placeholders placeholder_aat;
+
+    PROCEDURE add_placeholder(loc_in IN PLS_INTEGER) IS
+      l_row PLS_INTEGER := l_placeholders.FIRST;
+      c_last CONSTANT PLS_INTEGER := l_placeholders.LAST;
+      l_name         VARCHAR2(32767);
+      l_already_used BOOLEAN := FALSE;
+    BEGIN
+      l_name := UPPER(only_identifier_from(string_in, loc_in + 1));
+
+      IF c_is_dynplsql THEN
+        WHILE (NOT l_already_used AND l_row <= c_last) LOOP
+          l_already_used := l_name = l_placeholders(l_row);
+          l_row          := l_row + 1;
+        END LOOP;
+      END IF;
+
+      IF NOT l_already_used THEN
+        l_row := l_placeholders.COUNT + 1;
+        l_placeholders(l_row) := l_name;
+      END IF;
+    END add_placeholder;
+  BEGIN
+    LOOP
+      l_loc := INSTR(string_in, ':', l_start);
+      EXIT WHEN l_loc = 0 OR l_loc IS NULL;
+
+      IF SUBSTR(string_in, l_loc + 1, 1) != '=' THEN
+        add_placeholder(l_loc);
+      END IF;
+
+      l_start := l_loc + 1;
+    END LOOP;
+
+    RETURN l_placeholders;
+  END all_in_string;
+
+  FUNCTION get_process_order RETURN VARCHAR2 IS
+    CURSOR process_cur IS
+      SELECT process_order
+        FROM emf_target_process
+       WHERE process_code = gv_process_in
+         AND action_code = gv_action_in
+         AND action_seq = gv_actionSeq_in; -- V02
+
+    rec process_cur%ROWTYPE;
+  BEGIN
+    OPEN process_cur;
+    FETCH process_cur
+      INTO rec.process_order;
+    CLOSE process_cur;
+
+    RETURN rec.process_order;
+  END get_process_order;
+
+  PROCEDURE init_responses IS
+    CURSOR seq_cur IS
+      SELECT TO_CHAR(REPLACE(process_seq, '.', '_')) seq, response
+        FROM emf_source_process
+       WHERE process_code = gv_process_in
+         AND sql_stmt IS NULL;
+  BEGIN
+    pl('In init_responses routine');
+
+    -- Clear collection variable before loadign it.
+    IF proc_resp_aa.EXISTS(gv_process_in) THEN
+      proc_resp_aa(gv_process_in).DELETE;
+    END IF;
+
+    FOR rec IN seq_cur LOOP
+      proc_resp_aa(gv_process_in)(rec.seq) := rec.response;
+    END LOOP;
+    -- mark that this process code responses are loaded.
+    loaded_responses(gv_process_in) := TRUE;
+    --
+  END init_responses;
+
+  PROCEDURE init_sqls IS
+    CURSOR sql_cur IS
+      SELECT process_seq, sql_stmt, sql_out
+        FROM emf_source_process
+       WHERE process_code = gv_process_in
+         AND sql_stmt IS NOT NULL;
+  BEGIN
+    pl('In init_sqls routine');
+
+    -- Clear collection variable before loading it.
+    IF proc_sql_aa.EXISTS(gv_process_in) THEN
+      proc_sql_aa(gv_process_in).DELETE;
+    END IF;
+
+    IF proc_sqlOut_aa.EXISTS(gv_process_in) THEN
+      proc_sqlOut_aa(gv_process_in).DELETE;
+    END IF;
+
+    FOR rec IN sql_cur LOOP
+      proc_sql_aa(gv_process_in)(rec.process_seq) := rec.sql_stmt;
+      proc_sqlOut_aa(gv_process_in)(rec.process_seq) := rec.sql_out;
+    END LOOP;
+    -- mark that this process code SQL's are loaded.
+    loaded_sqls(gv_process_in) := TRUE;
+    --
+  END init_sqls;
+
+  FUNCTION sql_count RETURN NUMBER IS
+    ln_cnt NUMBER;
+  BEGIN
+    SELECT COUNT(1)
+      INTO ln_cnt
+      FROM emf_source_process
+     WHERE process_code = gv_process_in
+       AND sql_stmt IS NOT NULL;
+
+    RETURN ln_cnt;
+  END sql_count;
+
+  FUNCTION step_count RETURN NUMBER IS
+    ln_cnt NUMBER;
+  BEGIN
+    SELECT COUNT(DISTINCT TRUNC(process_seq))
+      INTO ln_cnt
+      FROM emf_source_process
+     WHERE process_code = gv_process_in;
+
+    RETURN ln_cnt;
+  END step_count;
+
+ FUNCTION csv_to_row(resp_in IN VARCHAR2) RETURN VARCHAR2 IS
+    lv_return VARCHAR2(2000);
+  BEGIN
+    lv_return := '( SELECT REGEXP_SUBSTR(''' || resp_in ||
+                 ''',''[^,]+'', 1, LEVEL) FROM DUAL
+                  CONNECT BY REGEXP_SUBSTR(''' ||
+                 resp_in || ''', ''[^,]+'', 1, LEVEL) IS NOT NULL)';
+    RETURN lv_return;
+  END csv_to_row;
+
+  FUNCTION in_quotes(string_in IN VARCHAR2) RETURN VARCHAR2 IS
+  BEGIN
+    RETURN '''' || string_in || '''';
+  END in_quotes;
+
+
+  FUNCTION get_data_type(tbl_in IN VARCHAR2, col_in IN VARCHAR2)
+    RETURN VARCHAR2 IS
+    lv_return VARCHAR2(100) := NULL;
+  BEGIN
+    SELECT data_type
+      INTO lv_return
+      FROM all_tab_columns
+     WHERE table_name = tbl_in
+       AND column_name = col_in;
+
+    RETURN lv_return;
+  EXCEPTION
+    WHEN OTHERS THEN
+      lv_return := NULL;
+      RETURN lv_return;
+  END get_data_type;
+
+  FUNCTION refactor_SQLOper(sqlOper_in IN VARCHAR2) RETURN VARCHAR2 IS
+    lv_sqlOper VARCHAR2(30);
+  BEGIN
+    CASE sqlOper_in
+      WHEN 'EQ' THEN
+        lv_sqlOper := '=';
+      WHEN 'NE' THEN
+        lv_sqlOper := '!=';
+      WHEN 'LT' THEN
+        lv_sqlOper := '<';
+      WHEN 'GT' THEN
+        lv_sqlOper := '>';
+      WHEN 'LE' THEN
+        lv_sqlOper := '<=';
+      WHEN 'GE' THEN
+        lv_sqlOper := '>=';
+      WHEN 'ANY OF' THEN
+        lv_sqlOper := 'IN';
+      ELSE
+        -- ALL OF, IN, NOT IN, COUNT GE, COUNT LE, COUNT LT , COUNT EQ
+        lv_sqlOper := sqlOper_in;
+    END CASE;
+
+    RETURN lv_sqlOper;
+  END refactor_SQLOper;
+
+  FUNCTION refactor_Response(tblName_in IN VARCHAR2, colName_in IN VARCHAR2, sqlOper_in IN VARCHAR2, resp_in IN VARCHAR2) RETURN VARCHAR2 IS
+    lv_dataType VARCHAR2(100);
+    lv_response VARCHAR2(20000);
+    lv_sqlOper  VARCHAR2(30);
+  BEGIN
+    IF tblName_in IS NOT NULL AND
+      colName_in IS NOT NULL AND
+      sqlOper_in IS NOT NULL AND
+      resp_in IS NOT NULL THEN
+
+        lv_sqlOper := sqlOper_in;
+        lv_dataType := get_data_type(tblName_in,colName_in);
+
+        IF lv_sqlOper IN ('IN', 'NOT IN') THEN
+          IF lv_dataType = 'VARCHAR2' THEN
+            lv_response := csv_to_row(resp_in);
+          ELSE
+            lv_response := '(' || resp_in || ')';
+          END IF;
+        ELSIF INSTR(lv_sqlOper, '=') != 0 OR INSTR(lv_sqlOper, '<') != 0 OR
+              INSTR(lv_sqlOper, '>') != 0 THEN
+          CASE
+            WHEN (INSTR(resp_in, ':') != 0) THEN
+              lv_response := resp_in;
+            ELSE
+              IF lv_dataType = 'VARCHAR2' THEN
+                lv_response := in_quotes(resp_in);
+              ELSIF lv_dataType = 'DATE' THEN
+                lv_response := TO_DATE(resp_in,'MMDDYYYY');
+              ELSE
+                lv_response := resp_in;
+              END IF;
+          END CASE;
+        ELSIF lv_sqlOper IS NULL THEN
+          lv_response := ':PARAM1';
+        ELSE
+          lv_response := resp_in;
+        END IF;
+
+        RETURN lv_response;
+    END IF;
+  END refactor_Response;
+
+
+  PROCEDURE run_process(name_in        IN VARCHAR2,
+                        action_in      IN VARCHAR2,
+                        actionSeq_in   IN VARCHAR2, --V02
+                        bind_values_in IN strings_t) IS
+    --dml_string VARCHAR2(32767);
+    cur_id PLS_INTEGER;
+    lv_sql VARCHAR2(32767);
+
+    desctab          DBMS_SQL.desc_tab;
+    colcnt           NUMBER;
+    string_value     VARCHAR2(2000);
+    number_value     NUMBER;
+    date_value       DATE;
+    fdbk             PLS_INTEGER;
+    bind_values_list emf_util.strings_t;
+
+    TYPE parm_rt IS RECORD(
+      ptype emf_parm_def.parm_type%TYPE,
+      pno   emf_parm_def.parm_no%TYPE);
+    TYPE parms_aat IS TABLE OF parm_rt INDEX BY emf_parm_def.parm_code%TYPE;
+
+    parms_aa parms_aat;
+    l_ptype  emf_parm_def.parm_type%TYPE;
+    l_pno    emf_parm_def.parm_no%TYPE;
+
+    --@ASH
+    TYPE string_aat IS TABLE OF VARCHAR2(200) INDEX BY PLS_INTEGER;
+    TYPE qcols_aat IS TABLE OF string_aat INDEX BY PLS_INTEGER;
+    qout_cname  qcols_aat;
+    qout_ctype  qcols_aat;
+    qout_cvalue qcols_aat;
+
+    TYPE lvar_rt IS RECORD(
+      typ VARCHAR2(10),
+      val VARCHAR2(100));
+    TYPE lvar_aat IS TABLE OF lvar_rt INDEX BY VARCHAR2(100);
+    lvar_aa lvar_aat;
+    /*
+    lvar_aa('L_INSERT_DATE').typ := 'D'; -- Date
+    lvar_aa('L_INSERT_DATE').val := '12121980';
+    */
+
+    -----
+
+    ---
+    --nProcCnt NUMBER := -1;
+    nPassCnt NUMBER := 0;
+
+    TYPE proc_order_vt IS TABLE OF VARCHAR2(100);
+    parent_order proc_order_vt := proc_order_vt();
+    temp_order   proc_order_vt := proc_order_vt();
+    child_order  proc_order_vt := proc_order_vt();
+
+    TYPE proc_order_t IS TABLE OF NUMBER;
+    passed_order proc_order_t := proc_order_t();
+
+    proc_seq NUMBER;
+
+    PROCEDURE closecur(cur_inout IN OUT INTEGER) IS
+    BEGIN
+      IF DBMS_SQL.IS_OPEN(cur_inout) THEN
+        DBMS_SQL.CLOSE_CURSOR(cur_inout);
+      END IF;
+    END closecur;
+
+    PROCEDURE initcur(cur_inout IN OUT INTEGER) IS
+    BEGIN
+      IF NOT DBMS_SQL.IS_OPEN(cur_inout) THEN
+        cur_inout := DBMS_SQL.OPEN_CURSOR;
+      END IF;
+    EXCEPTION
+      WHEN invalid_cursor THEN
+        cur_inout := DBMS_SQL.OPEN_CURSOR;
+    END initcur;
+
+    PROCEDURE open_and_parse(cur_inout        IN OUT INTEGER,
+                             sql_statement_in IN VARCHAR2,
+                             dbms_mode_in     IN INTEGER := NULL)
+
+     IS
+      v_already_open BOOLEAN := DBMS_SQL.IS_OPEN(cur_inout);
+    BEGIN
+      pl(sql_statement_in);
+
+      placeholders := all_in_string(sql_statement_in);
+
+      -- Check if all the placeholders are defined in the parameters tabel..
+      FOR indx IN 1 .. placeholders.COUNT LOOP
+        IF NOT parms_aa.EXISTS(placeholders(indx)) THEN
+          IF NOT lvar_aa.EXISTS(placeholders(indx)) THEN
+            emf_assert(FALSE, 'placeholder not found in parameters list.');
+          END IF;
+        END IF;
+      END LOOP;
+
+      initcur(cur_inout);
+
+      DBMS_SQL.PARSE(cur_inout,
+                     sql_statement_in,
+                     NVL(dbms_mode_in, DBMS_SQL.NATIVE));
+    EXCEPTION
+      WHEN OTHERS THEN
+        pl(SQLERRM);
+        pl(sql_statement_in);
+        IF NOT v_already_open THEN
+          closecur(cur_inout);
+        END IF;
+        RAISE;
+    END open_and_parse;
+
+    PROCEDURE load_parm_defs IS
+    BEGIN
+      -- load table (emf_parm_Def)
+      pl('in load parm def FOR ' || GV_PROCESS_IN);
+      FOR rec IN (SELECT parm_no, parm_code, parm_type
+                    FROM emf_parm_def
+                   WHERE proc_code = gv_process_in) LOOP
+        --pl('param no ' || rec.parm_no);
+        parms_aa(rec.parm_code).ptype := rec.parm_type;
+        parms_aa(rec.parm_code).pno := rec.parm_no;
+      END LOOP;
+    END load_parm_defs;
+
+    PROCEDURE bind_variables IS
+    BEGIN
+      pl('');
+      pl('Binding placeholders with input parameter values');
+
+      FOR indx IN 1 .. placeholders.COUNT LOOP
+        IF parms_aa.EXISTS(placeholders(indx)) THEN
+          l_ptype := parms_aa(placeholders(indx)).ptype;
+          l_pno   := parms_aa(placeholders(indx)).pno;
+
+          -- V02
+          -- If NOVAL is in bind values, check the previous query output for possible values and update bind_values_list.
+          pl('bind value check - ' || l_pno || ' -- ' ||
+             bind_values_list(l_pno));
+          /*
+          IF bind_values_list(l_pno) = 'NOVAL' THEN
+            -- check qout_cname, qout_cvalue for the value.
+            FOR oindx IN qout_cname.FIRST .. qout_cname.LAST LOOP
+              FOR iindx IN qout_cname(oindx).FIRST .. qout_cname(oindx).LAST LOOP
+                IF qout_cname(oindx)(iindx) = SUBSTR(placeholders(indx),3) THEN
+                   bind_values_list(l_pno) := qout_cvalue(oindx)(iindx);
+                   EXIT;
+                END IF;
+              END LOOP;
+            END LOOP;
+          END IF;
+          */
+          ---
+
+          pl(indx || ' - ' || placeholders(indx) || ' ---> ' ||
+             bind_values_list(l_pno)); -- V02
+
+          IF l_ptype = 'DATE' THEN
+            DBMS_SQL.bind_variable(cur_id,
+                                   placeholders(indx),
+                                   TO_DATE(bind_values_list(l_pno), -- V02
+                                           'MMDDYYYY'));
+          ELSIF l_ptype = 'NUMBER' THEN
+            DBMS_SQL.bind_variable(cur_id,
+                                   placeholders(indx),
+                                   TO_NUMBER(bind_values_list(l_pno))); -- V02
+          ELSE
+            -- Default is STRING
+            DBMS_SQL.bind_variable(cur_id,
+                                   placeholders(indx),
+                                   bind_values_list(l_pno)); -- V02
+          END IF;
+        ELSIF lvar_aa.EXISTS(placeholders(indx)) THEN
+          l_ptype := lvar_aa(placeholders(indx)).typ;
+
+          IF l_ptype = 'DATE' THEN
+            DBMS_SQL.bind_variable(cur_id,
+                                   placeholders(indx),
+                                   TO_DATE(lvar_aa(placeholders(indx)).val,
+                                           'MMDDYYYY'));
+          ELSIF l_ptype = 'NUMBER' THEN
+            DBMS_SQL.bind_variable(cur_id,
+                                   placeholders(indx),
+                                   TO_NUMBER(lvar_aa(placeholders(indx)).val));
+          ELSE
+            DBMS_SQL.bind_variable(cur_id,
+                                   placeholders(indx),
+                                   lvar_aa(placeholders(indx)).val);
+          END IF;
+
+        END IF;
+
+      END LOOP;
+    END bind_variables;
+
+    PROCEDURE define_columns_and_execute IS
+    BEGIN
+      pl('');
+      pl('Executing Query...');
+      -- Describe COLUMNS
+      DBMS_SQL.describe_columns(cur_id, colcnt, desctab);
+      FOR indx IN 1 .. colcnt LOOP
+        IF desctab(indx).col_type = 2 THEN
+          DBMS_SQL.define_column(cur_id, indx, number_value);
+        ELSIF desctab(indx).col_type = 12 THEN
+          DBMS_SQL.define_column(cur_id, indx, date_value);
+        ELSE
+          DBMS_SQL.define_column(cur_id, indx, string_value, 100);
+        END IF;
+      END LOOP;
+
+      fdbk := DBMS_SQL.EXECUTE(cur_id);
+
+    END define_columns_and_execute;
+
+    PROCEDURE display_output(query_no_in IN PLS_INTEGER) IS
+      lv_line     VARCHAR2(2000);
+      lv_colName  VARCHAR2(200);
+      lv_colType  VARCHAR2(20);
+      lv_colValue VARCHAR2(2000);
+      lv_sqlOut   VARCHAR2(200);
+      lv_indx     emf_parm_def.parm_code%TYPE;
+      PROCEDURE load_query_output(query_no    IN PLS_INTEGER,
+                                  colPos_in   IN PLS_INTEGER,
+                                  colName_in  IN VARCHAR2,
+                                  colType_in  IN VARCHAR2,
+                                  colValue_in IN VARCHAR2)
+
+       IS
+      BEGIN
+        qout_cname(query_no)(colPos_in) := colName_in;
+        qout_cvalue(query_no)(colPos_in) := colValue_in;
+        qout_ctype(query_no)(colPos_in) := colType_in;
+
+        lv_sqlOut := proc_sqlOut_aa(gv_process_in) (query_no);
+
+        IF lv_sqlOut IS NOT NULL AND INSTR(lv_sqlOut, ':L_') != 0 THEN
+          lvar_aa('L_' || colName_in).typ := colType_in;
+          lvar_aa('L_' || colName_in).val := colValue_in;
+        END IF;
+
+      END load_query_output;
+    BEGIN
+      pl('');
+      pl('Fetching Rows...');
+      LOOP
+        fdbk := DBMS_SQL.fetch_rows(cur_id);
+        EXIT WHEN fdbk = 0;
+
+        --DBMS_SQL.last_row_count = 1
+
+        lv_line := NULL;
+
+        FOR indx IN 1 .. colcnt LOOP
+          lv_colName := desctab(indx).col_name;
+
+          IF desctab(indx).col_type = 2 THEN
+            DBMS_SQL.column_value(cur_id, indx, number_value);
+            lv_colValue := TO_CHAR(number_value);
+            lv_colType  := 'NUMBER';
+          ELSIF desctab(indx).col_type = 12 THEN
+            DBMS_SQL.column_value(cur_id, indx, date_value);
+            lv_colvalue := TO_CHAR(date_value, 'MMDDYYYY');
+            lv_colType  := 'DATE';
+          ELSE
+            DBMS_SQL.column_value(cur_id, indx, string_value);
+            lv_colValue := string_value;
+            lv_colType  := 'STRING';
+          END IF;
+
+          lv_line := lv_line || ' ' || 'Col Name: ' || lv_colName ||
+                     ' ,  Type: ' || lv_colType || ' ,  Value: ' ||
+                     NVL(lv_colValue, ' ');
+
+          -- V02
+          -- If NOVAL is in bind values, check the previous query outputs for possible values and update bind_values_list.
+          FOR list_indx IN 1 .. bind_values_list.COUNT LOOP
+            IF bind_values_list(list_indx) = 'NOVAL' THEN
+              --  Get the parameter name for that index.
+              lv_indx := parms_aa.FIRST; -- lv_indx is P_trn_id, p_unit_id, p_chp_id;
+              WHILE lv_indx IS NOT NULL LOOP
+                IF parms_aa(lv_indx).pno = list_indx THEN
+                  -- comparing bind values list indx with parameter number to get the param name.
+                  IF SUBSTR(lv_indx, 3) = lv_colName THEN
+                    -- If the param name is a match with select query col name - assign the value to the parameter.
+                    bind_values_list(list_indx) := lv_colValue;
+                  END IF;
+                END IF;
+                lv_indx := parms_aa.NEXT(lv_indx);
+              END LOOP;
+              --
+            END IF;
+          END LOOP;
+
+          load_query_output(query_no    => query_no_in,
+                            colPos_in   => indx,
+                            colName_in  => lV_colName,
+                            colType_in  => lV_colType,
+                            colValue_in => lV_colValue);
+
+        END LOOP;
+
+        pl(lv_line);
+      END LOOP;
+    END display_output;
+
+    PROCEDURE action_process(check_child_IN IN BOOLEAN := FALSE) IS
+
+      CURSOR action_val_cur IS
+        SELECT action_on, action_value
+          FROM emf_target_process
+         WHERE process_code = gv_process_in
+           AND action_code <> gv_action_in;
+
+      CURSOR action_cur IS
+        SELECT process_order,
+               action_seq,
+               action_code,
+               action_on,
+               action_value,
+               data_table_name,
+               data_column_name,
+               sql_oper,
+               response
+          FROM emf_target_process
+         WHERE process_code = gv_process_in
+           AND parent_action_seq IS NULL
+           AND action_seq = gv_actionSeq_in;
+
+      CURSOR child_action_cur IS
+        SELECT process_order,
+               action_seq,
+               action_code,
+               action_on,
+               action_value,
+               data_table_name,
+               data_column_name,
+               sql_oper,
+               response
+          FROM emf_target_process
+         WHERE process_code = gv_process_in
+           AND parent_action_seq = gv_actionSeq_in;
+
+      TYPE action_value_t IS TABLE OF emf_target_process.action_value%TYPE INDEX BY emf_target_process.action_on%TYPE;
+
+      action_value_aat action_value_t;
+
+      PROCEDURE action_proc(target_rec IN action_cur%ROWTYPE) IS
+        lv_sql VARCHAR2(10000);
+        lv_tblName VARCHAR2(100);
+        lv_colName VARCHAR2(30);
+
+        lv_sqlOper VARCHAR2(30);
+        lv_response VARCHAR2(2000);
+
+        exit_action EXCEPTION;
+        PROCEDURE run_sql(lv_sql_in IN VARCHAR2) IS
+        BEGIN
+          ---------------------------------------
+          open_and_parse(cur_id, lv_sql_in);
+
+          bind_variables;
+
+          define_columns_and_execute;
+
+          display_output(query_no_in => 1);
+
+          closecur(cur_id);
+          ---------------------------------------
+        END run_sql;
+      BEGIN
+
+        IF target_rec.action_code IN ('SCHEDULE LATER') THEN
+          pl('');
+          pl('Executing action sequence ' || target_rec.action_seq);
+
+          pl('Inserting into chagas_utb');
+
+          INSERT INTO chagas_utb
+            (unit_id, coll_date, insert_date)
+          VALUES
+            (bind_values_list(parms_aa('P_UNIT_ID').pno),
+             TO_DATE(bind_values_list(parms_aa('P_COLL_DATE').pno),
+                     'MMDDYYYY'),
+             sysdate);
+        END IF;
+
+        IF target_rec.action_code = 'CANCEL' THEN
+          emf_assert(target_rec.data_table_name IS NOT NULL,
+                     'Data entity source not configured.');
+          emf_assert(target_rec.data_column_name IS NOT NULL,
+                     'Data entity column not configured.');
+
+          pl('');
+          pl('Executing action sequence ' || target_rec.action_seq);
+          IF target_rec.action_on = 'TEST_ID' AND target_rec.data_table_name = 'UTRS' THEN
+             BEGIN
+               IF target_rec.data_column_name IS NOT NULL AND
+                  target_rec.sql_oper IS NOT NULL AND
+                  target_rec.response IS NOT NULL THEN
+
+                  lv_sqlOper := refactor_SQLOper(target_rec.sql_oper);
+                  lv_response := refactor_Response(target_rec.data_table_name,
+                                                   target_rec.data_column_name,
+                                                   lv_sqlOper,
+                                                   target_rec.response
+                                                   );
+                EXECUTE IMMEDIATE 'UPDATE UTRS ' ||
+                                  'SET cancel_flag = ''Y'' ' ||
+                                  ' WHERE unit_id = :P_UNIT_ID ' ||
+                                  ' AND ' || target_rec.action_on || ' = ''' || target_rec.action_value || '''' ||
+                                  ' AND ' || target_rec.data_column_name || ' ' || lv_sqlOper || ' ' || lv_response  
+                  USING bind_values_list(parms_aa('P_UNIT_ID').pno);
+               ELSE
+                EXECUTE IMMEDIATE 'UPDATE UTRS ' ||
+                                  'SET cancel_flag = ''Y'' ' ||
+                                  ' WHERE unit_id = :P_UNIT_ID ' ||
+                                  ' AND chapter_id = :P_CHAPTER_ID ' ||
+                                  ' AND ' || target_rec.action_on || ' = ''' || target_rec.action_value || ''''
+                  USING bind_values_list(parms_aa('P_UNIT_ID').pno);               
+               END IF;                                                                  
+               pl('Updated in table - ' || target_rec.data_table_name);
+            EXCEPTION
+              WHEN OTHERS THEN
+                pl(DBMS_UTILITY.format_error_stack());
+                pl(DBMS_UTILITY.format_error_backtrace());
+            END;
+          END IF;            
+        END IF;
+
+
+        IF target_rec.action_code = 'REMOVE' THEN
+          emf_assert(target_rec.data_table_name IS NOT NULL,
+                     'Data entity source not configured.');
+          emf_assert(target_rec.data_column_name IS NOT NULL,
+                     'Data entity column not configured.');
+
+          pl('');
+          pl('Executing action sequence ' || target_rec.action_seq);
+          pl('action value ' || action_value_aat('TEST_ID'));
+
+          /*
+          lv_sql := 'SELECT COUNT(1) FROM UTRS'
+                  || ' WHERE unit_id = :P_UNIT_ID'
+                  || '   AND coll_date = :P_COLL_DATE'
+                  || '   AND result_status_1 IS NOT NULL'
+                  || '   AND cancel_flag IS NULL'
+                  || '   AND test_id '|| ' = ''' || target_rec.action_value || '''';
+
+          ---------------------------------------
+          open_and_parse (cur_id, lv_sql);
+
+          bind_variables;
+
+          define_columns_and_execute;
+
+          display_output(query_no_in => 1);
+
+          closecur (cur_id);
+          ---------------------------------------
+
+          pl('Before Insert query check output - ' || qout_cvalue(1)(1));
+
+          IF qout_cvalue(1)(1) > 0 THEN
+          */
+          /* 11/07/2017
+          1) DELETE component interdictions  (ONLY 3 possible scenarios)
+             a) With product type as filter (WHERE product_type IN ('','');
+             b) With product code as filter (WHERE product_code IN ('', '');
+             c) Without any filter (just delete the configuired interdiction from component interdictions for the unit ID);
+          */
+          IF target_rec.action_on = 'INTER_CODE' AND target_rec.data_table_name = 'COMPONENT_INTERDICTIONS' THEN
+            IF target_rec.data_column_name = 'PRODUCT_TYPE' AND
+               target_rec.sql_oper IS NOT NULL AND
+               target_rec.response IS NOT NULL THEN
+              --
+              lv_sqlOper := refactor_SQLOper(target_rec.sql_oper);
+              lv_response := refactor_Response('VALID_PRODUCTS',
+                                               'PRODUCT_TYPE',
+                                               lv_sqlOper,
+                                               target_rec.response
+                                               );    
+              BEGIN
+                EXECUTE IMMEDIATE 'DELETE FROM component_interdictions ci' ||
+                                  ' WHERE ci.unit_id = :P_UNIT_ID ' ||
+                                  ' AND ci.coll_date = :P_COLL_DATE ' ||
+                                  ' AND ci.inter_code = ''' || target_rec.action_value || '''' ||
+                                  ' AND SUBSTR(ci.product_code, 1, 5) IN' ||
+                                  ' (SELECT vp.product_code FROM valid_products vp ' ||
+                                  '   WHERE vp.product_type ' || lv_sqlOper || lv_response ||
+                                  '  )'
+                  USING bind_values_list(parms_aa('P_UNIT_ID').pno), TO_DATE(bind_values_list(parms_aa('P_COLL_DATE').pno), 'MMDDYYYY');
+
+
+                pl('Deleted from table - ' || target_rec.data_table_name);
+              EXCEPTION
+                WHEN OTHERS THEN
+                  pl(DBMS_UTILITY.format_error_stack());
+                  pl(DBMS_UTILITY.format_error_backtrace());
+              END; 
+              RAISE exit_action;
+            END IF;
+
+            IF target_rec.data_column_name = 'PRODUCT_CODE' AND
+               target_rec.sql_oper IS NOT NULL AND
+               target_rec.response IS NOT NULL THEN
+              --
+              lv_sqlOper := refactor_SQLOper(target_rec.sql_oper);
+              lv_response := refactor_Response('COMPONENT_INTERDICTIONS',
+                                               'PRODUCT_CODE',
+                                               lv_sqlOper,
+                                               target_rec.response
+                                               );  
+              BEGIN
+                EXECUTE IMMEDIATE 'DELETE FROM component_interdictions ci' ||
+                                  ' WHERE ci.unit_id = :P_UNIT_ID ' ||
+                                  ' AND ci.coll_date = :P_COLL_DATE ' ||
+                                  ' AND ci.inter_code = ''' || target_rec.action_value || '''' ||
+                                  ' AND SUBSTR(ci.product_code, 1, 5) ' || lv_sqlOper || lv_response 
+                  USING bind_values_list(parms_aa('P_UNIT_ID').pno), TO_DATE(bind_values_list(parms_aa('P_COLL_DATE').pno), 'MMDDYYYY');
+
+
+                pl('Deleted from table - ' || target_rec.data_table_name);
+              EXCEPTION
+                WHEN OTHERS THEN
+                  pl(DBMS_UTILITY.format_error_stack());
+                  pl(DBMS_UTILITY.format_error_backtrace());
+              END; 
+              RAISE exit_action;
+            END IF; 
+
+            BEGIN
+                EXECUTE IMMEDIATE 'DELETE FROM component_interdictions ci' ||
+                                  ' WHERE ci.unit_id = :P_UNIT_ID ' ||
+                                  ' AND ci.coll_date = :P_COLL_DATE ' ||
+                                  ' AND ci.inter_code = ''' || target_rec.action_value || '''' 
+                  USING bind_values_list(parms_aa('P_UNIT_ID').pno), TO_DATE(bind_values_list(parms_aa('P_COLL_DATE').pno), 'MMDDYYYY');
+
+              pl('Deleted from table - ' || target_rec.data_table_name);
+            EXCEPTION
+              WHEN OTHERS THEN
+                pl(DBMS_UTILITY.format_error_stack());
+                pl(DBMS_UTILITY.format_error_backtrace());
+            END;            
+          END IF;
+
+          /*
+          1) DELETE unit interdictions  (ONLY 1 possible scenarios)
+             a) Delete the configured interdiction from the unit interdictions for the unit ID (also checks for source_test_id).
+          */          
+          IF target_rec.action_on = 'INTER_CODE' AND target_rec.data_table_name = 'UNIT_INTERDICTIONS' THEN --V03
+            IF action_value_aat.EXISTS('TEST_ID') THEN
+              BEGIN
+                EXECUTE IMMEDIATE 'DELETE FROM ' || target_rec.data_table_name ||
+                                  ' WHERE unit_id = :P_UNIT_ID ' ||
+                                  ' AND coll_date = :P_COLL_DATE ' ||
+                                  ' AND source_test_id = :P_TEST_ID ' ||
+                                  ' AND ' || target_rec.action_on || ' = ''' ||
+                                  target_rec.action_value || ''''
+                  USING bind_values_list(parms_aa('P_UNIT_ID').pno), TO_DATE(bind_values_list(parms_aa('P_COLL_DATE').pno), 'MMDDYYYY'), action_value_aat('TEST_ID');
+
+                pl('Deleted from table - ' || target_rec.data_table_name || ' with source_test_id ' || action_value_aat('TEST_ID'));
+              EXCEPTION
+                WHEN OTHERS THEN
+                  pl(DBMS_UTILITY.format_error_stack());
+                  pl(DBMS_UTILITY.format_error_backtrace());
+              END;
+            ELSE
+              BEGIN
+                EXECUTE IMMEDIATE 'DELETE FROM ' || target_rec.data_table_name ||
+                                  ' WHERE unit_id = :P_UNIT_ID ' ||
+                                  ' AND coll_date = :P_COLL_DATE ' ||
+                                  ' AND ' || target_rec.action_on || ' = ''' ||
+                                  target_rec.action_value || ''''
+                  USING bind_values_list(parms_aa('P_UNIT_ID').pno), TO_DATE(bind_values_list(parms_aa('P_COLL_DATE').pno), 'MMDDYYYY');
+
+                pl('Deleted from table - ' || target_rec.data_table_name || ' without source_test_id');
+              EXCEPTION
+                WHEN OTHERS THEN
+                  pl(DBMS_UTILITY.format_error_stack());
+                  pl(DBMS_UTILITY.format_error_backtrace());
+              END;
+            END IF; 
+          END IF;
+          -- END IF;
+        END IF;
+
+        IF target_rec.action_code IN ('SCHEDULE', 'PLACE') THEN
+          emf_assert(target_rec.data_table_name IS NOT NULL,
+                     'Data entity source not configured.');
+          emf_assert(target_rec.data_column_name IS NOT NULL,
+                     'Data entity column not configured.');
+
+          pl('');
+          pl('Executing action sequence ' || target_rec.action_seq);
+
+
+          IF target_rec.action_on = 'TEST_ID' AND target_rec.data_table_name IN ('UTRS', 'UNIT_TEST_BASE') THEN
+             -- check for any existing record before inserting.
+              lv_sql := 'SELECT COUNT(1) FROM ' || target_rec.data_table_name ||
+                        ' WHERE unit_id = :P_UNIT_ID' ||
+                        '   AND coll_date = :P_COLL_DATE' || 
+                        '   AND chapter_id = :P_CHAPTER_ID' ||
+                        '   AND ' ||
+                        target_rec.data_column_name || ' = ''' ||
+                        target_rec.action_value || '''';
+
+              run_sql(lv_sql);
+
+              pl('Before Insert query check output - ' || qout_cvalue(1) (1));
+
+             IF qout_cvalue(1)(1) = 0 THEN
+                BEGIN
+                  EXECUTE IMMEDIATE 'INSERT into ' || target_rec.data_table_name || ' (UNIT_ID,COLL_DATE,CHAPTER_ID,TEST_SEQ_NO,TEST_ID,
+                                      INSERT_DATS,INSERT_USER_ID,AUDIT_KEY,PROGRAM_ID)
+                                VALUES  (:p_unit_id,:p_coll_date,:p_chapter_id,1,
+                                          :p_test_id,sysdate,''EMFUTL'',
+                                          audit_seq_lab.nextval,''DBTRG'')'
+                    USING bind_values_list(parms_aa('P_UNIT_ID').pno), TO_DATE(bind_values_list(parms_aa('P_COLL_DATE').pno), 'MMDDYYYY'), bind_values_list(parms_aa('P_CHAPTER_ID').pno), target_rec.action_value;
+
+                  pl('Inserted into table - ' || target_rec.data_table_name);
+                EXCEPTION
+                  WHEN OTHERS THEN
+                    pl(DBMS_UTILITY.format_error_stack());
+                    pl(DBMS_UTILITY.format_error_backtrace());
+                END;
+             END IF;
+          END IF;
+
+          IF target_rec.action_on = 'INTER_CODE' AND target_rec.data_table_name = 'UNIT_INTERDICTIONS' THEN
+           -- check for any existing record before inserting.
+            lv_sql := 'SELECT COUNT(1) FROM ' || target_rec.data_table_name ||
+                      ' WHERE unit_id = :P_UNIT_ID' ||
+                      '   AND coll_date = :P_COLL_DATE' || '   AND ' ||
+                      target_rec.data_column_name || ' = ''' ||
+                      target_rec.action_value || '''';
+
+            run_sql(lv_sql);
+
+            pl('Before Insert query check output - ' || qout_cvalue(1) (1));
+            IF qout_cvalue(1)(1) = 0 THEN
+              BEGIN
+                IF action_value_aat.EXISTS('TEST_ID') THEN
+                  EXECUTE IMMEDIATE 'INSERT into UNIT_INTERDICTIONS(UNIT_ID,COLL_DATE,CHAPTER_ID,INTER_CODE,
+                                      INSERT_DATS,INTER_USER_ID, SOURCE_TEST_ID,
+                                      AUDIT_KEY,PROGRAM_ID)
+                                VALUES  (:p_unit_id,:p_coll_date,:p_chapter_id,:p_inter_code,
+                                          sysdate,''EMFUTL'',:p_test_id,
+                                          audit_seq.nextval,''DBTRG'')'
+                    USING bind_values_list(parms_aa('P_UNIT_ID').pno), TO_DATE(bind_values_list(parms_aa('P_COLL_DATE').pno), 'MMDDYYYY'), bind_values_list(parms_aa('P_CHAPTER_ID').pno), target_rec.action_value, action_value_aat('TEST_ID');
+
+                ELSE
+                  EXECUTE IMMEDIATE 'INSERT into UNIT_INTERDICTIONS(UNIT_ID,COLL_DATE,CHAPTER_ID,INTER_CODE,
+                                      INSERT_DATS,INTER_USER_ID, SOURCE_TEST_ID,
+                                      AUDIT_KEY,PROGRAM_ID)
+                                VALUES  (:p_unit_id,:p_coll_date,:p_chapter_id,:p_inter_code,
+                                          sysdate,''EMFUTL'',NULL,
+                                          audit_seq.nextval,''DBTRG'')'
+                    USING bind_values_list(parms_aa('P_UNIT_ID').pno), TO_DATE(bind_values_list(parms_aa('P_COLL_DATE').pno), 'MMDDYYYY'), bind_values_list(parms_aa('P_CHAPTER_ID').pno), target_rec.action_value;
+                END IF;
+
+                pl('Inserted into table - ' || target_rec.data_table_name);
+              EXCEPTION
+                WHEN OTHERS THEN
+                  pl(DBMS_UTILITY.format_error_stack());
+                  pl(DBMS_UTILITY.format_error_backtrace());
+              END;
+            END IF;
+
+          END IF;
+
+          IF target_rec.action_on = 'INTER_CODE' AND target_rec.data_table_name = 'COMPONENT_INTERDICTIONS' THEN
+            -- check for any existing record before inserting.
+
+            IF target_rec.data_column_name IS NOT NULL AND
+              target_rec.sql_oper IS NOT NULL AND
+              target_rec.response IS NOT NULL THEN
+              --
+              IF INSTR(target_rec.data_column_name, '*') > 0 THEN
+                --
+                SELECT REGEXP_SUBSTR(TRIM(regexp_substr(description, '[^;]+',1,2)), '[^.]+',1,1) tbl_name,
+                       REGEXP_SUBSTR(TRIM(regexp_substr(description, '[^;]+',1,2)), '[^.]+',1,2) col_name
+                  INTO lv_tblName, lv_colName
+                  FROM valid_master_codes
+                 WHERE code_type = 'EMACT'
+                   AND TRIM(regexp_substr(description, '[^|]+',1,1)) = target_rec.action_code
+                   AND REGEXP_SUBSTR(TRIM(regexp_substr(description, '[^;]+',1,2)), '[^.]+',1,2) || '*'  = target_rec.data_column_name;
+
+                lv_sqlOper := refactor_SQLOper(target_rec.sql_oper);
+                lv_response := refactor_Response(lv_tblName,
+                                                 lv_colName,
+                                                 lv_sqlOper,
+                                                 target_rec.response
+                                                 );
+
+                lv_sql := 'SELECT COUNT(1) FROM ' || lv_tblName ||
+                          ' WHERE ' || lv_colName || ' ' || lv_sqlOper || ' ' || lv_response;
+
+              ELSE
+                lv_sqlOper := refactor_SQLOper(target_rec.sql_oper);
+                lv_response := refactor_Response(target_rec.data_table_name,
+                                                 target_rec.data_column_name,
+                                                 lv_sqlOper,
+                                                 target_rec.response
+                                                 );
+
+                lv_sql := 'SELECT COUNT(1) FROM ' || target_rec.data_table_name ||
+                          ' WHERE ' || target_rec.data_column_name || ' ' || lv_sqlOper || ' ' || lv_response;
+
+              END IF;
+
+              run_sql(lv_sql);
+
+              IF qout_cvalue(1)(1) = 0 THEN
+                RAISE exit_action;
+              END IF;              
+            END IF;
+
+
+
+           lv_sql := 'SELECT COUNT(1) FROM ' || target_rec.data_table_name ||
+                      ' WHERE unit_id = :P_UNIT_ID' ||
+                      '   AND product_code = :P_PRODUCT_CODE' ||
+                      '   AND coll_date = :P_COLL_DATE' || '   AND ' ||
+                      target_rec.action_on || ' = ''' ||
+                      target_rec.action_value || '''';
+
+            run_sql(lv_sql); 
+
+            pl('Before Insert query check output - ' || qout_cvalue(1) (1));
+            IF qout_cvalue(1)(1) = 0 THEN
+                BEGIN
+                  EXECUTE IMMEDIATE 'INSERT into component_interdictions(UNIT_ID,COLL_DATE,CHAPTER_ID, PRODUCT_CODE, INTER_CODE,
+                                      INSERT_DATS,INTER_USER_ID, PROGRAM_ID)
+                                VALUES  (:p_unit_id,:p_coll_date,:p_chapter_id,:p_product_code,:p_inter_code,
+                                          sysdate,''EMFUTL'',''DBTRG'')'
+                    USING bind_values_list(parms_aa('P_UNIT_ID').pno),
+                          TO_DATE(bind_values_list(parms_aa('P_COLL_DATE').pno), 'MMDDYYYY'),
+                          bind_values_list(parms_aa('P_CHAPTER_ID').pno),
+                          bind_values_list(parms_aa('P_PRODUCT_CODE').pno),
+                          target_rec.action_value;
+
+                  pl('Inserted into table - ' || target_rec.data_table_name);
+                EXCEPTION
+                  WHEN OTHERS THEN
+                    pl(DBMS_UTILITY.format_error_stack());
+                    pl(DBMS_UTILITY.format_error_backtrace());
+                END;
+            END IF; -- qout_cvalue
+          END IF; -- component_interdictions
+
+        END IF; -- SCHEDULE, PLACE
+      EXCEPTION
+        WHEN exit_action THEN
+          NULL;
+      END action_proc;
+
+    BEGIN
+      pl('action process start');
+      --
+      action_value_aat.DELETE;
+      FOR rec IN action_val_cur LOOP
+        pl('action on -> val' || rec.action_on || '-->' || rec.action_value);
+        action_value_aat(rec.action_on) := rec.action_value;
+      END LOOP;
+      --
+
+      IF check_child_IN THEN
+        pl('Checking for any child action');
+        DECLARE
+          recFound BOOLEAN := FALSE;
+        BEGIN
+          FOR rec IN child_action_cur LOOP
+            recFound := TRUE;
+            pl('Child action found. Checking for process order match.');
+            -- Check if the child record process order matches.
+            SELECT TRIM(REGEXP_SUBSTR(rec.process_order, '[^,]+', 1, LEVEL)) seq
+              BULK COLLECT
+              INTO child_order
+              FROM DUAL
+            CONNECT BY REGEXP_SUBSTR(rec.process_order, '[^,]+', 1, LEVEL) IS NOT NULL;
+
+            pl('temp order count ' || temp_order.COUNT);
+            pl('child order count ' || child_order.COUNT);
+            pl('parent order count ' || parent_order.COUNT);
+
+            IF temp_order.COUNT = 0 AND child_order.COUNT = 1 AND
+               child_order(1) IS NULL THEN
+              pl('Found a match on child process order - null. Executing child action.');
+              action_proc(rec);
+            ELSIF temp_order = child_order AND child_order SUBMULTISET OF
+             parent_order THEN
+              pl('Found a match on child process order. Executing child action.');
+              action_proc(rec);
+            ELSE
+              pl('Did not find any match on child process order. Exiting process...');
+            END IF;
+          END LOOP;
+
+          IF NOT recFound THEN
+            pl('No child action found.. Exiting process');
+          END IF;
+        END;
+      ELSE
+        FOR rec IN action_cur LOOP
+          action_proc(rec);
+        END LOOP;
+      END IF;
+    END action_process;
+
+  BEGIN
+    --DBMS_OUTPUT.PUT_LINE('STARTING');
+
+    gv_process_in    := name_in;
+    gv_action_in     := action_in;
+    gv_actionSeq_in  := actionSeq_in; -- V02
+    bind_values_list := bind_values_in; -- V02
+
+    emf_util.clear_process_cache(gv_process_in);
+
+    --output.DELETE;
+
+    --emf_util.write_to_screen(TRUE);
+
+    -- sets file variables (which are later used in dump_output to decide whether
+    -- to write to file or not.
+    --emf_util.write_to_file('/tmp/dtrak_util','chagas.log');
+
+    -- Validations (NOT NULL)
+    emf_assert(gv_process_in IS NOT NULL, 'Process code is not available.');
+    emf_assert(action_in IS NOT NULL, 'Action code is not available.');
+
+    gv_process_order := get_process_order;
+    emf_assert(gv_process_order IS NOT NULL,
+               ' Process order is not available for ' || gv_process_in);
+    --DBMS_OUTPUT.PUT_LINE('3');
+    pl('Before loading responses');
+    --DBMS_OUTPUT.PUT_LINE('4');
+    -- initialize responses.
+    IF loaded_responses.EXISTS(gv_process_in) AND
+       loaded_responses(gv_process_in) THEN
+      NULL;
+    ELSE
+      init_responses;
+    END IF;
+
+    pl('Before cnt check');
+    -- check if all sql stmts are available for process order.
+    IF SQL_COUNT <> STEP_COUNT THEN
+      emf_assert(FALSE, 'Missing SQL''s in the process');
+    END IF;
+    --DBMS_OUTPUT.PUT_LINE('5');
+    pl('Before loading sqls');
+    -- initialize SQLs.
+    IF loaded_sqls.EXISTS(gv_process_in) AND loaded_sqls(gv_process_in) THEN
+      NULL;
+    ELSE
+      init_sqls;
+    END IF;
+    --DBMS_OUTPUT.PUT_LINE('6');
+    PL('');
+    pl('Before loading params');
+    load_parm_defs; -- load table (emf_parm_Def)
+
+    pl('');
+    pl('Input Parameter values');
+    FOR value_indx IN 1 .. bind_values_list.COUNT LOOP
+      pl(value_indx || ' -  ' || bind_values_list(value_indx));
+    END LOOP;
+    --DBMS_OUTPUT.PUT_LINE('7');
+    DECLARE
+      row_indx        PLS_INTEGER;
+      lv_proc_element VARCHAR2(10);
+      lb_check_passed BOOLEAN;
+    BEGIN
+      SELECT TRIM(REGEXP_SUBSTR(gv_process_order, '[^,]+', 1, LEVEL)) seq
+        BULK COLLECT
+        INTO parent_order
+        FROM DUAL
+      CONNECT BY REGEXP_SUBSTR(gv_process_order, '[^,]+', 1, LEVEL) IS NOT NULL;
+
+      pl('Parent Order Count ' || parent_order.COUNT);
+
+      row_indx := parent_order.FIRST;
+
+      LOOP
+        EXIT WHEN row_indx IS NULL;
+
+        pl('');
+        -- Check each SQL statement by proc_order.
+        --DBMS_OUTPUT.PUT_LINE('SQL String No: - ' || parent_order(row_indx));
+        -- check for 'AND', 'OR'
+        lv_proc_element := parent_order(row_indx);
+        IF INSTR(parent_order(row_indx), 'OR') != 0 THEN
+          lb_check_passed := FALSE;
+          FOR rec IN (SELECT TRIM(REGEXP_SUBSTR(lv_proc_element,
+                                                '[^OR]+',
+                                                1,
+                                                LEVEL)) seq
+                        FROM DUAL
+                      CONNECT BY REGEXP_SUBSTR(lv_proc_element,
+                                               '[^OR]+',
+                                               1,
+                                               LEVEL) IS NOT NULL) LOOP
+            PL('SQL String No: - ' || rec.seq);
+            proc_seq := rec.seq;
+            lv_sql   := proc_sql_aa(gv_process_in) (proc_seq);
+            ---------------------------------------
+            open_and_parse(cur_id, lv_sql);
+
+            bind_variables;
+
+            define_columns_and_execute;
+
+            display_output(query_no_in => proc_seq);
+
+            closecur(cur_id);
+            ---------------------------------------
+            pl('Query output: ' || qout_cvalue(proc_seq) (1));
+            pl('Query output variable: ' || qout_cname(proc_seq) (1));
+
+            -- V02
+            IF qout_cname(proc_seq) (1) LIKE 'COUNT%' THEN
+              IF qout_cvalue(proc_seq) (1) = 0 THEN
+                NULL;
+              ELSE
+                lb_check_Passed := TRUE;
+                passed_order.EXTEND;
+                passed_order(row_indx) := proc_seq;
+              END IF;
+            ELSE
+              -- IF qout_cname(proc_seq) (1) NOT LIKE 'COUNT%' THEN
+              IF qout_cvalue(proc_seq) (1) IS NOT NULL THEN
+                NULL;
+              ELSE
+                lb_check_Passed := TRUE;
+                passed_order.EXTEND;
+                passed_order(row_indx) := proc_seq;
+              END IF;
+            END IF;
+            --
+
+          /* -- V02
+                      IF qout_cvalue(proc_seq) (1) = 0 THEN
+                        NULL;
+                      ELSE
+                        lb_check_Passed := TRUE;
+                        passed_order.EXTEND;
+                        passed_order(row_indx) := proc_seq;
+                      END IF;
+                     */
+          END LOOP;
+
+          IF lb_check_passed THEN
+            nPassCnt := nPassCnt + 1;
+            temp_order.EXTEND;
+            temp_order(row_indx) := lv_proc_element;
+          END IF;
+
+        ELSIF INSTR(parent_order(row_indx), 'AND') != 0 THEN
+          lb_check_passed := TRUE;
+          FOR rec IN (SELECT TRIM(REGEXP_SUBSTR(lv_proc_element,
+                                                '[^AND]+',
+                                                1,
+                                                LEVEL)) seq
+                        FROM DUAL
+                      CONNECT BY REGEXP_SUBSTR(lv_proc_element,
+                                               '[^AND]+',
+                                               1,
+                                               LEVEL) IS NOT NULL) LOOP
+            pl('SQL String No: - ' || rec.seq);
+            proc_seq := rec.seq;
+            lv_sql   := proc_sql_aa(gv_process_in) (proc_seq);
+            ---------------------------------------
+            open_and_parse(cur_id, lv_sql);
+
+            bind_variables;
+
+            define_columns_and_execute;
+
+            display_output(query_no_in => proc_seq);
+
+            closecur(cur_id);
+            ---------------------------------------
+            pl('Query output: ' || qout_cvalue(proc_seq) (1));
+            pl('Query output variable: ' || qout_cname(proc_seq) (1));
+
+            -- V02
+            IF qout_cname(proc_seq) (1) LIKE 'COUNT%' THEN
+              IF qout_cvalue(proc_seq) (1) = 0 THEN
+                lb_check_passed := FALSE;
+              ELSE
+                passed_order.EXTEND;
+                passed_order(row_indx) := proc_seq;
+              END IF;
+            ELSE
+              --IF qout_cname(proc_seq) (1) NOT LIKE 'COUNT%' THEN
+              IF qout_cvalue(proc_seq) (1) IS NOT NULL THEN
+                lb_check_passed := FALSE;
+              ELSE
+                passed_order.EXTEND;
+                passed_order(row_indx) := proc_seq;
+              END IF;
+            END IF;
+            --
+
+          /* -- V02
+                      IF qout_cvalue(proc_seq) (1) = 0 THEN
+                        lb_check_passed := FALSE;
+                      ELSE
+                        passed_order.EXTEND;
+                        passed_order(row_indx) := proc_seq;
+                      END IF;
+                      */
+          END LOOP;
+
+          IF lb_check_passed THEN
+            nPassCnt := nPassCnt + 1;
+            temp_order.EXTEND;
+            temp_order(row_indx) := lv_proc_element;
+          END IF;
+        ELSE
+          pl('SQL String No: - ' || parent_order(row_indx));
+          proc_seq := parent_order(row_indx);
+          lv_sql   := proc_sql_aa(gv_process_in) (proc_seq);
+
+          ---------------------------------------
+          open_and_parse(cur_id, lv_sql);
+
+          bind_variables;
+
+          define_columns_and_execute;
+
+          display_output(query_no_in => proc_seq);
+
+          closecur(cur_id);
+          ---------------------------------------
+
+          pl('Query output: ' || qout_cvalue(proc_seq) (1));
+          pl('Query output variable: ' || qout_cname(proc_seq) (1));
+
+          -- V02
+          IF qout_cname(proc_seq) (1) LIKE 'COUNT%' THEN
+            IF qout_cvalue(proc_seq) (1) = 0 THEN
+              pl('Exiting now... Failed step ' || proc_seq);
+              EXIT;
+            END IF;
+          END IF;
+
+          IF qout_cname(proc_seq) (1) NOT LIKE 'COUNT%' THEN
+            IF qout_cvalue(proc_seq) (1) IS NULL THEN
+              pl('Exiting now... Failed step ' || proc_seq);
+              EXIT;
+            END IF;
+          END IF;
+
+          nPassCnt := nPassCnt + 1;
+          pl('Passed Sqls Count - ' || nPassCnt);
+          temp_order.EXTEND;
+          temp_order(row_indx) := proc_seq;
+          passed_order.EXTEND;
+          passed_order(row_indx) := proc_seq;
+          ----------
+
+          /* -- V02
+            IF qout_cvalue(proc_seq) (1) = 0 THEN
+               pl('Exiting now... Failed step ' || proc_seq);
+               EXIT;
+            ELSE
+              nPassCnt := nPassCnt + 1;
+              temp_order.EXTEND;
+              temp_order(row_indx) := proc_seq;
+              passed_order.EXTEND;
+              passed_order(row_indx) := proc_seq;
+            END IF;
+          */
+        END IF;
+
+        row_indx := parent_order.NEXT(row_indx);
+      END LOOP;
+
+    END;
+
+    pl('');
+    IF parent_order.COUNT = nPassCnt THEN
+      pl('******************');
+      pl('All checks passed');
+      pl('******************');
+      -- Perform action.
+      action_process(check_child_IN => FALSE);
+    ELSE
+      pl('******************');
+      pl('Check(s) failed');
+      pl('******************');
+      action_process(check_child_IN => TRUE);
+    END IF;
+  EXCEPTION
+    WHEN OTHERS THEN
+      --dump_output; -- V02
+      PL(DBMS_UTILITY.format_error_stack()); -- V02
+      PL(DBMS_UTILITY.format_error_backtrace()); -- V02
+      DBMS_OUTPUT.put_line(DBMS_UTILITY.format_error_stack());
+      DBMS_OUTPUT.put_line(DBMS_UTILITY.format_error_backtrace());
+  END run_process;
+
+  PROCEDURE RECHECK_DONOR is
+    CURSOR uns_chagas IS
+      SELECT a.unit_id, a.coll_date, b.chapter_id
+        FROM chagas_utb a, donations b
+       WHERE a.unit_id = b.unit_id
+         AND b.donor_id IS NOT NULL;
+  BEGIN
+
+    FOR Z in uns_chagas loop
+
+      /*  commented this in EMF_UTIL - as the inserted records are already checked for this.
+      -- if it has excluded donation types, then the records are not inserted into chagas_utb table.
+      */
+      /*
+      -- check if any donation type should be excluded from the scheduling.
+      -- if so then just delete the record from the chagas_utb table, where the
+      -- record was inserted before (added on 12/29/2011)
+
+      select nvl(count(*),0) into nCount from unit_attributes where
+      unit_id=Z.unit_id and coll_date=Z.coll_date and
+      attrib_group in ('DON','PHER')  and attrib_code in
+            (select code from master_codes where
+                 code_type='CHCFG' and sysdate between eff_date and
+                 nvl(term_date,sysdate+1)
+            );
+      */
+      --SCHEDULE_CHAGAS(Z.unit_id,Z.coll_date,Z.chapter_id);
+      emf_util.run_process('CHAGAS',
+                           'SCHEDULE',
+                           'A01',
+                           emf_util.strings_t(Z.unit_id,
+                                              Z.chapter_id,
+                                              TO_CHAR(Z.coll_date,
+                                                      'MMDDYYYY')));
+      delete from chagas_utb
+       where unit_id = Z.unit_id
+         and coll_date = Z.coll_date;
+      commit;
+
+    END LOOP;
+  END RECHECK_DONOR;
+
+  PROCEDURE tab_metadata(sql_in IN VARCHAR2, nest_tab IN OUT typ_nest_tab) AS
+    lv_token VARCHAR2(100);
+    --ln_indx     PLS_INTEGER;
+    ocntr pls_integer := 0;
+    --icntr       pls_integer := 1;
+    --skip_rec    BOOLEAN;
+    --temp_indx   NUMBER;
+    lv_query    VARCHAR2(20000);
+    lv_tblname  VARCHAR2(2000);
+    lv_tblAlias VARCHAR2(100);
+    sql_tab     typ_sql_tab;
+
+    TYPE used_aat IS TABLE OF BOOLEAN INDEX BY VARCHAR2(100);
+    col_names_used used_aat;
+    lv_colName     VARCHAR2(100);
+    lv_colAlias    VARCHAR2(100);
+    lv_oper        VARCHAR2(30);
+    lv_value       VARCHAR2(500);
+
+  BEGIN
+
+    /*
+    lv_query := 'SELECT COUNT(1)
+                  FROM UTRS
+                  WHERE TEST_ID :P_OPER_TEST_ID :P_VALUE_TEST_ID
+                  AND UNIT_ID IN
+                    (SELECT unit_id FROM DONATIONS
+                      WHERE donor_id = (SELECT donor_id FROM donations WHERE unit_id = :P_UNIT_ID))
+                  AND
+                    RESULT_STATUS_1 :P_OPER_RESULT_STATUS_1 :P_VALUE_RESULT_STATUS_1';
+
+     */
+
+    --lv_query := sql_in;
+    lv_query := REPLACE(sql_in, ',', ' , ');
+
+    SELECT REGEXP_REPLACE(lv_query, '\s{1,}', '@') INTO lv_query FROM dual;
+
+    pl(lv_query);
+    --lv_query := 'SELECT@count(1)@FROM@utrs@WHERE@test_id@=@:PARAM1@AND@result_status@=@:PARAM2@AND@cancel_flag@IS@:PARAM3@AND@unit_id@=@:PARAM@';
+    nest_tab.DELETE;
+
+    /*
+     SELECT REGEXP_SUBSTR (lv_query,
+                           '\w*',
+                           INSTR (lv_query, 'FROM')+5) frm
+
+       INTO lv_tblname
+       FROM DUAL;
+
+     nest_tab(ocntr)(1) := lv_tblname;
+     pl('QUERY -> ' || lv_query);
+     --pl('nest_tab(0)(1) -> ' || nest_tab(0)(1));
+
+     SELECT SUBSTR(lv_query, INSTR(lv_query,'@WHERE@')+6) INTO lv_query
+      FROM DUAL;
+    */
+    lv_query := '@' || lv_query || '@';
+
+    pl(lv_query);
+
+    SELECT regexp_substr(s, '[^\@]+', 1, lvl) token
+      BULK COLLECT
+      INTO sql_tab
+      FROM (SELECT s, LEVEL lvl
+              FROM (SELECT lv_query s FROM dual)
+            CONNECT BY LEVEL < LENGTH(s) - LENGTH(REPLACE(s, '@')));
+
+    FOR indx IN 1 .. sql_tab.COUNT LOOP
+      lv_token := sql_tab(indx);
+
+      IF INSTR(sql_tab(indx), ':P_VALUE_') != 0 THEN
+        lv_colName := sql_tab(indx - 2); -- should be in tbl_alias.col format
+        -- check if its a column alias. Column aliases are enclosed in double quotes.
+        lv_colAlias := regexp_substr(lv_colName, '"([^"]*)"', 1, 1, '', 1);
+        lv_colName  := NVL(lv_colAlias, lv_colName);
+
+        lv_tblAlias := SUBSTR(lv_colName, 1, INSTR(lv_colName, '.') - 1);
+        lv_oper     := sql_tab(indx - 1);
+        lv_value    := sql_tab(indx);
+
+        IF col_names_used.EXISTS(lv_colName) THEN
+          NULL;
+        ELSE
+          lv_tblName := NULL;
+          FOR cntr IN REVERSE 1 .. indx LOOP
+            IF sql_tab(cntr) = lv_tblAlias THEN
+              IF sql_tab(cntr - 1) NOT IN ('FROM', ',') THEN
+                lv_tblName := sql_tab(cntr - 1);
+              ELSE
+                lv_tblName := sql_tab(cntr);
+              END IF;
+              EXIT;
+            END IF;
+          END LOOP;
+
+          col_names_used(lv_colName) := TRUE;
+          ocntr := ocntr + 1;
+          nest_tab(ocntr)(1) := lv_tblName; -- Table name.
+          nest_tab(ocntr)(2) := lv_colName; -- Column name
+          nest_tab(ocntr)(3) := lv_oper; -- Operator name
+          nest_tab(ocntr)(4) := lv_value; -- value
+        END IF;
+
+      END IF;
+
+     IF INSTR(sql_tab(indx), ':F_IN_') != 0 THEN -- input parameter to a function.
+        lv_colName := SUBSTR(sql_tab(indx), 7);
+        lv_tblName := 'FNC';
+        lv_oper    := '=';
+        lv_value   := NULL;
+
+        IF col_names_used.EXISTS(lv_colName) THEN
+          NULL;
+        ELSE
+          col_names_used(lv_colName) := TRUE;
+          ocntr := ocntr + 1;
+          nest_tab(ocntr)(1) := lv_tblName; -- Table name.
+          nest_tab(ocntr)(2) := lv_colName; -- Column name
+          nest_tab(ocntr)(3) := lv_oper; -- Operator name
+          nest_tab(ocntr)(4) := lv_value; -- value
+        END IF;
+      END IF;
+
+      IF INSTR(sql_tab(indx), ':F_RET_VALUE_') != 0 THEN -- input parameter to a function.
+        IF INSTR(sql_tab(indx), ':F_RET_VALUE_CHAR_') != 0 THEN
+         lv_colName := SUBSTR(sql_tab(indx),LENGTH(':F_RET_VALUE_CHAR_')+1);
+        ELSIF INSTR(sql_tab(indx), ':F_RET_VALUE_DATE_') != 0 THEN
+         lv_colName := SUBSTR(sql_tab(indx),LENGTH(':F_RET_VALUE_DATE_')+1);
+        ELSIF INSTR(sql_tab(indx), ':F_RET_VALUE_NUM_') != 0 THEN
+         lv_colName := SUBSTR(sql_tab(indx),LENGTH(':F_RET_VALUE_NUM_')+1);
+        END IF;
+        lv_tblName := 'FNC';
+        IF INSTR(sql_tab(indx-1), ':F_RET_OPER_') != 0 THEN
+          lv_oper := NULL;
+        ELSE
+          lv_oper := sql_tab(indx-1);
+        END IF;
+        lv_value   := NULL;
+
+        IF col_names_used.EXISTS(lv_colName) THEN
+          NULL;
+        ELSE
+          col_names_used(lv_colName) := TRUE;
+          ocntr := ocntr + 1;
+          nest_tab(ocntr)(1) := lv_tblName; -- Table name.
+          nest_tab(ocntr)(2) := lv_colName; -- Column name
+          nest_tab(ocntr)(3) := lv_oper; -- Operator name
+          nest_tab(ocntr)(4) := lv_value; -- value
+        END IF;
+      END IF;      
+
+    END LOOP;
+
+    pl('Count ' || nest_tab.COUNT);
+    FOR oindx IN 1 .. nest_tab.COUNT LOOP
+      FOR iindx IN 1 .. nest_tab(oindx).COUNT LOOP
+        pl('nest_tab(' || ltrim(to_char(oindx)) || ')(' ||
+           ltrim(to_char(iindx)) || ') -> ' || nest_tab(oindx) (iindx));
+      END LOOP;
+    END LOOP;
+
+  END tab_metadata;
+
+ PROCEDURE generate_sql(name_in IN VARCHAR2) AS
+    lv_gen_sql VARCHAR2(20000);
+    --lv_common_condition VARCHAR2(20000);
+
+    CURSOR seq_cur IS
+      SELECT DISTINCT ROUND(esp.process_seq) seq
+        FROM emf_source_process esp, emf_process_mapping epm
+       WHERE esp.looking_for = epm.mapping_name(+)
+         AND esp.process_code = gv_process_in
+         AND esp.data_table_name IS NOT NULL
+       ORDER BY seq;
+
+    CURSOR param_typ IS
+      SELECT esp.process_seq,
+             esp.data_column_name,
+             esp.sql_oper,
+             esp.response
+        FROM emf_source_process esp, emf_process_mapping epm
+       WHERE esp.looking_for = epm.mapping_name(+)
+         AND esp.process_code = gv_process_in
+         AND esp.param_flag IS NOT NULL
+       ORDER BY esp.process_seq;
+
+    TYPE typ_param_tab IS TABLE OF param_typ%ROWTYPE INDEX BY VARCHAR2(25);
+    param_by_name typ_param_tab;
+
+    FUNCTION apply_params(sql_in IN VARCHAR2) RETURN VARCHAR2 IS
+      lv_sql VARCHAR2(2000);
+      --ln_cnt NUMBER;
+
+      TYPE typ_sql_tab IS TABLE OF VARCHAR2(200) INDEX BY PLS_INTEGER;
+      sql_tab typ_sql_tab;
+
+      lv_col_name VARCHAR2(2000);
+      --lv_test2    VARCHAR2(2000);
+
+      lv_new_query VARCHAR2(20000);
+    BEGIN
+      lv_sql := sql_in;
+
+      -- replace all space characters with @
+      SELECT REGEXP_REPLACE(lv_sql, '\s{1,}', '@') INTO lv_sql FROM dual;
+
+      lv_sql := lv_sql || '@';
+
+      --DBMS_OUTPUT.PUT_LINE('sql ' || lv_sql);
+
+      -- splits the string into tokens using '@' as delimiter.
+      SELECT regexp_substr(s, '[^\@]+', 1, lvl) token
+        BULK COLLECT
+        INTO sql_tab
+        FROM (SELECT s, LEVEL lvl
+                FROM (SELECT lv_sql s FROM dual)
+              CONNECT BY LEVEL < LENGTH(s) - LENGTH(REPLACE(s, '@')));
+
+      FOR indx in 1 .. sql_tab.count LOOP
+        -- check for parameter in SQL. (p_oper_unit_id OR p_value_unit_id)
+        IF INSTR(sql_tab(indx), 'P_OPER_') > 0 THEN
+          -- Extract column name based on parameter syntax.
+          lv_col_name := SUBSTR(sql_tab(indx),
+                                INSTR(sql_tab(indx), 'P_OPER_') +
+                                LENGTH('P_OPER_'));
+
+          IF param_by_name.EXISTS(lv_col_name) THEN
+            sql_tab(indx) := param_by_name(lv_col_name).sql_oper;
+          END IF;
+        ELSIF INSTR(sql_tab(indx), 'P_VALUE_') > 0 THEN
+          lv_col_name := SUBSTR(sql_tab(indx),
+                                INSTR(sql_tab(indx), 'P_VALUE_') +
+                                LENGTH('P_VALUE_'));
+
+          IF param_by_name.EXISTS(lv_col_name) THEN
+            sql_tab(indx) := param_by_name(lv_col_name).response;
+          END IF;
+        END IF;
+      END LOOP;
+
+      -- Reconstruct SQL.
+      lv_new_query := NULL;
+      FOR indx IN 1 .. sql_tab.COUNT LOOP
+        IF lv_new_query IS NULL THEN
+          lv_new_query := sql_tab(indx);
+        ELSE
+          lv_new_query := lv_new_query || ' ' || sql_tab(indx);
+        END IF;
+      END LOOP;
+
+      --DBMS_OUTPUT.PUT_LINE('New query');
+      --DBMS_OUTPUT.PUT_LINE(lv_new_query);
+      RETURN lv_new_query;
+    END apply_params;
+
+    FUNCTION gen_sql(seq_in IN NUMBER) RETURN VARCHAR2 IS
+      lv_query     VARCHAR2(20000);
+      lv_response  VARCHAR2(20000);
+      lv_sqlOper   VARCHAR2(30);
+      --lv_data_type VARCHAR2(100);
+      lv_where     VARCHAR2(20000);
+      lv_where2    VARCHAR2(20000) := NULL;
+      lv_tbl_name  VARCHAR2(1000);
+      ln_cnt       NUMBER;
+
+
+      -- used for row type declaration.
+      CURSOR proc_cur IS
+        SELECT ROUND(esp.process_seq) seq,
+               esp.process_seq,
+               esp.looking_for,
+               esp.data_table_name,
+               esp.data_column_name,
+               esp.sql_oper,
+               esp.response,
+               epm.where_clause,
+               epm.sql_stmt
+          FROM emf_source_process esp, emf_process_mapping epm
+         WHERE esp.looking_for = epm.mapping_name(+)
+           AND esp.process_code = gv_process_in
+           AND esp.data_table_name IS NOT NULL
+         ORDER BY esp.process_seq;
+
+      CURSOR param_cur IS
+        SELECT epm.sql_stmt
+          FROM emf_source_process esp, emf_process_mapping epm
+         WHERE esp.process_code = epm.process_code
+           AND esp.process_code = gv_process_in
+           AND esp.looking_for = epm.mapping_name
+           AND esp.param_flag = 'Y'
+           AND esp.process_seq = seq_in;
+
+      TYPE typ_sql_tab IS TABLE OF proc_cur%ROWTYPE INDEX BY PLS_INTEGER;
+      sql_temp_tab typ_sql_tab;
+
+      lb_sqlFound BOOLEAN;
+
+     FUNCTION refactor_response2(sqlOper_in IN VARCHAR2,  dataType_in IN VARCHAR2, resp_in IN VARCHAR2) RETURN VARCHAR2 IS
+       v_response VARCHAR2(20000);
+     BEGIN
+
+      IF sqlOper_in IN ('IN', 'NOT IN') THEN
+        IF dataType_in = 'VARCHAR2' THEN
+          v_response := csv_to_row(resp_in);
+        ELSE
+          v_response := '(' || resp_in || ')';
+        END IF;
+      ELSIF INSTR(sqlOper_in, '=') != 0 OR INSTR(sqlOper_in, '<') != 0 OR
+            INSTR(sqlOper_in, '>') != 0 THEN
+        CASE
+          WHEN (INSTR(resp_in, ':') != 0) THEN
+            v_response := resp_in;
+          ELSE
+            IF dataType_in = 'VARCHAR2' THEN
+              v_response := in_quotes(resp_in);
+            ELSIF dataType_in = 'DATE' THEN
+              v_response := TO_DATE(resp_in,'MMDDYYYY');
+            ELSE
+              v_response := resp_in;
+            END IF;
+        END CASE;
+      ELSIF sqlOper_in IS NULL THEN
+        v_response := ':PARAM1';
+      ELSE
+        v_response := resp_in;
+      END IF;   
+      RETURN v_response;
+     END refactor_response2; 
+
+    BEGIN
+
+      -- Load sql_temp_tab with detailed sequences;
+      sql_temp_tab.DELETE;
+
+      SELECT ROUND(esp.process_seq) seq,
+             esp.process_seq,
+             esp.looking_for,
+             UPPER(esp.data_table_name),
+             UPPER(esp.data_column_name),
+             esp.sql_oper,
+             esp.response,
+             epm.where_clause,
+             epm.sql_stmt
+        BULK COLLECT
+        INTO sql_temp_tab
+        FROM emf_source_process esp, emf_process_mapping epm
+       WHERE esp.looking_for = epm.mapping_name(+)
+         AND esp.process_code = epm.process_code(+) -- AV
+         AND esp.process_code = gv_process_in
+         AND esp.data_table_name IS NOT NULL
+         AND ROUND(esp.process_seq) = seq_in
+       ORDER BY esp.process_seq;
+
+      --
+      -- check if sql needs to be constructed or already available
+      OPEN param_cur;
+      FETCH param_cur
+        INTO lv_query;
+      lb_sqlFound := param_cur%FOUND;
+      CLOSE param_cur;
+
+      IF lb_sqlFound THEN
+        --DBMS_OUTPUT.PUT_LINE('SQL found');
+        FOR indx IN 1 .. sql_temp_tab.COUNT LOOP
+
+          IF sql_temp_tab(indx).data_table_name = 'FNC' 
+            AND INSTR(lv_query, ':F_IN_' || sql_temp_tab(indx).data_column_name) <> 0 THEN
+            --lv_sqlOper := refactor_SQLOper(sql_temp_tab(indx).sql_oper);
+            lv_response := in_quotes( sql_temp_tab(indx).response);
+            lv_query := REPLACE(lv_query,
+                                ':F_IN_' || sql_temp_tab(indx).data_column_name,
+                                lv_response);                                          
+          -- special case for function.
+          ELSIF sql_temp_tab(indx).data_table_name = 'FNC' 
+            AND INSTR(lv_query, ':F_RET_OPER_CHAR_' || sql_temp_tab(indx).data_column_name) <> 0 THEN
+              lv_sqlOper := refactor_SQLOper(sql_temp_tab(indx).sql_oper);              
+             lv_response := refactor_response2(lv_sqlOper, 'VARCHAR2', sql_temp_tab(indx).response);
+               lv_query := REPLACE(lv_query,
+                                  ':F_RET_OPER_CHAR_' || sql_temp_tab(indx).data_column_name,
+                                  lv_sqlOper);  
+               lv_query := REPLACE(lv_query,
+                                    ':F_RET_VALUE_CHAR_' || sql_temp_tab(indx).data_column_name,
+                                    lv_response);             
+          ELSIF sql_temp_tab(indx).data_table_name = 'FNC' 
+            AND INSTR(lv_query, ':F_RET_OPER_DATE_' || sql_temp_tab(indx).data_column_name) <> 0 THEN
+              lv_sqlOper := refactor_SQLOper(sql_temp_tab(indx).sql_oper);            
+             lv_response := refactor_response2(lv_sqlOper, 'DATE', sql_temp_tab(indx).response);              
+               lv_query := REPLACE(lv_query,
+                                  ':F_RET_OPER_DATE_' || sql_temp_tab(indx).data_column_name,
+                                  lv_sqlOper);  
+               lv_query := REPLACE(lv_query,
+                                    ':F_RET_VALUE_DATE_' || sql_temp_tab(indx).data_column_name,
+                                    lv_response);
+          ELSIF sql_temp_tab(indx).data_table_name = 'FNC' 
+            AND INSTR(lv_query, ':F_RET_OER_NUM_' || sql_temp_tab(indx).data_column_name) <> 0 THEN
+              lv_sqlOper := refactor_SQLOper(sql_temp_tab(indx).sql_oper);            
+             lv_response := refactor_response2(lv_sqlOper, 'NUMBER', sql_temp_tab(indx).response);              
+
+               lv_query := REPLACE(lv_query,
+                                  ':F_RET_OPER_NUM_' || sql_temp_tab(indx).data_column_name,
+                                  lv_sqlOper);  
+               lv_query := REPLACE(lv_query,
+                                    ':F_RET_VALUE_NUM_' || sql_temp_tab(indx).data_column_name,
+                                    lv_response);
+
+          ELSE
+             lv_sqlOper := refactor_SQLOper(sql_temp_tab(indx).sql_oper);
+             lv_response := refactor_Response(sql_temp_tab(indx).data_table_name,
+                                           sql_temp_tab(indx).data_column_name,
+                                           lv_sqlOper,
+                                           sql_temp_tab(indx).response
+                                           );
+
+              lv_query := REPLACE(lv_query,
+                                  ':P_OPER_' || sql_temp_tab(indx)
+                                  .data_column_name,
+                                  lv_sqlOper);
+              lv_query := REPLACE(lv_query,
+                                  ':P_VALUE_' || sql_temp_tab(indx)
+                                  .data_column_name,
+                                  lv_response);
+          END IF;
+          lv_query := REGEXP_REPLACE(lv_query, '"[^"]*"', '');
+        END LOOP;
+      ELSE
+        -- lb_sqlFound
+        lv_response := NULL;
+        lv_where2   := NULL;
+        lv_where    := NULL;
+        lv_query    := NULL;
+
+        FOR indx IN 1 .. sql_temp_tab.COUNT LOOP
+          lv_tbl_name := sql_temp_tab(indx).data_table_name;
+          lv_sqlOper := refactor_SQLOper(sql_temp_tab(indx).sql_oper);
+          lv_response := refactor_Response(sql_temp_tab(indx).data_table_name,
+                                           sql_temp_tab(indx).data_column_name,
+                                           lv_sqlOper,
+                                           sql_temp_tab(indx).response
+                                           );
+          --
+          IF indx = 1 THEN
+            -- if the first indx has sql stmt, then just assign parameters to sql stmt
+            -- and exit.
+            IF sql_temp_tab(indx).sql_stmt IS NOT NULL THEN
+              lv_query := sql_temp_tab(indx).sql_stmt;
+              -- step 1 (Apply parameter mapping value);
+              lv_query := REPLACE(lv_query,
+                                  ':P_VALUE_' || sql_temp_tab(indx)
+                                  .data_column_name,
+                                  lv_response);
+              lv_query := REPLACE(lv_query,
+                                  ':P_OPER_' || sql_temp_tab(indx)
+                                  .data_column_name,
+                                  lv_sqlOper);
+
+              -- step 2 (check if any other parameter value is required in the SQL).
+              SELECT REGEXP_COUNT(lv_query, 'P_VALUE')
+                INTO ln_cnt
+                FROM DUAL;
+              -- Compares parameters defined in EMFRPOC and substitutes them accordingly. (like PARAM1, PARAM2)
+              IF ln_cnt > 1 THEN
+                lv_query := apply_params(lv_query);
+              END IF;
+
+              EXIT;
+            END IF;
+
+            IF sql_temp_tab(indx).sql_stmt IS NULL THEN
+              lv_where := sql_temp_tab(indx)
+                          .data_column_name || ' ' || NVL(lv_sqlOper, ' = ') || ' ' ||
+                           lv_response;
+              IF sql_temp_tab(indx).where_clause IS NOT NULL THEN
+                lv_where := lv_where || ' AND ' || sql_temp_tab(indx)
+                           .where_clause;
+              END IF;
+            END IF; -- sql_stmt IS NULL/NOT NULL
+
+          END IF; -- indx = 1
+          ---
+
+          IF indx > 1 THEN
+            IF lv_where2 IS NULL THEN
+              lv_where2 := ' AND ' || sql_temp_tab(indx).data_column_name || ' ' ||
+                           lv_sqlOper || ' ' || lv_response;
+            ELSE
+              lv_where2 := lv_where2 || ' AND ' || sql_temp_tab(indx)
+                          .data_column_name || ' ' || lv_sqlOper || ' ' ||
+                           lv_response;
+            END IF;
+
+            --DBMS_OUTPUT.PUT_LINE(lv_where2);
+
+            -- adding default where clause;
+            IF sql_temp_tab(indx).where_clause IS NOT NULL THEN
+              lv_where2 := lv_where2 || ' AND ' || sql_temp_tab(indx)
+                          .where_clause;
+            END IF;
+
+          END IF; -- INDX > 1
+        END LOOP;
+
+        /*
+        DBMS_OUTPUT.PUT_LINE('Seq ' || seq_in);
+        dbms_output.put_line('query ' ||lv_query);
+        DBMS_OUTPUT.PUT_LINE('where ' ||lv_where);
+        DBMS_OUTPUT.PUT_LINE('where2 ' || lv_where2);
+        */
+        IF lv_query IS NOT NULL THEN
+          lv_query := lv_query || lv_where2;
+        ELSE
+          lv_query := 'SELECT COUNT(1) FROM ' || lv_tbl_name || ' WHERE ' ||
+                      lv_where || lv_where2;
+        END IF;
+
+        lv_query := REGEXP_REPLACE(lv_query, '"[^"]*"', '');
+      END IF;
+
+      --DBMS_OUTPUT.PUT_LINE('Query ' || lv_query);
+      -- common condition on all sqls.
+      /*
+      IF seq_in = 1 THEN
+        lv_common_condition := SUBSTR(lv_query, INSTR(lv_query, 'WHERE') + LENGTH('WHERE'));
+      ELSIF seq_in > 1 THEN
+        lv_query := lv_query || ' AND ' || lv_common_condition;
+      END IF;
+      */
+      RETURN lv_query;
+    END gen_sql;
+
+    PROCEDURE load_param_tables IS
+      CURSOR param_cur IS
+        SELECT esp.process_seq,
+               esp.data_column_name,
+               NVL(esp.sql_oper, '='),
+               NVL(esp.response, ':PARAM' || ROUND(esp.process_seq)) response
+          FROM emf_source_process esp, emf_process_mapping epm
+         WHERE esp.looking_for = epm.mapping_name(+)
+           AND esp.process_code = gv_process_in
+           AND esp.param_flag IS NOT NULL
+         ORDER BY esp.process_seq;
+    BEGIN
+      param_by_name.DELETE;
+      FOR param_rec IN param_cur LOOP
+        param_by_name(param_rec.data_column_name) := param_rec;
+      END LOOP;
+    END load_param_tables;
+  BEGIN
+    -- Store the parameters in a temp table.
+    --load_param_tables; -- (loads param_oper, param_value, param_where tables);
+    gv_process_in := name_in;
+
+    -- Loop of master sequence numbers (1,2,3,4,5);
+    FOR seq_rec IN seq_cur LOOP
+      --DBMS_OUTPUT.PUT_LINE('Processing sequence ' || seq_rec.seq);
+      -- generate sql for each master sequence. Gen_sql loops through detail sequences and generates a master sql.
+      lv_gen_sql := gen_sql(seq_rec.seq);
+      --DBMS_OUTPUT.PUT_LINE(lv_gen_sql);
+
+      UPDATE emf_source_process
+         SET sql_stmt = lv_gen_sql
+       WHERE process_code = gv_process_in
+         AND process_seq = seq_rec.seq;
+
+    END LOOP;
+
+    commit;
+  END generate_sql;
+
+  PROCEDURE run_target_process IS
+    num_total_rows NUMBER := 0;
+    exit_process EXCEPTION;
+    nrowCnt NUMBER := 0;
+
+    CURSOR staging_cur IS
+      SELECT TABLE_NAME,
+             TABLE_AUDIT_KEY,
+             SOURCE_FUNCTION,
+             SOURCE_APPLICATION,
+             INSERT_DATE,
+             INSERT_USER,
+             PROGRAM_ID,
+             MODE_FLAG,
+             'C' FLAG
+        FROM emf_staging_data
+       WHERE NVL(status_flag, 'P') = 'P'
+         FOR UPDATE;
+
+    PROCEDURE call_action(p_fnc      IN VARCHAR2,
+                          p_tblName  IN VARCHAR2,
+                          p_auditKey IN VARCHAR2) IS
+      CURSOR process_cur IS
+        SELECT distinct process_code
+          FROM emf_target_process
+         WHERE parent_action_seq IS NULL
+           AND action_fncs LIKE '%' || p_fnc || '%'
+           AND process_code IN (SELECT proc_code
+                                  FROM valid_emf_proc_def
+                                 WHERE SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 10)
+                                ); -- V02 (Added eff date, term date check query)
+      l_actionCode    VARCHAR2(50);
+      selectVals_list emf_util.strings_t := emf_util.strings_t();
+      l_select_cols   VARCHAR2(10000);
+      l_select_vals   VARCHAR2(10000);
+
+      --value_indx  NUMBER;
+      nActionRows NUMBER := 0;
+      nTargetRows NUMBER := 0;
+
+    BEGIN
+      pl('  Reading process codes for ' || p_fnc);
+      FOR process_rec IN process_cur LOOP
+        nTargetRows := nTargetRows + 1;
+        pl('####Reading action seq''s for process code ' ||
+           process_rec.process_code);
+        FOR seq_rec IN (SELECT DISTINCT action_seq
+                          FROM emf_target_process
+                         WHERE parent_action_seq IS NULL
+                           AND action_fncs LIKE '%' || p_fnc || '%'
+                           AND process_code = process_rec.process_code)
+
+         LOOP
+          nActionRows := nActionRows + 1;
+          pl('      Reading a unique code defined for the sequence... ' ||
+             seq_rec.action_seq);
+          SELECT action_code
+            INTO l_actionCode
+            FROM emf_target_process
+           WHERE parent_action_seq IS NULL
+             AND action_fncs LIKE '%' || p_fnc || '%'
+             AND process_code = process_rec.process_code
+             AND action_seq = seq_rec.action_seq
+             AND rownum = 1;
+
+          pl('      Process: ' || process_rec.process_code ||
+             ' - Action: ' || l_actionCode);
+
+          /*
+           SELECT LISTAGG(DECODE(parm_type,
+                                 'DATE',
+                                 'TO_CHAR(' || SUBSTR(parm_code, 3) ||
+                                 ',''MMDDYYYY'')',
+                                 'NUMBER',
+                                 'TO_CHAR(' || SUBSTR(parm_code, 3) || ')',
+                                 SUBSTR(parm_code, 3)),
+                          ' || '','' || ') WITHIN GROUP(ORDER BY parm_no) select_list
+             INTO l_select_cols
+             FROM emf_parm_def
+            WHERE proc_code = process_rec.process_code
+              AND ref_table = p_tblName;  -- V02
+
+
+          SELECT LISTAGG(DECODE(ref_table,
+                                p_tblName,
+                                DECODE(parm_type,
+                                       'DATE',NVL(default_value, 'TO_CHAR(' || SUBSTR(parm_code, 3) || ',''MMDDYYYY'')'),
+                                       'NUMBER',NVL(default_value, 'TO_CHAR(' || SUBSTR(parm_code, 3) || ')'),
+                                       NVL(default_value, SUBSTR(parm_code, 3))
+                                       ),
+                                '''NOVAL''' -- Passing NOVAL string instead of NULL.
+                                ),
+                         ' || '','' || ') WITHIN GROUP(ORDER BY parm_no) select_list
+            INTO l_select_cols
+            FROM emf_parm_def
+           WHERE proc_code = process_rec.process_code;
+          */
+
+        SELECT LISTAGG(p_type, ' || '','' || ') WITHIN GROUP(ORDER BY parm_no) select_list
+          INTO l_select_cols
+          FROM
+          (
+          SELECT  parm_no, DECODE(parm_type,
+                         'DATE',NVL(default_value, 'TO_CHAR(' || SUBSTR(parm_code, 3) || ',''MMDDYYYY'')'),
+                         'NUMBER',NVL(default_value, 'TO_CHAR(' || SUBSTR(parm_code, 3) || ')'),
+                         NVL(default_value, SUBSTR(parm_code, 3))
+                         ) p_type
+            FROM emf_parm_def
+           WHERE proc_code = process_rec.process_code
+            AND p_tblName IN (
+                             SELECT TRIM(regexp_substr(ref_table, '[^,]+', 1, LEVEL)) tbl_name
+                               FROM dual
+                               CONNECT BY regexp_substr(ref_table, '[^,]+', 1, LEVEL) IS NOT NULL
+                             )
+          UNION 
+          SELECT parm_no, '''NOVAL''' p_type 
+            FROM emf_parm_def
+           WHERE proc_code = process_rec.process_code
+             AND p_tblName NOT IN (
+                                 SELECT TRIM(regexp_substr(ref_table, '[^,]+', 1, LEVEL)) tbl_name
+                                   FROM dual
+                                  CONNECT BY regexp_substr(ref_table, '[^,]+', 1, LEVEL) IS NOT NULL
+                                )
+          );                      
+
+
+          pl('  Select string for audit key sql : ' || l_select_cols);
+
+          DECLARE
+            exc_invalid_id EXCEPTION;
+            PRAGMA EXCEPTION_INIT(exc_invalid_id, -904); -- invalid identifier.
+          BEGIN
+            EXECUTE IMMEDIATE 'SELECT ' || l_select_cols || ' FROM ' ||
+                              p_tblName || ' WHERE audit_key = :aud_key'
+              INTO l_select_vals
+              USING p_auditKey;
+          EXCEPTION
+            WHEN exc_invalid_id THEN
+              pl(sqlcode || ' - Msg: ' || SUBSTR(sqlerrm, 1, 150));
+              EXIT;
+            WHEN OTHERS THEN
+              pl(sqlcode || ' - Msg: ' || SUBSTR(sqlerrm, 1, 150));
+              EXIT;
+          END;
+
+          pl(' Audit Key SQL Output: ' || l_select_vals);
+
+          -- Populate list for bind values.
+
+          SELECT TRIM(REGEXP_SUBSTR(l_select_vals, '[^,]+', 1, LEVEL)) seq
+            BULK COLLECT
+            INTO selectVals_list
+            FROM DUAL
+          CONNECT BY REGEXP_SUBSTR(l_select_vals, '[^,]+', 1, LEVEL) IS NOT NULL;
+
+          pl('Bind Values List passed to run_process -- ' ||
+             selectVals_list.COUNT);
+
+          FOR value_indx IN 1 .. selectVals_list.COUNT LOOP
+            pl(value_indx || ' -  ' || selectVals_list(value_indx));
+          END LOOP;
+
+          pl('');
+          pl('*****************DYNAMIC RUN PROCESS START**************');
+
+          EXECUTE IMMEDIATE 'BEGIN emf_util.run_process(:1, :2 ,:3, :4); END;'
+            USING process_rec.process_code, l_actionCode, seq_rec.action_seq, selectVals_list;
+
+          pl('*****************DYNAMIC RUN PROCESS END **************');
+          pl('');
+
+        --DBMS_OUTPUT.PUT_LINE('END LOOP');
+        END LOOP;
+        pl('Action Records processed -' || nActionRows);
+      END LOOP;
+      pl('Target Records processed -' || nTargetRows);
+    END call_action;
+
+  BEGIN
+    output.DELETE; -- clear the output array.
+
+    SELECT COUNT(1)
+      INTO nrowCnt
+      FROM emf_staging_data
+     WHERE NVL(status_flag, 'P') = 'P';
+
+    IF nrowCnt = 0 THEN
+      RAISE exit_process;
+    END IF;
+    -- V02
+    DECLARE
+      CURSOR logCur is
+        SELECT code_desc
+          FROM master_codes
+         WHERE code_type = 'LOGDR'
+           AND code = 'LOGDR'
+           AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1);
+      lv_logDir master_codes.code_desc%TYPE := NULL;
+    BEGIN
+      OPEN logcur;
+      FETCH logcur
+        INTO lv_logDir;
+      CLOSE logcur;
+
+      IF lv_logDir IS NULL THEN
+        pl('Error in log file location - check master codes (LOGDR, LOGDR). Exiting now.');
+        RAISE exit_process;
+      END IF;
+
+      pl('Log File Location : ' || lv_logDir);
+
+      emf_util.write_to_file(lv_logDir,
+                             'EMF_UTIL_' ||
+                             TO_CHAR(SYSDATE, 'MMDDYYHH24MISS') || '.log');
+
+    END;
+    ---
+
+    pl('Main process started. Reading emf_staging_data table...');
+
+    FOR rec IN staging_cur LOOP
+      pl('');
+      pl('@@@Processing record... Fnc: ' || rec.source_function ||
+         ', Table: ' || rec.table_name || ', Aud Key: ' ||
+         rec.table_audit_key);
+      call_action(rec.source_function, rec.table_name, rec.table_audit_key);
+      pl('@@@Record processing completed....Updating status flag to ''C''. ');
+      pl('');
+
+      UPDATE emf_staging_data
+         SET status_flag = 'C'
+       WHERE CURRENT OF staging_cur;
+
+      INSERT INTO emf_staging_data_arch VALUES rec;
+
+      num_total_rows := staging_cur%ROWCOUNT;
+    END LOOP;
+
+    DELETE FROM emf_staging_data WHERE NVL(status_flag, 'P') = 'C';
+
+    pl('Main process completed.  Processed ' || TO_CHAR(num_total_rows) ||
+       ' row(s).');
+    /*
+        INSERT INTO EMF_STAGING_DATA_ARCH
+         SELECT * FROM emf_staging_data WHERE NVL(status_flag,'P') = 'C';
+    */
+    COMMIT;
+
+    dump_output;
+
+  EXCEPTION
+    WHEN exit_process THEN
+      NULL;
+
+    WHEN OTHERS THEN
+      dump_output;
+      DBMS_OUTPUT.put_line(DBMS_UTILITY.format_error_stack());
+      DBMS_OUTPUT.put_line(DBMS_UTILITY.format_error_backtrace());
+  END run_target_process;
+
+  PROCEDURE staging_insert(tblName_in  IN VARCHAR2,
+                           audKey_in   IN VARCHAR2,
+                           srcFnc_in   IN VARCHAR2,
+                           srcAppl_in  IN VARCHAR2,
+                           pgm_in      IN VARCHAR2,
+                           modeFlag_in IN VARCHAR2) IS
+    narchCnt  NUMBER;
+    nCnt      NUMBER;
+    nparamCnt NUMBER;
+  BEGIN
+
+    SELECT COUNT(1)
+      INTO nparamCnt
+      FROM valid_parameters
+     WHERE parameter_code = 'EMF_UTIL'
+       AND parameter_value = 'Y';
+
+    IF nparamCnt > 0 THEN
+      SELECT COUNT(1)
+        INTO narchCnt
+        FROM emf_staging_data_arch
+       WHERE table_audit_key = audKey_in
+         AND program_id = pgm_in;
+
+      SELECT COUNT(1)
+        INTO nCnt
+        FROM emf_staging_data
+       WHERE table_audit_key = audKey_in
+         AND program_id = pgm_in
+         AND status_flag = 'P';
+
+      IF nCnt = 0 AND narchCnt = 0 THEN
+        INSERT INTO emf_staging_data
+          (table_name,
+           table_audit_key,
+           source_function,
+           source_application,
+           insert_date,
+           insert_user,
+           program_id,
+           mode_flag,
+           status_flag)
+        VALUES
+          (tblName_in,
+           audKey_in,
+           srcFnc_in,
+           srcAppl_in,
+           SYSDATE,
+           lt_user_session.get_userid,
+           pgm_in,
+           modeFlag_in,
+           'P');
+      END IF;
+    END IF;
+
+  END staging_insert;
+
+  FUNCTION utrs_test_result(p_unit_id IN VARCHAR2,
+                            p_test_id IN VARCHAR2,
+                            p_chp_id  IN VARCHAR2) RETURN VARCHAR2 IS
+    nReaRes    NUMBER := 0;
+    nNonReaRes NUMBER := 0;
+    pReaRes    VARCHAR2(10);
+    pNonReaRes VARCHAR2(10);
+    nNTRes     NUMBER := 0;
+    nPendTestCnt NUMBER := 0;
+
+    result_out  VARCHAR2(10);
+    chp_sysdate DATE;
+    exit_out EXCEPTION;
+  BEGIN
+
+    --get the reactive COUNTs
+    SELECT NVL(COUNT(*), 0)
+      INTO nPendTestCnt
+      FROM utrs
+     WHERE unit_id = p_unit_id
+       AND test_id = p_test_id
+       AND cancel_flag IS NULL
+       AND result_status_1 IS NULL;
+
+    IF nPendTestCnt > 0 THEN
+      result_out := 'IND';
+      RAISE exit_out;
+    END IF;  
+
+    chp_sysdate := lifetrack_timezone_convert.get_local_time(p_chp_ID,
+                                                             SYSDATE);
+    --get the reactive COUNTs
+    SELECT NVL(COUNT(*), 0)
+      INTO nReaRes
+      FROM utrs
+     WHERE unit_id = p_unit_id
+       AND test_id = p_test_id
+       AND cancel_flag IS NULL
+       --AND extract_date IS NOT NULL
+       AND result_status_1 IN
+           (SELECT code
+              FROM master_codes
+             WHERE code_type = 'REAC'
+               AND chp_sysdate BETWEEN eff_date AND
+                   NVL(term_date, chp_sysdate + 1));
+    --get the reactive result code for the unit
+    IF nReares >= 1 THEN
+      BEGIN
+        SELECT DISTINCT result_status_1
+          INTO pReaRes
+          FROM utrs
+         WHERE unit_id = p_unit_id
+           AND test_id = p_test_id
+           AND cancel_flag IS NULL
+           --AND extract_date IS NOT NULL
+           AND result_status_1 IN
+               (SELECT code
+                  FROM master_codes
+                 WHERE code_type = 'REAC'
+                   AND chp_sysdate BETWEEN eff_date AND
+                       NVL(term_date, chp_sysdate + 1));
+      EXCEPTION
+        WHEN OTHERS THEN
+          pReaRes := 'IND';
+      END;
+    END IF;
+    --get the non reactive COUNTs
+    SELECT NVL(COUNT(*), 0)
+      INTO nNonReaRes
+      FROM utrs
+     WHERE unit_id = p_unit_id
+       AND test_id = p_test_id
+       AND cancel_flag IS NULL
+       AND result_status_1 != 'NT'
+       --AND extract_date IS NOT NULL
+       AND result_status_1 NOT IN
+           (SELECT code
+              FROM master_codes
+             WHERE code_type = 'REAC'
+               AND chp_sysdate BETWEEN eff_date AND
+                   NVL(term_date, chp_sysdate + 1));
+
+    IF nNonReaRes >= 1 THEN
+      BEGIN
+        SELECT DISTINCT result_status_1
+          INTO pNonReaRes
+          FROM utrs
+         WHERE unit_id = p_unit_id
+           AND test_id = p_test_id
+           AND cancel_flag IS NULL
+           AND result_status_1 NOT IN ('NT')
+           --AND extract_date IS NOT NULL
+           AND result_status_1 NOT IN
+               (SELECT code
+                  FROM master_codes
+                 WHERE code_type = 'REAC'
+                   AND chp_sysdate BETWEEN eff_date AND
+                       NVL(term_date, chp_sysdate + 1));
+      EXCEPTION
+        WHEN OTHERS THEN
+          pNonReaRes := 'IND';
+      END;
+    END IF;
+
+    IF nReaRes > nNonReaRes THEN
+      result_out := pReares;
+    ElSIF nReaRes < nNonReaRes THEN
+      result_out := pNonReaRes;
+    ElSIF nReaRes = nNonReaRes THEN
+      --check IF ther is a NT result present
+      SELECT NVL(COUNT(DISTINCT result_status_1), 0)
+        INTO nNTRes
+        FROM utrs
+       WHERE unit_id = p_unit_id
+         AND test_id = p_test_id
+         AND cancel_flag IS NULL
+         AND result_status_1 = 'NT';
+         --ND extract_date IS NOT NULL;
+
+      IF nNTRes > 0 THEN
+        result_out := pReares;
+      ELSE
+        result_out := 'IND';
+      END IF;
+    END IF;
+
+    RETURN result_out;
+
+  EXCEPTION
+    WHEN exit_out THEN
+      RETURN result_out;
+  END utrs_test_result;
+
+BEGIN
+  --gb_to_screen := TRUE;
+  NULL;
+EXCEPTION
+  WHEN OTHERS THEN
+    dump_output;
+    DBMS_OUTPUT.put_line(DBMS_UTILITY.format_error_stack());
+    DBMS_OUTPUT.put_line(DBMS_UTILITY.format_error_backtrace());
+END emf_util;
+/

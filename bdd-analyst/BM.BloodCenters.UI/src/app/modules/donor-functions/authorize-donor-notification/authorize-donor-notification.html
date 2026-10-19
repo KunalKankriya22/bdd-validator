@@ -1,0 +1,360 @@
+<!-- Cell template for Other Interdictions checkbox -->
+<ng-template #otherInterdictionsTpl let-row>
+  <mat-checkbox [checked]="row.otherInterdictionCount > 0" disabled
+    [attr.aria-label]="'Other interdictions: ' + row.otherInterdictionCount">
+  </mat-checkbox>
+</ng-template>
+
+<div class="authorize-donor-notification-container">
+  <h1 class="cdk-visually-hidden">{{ headerConfig.title }}</h1>
+  <app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+  <div class="page-layout" [class.side-panel-active]="sidePanelOpen()">
+    <div class="main-content" [class.side-panel-active]="sidePanelOpen()">
+
+  <!-- SEARCH CARD -->
+  <div class="search-card">
+    <form [formGroup]="searchForm" class="search-form-row">
+      <!-- Search Type -->
+      <mat-form-field appearance="fill" class="form-field form-field--wide" subscriptSizing="dynamic">
+        <mat-label>Search</mat-label>
+        <mat-select
+          [id]="elementId('searchType')"
+          formControlName="searchType"
+          [attr.aria-invalid]="f['searchType'].invalid && f['searchType'].touched">
+          <mat-option>
+            <ngx-mat-select-search
+              [formControl]="searchTypeSearchControl"
+              placeholderLabel="Search..."
+              noEntriesFoundLabel="">
+            </ngx-mat-select-search>
+          </mat-option>
+          @for (option of filteredSearchTypeOptions(); track option.value) {
+            <mat-option [value]="option.value">{{ option.label }}</mat-option>
+          }
+          @if (filteredSearchTypeOptions().length === 0) {
+            <mat-option disabled>No data available</mat-option>
+          }
+        </mat-select>
+        @if (f['searchType'].invalid && f['searchType'].touched) {
+          <mat-error>Search type is required</mat-error>
+        }
+      </mat-form-field>
+
+      <!-- Include Notified Donors -->
+      <mat-checkbox
+        [id]="elementId('includeNotified')"
+        formControlName="includeNotified"
+        color="primary"
+        class="include-notified-checkbox">
+        Include Notified Donors
+      </mat-checkbox>
+
+      <!-- Effective Date From -->
+      <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+        <mat-label>Effective Date From</mat-label>
+        <input matInput [matDatepicker]="startDatePicker" formControlName="startDate"
+          [max]="today" placeholder="DD-MMM-YYYY" autocomplete="off"
+          [errorStateMatcher]="startDateErrorMatcher"
+          (input)="onStartDateInput($event)"
+          (keydown.enter)="onStartDateInput($event)">
+        <mat-datepicker-toggle matSuffix [for]="startDatePicker"></mat-datepicker-toggle>
+        <mat-datepicker #startDatePicker></mat-datepicker>
+        @if (getStartDateError()) {
+          <mat-error>{{ getStartDateError() }}</mat-error>
+        }
+      </mat-form-field>
+
+      <!-- Effective Date To -->
+      <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+        <mat-label>Effective Date To</mat-label>
+        <input matInput [matDatepicker]="endDatePicker" formControlName="endDate"
+          [max]="today" placeholder="DD-MMM-YYYY" autocomplete="off"
+          [errorStateMatcher]="endDateErrorMatcher"
+          (input)="onEndDateInput($event)"
+          (keydown.enter)="onEndDateInput($event)">
+        <mat-datepicker-toggle matSuffix [for]="endDatePicker"></mat-datepicker-toggle>
+        <mat-datepicker #endDatePicker></mat-datepicker>
+        @if (getEndDateError()) {
+          <mat-error>{{ getEndDateError() }}</mat-error>
+        }
+      </mat-form-field>
+
+      <!-- Code Input (conditionally shown) -->
+      @if (selectedSearchOption?.requiresCode) {
+        @if (searchForm.get('searchType')?.value === 'UnitID') {
+          <app-unit-id-field
+            [validateFfValue]="'N'"
+            [required]="true"
+            [label]="'Unit ID'"
+            (postValidate)="onUnitPostValidate($event)"
+            (validated)="onUnitValidated($event)"
+            (cleared)="onUnitCleared()"
+            class="form-field form-field--unit-id">
+          </app-unit-id-field>
+        } @else if (hasLov) {
+          <!-- LOV Dropdown (InterCD, LetterID, Reinst) -->
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label>{{ selectedSearchOption?.codePlaceholder || 'Code' }}</mat-label>
+            <mat-select formControlName="code" required (selectionChange)="onLovCodeSelected($event.value)">
+              <mat-select-trigger>{{ searchForm.get('code')?.value }}</mat-select-trigger>
+              @if (isLoadingLov) {
+                <mat-option disabled>
+                  <span class="panel-loading">
+                    <mat-spinner diameter="20"></mat-spinner>
+                    <span>Loading...</span>
+                  </span>
+                </mat-option>
+              } @else if (lovCodes().length === 0) {
+                <mat-option disabled>No data available</mat-option>
+              } @else if (lovCodes().length <= 3) {
+                @for (option of lovCodes(); track option.code) {
+                  <mat-option [value]="option.code">{{ option.code }} - {{ option.description }}</mat-option>
+                }
+              } @else {
+                <mat-option>
+                  <ngx-mat-select-search
+                    [formControl]="lovSearchControl"
+                    placeholderLabel="Search..."
+                    noEntriesFoundLabel="">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (option of filteredLovCodes(); track option.code) {
+                  <mat-option [value]="option.code">{{ option.code }} - {{ option.description }}</mat-option>
+                }
+                @if (filteredLovCodes().length === 0) {
+                  <mat-option disabled>No matching codes</mat-option>
+                }
+              }
+            </mat-select>
+            @if (f['code'].invalid && f['code'].touched) {
+              <mat-error>{{ selectedSearchOption?.codePlaceholder || 'Code' }} is required</mat-error>
+            }
+          </mat-form-field>
+
+          @if (selectedSearchOption?.codeDescriptionLabel) {
+            <mat-form-field appearance="fill" class="form-field form-field--wide readonly-field" subscriptSizing="dynamic">
+              <mat-label>{{ selectedSearchOption?.codeDescriptionLabel || 'Description' }}</mat-label>
+              <input matInput [value]="codeDescription || '-'" readonly autocomplete="off">
+            </mat-form-field>
+          }
+
+          <!-- Exclusive (Reinst only) -->
+          @if (searchForm.get('searchType')?.value === 'Reinst') {
+            <mat-checkbox
+              [id]="elementId('exclusive')"
+              formControlName="exclusive"
+              color="primary"
+              class="include-notified-checkbox">
+              Exclusive?
+            </mat-checkbox>
+          }
+        } @else {
+          <!-- Plain text input (DonorID) -->
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label>{{ selectedSearchOption?.codePlaceholder || 'Code' }}</mat-label>
+            <input
+              matInput
+              [id]="elementId('code')"
+              formControlName="code"
+              required
+              autocomplete="off"
+              [maxlength]="searchForm.get('searchType')?.value === 'DonorID' ? 10 : null"
+              (blur)="onCodeBlur()"
+              (keydown.enter)="onCodeBlur(); $event.preventDefault()">
+            @if (f['code'].invalid && f['code'].touched) {
+              <mat-error>
+                @if (f['code'].errors?.['required']) {
+                  {{ selectedSearchOption?.codePlaceholder || 'Code' }} is required
+                } @else if (f['code'].errors?.['maxlength']) {
+                  Donor ID cannot exceed 10 characters
+                }
+              </mat-error>
+            }
+          </mat-form-field>
+
+          @if (selectedSearchOption?.codeDescriptionLabel) {
+            <mat-form-field appearance="fill" class="form-field form-field--wide readonly-field" subscriptSizing="dynamic">
+              <mat-label>{{ selectedSearchOption?.codeDescriptionLabel || 'Description' }}</mat-label>
+              <input matInput [value]="codeDescription || '-'" readonly autocomplete="off">
+            </mat-form-field>
+          }
+
+        }
+      }
+
+      <!-- Retrieve Button -->
+      <button
+        type="button"
+        class="btn-retrieve"
+        [disabled]="isRetrieveDisabled"
+        (click)="onRetrieve()">
+        RETRIEVE
+      </button>
+
+      <!-- Clear All Button -->
+      <button type="button" class="clear-btn"
+              (click)="onClearAll()">
+        CLEAR ALL
+      </button>
+    </form>
+  </div>
+
+  <!-- CONTENT AREA -->
+  <div class="content-area">
+    <div class="table-panel">
+      @if (!hasSearched && !isLoading) {
+        <div class="empty-state-container">
+          <div class="empty-state-icon"><mat-icon aria-hidden="true">search</mat-icon></div>
+          <h3>No Results to Display</h3>
+          <p>Please enter search criteria to view results</p>
+        </div>
+      } @else {
+        <app-data-table
+          [class.has-horizontal-overflow]="hasHorizontalOverflow"
+          [config]="tableConfig"
+          [data]="dataSource"
+          [loading]="isLoading"
+          [expandTemplate]="donorDetailTpl"
+          [expandedRows]="expandedRows"
+          expandRowKey="_rowKey"
+          (pageChange)="onPageChange($event)"
+          (sortChange)="onSortChange($event)"
+          (rowAction)="onRowAction($event)"
+          (rowClick)="onRowClick($event)"
+          (rowExpandToggle)="onRowExpandToggle($event)"
+          (expandAllToggle)="onExpandAllToggle($event)">
+        </app-data-table>
+
+        <ng-template #donorDetailTpl let-donor>
+          <div class="expanded-content">
+            @if (isDonorDetailsLoading(donor.donorId)) {
+              <div class="detail-loading">
+                <mat-spinner diameter="24"></mat-spinner>
+                <span>Loading donor details...</span>
+              </div>
+            } @else {
+              @let details = getDonorDetails(donor.donorId);
+              <div class="detail-row">
+                <div class="detail-item detail-item--donor-id">
+                  <span class="detail-label">Donor ID</span>
+                  <span class="detail-value">{{ donor.donorId }}</span>
+                </div>
+                <div class="detail-item detail-item--work-phone">
+                  <span class="detail-label">Work Phone Number</span>
+                  <span class="detail-value">
+                    {{ details?.workPhone || '-' }}
+                    @if (details?.preferredContactFlag === 'W') {
+                      <mat-checkbox checked disabled class="preferred-indicator">Preferred</mat-checkbox>
+                    }
+                  </span>
+                </div>
+                <div class="detail-item detail-item--home-phone">
+                  <span class="detail-label">Home Phone Number</span>
+                  <span class="detail-value">
+                    {{ details?.homePhone || '-' }}
+                    @if (details?.preferredContactFlag === 'H') {
+                      <mat-checkbox checked disabled class="preferred-indicator">Preferred</mat-checkbox>
+                    }
+                  </span>
+                </div>
+                <div class="detail-item detail-item--mobile-phone">
+                  <span class="detail-label">Mobile Phone Number</span>
+                  <span class="detail-value">
+                    {{ details?.mobilePhone || '-' }}
+                    @if (details?.preferredContactFlag === 'M') {
+                      <mat-checkbox checked disabled class="preferred-indicator">Preferred</mat-checkbox>
+                    }
+                  </span>
+                </div>
+                <div class="detail-item detail-item--address">
+                  <span class="detail-label">Address</span>
+                  <span class="detail-value">{{ details?.address || '-' }}</span>
+                </div>
+              </div>
+            }
+          </div>
+        </ng-template>
+      }
+    </div>
+  </div>
+
+    </div>
+
+    <!-- Gray Backdrop -->
+    @if (sidePanelOpen()) {
+      <div class="panel-backdrop"></div>
+    }
+
+    <!-- Side Window Panel -->
+    <div class="side-panel" [class.open]="sidePanelOpen()" [style.width]="sidePanelOpen() ? sidePanelWidth() : '0'"
+      cdkTrapFocus [cdkTrapFocusAutoCapture]="sidePanelOpen()">
+      @if (sidePanelOpen()) {
+        @switch (currentSection()) {
+          @case ('demographics') {
+            <app-donor-demographics
+              [inputDonorId]="currentCheckDonorId()"
+              [inputReadOnly]="false"
+              (closePanelEvent)="onPanelClose()"
+              (panelWidthChange)="onPanelWidthChange($event)">
+            </app-donor-demographics>
+          }
+          @case ('test-results') {
+            <app-donor-within-test-dialog
+              [donorId]="currentCheckDonorId()"
+              [donorName]="currentCheckDonorName()"
+              [dob]="''"
+              [sex]="''"
+              [abo]="''"
+              (closePanel)="onPanelClose()">
+            </app-donor-within-test-dialog>
+          }
+          @case ('attributes') {
+            <app-donor-attributes
+              [inputDonorId]="currentCheckDonorId()"
+              [inputDonorName]="currentCheckDonorName()"
+              (closePanelEvent)="onPanelClose()">
+            </app-donor-attributes>
+          }
+          @default {
+            <div class="side-panel-container">
+              <div class="side-panel-header">
+                <h2 class="side-panel-title">
+                  @switch (currentSection()) {
+                    @case ('interdictions') { Donor Interdictions }
+                  }
+                </h2>
+                <button
+                  type="button"
+                  mat-icon-button
+                  class="side-panel-close"
+                  aria-label="Close panel"
+                  (click)="onPanelClose()">
+                  <mat-icon>close</mat-icon>
+                </button>
+              </div>
+              <div class="side-panel-content-wrapper">
+                <div class="side-panel-content">
+                  @switch (currentSection()) {
+                    @case ('interdictions') {
+                      <app-donor-interdictions-content
+                        [donorId]="currentCheckDonorId()"
+                        (closePanel)="onPanelClose()">
+                      </app-donor-interdictions-content>
+                    }
+                    @default {
+                      <div class="panel-placeholder">
+                        <p>Content for {{ currentSection() }} will be displayed here.</p>
+                      </div>
+                    }
+                  }
+                </div>
+              </div>
+            </div>
+          }
+        }
+      }
+    </div>
+  </div>
+
+</div>

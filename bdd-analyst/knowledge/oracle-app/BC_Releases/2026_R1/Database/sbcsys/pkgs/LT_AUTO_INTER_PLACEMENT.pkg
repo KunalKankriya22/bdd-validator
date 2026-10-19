@@ -1,0 +1,885 @@
+CREATE OR REPLACE PACKAGE LT_AUTO_INTER_PLACEMENT IS
+
+/* ************************************************************
+  This Package would be used to place the interdiction automatically based on
+   the auto interdiction table configuration 
+ 
+  Created By        : Basker Edwin 
+  Date Of Creation  : 03/25/2013
+  Compatability     : LT_2013 and above
+
+  Version   : 01 [03/25/13] - Edwin
+  Version   : 02 [04/23/13] - Ashok - Modified pl_status variable to be 
+                                      'OK' instead of 'Ok'.
+  Version   : 03 [05/15/13]  -Edwin (IM: 9386)
+
+  Version   : 04 (11/04/13)  - Edwin (IM:9770) 
+
+  Version   : 05 (12/13/13)    - Edwin (IM: 9841)
+
+  Version   : 06 (12/26/13)  - Edwin (IM: 9853)
+
+ Restarting Version to 01 for LT 2018
+  
+  Version   : 01 - LT2018-valid_interdictions to valid_interdictions_lab table.
+  Verion    : 02 - For IM: 328 , Edwin - 10/18/16
+
+  *****************************************   */
+
+
+ procedure main_proc(pl_function_name   in varchar2,
+                    pl_function_type    in varchar2,
+                    pl_action_code      in varchar2,
+                    pl_chapter_id       in varchar2,
+                    pl_unit_id          in varchar2,
+                    pl_coll_date        in date,
+                    pl_source_prod_code in varchar2,
+                    pl_status           out varchar2);
+ 
+  procedure init_variables;
+
+Procedure find_action_product(x_function_name in varchar2,
+                             x_unit_id in varchar2,
+                             x_coll_date in date,
+                             x_chapter_id  in varchar2,
+                             x_source_prod_code in varchar2,
+                             x_action_product out varchar2,
+                             x_inter_code out varchar2,
+                             x_status out varchar2);
+
+Procedure find_action_prod_from_types(x_function_name       in varchar2,
+                                      x_unit_id             in varchar2,
+                                      x_coll_date           in date,
+                                      x_chapter_id          in varchar2,
+                                      x_source_product_code in varchar2,
+                                      x_action_product      out varchar2,
+                                      x_inter_code          out varchar2,
+                                      x_status              out varchar2);
+
+
+Procedure place_inter_on_other_prods(x_unit_id in varchar2,
+                                      x_coll_date in date,
+                                      x_chapter in varchar2,
+                                      x_source_prod in varchar2,
+                                      x_prod_list in varchar2,
+                                      x_inter in varchar2,
+                                      x_status out varchar2) ;
+
+Procedure place_inter_on_other_types(x_unit_id in varchar2,
+                                      x_coll_date in date,
+                                      x_chapter in varchar2,
+                                      x_source_prod in varchar2,
+                                      x_prod_type_list in varchar2,
+                                      x_inter in varchar2,
+                                      x_status out varchar2);
+
+Function place_comp_interdiction (p_unit_id             in   varchar2,
+                                 p_coll_date            in   date,
+                                 p_chapter_id           in   varchar2,
+                                 p_product_code         in   varchar2,
+                                 p_inter_code           in   varchar2,
+                                 p_user_id              in   varchar2,
+                                 p_prog_name            in   varchar2)
+          return varchar2;
+
+Function place_unit_interdiction (p_unit_id              in   varchar2,
+                                  p_coll_date            in   date,
+			          p_chapter_id           in   varchar2,
+			          p_inter_code           in   varchar2,
+			          p_user_id              in   varchar2,
+			          p_prog_name            in   varchar2)
+	  return varchar2;
+
+  p_chp_sys_date         DATE;
+
+end LT_AUTO_INTER_PLACEMENT;
+/
+create or replace package body LT_AUTO_INTER_PLACEMENT is
+
+
+procedure main_proc(pl_function_name    in varchar2, 
+                    pl_function_type    in varchar2,
+                    pl_action_code      in varchar2,
+                    pl_chapter_id       in varchar2,
+                    pl_unit_id          in varchar2,
+                    pl_coll_date        in date,
+                    pl_source_prod_code in varchar2,
+                    pl_status out varchar2) is
+
+ CURSOR auto_inter is select ACTION_TYPE,
+                             ACTION_CODE,
+                             ACTION_PRODUCT_CODE ,
+                             INTER_ON_CURRENT_PROD , 
+                             INTER_ON_OTHER_PRODS ,
+                             INTER_ON_OTHER_PROD_TYPES,
+                             INTER_ON_UNIT_LEVEL,       
+                             INTER_ALL_PROD_BUT_CURR,   
+                              INTER_CODE  
+    from VALID_AUTO_INTER_CONFIG where action_function_name=pl_function_name
+         and action_product_code=substr(pl_source_prod_code,1,5) 
+         and nvl(action_code,'X')=nvl(pl_action_code,'X') and 
+         chapter_id=pl_chapter_id and
+         p_chp_sys_date between eff_date and nvl(term_date,sysdate+20);
+
+ p_ACTION_TYPE               VARCHAR2(10);
+ p_ACTION_CODE               VARCHAR2(10);
+ p_ACTION_PRODUCT_CODE       VARCHAR2(5);
+ p_INTER_ON_CURRENT_PROD     VARCHAR2(1);
+ p_INTER_ON_OTHER_PRODS      VARCHAR2(240);
+ p_INTER_ON_OTHER_PROD_TYPES VARCHAR2(240);
+ p_INTER_ON_UNIT_LEVEL       VARCHAR2(1);
+ p_INTER_CODE                VARCHAR2(5);
+ p_proc_status               VARCHAR2(200);
+ szAction_prd                VARCHAR2(10);
+ szInter_code                VARCHAR2(10);
+ nConfig                     NUMBER:=0;
+ nCount                      NUMBER:=0;
+ v_chapter_id                VARCHAR2(4);
+ nRet                        VARCHAR2(1);
+ szstatus                    VARCHAR2(200);
+ nExistInter                 NUMBER:=0;
+
+BEGIN
+      dbms_output.enable(50000000);
+      v_chapter_id:=pl_chapter_id;
+      --p_chp_sys_date:= sysdate;
+     
+      pl_status:= 'OK'; -- 'Ok'; Modified this to Caps OK as we are using 'OK'in the forms to display appropriate message.
+ 
+      p_chp_sys_date:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                                sysdate);
+
+  -- Verify if the imcoming product (source product) is  the 
+  --action product code in the configuration table for the program
+
+  dbms_output.put_line('Source='||pl_source_prod_code||
+                       'Sys='||to_char(p_chp_sys_date,'mm-dd-yy hh24:mi')||
+                       'Function='||pl_function_name||
+                       'Coll='||pl_coll_date);
+
+ select nvl(count(*),0) into nConfig from  valid_auto_inter_config where
+ action_function_name=pl_function_name and 
+ action_product_code=substr(pl_source_prod_code,1,5) and
+ nvl(action_code,'X')=nvl(pl_action_code,'X') and 
+ chapter_id=pl_chapter_id and 
+ p_chp_sys_date between eff_date and nvl(term_date,sysdate+20);
+
+
+  dbms_output.put_line('nConfig='||to_char(nConfig));
+
+IF nConfig > 0 then   --- incoming is mentioned in the action product code
+
+ FOR Z in auto_inter Loop
+   Begin
+ 
+    -- Get all the parameters
+
+      p_ACTION_TYPE :=Z.ACTION_TYPE;
+      p_ACTION_CODE :=Z.ACTION_CODE;
+      p_ACTION_PRODUCT_CODE :=Z.ACTION_PRODUCT_CODE;
+      p_INTER_ON_CURRENT_PROD:=Z.INTER_ON_CURRENT_PROD;
+      p_INTER_ON_OTHER_PRODS:=Z.INTER_ON_OTHER_PRODS;
+      p_INTER_ON_OTHER_PROD_TYPES:=Z.INTER_ON_OTHER_PROD_TYPES;
+      p_INTER_ON_UNIT_LEVEL:=Z.INTER_ON_UNIT_LEVEL;
+      p_INTER_CODE:=Z.INTER_CODE;
+
+
+      ---if the unit level flag is set then place the inter on the unit
+
+     If nvl(p_INTER_ON_UNIT_LEVEL,'N')  ='Y' then
+         If place_unit_interdiction (pl_unit_id,pl_coll_date,
+                                             pl_chapter_id,p_INTER_CODE,
+                                             lt_user_session.get_userid,
+                                             'AUTOINT') = '0' then
+             NULL;
+         Else
+            pl_status:='Unable to place the interdiction on the unit';
+            return;
+         End If;
+    End If;
+
+
+    --Check if the interdiction should be placed on the incoming product itself 
+
+
+         If nvl(p_INTER_ON_CURRENT_PROD,'N') = 'Y' and
+            pl_function_name!='CPISDAL2' then 
+
+            If place_comp_interdiction (pl_unit_id,pl_coll_date,
+                           pl_chapter_id,pl_source_prod_code,
+                           p_INTER_CODE,
+                           lt_user_session.get_userid,  -- IM: 328
+                           'AUTOINT') = '0' then 
+                 NULL;
+           Else
+              pl_status:='Unable to place the interdiction on the product-3';
+              return;
+           End If;
+         End If;
+
+        -- Check if any products  or prodduct types in the list should get the 
+        -- interdiction if the products or product types in the list 
+        -- were created before the source product was created.
+       
+        If p_INTER_ON_OTHER_PRODS is not null  then  
+             place_inter_on_other_prods (pl_unit_id,
+                                        pl_coll_date,
+                                        pl_chapter_id,
+                                        pl_source_prod_code,
+                                        p_INTER_ON_OTHER_PRODS,
+                                        p_INTER_CODE,
+                                        p_proc_status);
+             If p_proc_status!='0' then
+               pl_status:='Unable to place the interdiction on the product-1';
+               return;
+            End If;
+
+        End If;
+
+
+        If p_INTER_ON_OTHER_PROD_TYPES is not null  then  
+             place_inter_on_other_types (pl_unit_id,
+                                        pl_coll_date,
+                                        pl_chapter_id,
+                                        pl_source_prod_code,
+                                        p_INTER_ON_OTHER_PROD_TYPES,
+                                        p_INTER_CODE,
+                                        p_proc_status);
+
+           If p_proc_status!='0' then
+             pl_status:='Unable to place the interdiction on the prod types-2';
+             return;
+           End If;
+
+       End If;
+
+       -- For Aliquotes 
+      
+       If pl_function_name='CPISDAL2' then 
+          If place_comp_interdiction (pl_unit_id,pl_coll_date,
+                    pl_chapter_id,pl_source_prod_code,
+                    p_INTER_CODE,
+                    lt_user_session.get_userid, --- IM: 328
+                    'AUTOINT') = '0' then
+              NULL;
+          Else
+             pl_status:='Unable to place the interdiction on the product-30';
+             return;
+          End If;
+       End If;
+
+       -- Check if any interdiction will have to be released when they
+       -- modify the original product.
+       
+       -- Note: The sbclib.pll is actually releasing the inter when we modify
+       -- the product but for some reason if it was not deleted ther then  
+       --the below code will delete the inter
+
+     If pl_function_type in ('CONVERT','MODIFY') then 
+
+      select nvl(count(*),0) into nExistInter from component_interdictions where
+      unit_id=pl_unit_id and product_code=pl_source_prod_code and 
+      inter_code=p_INTER_CODE and program_id='AUTOINT';
+
+      If nExistInter > 0 then
+         If  nvl(p_INTER_ON_CURRENT_PROD,'N') = 'N' then
+             delete from component_interdictions where
+             unit_id=pl_unit_id and product_code=pl_source_prod_code and
+             inter_code=p_INTER_CODE and program_id='AUTOINT'; 
+        End If;
+     End If;
+
+   End If;
+
+  End;
+
+ END LOOP;
+
+ELSE    -- for nConfig > 0 (if the incoming is not the action prd but others)
+  
+
+       -- first findout what is the action product for the incoming source prd
+
+
+       -- case 1: If the source product is already created, place the inter
+       --           on the incoming product if the prodct code or type
+       --            is meniotned in the list.
+
+         find_action_product(pl_function_name,
+                             pl_unit_id,
+                             pl_coll_date,
+                             pl_chapter_id,
+                             pl_source_prod_code,
+                             szAction_prd,
+                             szInter_code,
+                             szStatus);
+
+         dbms_output.put_line('Action prod='||szAction_prd);        
+
+       If szStatus!='OK' then
+          pl_status:=szStatus;
+          return;
+      Else
+          If szAction_prd='NONE' then 
+
+          --- check the action prd by searching the product type list
+
+          find_action_prod_from_types(pl_function_name,
+                                      pl_unit_id,
+                                      pl_coll_date,
+                                      pl_chapter_id,
+                                      pl_source_prod_code,
+                                      szAction_prd,
+                                     szInter_code,szStatus);
+
+
+                If szStatus!='OK' then 
+                 pl_status:=szStatus;
+                  return;
+                End If;
+
+          End If;
+
+           --End If;
+
+       End If; 
+
+ END IF;   -- for nConfig > 0;
+
+End main_proc;
+
+Procedure place_inter_on_other_prods(x_unit_id in varchar2,
+                                      x_coll_date in date,
+                                      x_chapter in varchar2,
+                                      x_source_prod in varchar2,
+                                      x_prod_list in varchar2,
+                                      x_inter in varchar2,
+                                      x_status out varchar2) is
+  v_max    NUMBER:=0;
+  v_next_max  NUMBER:=0;
+  str_start_pos number:=0;
+  parsed_Prod_code  varchar2(20);
+  nPos  number:=0;
+  nOtherProd  NUMBER:=0;
+  nRet    VARCHAR2(1);
+  szProdCode  varchar2(8);
+
+begin
+str_start_pos:=1;
+FOR cnt IN 1..99 loop
+   select instr(x_prod_list,',',str_start_pos) into nPos
+   from dual;
+
+   If nPos =0 then 
+       parsed_PROD_CODE:=substr(x_prod_list,str_start_pos);
+
+   Else
+      parsed_PROD_CODE:=substr(x_prod_list,str_start_pos,nPos - str_start_pos);     
+   End If;
+   dbms_output.put_line('Parsed code='|| parsed_prod_code);
+
+     parsed_PROD_CODE:=LTRIM(parsed_PROD_CODE);
+
+     select nvl(count(*),0) into nOtherProd from components where  
+     unit_id=x_unit_id and coll_date=x_coll_date and
+     substr(product_code,1,5)=parsed_prod_code and chapter_id=x_chapter;
+
+     If nOtherProd > 0 then
+        -- get the product code from the DB and place the interdiction
+
+          begin
+            select product_code into szProdCode from components where
+            unit_id=x_unit_id and coll_date=x_coll_date and
+            substr(product_code,1,5)=parsed_prod_code and 
+            chapter_id=x_chapter and rownum=1;
+          exception when others then 
+              szProdCode:=parsed_prod_code||'V00';
+          end;
+
+       dbms_output.put_line('inter prod='||szProdCode||' I='||x_inter);
+
+
+       nRet:=place_comp_interdiction (x_unit_id,
+                                               x_coll_date,
+                                               x_chapter,
+                                               szProdCode,
+                                               x_inter,
+                                               lt_user_session.get_userid,
+                                              'AUTOINT') ;
+        if nRet!= '0' then
+          x_status:='Unable to place the interdiction -4';
+          exit;
+        end If;
+     End If;
+
+   if nPos = 0 then 
+	exit;
+   else
+     str_start_pos:=nPos +1;
+   end if;
+ END LOOP;
+
+End place_inter_on_other_prods;
+
+
+Procedure place_inter_on_other_types(x_unit_id in varchar2,
+                                      x_coll_date in date,
+                                      x_chapter in varchar2,
+                                      x_source_prod in varchar2,
+                                      x_prod_type_list in varchar2,
+                                      x_inter in varchar2,
+                                      x_status out varchar2) is
+  v_max    NUMBER:=0;
+  v_next_max  NUMBER:=0;
+  str_start_pos number:=0;
+  parsed_Prod_type  varchar2(20);
+  nPos  number:=0;
+  nRet    varchar2(1);
+
+ CURSOR prod_cur (x_parsed_type in varchar2)  is select product_code 
+        from components where unit_id=x_unit_id and coll_date=x_coll_date and
+ substr(product_code,1,5) in (select product_code from
+                              valid_products where
+                              product_type=x_parsed_type and
+                              sysdate between eff_date and
+                              nvl(term_date,sysdate+2));
+
+Begin
+str_start_pos:=1;
+
+dbms_output.put_line('Unit='||x_unit_id||' Coll='||x_coll_date);
+
+FOR cnt IN 1..59 loop
+   select instr(x_prod_type_list,',',str_start_pos) into nPos
+   from dual;
+
+   If nPos =0 then 
+       parsed_prod_type:=substr(x_prod_type_list,str_start_pos);
+
+   Else
+      parsed_prod_type:=substr(x_prod_type_list,
+                               str_start_pos,nPos - str_start_pos);     
+   End If;
+   dbms_output.put_line('Parsed type 2 ='|| parsed_prod_type);
+
+    -- check if any products (product types) that was created before
+   
+     For Z1 in prod_cur(LTrim(RTrim(parsed_prod_type)))
+     Loop
+      
+      dbms_output.put_line('prod code for type='||Z1.product_code);
+ 
+       nRet:=place_comp_interdiction (x_unit_id,
+                                                   x_coll_date,
+                                                   x_chapter,
+                                                   Z1.product_code,
+                                                   x_inter,
+                                            lt_user_session.get_userid,
+                                              'AUTOINT') ;
+        if nRet!= '0' then
+          x_status:=nRet;
+          return;
+        end If;
+
+     End Loop;
+
+   if nPos = 0 then 
+	exit;
+   else
+     str_start_pos:=nPos +1;
+   end if;
+ END LOOP;
+
+End place_inter_on_other_types;
+
+
+Procedure find_action_product(x_function_name in varchar2,
+                             x_unit_id    in varchar2,
+                             x_coll_date  in date,
+                             x_chapter_id in varchar2,
+                             x_source_prod_code in varchar2,
+                             x_action_product out varchar2,
+                             x_inter_code out varchar2,
+                             x_status out varchar2) is
+  v_max    NUMBER:=0;
+  v_next_max  NUMBER:=0;
+  str_start_pos number:=0;
+  parsed_Prod_code  varchar2(20);
+  nPos  number:=0;
+  p_action_prod  varchar2(8);
+  found_it      exception;
+  nRejCount    number:=0;
+  nCount   number:=0;
+  nRet     varchar2(1);
+
+ 
+  cursor prod_code_list is select action_function_name, action_product_code,
+          action_code, inter_on_other_prods,inter_code from 
+          valid_auto_inter_config
+            where inter_on_other_prods is not null and
+            chapter_id=x_chapter_id and 
+            (action_function_name=x_function_name or 
+             action_function_name='CPIREJ') and
+            p_chp_sys_date between eff_date and nvl(term_date, sysdate+20);
+
+begin
+--str_start_pos:=1; -- for IM 9853, it is moved below to the loop
+
+for Z in prod_code_list 
+loop
+
+str_start_pos:=1;
+
+ FOR cnt IN 1..50 loop
+   select instr(Z.inter_on_other_prods,',',str_start_pos) into nPos
+   from dual;
+
+   If nPos =0 then 
+       parsed_PROD_CODE:=substr(z.inter_on_other_prods,str_start_pos);
+
+   Else
+      parsed_PROD_CODE:=substr(Z.inter_on_other_prods,
+                               str_start_pos,nPos - str_start_pos);     
+   End If;
+   dbms_output.put_line('Source='||x_source_prod_code||
+                         ' Parsed code='|| parsed_prod_code||
+                         'Inter='||Z.inter_code);
+
+  If substr(x_source_prod_code,1,5) = parsed_prod_code then
+
+      If Z.action_function_name!='CPIREJ' then 
+
+         If x_function_name!='CPIREJ' then
+           -- product should not be rejected
+
+            select nvl(count(*),0) into nRejCount from components where
+            unit_id=x_unit_id and chapter_id=x_chapter_id and 
+            substr(product_code,1,5)=Z.action_product_code
+            and (reject_reason_code is null or reject_reason_code in ('CONV'));
+ 
+            If nRejCount > 0 then 
+               x_action_product:=Z.action_product_code;
+               x_inter_code:=Z.inter_code;
+               exit;
+               dbms_output.put_line('Inter='||Z.inter_code);
+               --raise found_it;
+           End If;
+
+         End If;
+
+      Else 
+
+         select nvl(count(*),0) into nRejCount from components where
+         unit_id=x_unit_id and chapter_id=x_chapter_id and 
+         substr(product_code,1,5)=Z.action_product_code
+         and reject_reason_code=Z.action_code;
+
+         If nRejCount > 0 then
+           x_action_product:=Z.action_product_code;
+           x_inter_code:=Z.inter_code;
+           exit;
+         End If;
+     End If;
+
+  End If;
+
+   if nPos = 0 then 
+	exit;
+   else
+     str_start_pos:=nPos +1;
+   end if;
+ END LOOP;
+
+ If x_action_product is not null then
+   
+   x_status:='OK';
+
+     ---dbms_output.put_line('x_action_prd='||x_action_product);
+
+    select nvl(count(*),0) into nCount from components where
+    unit_id=x_unit_id and coll_date=x_coll_date and
+    chapter_id=x_chapter_id and
+    substr(product_code,1,5)=x_action_product;
+
+    ---dbms_output.put_line('coll='||to_char(x_coll_date,'mm-dd-yyyy'));
+    If nCount > 0 then   -- place the inter
+       nRet:=place_comp_interdiction (x_unit_id,
+                                              x_coll_date,
+                                              x_chapter_id,
+                                              x_source_prod_code,
+                                              x_inter_code,
+                                              lt_user_session.get_userid,
+                                              'AUTOINT') ;
+
+
+         If nRet!='0' then
+            x_status:='Unable to place the interdiction on the product-5';
+            return;
+         End If;
+   End If;
+ End if;
+
+End loop;
+
+
+   If x_action_product is null then 
+      x_action_product:='NONE';
+   End If;
+
+
+Exception when found_it then 
+  null;
+End find_action_product;
+
+
+Procedure find_action_prod_from_types( x_function_name in varchar2,
+                                      x_unit_id       in varchar2,
+                                      x_coll_date    in date,
+                                      x_chapter_id   in varchar2,
+                                      x_source_product_code in varchar2,
+                                      x_action_product out varchar2,
+                                      x_inter_code out varchar2,
+                                      x_status     out varchar2 ) is
+  str_start_pos number:=0;
+  parsed_Prod_type  varchar2(20);
+  x_prod_type_list  varchar2(200);
+  nPos  number:=0;
+  szprodType   VARCHAR2(10);
+  p_action_prod   VARCHAR2(10);
+  nRejCount       number:=0;
+  nCount          number:=0;
+  nRet    varchar2(1);
+
+ CURSOR type_list_cur is select inter_on_other_prod_types, 
+            action_product_code, inter_code,action_code,action_function_name
+            from  valid_auto_inter_config where inter_on_other_prod_types is
+            not null and chapter_id=x_chapter_id and 
+            (action_function_name=x_function_name or 
+             action_function_name='CPIREJ') and 
+            p_chp_sys_date between eff_date and nvl(term_date,sysdate+20);
+
+Begin
+
+  -- get the product type of the incoming source product code
+
+    begin
+      select product_type into szprodType from valid_products where
+      product_code=substr(x_source_product_code,1,5) and 
+      sysdate between eff_date and nvl(term_date,sysdate+1);
+    exception   
+   when others then 
+           szprodType:=null;
+    end;
+
+
+FOR Z2 in type_list_cur Loop     -- read the list from each record
+
+x_prod_type_list:=Z2.inter_on_other_prod_types;
+
+str_start_pos:=1;
+
+FOR cnt IN 1..50 loop
+   select instr(x_prod_type_list,',',str_start_pos) into nPos
+   from dual;
+
+   If nPos =0 then 
+       parsed_prod_type:=substr(x_prod_type_list,str_start_pos);
+
+   Else
+      parsed_prod_type:=substr(x_prod_type_list,
+                               str_start_pos,nPos - str_start_pos);     
+   End If;
+   dbms_output.put_line('Parsed type='|| parsed_prod_type||
+                        ' Source type='||szProdType);
+
+    -- check if the incoming product code is the type which is in the list
+     parsed_prod_type:=LTrim(RTrim(parsed_prod_type));
+
+   If parsed_prod_type = szProdType then
+
+       dbms_output.put_line('action fn='||Z2.action_function_name);
+
+     If Z2.action_function_name!='CPIREJ' then
+ 
+        If x_function_name!='CPIREJ' then 
+           -- product should not be rejected
+
+           select nvl(count(*),0) into nRejCount from components where
+           unit_id=x_unit_id and chapter_id=x_chapter_id and 
+           substr(product_code,1,5)=Z2.action_product_code
+           and (reject_reason_code is null or reject_reason_code in ('CONV'));
+
+            If nRejCount > 0 then    
+              x_action_product:=Z2.action_product_code;
+              x_inter_code:=Z2.inter_code;
+              exit;
+            End If;
+        End If;
+
+     Else
+       dbms_output.put_line('U='||x_unit_id||' ap='||Z2.action_product_code||
+                           'Rej='||Z2.action_code);
+
+       select nvl(count(*),0) into nRejCount from components where
+       unit_id=x_unit_id and substr(product_code,1,5)=Z2.action_product_code 
+       and reject_reason_code=Z2.action_code;
+        
+         If nRejCount > 0 then 
+            x_action_product:=Z2.action_product_code;
+            x_inter_code:=Z2.inter_code;
+            exit;
+         End If; 
+     End If;
+   End if;
+
+   if nPos = 0 then 
+	exit;
+   else
+     str_start_pos:=nPos +1;
+   end if;
+
+ END LOOP;
+ If x_action_product is  not null then 
+ --   exit;
+      x_status:='OK';
+
+      ---dbms_output.put_line('x_action_prd='||x_action_product);
+
+     select nvl(count(*),0) into nCount from components where
+     unit_id=x_unit_id and coll_date=x_coll_date and
+     chapter_id=x_chapter_id and
+     substr(product_code,1,5)=x_action_product;
+
+     ---dbms_output.put_line('coll='||to_char(x_coll_date,'mm-dd-yyyy'));
+     If nCount > 0 then   -- place the inter
+        nRet:=place_comp_interdiction (x_unit_id,
+                                       x_coll_date,
+                                       x_chapter_id,
+                                       x_source_product_code,
+                                       x_inter_code,
+                                       lt_user_session.get_userid,
+                                               'AUTOINT') ;
+
+         If nRet!='0' then
+            x_status:='Unable to place the interdiction on the product-5';
+            return;
+         End If;
+   End If;
+ End If;
+End Loop;
+
+ If x_action_product is null then 
+    x_action_product:='NONE';
+ End If;
+
+End find_action_prod_from_types;
+
+
+Function place_comp_interdiction (p_unit_id           in   varchar2,
+                                 p_coll_date          in   date,
+             	                 p_chapter_id         in   varchar2,
+		                 p_product_code       in   varchar2,
+		                 p_inter_code         in   varchar2,
+		                 p_user_id            in   varchar2,
+		                 p_prog_name          in   varchar2)
+	  return varchar2 is
+     Begin
+          insert into component_interdictions
+          (unit_id, coll_date, chapter_id, product_code, inter_code,
+           insert_dats, inter_user_id, program_id)
+          select  p_unit_id, p_coll_date, p_chapter_id, p_product_code,
+		  inter_code, sysdate, p_user_id, p_prog_name
+           from   valid_interdictions_lab
+           where  inter_code = p_inter_code and
+                  inter_code not in (select inter_code
+                                     from   component_interdictions
+                                     where  unit_id = p_unit_id
+                                       and  trunc(coll_date) =trunc(p_coll_date)
+                                       and  chapter_id = p_chapter_id
+				       and  product_code = p_product_code)
+               and sysdate between eff_date and
+                             nvl(term_date,sysdate+365);
+	  return('0');
+      Exception
+              when NO_DATA_FOUND
+              then
+		 return('1');
+              when TOO_MANY_ROWS
+              then
+		 return('-2');
+              when DUP_VAL_ON_INDEX
+              then
+		 return('-3');
+              when VALUE_ERROR
+              then
+		 return('-4');
+              when PROGRAM_ERROR
+              then
+		 return('-5');
+              when STORAGE_ERROR
+              then
+		 return('-6');
+End place_comp_interdiction;
+
+Function place_unit_interdiction (p_unit_id              in   varchar2,
+                                  p_coll_date            in   date,
+		                  p_chapter_id           in   varchar2,
+	          	          p_inter_code           in   varchar2,
+			          p_user_id              in   varchar2,
+			          p_prog_name            in   varchar2)
+	  return varchar2 is
+      Begin
+          insert into unit_interdictions
+          (unit_id, coll_date, chapter_id, inter_code,
+           insert_dats, inter_user_id, program_id)
+          select p_unit_id, p_coll_date, p_chapter_id, inter_code,
+		  sysdate, p_user_id, p_prog_name
+           from   valid_interdictions_lab
+           where  inter_code = p_inter_code and
+                  inter_code not in (select inter_code
+                              from   unit_interdictions
+                              where  unit_id = p_unit_id
+                              and  trunc(coll_date) =trunc(p_coll_date)
+                              and  chapter_id = p_chapter_id)
+               and sysdate between eff_date and
+                      nvl(term_date,sysdate+365);
+	  return('0');
+        Exception
+              when NO_DATA_FOUND
+              then
+		 return('1');
+              when TOO_MANY_ROWS
+              then
+		 return('-2');
+              when DUP_VAL_ON_INDEX
+              then
+		 return('-3');
+              when VALUE_ERROR
+              then
+		 return('-4');
+              when PROGRAM_ERROR
+              then
+		 return('-5');
+              when STORAGE_ERROR
+              then
+		 return('-6');
+End place_unit_interdiction;
+      
+
+Procedure init_variables is
+ l_inst_id    varchar2(10);
+ chapCount    number:=0;
+Begin
+null;
+End init_variables;
+
+
+END LT_AUTO_INTER_PLACEMENT;
+/
+drop public synonym  LT_AUTO_INTER_PLACEMENT
+/
+create public synonym LT_AUTO_INTER_PLACEMENT for LT_AUTO_INTER_PLACEMENT
+/
+grant execute on  LT_AUTO_INTER_PLACEMENT to public 
+/
+

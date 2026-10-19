@@ -1,0 +1,23 @@
+---
+module: Lab/Distribution
+sub_module: "Component Processing"
+title: "Manual Entry of Unit ID"
+mnemonic: cpisdcv
+tags:
+  - screen
+  - lab-distribution
+  - component-processing
+---
+
+# cpisdcv — Manual Entry of Unit ID
+
+**Module:** [[Lab/Distribution]] > [[Component Processing]]
+
+## Database Tables
+
+- [[UNIT_ADD_ON_BAGS]]
+
+## Dropdown/LOV Sources
+Values in dropdowns on this screen come from:
+
+- [[UNIT_ADD_ON_BAGS]]

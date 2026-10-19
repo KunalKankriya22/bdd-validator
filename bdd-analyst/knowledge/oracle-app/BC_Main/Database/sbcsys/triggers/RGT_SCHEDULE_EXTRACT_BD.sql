@@ -1,0 +1,26 @@
+--------------------------------------------------------
+--  DDL for Trigger RGT_SCHEDULE_EXTRACT_BD
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "RGT_SCHEDULE_EXTRACT_BD" 
+BEFORE DELETE
+ON SBCSYS.RGT_SCHEDULE_EXTRACT
+REFERENCING NEW AS NEW OLD AS OLD
+FOR EACH ROW
+begin
+
+	insert into RGT_SCHEDULE_EXTRACT_AUDIT
+    (
+	FILE_NAME, EXTRACT_DATE_TIME, STATUS,
+	CHAPTER_ID, CONTRACT_ID, RESULT_PARM_ID,
+	AUDIT_KEY, AUDIT_INSERT_DATS, AUDIT_INSERT_USER
+    )
+    values
+    (
+	:old.FILE_NAME, :old.EXTRACT_DATE_TIME, :old.STATUS,
+	:old.CHAPTER_ID, :old.CONTRACT_ID, :old.RESULT_PARM_ID,
+	:old.AUDIT_KEY, sysdate, lt_user_session.get_userid
+    );
+end;
+/
+ALTER TRIGGER "RGT_SCHEDULE_EXTRACT_BD" ENABLE;

@@ -1,0 +1,664 @@
+create or replace PACKAGE lt_licensure_check
+AS
+/******************************************************************************
+Program Name	:	LT_LICENSURE_CHECK
+
+Description	:	ThIS package contain common process routines related to
+					LIFetrack Applications.
+
+Created by	:	Arun Samuel
+
+Created on	:	March 24, 2011
+
+Version		:	1.0 (Initial)
+*******************************************************************************
+ModIFied by	Ver		On			IM 		Remarks
+*******************************************************************************
+
+Arun S		2		03/29/11	--		Function IS_product_licensed was NOT
+										RETURNing a value.  Fixed.
+
+Arun S		3		03/30/11	--		Logic in Function IS_product_licensed
+										was NOT having correct logic.  Fixed.
+
+Arun S		4		03/30/11	--		ModIFied to cater for requirements in
+										Oracle Forms Screens.
+
+Arun S		5		04/14/11	--		ModIFied to add chapter_id check against
+										table valid_prodequip_cgmp.
+
+Arun S		6		04/27/11	5336	ModIFied EXCEPTION section to RETURN
+										FALSE in case NO_DATA_FOUND.
+
+Arun S		7		04/27/11	5429	ModIFied to hANDle PHERESIS products
+                                        (Added function out_of_state_allowed_isbt).
+Edwin       08      04/28/12            If the product is not licensed the product
+                                            is no linced if the multi chapter is Y
+
+Ashok       09      09/21/2012  --     SCR 19597; To handle new field - imp_license_flag;
+                                        is_product_licensed routine modified.
+                                        out_of_state_allowed_isbt modifed.
+
+Ashok      10       09/25/2012  IM9141 --SUBSTR function added for product code in IS_LICENSED_PRODUCT routine.
+
+Ashok	   11	      10/17/2012  IM9179 -- timezone conversion applied.
+
+Ashok	   12	   10/30/2014  SCR 20830, IM 10078 -- IS_product_licensed routine modified
+
+Ashok    13       02/11/2015  IM 10380 - 'POOL' contract ID case added.
+
+Ashok    14       04/10/2015  SCR 21363 (ported from LT2012R3SP3) -- IM 10457 (POOL Contract Scenario - check in licensed_products before 
+                              checking in valid_products table for license flag (OSOK_FLAG).
+                              
+Ashok    15       04/14/2015  -- IM 3; 03/14/2015 lic_prod_cur query made timezone aware.                             
+
+Ashok    16       06/03/2015  -- IM 59; Search for IM 59 in code
+Edwin    17       02/23/2016   -- IM:199 2015 SP1
+----Renumbering started for the 2018 version --------------------------------
+
+Edwin   01  base 2018 version (which is similar to the version 17 above)
+
+Edwin   02   03/04/19   --  MLT:1854
+
+******************************************************************************/
+
+	g_multi_chapter	CHAR(1)	:=	'N';
+	g_err_txt		VARCHAR2(1024);
+
+	FUNCTION IS_product_licensed(
+					i_chapter_id	VARCHAR2
+					,i_site_id		VARCHAR2
+					,i_drive_id		VARCHAR2
+					,i_product_code	VARCHAR2
+					,i_unit_id		VARCHAR2
+					,i_code_scheme	VARCHAR2
+					)
+	RETURN	BOOLEAN
+	;
+
+	FUNCTION IS_multi_chapter
+	RETURN CHAR
+	;
+
+END lt_licensure_check;
+/
+create or replace PACKAGE BODY lt_licensure_check
+AS
+
+	FUNCTION IS_multi_chapter
+	RETURN CHAR
+	IS
+ 		v_parameter_value CHAR;
+
+	BEGIN
+		SELECT 	NVL(multi_chapter,'N')
+		INTO 	v_parameter_value
+		FROM 	lt_application_config
+		;
+
+		RETURN v_parameter_value;
+
+	EXCEPTION
+
+		WHEN NO_DATA_FOUND
+		THEN
+			RETURN 'N';
+		WHEN OTHERS
+		THEN
+			RETURN 'N';
+
+	END IS_multi_chapter
+	;
+
+	FUNCTION out_of_state_allowed_isbt
+					(
+					p_unit_id VARCHAR2
+					,p_product_code VARCHAR2
+					,p_chapter_id	VARCHAR2
+					,p_code_scheme	CHAR
+					)
+	RETURN BOOLEAN
+	IS
+		temp_group_site_id	VARCHAR2(7);
+		temp_drive_id		VARCHAR2(6);
+		osok_flag		VARCHAR2(1);
+		temp_chapter_id		VARCHAR2(4) := p_chapter_id;
+		code_scheme		VARCHAR2(1);
+		cntrct			VARCHAR2(20);
+		pher_flag 		VARCHAR2(1);
+		product_osok		VARCHAR2(1);
+	BEGIN
+		BEGIN
+			SELECT 	group_site_id
+				,contract_id
+				,drive_id
+			INTO	temp_group_site_id
+				,cntrct
+				,temp_drive_id
+			FROM   	units
+			WHERE  	unit_id	=p_unit_id
+				AND chapter_id 	= temp_chapter_id
+			GROUP BY 	group_site_id
+					,contract_id
+					,drive_id
+			;
+		EXCEPTION
+			WHEN NO_DATA_FOUND
+			THEN
+				lt_licensure_check.g_err_txt	:=	'Error : Not found in units table!';
+		END;
+
+		BEGIN
+			SELECT	NVL(out_of_state_flag,'N')
+				,NVL(pheresIS_flag,'N')
+			INTO  	product_osok
+				,pher_flag
+			FROM   	valid_products
+			WHERE  	product_code=p_product_code
+				AND unit_scheme_type=p_code_scheme ;
+		EXCEPTION
+			WHEN NO_DATA_FOUND
+			THEN
+				lt_licensure_check.g_err_txt	:=	'Valid products in Out of state allowed ISBT-'||SQLERRM;
+			WHEN OTHERS
+			THEN
+				lt_licensure_check.g_err_txt	:=	'Error : Valid Products';
+		END;
+
+		IF IS_multi_chapter = 'Y'
+		THEN
+			product_osok:=NULL;
+
+			BEGIN
+			  SELECT	NVL(osok_flag,'N')
+		       	  INTO  	product_osok
+			  FROM   	licensed_products
+		       	  WHERE  	product_code= p_product_code
+		         AND	chapter_id 	= temp_chapter_id;
+			EXCEPTION
+				WHEN NO_DATA_FOUND
+				THEN
+            product_osok:='N'; -- IM 59 (modified the flag to 'N' from 'Y')
+				WHEN OTHERS
+				THEN
+				   lt_licensure_check.g_err_txt	:='Error : LCESNED_PRODUCTS check';
+			END;
+
+                        --- This was added by Edwin on 04/29/12
+
+                        If product_osok='N' then
+                           RETURN(FALSE);
+                        End If;
+
+		END IF;
+
+        -- Commented on 09/21/2012 - SCR 19597.  This check for external contract is moved outside of this routine.
+		--IF cntrct != 'INTERNAL'
+		--THEN
+
+		--	IF product_osok ='Y'
+		--	THEN
+		--		RETURN (TRUE);
+		--	ELSE
+		--		RETURN(FALSE);
+		--	END IF;
+
+		--ELSE
+
+			IF temp_group_site_id IS NOT NULL
+			THEN
+		          BEGIN
+				SELECT 	osok_flag
+				INTO 	osok_flag
+				FROM   	group_sites
+				WHERE  	group_site_id 	= temp_group_site_id
+				AND	chapter_id = temp_chapter_id;
+				EXCEPTION
+					WHEN OTHERS THEN
+					lt_licensure_check.g_err_txt:='Error :Group Sites';
+				END;
+			END IF;
+
+			IF 	temp_drive_id IS NOT NULL
+				AND NVL(osok_flag,'Y')='Y'
+			THEN
+				BEGIN
+			          SELECT osok_flag
+				  INTO 	osok_flag
+				  FROM  drives_lab        --- MLT-1854
+				  WHERE drive_id= temp_drive_id
+				  AND	chapter_id= temp_chapter_id;
+				EXCEPTION
+					WHEN OTHERS THEN
+					lt_licensure_check.g_err_txt:='Error :Drives';
+				END;
+			END IF;
+
+		---message('Drive='||osok_flag);pause;  ---(1)
+
+			IF NVL(osok_flag,'Y') = 'Y'
+			THEN
+
+				IF 	product_osok	=	'Y'
+					AND pher_flag	=	'N'
+				THEN
+					RETURN(TRUE);
+				ElSIF	pher_flag	=	'Y'
+				THEN
+					BEGIN
+						SELECT	NVL(osok_flag,'N')
+						INTO 	osok_flag
+						FROM 	equipment
+						WHERE 	equip_reference in
+								(
+									SELECT 	equip_reference
+									FROM 	component_cgmp
+									WHERE 	unit_id		=	p_unit_id
+										AND parm_code	=	'PHER'
+								)
+							AND	equip_type IN
+								(
+									SELECT 	equip_type
+									FROM 	valid_prodequip_cgmp
+									WHERE 	product_code	=	p_product_code
+										AND chapter_id		=	temp_chapter_id
+										AND proc IN
+										(
+											SELECT 	attrib_code
+											FROM 	unit_attributes
+											WHERE 	unit_id		=	p_unit_id
+												AND attrib_group=	'PHER'
+												--AND	SYSDATE BETWEEN eff_DATE AND NVL(term_DATE,SYSDATE+1) -- IM9179
+										)
+										AND	parm_code	=	'OSOK'
+										AND	lifetrack_timezone_convert.get_local_time(temp_chapter_id, SYSDATE)  BETWEEN eff_DATE AND NVL(term_DATE,lifetrack_timezone_convert.get_local_time(temp_chapter_id, SYSDATE)+1) -- IM:9179
+								)
+						;
+					EXCEPTION
+						WHEN NO_DATA_FOUND
+						THEN
+							osok_flag	:=	'N';
+						WHEN OTHERS
+						THEN
+							lt_licensure_check.g_err_txt	:=	'Error: EQUIPMENT';
+					END;
+
+					IF	osok_flag	=	'Y'
+					THEN
+						RETURN(TRUE);
+					ELSE
+						RETURN(FALSE);
+					END IF;
+				ELSE     -- For pheresIS_flag='Y'
+					RETURN(FALSE);
+				END IF;
+			ELSE
+				RETURN(FALSE);
+			END IF;
+		--END IF;     --for internal or imported -- Commented on 09/21/2012; SCR: 19597;
+
+	END;
+
+
+		FUNCTION IS_product_licensed
+					(
+						i_chapter_id	VARCHAR2
+						,i_site_id		VARCHAR2
+						,i_drive_id		VARCHAR2
+						,i_product_code	VARCHAR2
+						,i_unit_id		VARCHAR2
+						,i_code_scheme	VARCHAR2
+					)
+		RETURN	BOOLEAN
+		AS
+
+      l_err_text 	VARCHAR2(1024)	;
+      l_cntrct_id VARCHAR2(20);
+      --l_prod_code  VARCHAR2(8);  -- SCR 20830
+      --l_relabel_prod_code VARCHAR2(8); -- SCR 20830
+      --l_cur_found  BOOLEAN;-- SCR 20830
+      imp_license_flag  VARCHAR2(1);
+      l_product_osok		VARCHAR2(1); -- IM 10380
+      l_program_id VARCHAR2(30); -- IM 59
+      temp_osok_flag VARCHAR2(1); -- IM 59
+      
+      -- SCR 20830 Changes - comments; 10/30/2014
+      /** Labeling for product code - E0332V00 
+        1) Table 1 - E0332V00 - IMP_LIC_FLAG IS NULL and RELABEL_PROD_CODE IS NULL;   
+        2) Table 1 - there is no parent record for EO332V00
+        3) Table 2 - check components_audit table - for any changes in product_Codes -> EO336V00 to E0332V00
+        4) Table 2 - Use the product code - E0336V00 and look in table 1 for parent record.  IMP_LIC_FLAG is 'Y'
+                  - for the parent record 'E0316V00'.  Return IMP_LIC_FLAG ('Y').
+      
+      **/
+      
+      /* Table 1: COMPONENTS table records eg:
+      ****************************************************
+      PROD CODE RELABEL_PROD_CODE   IMP_LIC_FLAG   AUDIT_KEY
+      E0316V00	  E0336V00	            Y	          1393797
+      E0332V00	  NULL                NULL          1393804 
+      ****************************************************
+      */
+      
+      /* Table 2:  COMPONENTS_AUDIT table records eg:
+      *******************************************************
+      PROD CODE RELABEL_PROD_CODE   IMP_LIC_FLAG   AUDIT_KEY
+      E0336V00    NULL                NULL    			 1393804
+      NULL   			NULL                NULL          1393804             
+      E0332V00    NULL                NULL    			 1393804
+      NULL        NULL			           NULL          1393804
+      ********************************************************      
+      */ 
+      -- End comments - 10/30/2014;
+      
+      -- Added for SCR 20830:
+      -- Get the product code and imp_license_flag for parent record; (linked by relabel_product_code).
+      FUNCTION get_parent_lic_flag(pl_prod_code VARCHAR2) RETURN VARCHAR2 IS
+        CURSOR l_comp_cur (in_relabel_prod_code VARCHAR2) IS
+          SELECT imp_license_flag, product_code
+            FROM COMPONENTS
+           WHERE unit_id = i_unit_id
+             --AND SUBSTR(relabel_product_code,1,5) = in_relabel_prod_code -- IM:9141 - substr added.
+             AND SUBSTR(relabel_product_code,1,5) = SUBSTR(in_relabel_prod_code, 1, 5) -- SCR 20830
+             AND chapter_id = i_chapter_id;                      
+        l_relabel_prod_code VARCHAR2(8); -- SCR 20830
+        l_prod_code  VARCHAR2(8); -- SCR 20830
+        l_cur_found  BOOLEAN; -- SCR 20830
+        l_lic_flag VARCHAR2(1) := NULL;
+      BEGIN
+          l_relabel_prod_code := pl_prod_code; -- For cursor input parameter
+          LOOP
+              EXIT WHEN l_lic_flag IN ('Y','N');
+              OPEN l_comp_cur(l_relabel_prod_code);
+              FETCH l_comp_cur INTO l_lic_flag, l_prod_code;
+              l_cur_found := l_comp_cur%FOUND;
+              CLOSE l_comp_cur;
+      
+              IF l_cur_found THEN
+                -- If parent record is found and if multiple levels are there, use this product code to get to the next parent record.
+                l_relabel_prod_code := l_prod_code;
+              ELSE
+                EXIT; -- Exit, as there is no parent record and license_flag is also null. This error condition is handle in the below if-endif.
+              END IF;
+          END LOOP;
+          
+          RETURN l_lic_flag;
+      END get_parent_lic_flag;
+      
+      -- Added for SCR 20830.  Loop through the component_audits records to check for any changes in product code column.
+      FUNCTION get_comp_audit_lic_flag RETURN VARCHAR2 IS
+        -- Get the audit key from components table.  Audit key is used in the comp_audit_cur to loop through component_audits table
+        CURSOR comp_cur IS
+        SELECT audit_key
+          FROM components
+         WHERE unit_id = i_unit_id
+           AND SUBSTR(product_code,1,5) = i_product_code 
+           AND chapter_id = i_chapter_id;
+        
+        -- Get the previous product codes from components_audit table (use audit key from comp_cur to loop through records);   
+        CURSOR comp_audit_cur(pl_audit_key IN NUMBER) IS
+          SELECT product_code
+            FROM components_audit
+           WHERE audit_key = pl_audit_key
+             AND SUBSTR(product_code,1,5) <> i_product_code
+             AND product_code IS NOT NULL;
+        
+        l_audit_key NUMBER;    
+        l_temp_lic_flag VARCHAR2(1) := NULL;
+      BEGIN   
+        -- Get the audit key from components table.        
+        OPEN comp_cur;
+        FETCH comp_cur INTO l_audit_key;
+        CLOSE comp_cur;
+        
+        -- Get the previous product codes from components_audit table; 
+        FOR comp_audit_rec IN comp_audit_cur(l_audit_key) LOOP
+          -- Get the parent record license flag.
+          l_temp_lic_flag := get_parent_lic_flag(comp_audit_rec.product_code);
+          
+          -- EXIT the loop when license flag is 'Y' OR 'N'
+          IF l_temp_lic_flag IN ('Y','N') THEN
+            EXIT;
+          END IF;
+        END LOOP;
+        
+        
+        RETURN l_temp_lic_flag;
+      
+      END get_comp_audit_lic_flag;      
+      
+      FUNCTION get_osok_flag RETURN VARCHAR2 IS  
+      /* this function returns osok_flag configured in licensed_products table.  Returns 'N' if not found in the table */
+       l_osok_flag VARCHAR2(1);
+       chp_sysdate DATE;
+
+       CURSOR lic_prod_cur IS
+       SELECT NVL(osok_flag,'N')
+         FROM licensed_products
+        WHERE product_code = i_product_code
+          AND chapter_id = i_chapter_id
+          --AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE+1);
+          AND TRUNC(chp_sysdate) BETWEEN eff_date AND NVL(term_date, chp_sysdate+1);  
+      BEGIN
+        chp_sysdate := lifetrack_timezone_convert.get_local_time(i_chapter_id, SYSDATE);  
+        
+        l_osok_flag := 'N';
+        
+        OPEN lic_prod_cur;
+        FETCH lic_prod_cur INTO l_osok_flag;
+        CLOSE lic_prod_cur;
+        
+        RETURN l_osok_flag;
+        
+      END get_osok_flag;
+		BEGIN
+            -- Get the contract ID.  Internal or External
+            BEGIN
+                l_cntrct_id := NULL;
+
+                SELECT contract_id
+                  INTO l_cntrct_id
+                  FROM units
+                 WHERE unit_id = i_unit_id
+                   AND chapter_id = i_chapter_id;
+            EXCEPTION
+                WHEN NO_DATA_FOUND
+                THEN
+                    l_cntrct_id := NULL;
+                    lt_licensure_check.g_err_txt    :=    'Error : Not found in units table!';
+            END;
+
+            IF l_cntrct_id is NULL THEN -- not found in units table. Error condition
+              RETURN (FALSE);
+            ELSIF l_cntrct_id = 'INTERNAL' THEN -- for internal contracts
+              RETURN lt_licensure_check.out_of_state_allowed_isbt
+                        (
+                            i_unit_id
+                           ,i_product_code
+                           ,i_chapter_id
+                           ,i_code_scheme
+                         );
+            ELSIF l_cntrct_id = 'POOL' THEN -- IM 10380 added if condition for 'POOL' contract case.
+              -- SCR 21363 -- IM 10457 (first check in licensed_products table.  If no record found, check in valid_products table)
+              DECLARE   
+               l_osok_flag VARCHAR2(1);
+               l_rec_found BOOLEAN := FALSE;
+               chp_sysdate DATE; -- IM 3; 03/14/2015
+
+               CURSOR lic_prod_cur IS
+               SELECT osok_flag
+                 FROM licensed_products
+                WHERE product_code = i_product_code
+                  AND chapter_id = i_chapter_id
+                  --AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE+1);
+                  AND TRUNC(chp_sysdate) BETWEEN eff_date AND NVL(term_date, chp_sysdate+1);  -- IM 3; 03/14/2015
+              BEGIN
+                chp_sysdate := lifetrack_timezone_convert.get_local_time(i_chapter_id, SYSDATE);  -- IM 3; 03/14/2015
+                
+                OPEN lic_prod_cur;
+                FETCH lic_prod_cur INTO l_osok_flag;
+                l_rec_found := lic_prod_cur%FOUND;
+                CLOSE lic_prod_cur;
+                
+                IF l_rec_found THEN
+                  IF NVL(l_osok_flag,'N') = 'Y' THEN
+                    RETURN(TRUE);
+                  ELSE
+                    RETURN(FALSE);
+                  END IF;
+                END IF;
+              END;
+            
+              BEGIN
+                SELECT	NVL(out_of_state_flag,'N')
+                INTO  	l_product_osok
+                FROM   	valid_products
+                WHERE  	product_code=i_product_code
+                  AND unit_scheme_type=i_code_scheme ;
+
+                IF l_product_osok = 'Y' THEN
+                  RETURN (TRUE);
+                ELSE
+                  RETURN (FALSE);
+                END IF;
+              EXCEPTION
+                WHEN NO_DATA_FOUND
+                THEN
+                  --lt_licensure_check.g_err_txt	:=	'Valid products in IS_PRODUCT_LICENSED-'||SQLERRM;
+                  RETURN (FALSE);
+                WHEN OTHERS
+                THEN
+                  --lt_licensure_check.g_err_txt	:=	'Error : Valid Products in IS_PRODCUT_LICENSED';
+                  RETURN (FALSE);
+              END;
+            END IF;
+
+            -- Below code executes only for contracts that are NOT INTERNAL. -- NOT POOL -- IM 10380
+            
+            BEGIN
+                imp_license_flag := NULL;
+                l_program_id   := NULL; -- IM 59
+
+                -- 1. Get imp_license_flag from components table.
+                BEGIN
+                    SELECT imp_license_flag, program_id INTO imp_license_flag,
+                    l_program_id -- IM 59 (program_id added)
+                      FROM components
+                     WHERE unit_id = i_unit_id
+                       AND SUBSTR(product_code,1,5) = i_product_code -- IM:9141 - substr added.
+                       AND chapter_id = i_chapter_id;
+                EXCEPTION
+                  WHEN NO_DATA_FOUND THEN
+                    lt_licensure_check.g_err_txt    :=    'Error : Not found in units table!';
+                    RETURN (FALSE);
+                  when too_many_rows then   -- IM:199
+                     SELECT imp_license_flag, program_id INTO imp_license_flag, 
+                     l_program_id 
+                     FROM components
+                       WHERE unit_id = i_unit_id
+                       AND SUBSTR(product_code,1,5) = i_product_code  
+                       AND chapter_id = i_chapter_id and rownum=1;
+
+                END;
+
+                -- IM 59 changes
+                /*
+                Product modification can be performed in two ways -> 1) CONVERT 2) MODIFY
+                1) CONVERT - will create a new record in components table.
+                2) MODIFY - Updates product code and program ID for the existing record.
+                IM 59 code changes are for MODIFY functionality where license_flag is not updated during modification process (only product code and pgm ID are updated).
+                For this scenario, we call the out_of_state_allowed_isbt routine.
+                */
+                IF imp_license_flag = 'Y' THEN
+                    -- IM 59 begin
+                    IF UPPER(l_program_id) = 'IMCHKIN' THEN -- No product modification made as program ID is same as 'IMPORT' screen.
+                      RETURN (TRUE);
+                    ELSE   -- Program ID for the record is different from 'IMPORT' screen.
+                      /* -- IM 59
+                      RETURN lt_licensure_check.out_of_state_allowed_isbt
+                              (
+                                  i_unit_id
+                                 ,i_product_code
+                                 ,i_chapter_id
+                                 ,i_code_scheme
+                               );
+                      */ 
+                      temp_osok_flag := get_osok_flag;
+                      IF temp_osok_flag = 'Y' THEN
+                        RETURN (TRUE);
+                      ELSE
+                        RETURN (FALSE);
+                      END IF;
+                      
+                    END IF;
+                    -- IM 59 end;
+
+                    -- RETURN (TRUE); -- IM 59 (Above IF condition added)
+                ELSIF imp_license_flag = 'N' THEN
+                
+                    RETURN (FALSE);
+                    
+                ELSIF imp_license_flag IS NULL THEN
+                    -- Get the product code and imp_license_flag for parent record; (linked by relabel_product_code).
+                    -- SCR 20830; moved logic to get_parent_lic_flag routine.
+                    imp_license_flag := get_parent_lic_flag(i_product_code); 
+                    
+                    -- SCR 20830; Check in Components_audit table  (only if license flag is NULL)
+                    IF imp_license_flag IS NULL THEN
+                      imp_license_flag := get_comp_audit_lic_flag;
+                    END IF;
+                    
+                    
+                    -- SCR 20830; no changes made to the below stmt.
+                    IF imp_license_flag = 'Y' THEN
+                        /* IM 59
+                        RETURN lt_licensure_check.out_of_state_allowed_isbt
+                                (
+                                    i_unit_id
+                                   ,i_product_code
+                                   ,i_chapter_id
+                                   ,i_code_scheme
+                                 );
+                        */
+                        -- IM 59
+                        temp_osok_flag := get_osok_flag;
+                        IF temp_osok_flag = 'Y' THEN
+                          RETURN (TRUE);
+                        ELSE
+                          RETURN (FALSE);
+                        END IF;                        
+                        --
+                        
+                    ELSIF imp_license_flag = 'N' THEN
+                        RETURN (FALSE);
+                    ELSIF imp_license_flag IS NULL THEN                        
+                        lt_licensure_check.g_err_txt :='Error : Record with relabel_product_code not found in Components table!';
+                        RETURN (FALSE);
+                    END IF;
+                    
+                END IF; -- imp_license_flag IS NULL
+            END;
+
+		EXCEPTION
+			WHEN OTHERS
+			THEN
+				l_err_text := lt_licensure_check.g_err_txt||sqlerrm;
+
+				RAISE_APPLICATION_ERROR(-20000,l_err_text);
+
+		END IS_product_licensed
+	;
+
+BEGIN
+
+	g_multi_chapter	:=	IS_multi_chapter;
+
+END lt_licensure_check;
+/
+
+Create Or Replace Public Synonym lt_licensure_check for SBCSYS.lt_licensure_check
+/
+
+Grant execute on lt_licensure_check to PUBLIC
+/
+

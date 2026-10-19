@@ -1,0 +1,379 @@
+<!-- SIDE PANEL MODE -->
+@if (isSidePanelMode) {
+  <app-side-panel-base
+    [title]="'Donor Attributes'"
+    [width]="'100%'"
+    [showFooter]="true"
+    [footerButtons]="sidePanelButtons"
+    (closePanel)="onClose()"
+    (buttonClick)="onSidePanelButtonClick($event)">
+
+    <ng-container panelHeaderFields>
+      @if (hasHiddenAttributes()) {
+        <div class="info-banner">
+          <mat-icon class="info-banner-icon" aria-hidden="true">info</mat-icon>
+          <span>There are other attributes on this donor.</span>
+          <button mat-icon-button class="info-banner-close" (click)="hasHiddenAttributes.set(false)" [attr.aria-label]="'Dismiss'">
+            <mat-icon aria-hidden="true">close</mat-icon>
+          </button>
+        </div>
+      }
+      <ng-container *ngTemplateOutlet="headerInfo"></ng-container>
+    </ng-container>
+
+    <ng-container panelContent>
+      <ng-container *ngTemplateOutlet="mainContent"></ng-container>
+    </ng-container>
+  </app-side-panel-base>
+}
+
+<!-- PAGE MODE -->
+@else {
+  <div class="donor-attributes-container" role="main" aria-labelledby="page-title">
+    <header class="page-header">
+      <h1 id="page-title">Donor Attributes</h1>
+      <div class="header-actions">
+        <button mat-button type="button" (click)="onClose()" [attr.aria-label]="'Close donor attributes'">
+          <mat-icon aria-hidden="true">close</mat-icon> Close
+        </button>
+      </div>
+    </header>
+
+    @if (loading()) {
+      <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+        <mat-spinner diameter="40" [attr.aria-label]="'Loading donor attributes'"></mat-spinner>
+      </div>
+    }
+
+    @if (error() && !loading()) {
+      <div class="error-container" role="alert" aria-live="assertive">
+        <mat-icon aria-hidden="true">error</mat-icon>
+        <p>{{ error() }}</p>
+        <button mat-button color="primary" (click)="onRetry()">Retry</button>
+      </div>
+    }
+
+    @if (!loading() && !error() && donorDemographics()) {
+      <ng-container *ngTemplateOutlet="headerInfo"></ng-container>
+      <ng-container *ngTemplateOutlet="mainContent"></ng-container>
+    }
+  </div>
+}
+
+<!-- ============ SHARED TEMPLATES ============ -->
+
+
+<!-- Header Info -->
+<ng-template #headerInfo>
+  @if (isSidePanelMode || (!loading() && !error() && donorDemographics())) {
+    <div class="header-info">
+      <div class="info-row">
+        <div class="info-field">
+          <span class="label">Name</span>
+          <span class="value">{{ (isSidePanelMode ? (donorName() || inputDonorName) : donorName()) || '-' }}</span>
+        </div>
+        <div class="info-field">
+          <span class="label">DOB</span>
+          <span class="value">{{ (donorDemographics()?.dateOfBirth | date:'dd-MMM-yyyy' | uppercase) || inputDob || '-' }}</span>
+        </div>
+        <div class="info-field">
+          <span class="label">Sex</span>
+          <span class="value">{{ donorDemographics()?.gender || inputSex || '-' }}</span>
+        </div>
+        <div class="info-field">
+          <span class="label">ABO</span>
+          <span class="value">{{ donorDemographics()?.bloodType || inputAbo || '-' }}</span>
+        </div>
+      </div>
+    </div>
+  }
+</ng-template>
+
+<!-- Main Content -->
+<ng-template #mainContent>
+  @if (loading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" [attr.aria-label]="'Loading donor attributes'"></mat-spinner>
+    </div>
+  }
+
+  @if (error() && !loading()) {
+    <div class="error-container" role="alert" aria-live="assertive">
+      <mat-icon aria-hidden="true">error</mat-icon>
+      <p>{{ error() }}</p>
+      <button mat-button color="primary" (click)="onRetry()">Retry</button>
+    </div>
+  }
+
+  @if (!loading() && !error()) {
+    <div class="content-layout">
+      <!-- Tabs -->
+      <div class="panel-tabs">
+        <button
+          class="tab-btn"
+          [class.active]="activeTab() === 'all'"
+          (click)="onTabChange('all')"
+          type="button">
+          All Attributes
+        </button>
+        <button
+          class="tab-btn"
+          [class.active]="activeTab() === 'terminated'"
+          (click)="onTabChange('terminated')"
+          type="button">
+          Terminated Attributes
+        </button>
+      </div>
+
+      @if (activeTab() === 'all') {
+        <!-- Actions Row -->
+        <div class="panel-actions">
+          @if (!isEditing()) {
+            <button
+              mat-stroked-button
+              class="action-btn"
+              type="button"
+              (click)="onToggleEdit()">
+              ADD/EDIT
+            </button>
+          } @else {
+            <button
+              mat-stroked-button
+              class="action-btn add-new-btn"
+              type="button"
+              (click)="onAddAttribute()">
+              <mat-icon aria-hidden="true">add</mat-icon> ADD NEW ROW
+            </button>
+            <span class="button-separator"></span>
+            <button
+              mat-stroked-button
+              class="action-btn cancel-btn"
+              type="button"
+              (click)="onCancelEdit()">
+              <mat-icon aria-hidden="true">close</mat-icon> CANCEL
+            </button>
+            <button
+              mat-flat-button
+              class="save-btn"
+              type="button"
+              (click)="onSaveAll()"
+              [disabled]="saving()">
+              <mat-icon aria-hidden="true">check</mat-icon> SAVE
+            </button>
+          }
+        </div>
+
+        <!-- Attributes Table -->
+        <ng-container *ngTemplateOutlet="attributesTable"></ng-container>
+      }
+
+      @if (activeTab() === 'terminated') {
+        <ng-container *ngTemplateOutlet="terminatedTable"></ng-container>
+      }
+    </div>
+  }
+</ng-template>
+
+<!-- Active Attributes Table -->
+<ng-template #attributesTable>
+  <div class="table-container" role="region" aria-label="Active attributes table">
+    <form [formGroup]="attributesForm">
+      <table
+        mat-table
+        #attributesMatTable
+        [dataSource]="attributesArray.controls"
+        class="attributes-table"
+        role="table"
+        aria-label="Donor active attributes">
+
+        <!-- Attribute Code Column -->
+        <ng-container matColumnDef="interCode">
+          <th mat-header-cell *matHeaderCellDef role="columnheader">
+            Attribute <span class="required-marker">*</span>
+          </th>
+          <td mat-cell *matCellDef="let control; let i = index" role="cell">
+            @if (isEditing()) {
+              <mat-form-field appearance="fill" class="table-field compact-field"
+                [class.mat-form-field-invalid]="$any(control).get('interCode')?.touched && $any(control).get('interCode')?.hasError('required')"
+                [matTooltip]="$any(control).get('interCode')?.touched && $any(control).get('interCode')?.hasError('required') ? 'Attribute is required' : ''"
+                matTooltipPosition="below">
+                <mat-select
+                  [formControl]="$any(control).get('interCode')"
+                  panelClass="attribute-select-panel">
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="getSearchControl(i)"
+                      placeholderLabel="Search attribute..."
+                      noEntriesFoundLabel="No matching attributes">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @if (loadingProperties()) {
+                    <mat-option disabled>Loading...</mat-option>
+                  }
+                  @for (prop of getFilteredProperties(i); track prop.interCode) {
+                    <mat-option [value]="prop.interCode">{{ prop.interCode }} - {{ prop.interDesc }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+            } @else {
+              {{ $any(control).get('interCode')?.value || '-' }}
+            }
+          </td>
+        </ng-container>
+
+        <!-- Description Column -->
+        <ng-container matColumnDef="interDesc">
+          <th mat-header-cell *matHeaderCellDef role="columnheader">Description</th>
+          <td mat-cell *matCellDef="let control" role="cell">
+            {{ $any(control).get('interDesc')?.value || '-' }}
+          </td>
+        </ng-container>
+
+        <!-- User ID Column -->
+        <ng-container matColumnDef="insertUser">
+          <th mat-header-cell *matHeaderCellDef role="columnheader">User ID</th>
+          <td mat-cell *matCellDef="let control" role="cell">
+            {{ $any(control).get('insertUser')?.value || '-' }}
+          </td>
+        </ng-container>
+
+        <!-- Effective Date Column -->
+        <ng-container matColumnDef="effDate">
+          <th mat-header-cell *matHeaderCellDef role="columnheader">
+            Effective Date <span class="required-marker">*</span>
+          </th>
+          <td mat-cell *matCellDef="let control; let i = index" role="cell">
+            @if (isEditing()) {
+              <mat-form-field appearance="fill" class="table-field compact-field"
+                [class.mat-form-field-invalid]="getEffDateError($any(control))"
+                [matTooltip]="getEffDateError($any(control)) || ''"
+                matTooltipPosition="below">
+                <input
+                  matInput
+                  [matDatepicker]="effPicker"
+                  [formControl]="$any(control).get('effDate')"
+                  [min]="minDate"
+                  (input)="onEffDateInput($event, $any(control))"
+                  [attr.aria-label]="'Effective Date'">
+                <mat-datepicker-toggle matSuffix [for]="effPicker"></mat-datepicker-toggle>
+                <mat-datepicker #effPicker></mat-datepicker>
+              </mat-form-field>
+            } @else {
+              {{ formatDateForDisplay($any(control).get('effDate')?.value) }}
+            }
+          </td>
+        </ng-container>
+
+        <!-- Termination Date Column -->
+        <ng-container matColumnDef="termDate">
+          <th mat-header-cell *matHeaderCellDef role="columnheader">Termination Date</th>
+          <td mat-cell *matCellDef="let control; let i = index" role="cell">
+            @if (isEditing()) {
+              <mat-form-field appearance="fill" class="table-field compact-field"
+                [class.mat-form-field-invalid]="getTermDateError($any(control))"
+                [matTooltip]="getTermDateError($any(control)) || ''"
+                matTooltipPosition="below">
+                <input
+                  matInput
+                  [matDatepicker]="termPicker"
+                  [formControl]="$any(control).get('termDate')"
+                  [min]="getMinTermDate($any(control))"
+                  [matDatepickerFilter]="getTermDateFilter($any(control))"
+                  (input)="onTermDateInput($event, $any(control))"
+                  [attr.aria-label]="'Termination Date'">
+                <mat-datepicker-toggle matSuffix [for]="termPicker"></mat-datepicker-toggle>
+                <mat-datepicker #termPicker></mat-datepicker>
+              </mat-form-field>
+            } @else {
+              {{ formatDateForDisplay($any(control).get('termDate')?.value) }}
+            }
+          </td>
+        </ng-container>
+
+        <!-- Actions Column -->
+        <ng-container matColumnDef="actions">
+          <th mat-header-cell *matHeaderCellDef role="columnheader"><span class="cdk-visually-hidden">Actions</span></th>
+          <td mat-cell *matCellDef="let control; let i = index" role="cell">
+            @if (isEditing() && $any(control).get('isNew')?.value) {
+              <button
+                mat-icon-button
+                type="button"
+                (click)="onDeleteAttribute(i)"
+                [disabled]="saving()"
+                matTooltip="Delete row"
+                [attr.aria-label]="'Delete row'">
+                <mat-icon aria-hidden="true">delete</mat-icon>
+              </button>
+            }
+          </td>
+        </ng-container>
+
+        <tr mat-header-row *matHeaderRowDef="displayedColumns"></tr>
+        <tr mat-row *matRowDef="let row; columns: displayedColumns;"></tr>
+      </table>
+    </form>
+
+    @if (attributesArray.length === 0) {
+      <div class="empty-state" role="status">
+        <mat-icon aria-hidden="true">info</mat-icon>
+        <p>No active attributes found.</p>
+      </div>
+    }
+  </div>
+</ng-template>
+
+<!-- Terminated Attributes Table -->
+<ng-template #terminatedTable>
+  @if (loadingTerminated()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" [attr.aria-label]="'Loading terminated attributes'"></mat-spinner>
+    </div>
+  }
+
+  @if (!loadingTerminated() && terminatedAttributes().length === 0) {
+    <div class="empty-state" role="status">
+      <mat-icon aria-hidden="true">info</mat-icon>
+      <p>No terminated attributes found.</p>
+    </div>
+  }
+
+  @if (!loadingTerminated() && terminatedAttributes().length > 0) {
+    <div class="table-container" role="region" aria-label="Terminated attributes table">
+      <table
+        mat-table
+        [dataSource]="terminatedAttributes()"
+        class="attributes-table"
+        role="table"
+        [attr.aria-label]="'Donor terminated attributes'">
+
+        <ng-container matColumnDef="interCode">
+          <th mat-header-cell *matHeaderCellDef>Code</th>
+          <td mat-cell *matCellDef="let attr">{{ attr.interCode }}</td>
+        </ng-container>
+
+        <ng-container matColumnDef="interDesc">
+          <th mat-header-cell *matHeaderCellDef>Description</th>
+          <td mat-cell *matCellDef="let attr">{{ attr.interDesc || '-' }}</td>
+        </ng-container>
+
+        <ng-container matColumnDef="insertUser">
+          <th mat-header-cell *matHeaderCellDef>User ID</th>
+          <td mat-cell *matCellDef="let attr">{{ attr.insertUser || '-' }}</td>
+        </ng-container>
+
+        <ng-container matColumnDef="effDate">
+          <th mat-header-cell *matHeaderCellDef>Effective Date</th>
+          <td mat-cell *matCellDef="let attr">{{ attr.effDate | date:'dd-MMM-yyyy' | uppercase }}</td>
+        </ng-container>
+
+        <ng-container matColumnDef="termDate">
+          <th mat-header-cell *matHeaderCellDef>Termination Date</th>
+          <td mat-cell *matCellDef="let attr">{{ attr.termDate | date:'dd-MMM-yyyy' | uppercase }}</td>
+        </ng-container>
+
+        <tr mat-header-row *matHeaderRowDef="['interCode', 'interDesc', 'insertUser', 'effDate', 'termDate']"></tr>
+        <tr mat-row *matRowDef="let row; columns: ['interCode', 'interDesc', 'insertUser', 'effDate', 'termDate'];"></tr>
+      </table>
+    </div>
+  }
+</ng-template>

@@ -1,0 +1,30 @@
+--------------------------------------------------------
+--  DDL for Trigger TEST_BAND_DETAIL_BD
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "TEST_BAND_DETAIL_BD" 
+BEFORE DELETE
+ON SBCSYS.TEST_BAND_DETAIL
+REFERENCING NEW AS NEW OLD AS OLD
+FOR EACH ROW
+begin
+
+	insert into TEST_BAND_DETAIL_AUDIT
+    (
+	UNIT_ID, COLL_DATE, CHAPTER_ID,
+	TB_ID, TEST_ID, TB_SEQ_NO,
+	TEST_CHAPTER_ID, BAND_NAME, TECH1_BAND_VAL,
+	TECH2_BAND_VAL, SUPER_BAND_VAL, PROGRAM_ID, BAND_SEQ,
+	AUDIT_KEY, AUDIT_INSERT_DATS, AUDIT_INSERT_USER
+    )
+    values
+    (
+	:old.UNIT_ID, :old.COLL_DATE, :old.CHAPTER_ID,
+	:old.TB_ID, :old.TEST_ID, :old.TB_SEQ_NO,
+	:old.TEST_CHAPTER_ID, :old.BAND_NAME, :old.TECH1_BAND_VAL,
+	:old.TECH2_BAND_VAL, :old.SUPER_BAND_VAL, :old.PROGRAM_ID, :old.BAND_SEQ,
+	:old.AUDIT_KEY, sysdate, lt_user_session.get_userid
+    );
+end;
+/
+ALTER TRIGGER "TEST_BAND_DETAIL_BD" ENABLE;

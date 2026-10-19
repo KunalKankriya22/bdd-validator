@@ -1,0 +1,244 @@
+/*************************************************************************************
+||   Name:      don_lab_drv.pkg
+||   Type:      PL/SQL
+||   Function:  Donor to Lab Drive Information Interface 
+||   Author:    Jeff Centilli
+||   Date:      01/26/98
+
+Verion	Date		By		Change
+
+02	04.18.2011	Hussein		Replace user by lt_session_user.get_userid 
+
+03	05/12/2016	Seshu		Renamed below tables for merging database work
+					DRIVES			as	DRIVES_LAB
+					DONOR_DRIVES		as	DRIVES
+					DONOR_DRIVE_SPONSORS	as	DRIVE_SPONSORS
+					DONOR_SPONSORS		as	SPONSORS
+					DONOR_VALID_VEHICLES	as	VALID_VEHICLES
+					DONOR_DRIVE_VEHICLES	as	DRIVE_VEHICLES
+
+04  10/14/2016  Ashok   drives to drives_lab table. -- IM 314
+*************************************************************************************/
+CREATE OR REPLACE PACKAGE don_lab_drv IS
+
+PROCEDURE interface_drives
+             (i_drive_id       IN      VARCHAR2,
+              from_date        IN      DATE,
+              to_date          IN      DATE,
+              i_chapter_id     IN      VARCHAR2,
+              i_interface_id   IN OUT  VARCHAR2);
+END don_lab_drv;
+/
+create or replace PACKAGE BODY don_lab_drv IS
+
+PROCEDURE interface_drives
+             (i_drive_id       IN        VARCHAR2,
+              from_date        IN        DATE,
+              to_date          IN        DATE,
+              i_chapter_id     IN        VARCHAR2,
+              i_interface_id   IN OUT    VARCHAR2)
+IS
+   temp_return_code     number;
+   temp_drive_id        varchar2(10);
+   temp_drive_date      date;
+   temp_chapter_id      varchar2(4);
+   err_num              number;
+   err_msg              varchar2(250);
+   number_attempts      number;
+   number_failures      number;
+   number_successes     number;
+   sponsor_count        number;
+   drive_count          number;
+   new_interface_flag   varchar2(1);
+   new_interface_id     number;
+   interface_id         varchar2(10);
+   temp_license_flag    varchar2(1);
+   temp_sponsor_id      varchar2(10);
+   number_inserts       number;
+   number_updates       number;
+
+   CURSOR get_drives IS
+     SELECT drive_id, chapter_id, drive_type, 
+     drive_date, os_ok_flag, location_id
+       FROM drives
+      WHERE drive_date BETWEEN
+               nvl(trunc(from_date), decode(i_drive_id, 
+                  null, trunc(sysdate), drive_date)) AND 
+               nvl(trunc(to_date), decode(i_drive_id, 
+                  null, trunc(sysdate)+14, drive_date))
+        AND drive_id = nvl(i_drive_id, drive_id)
+        AND chapter_id = i_chapter_id
+        AND cancel_date is null
+        AND status not in ('CANCL','HOLD')
+      ORDER BY drive_id;
+
+   CURSOR get_sponsors IS
+   SELECT s.sponsor_id, name, eff_date, term_date
+     FROM sponsors s, drive_sponsors ds
+    WHERE ds.drive_id = temp_drive_id
+      AND ds.chapter_id = temp_chapter_id
+      AND ds.sponsor_id = s.sponsor_id;
+
+BEGIN
+   dbms_output.enable(300000);
+   number_attempts  := 0;
+   number_failures  := 0;
+   number_successes := 0;
+   number_inserts   := 0;
+   number_updates   := 0;
+--
+   new_interface_flag := 'N';
+   IF (i_interface_id is null) THEN
+      SELECT nvl(max_number,0) + 1
+        INTO new_interface_id
+        FROM number_generation
+       WHERE number_type = 'INTERFACE_ID'
+         AND chapter_id = i_chapter_id
+         FOR UPDATE OF max_number;
+      IF (new_interface_id is not null) THEN
+         interface_id := 'NAUD'||
+                          rtrim(ltrim(to_char(new_interface_id, '099999')));
+         i_interface_id := interface_id;
+         UPDATE number_generation
+            SET max_number = new_interface_id
+          WHERE number_type = 'INTERFACE_ID'
+           AND chapter_id = i_chapter_id;
+         COMMIT;
+      END IF;
+   END IF;
+   dbms_output.put_line ('Beginning of Drive Interface: '||i_interface_id||
+                        '  Time: '||to_char(sysdate,'MM-DD-YY HH24:MI:SS'));
+   BEGIN
+      SELECT 'Y'
+        INTO new_interface_flag
+        FROM interface_log
+       WHERE interface_id = i_interface_id;
+   EXCEPTION
+      WHEN no_data_found THEN
+         INSERT INTO interface_log VALUES
+            (i_interface_id, 'DNLBD', null, 0, sysdate, sysdate,
+             decode(substr(LT_USER_SESSION.get_userid,1,3),'OPS', substr(LT_USER_SESSION.get_userid,5), LT_USER_SESSION.get_userid),
+             0, 0, 0, i_chapter_id, 'DRIVE');
+         new_interface_flag := 'N';
+   END;
+   INSERT INTO interface_log_parms VALUES
+      (i_interface_id, i_chapter_id, i_drive_id, null, null, from_date,
+       to_date);
+   FOR c1 IN get_drives LOOP
+      temp_drive_id := c1.drive_id;
+      temp_drive_date := c1.drive_date;
+      temp_chapter_id := c1.chapter_id;
+      number_attempts := number_attempts + 1;
+      FOR c2 IN get_sponsors LOOP
+          SELECT count(*)
+            INTO sponsor_count
+            FROM group_sites
+           WHERE group_site_id = 'G'||substr(c2.sponsor_id,5,6) ;
+          IF (sponsor_count = 0) then
+            INSERT into group_sites 
+               (group_site_id, group_site_ind, chapter_id, site_name,
+                eff_date, term_date, last_modified_date)
+            VALUES
+               ('G'||substr(c2.sponsor_id,5,6), 
+               'G', c1.chapter_id, c2.name, 
+               c2.eff_date, c2.term_date, sysdate);
+          END IF;
+      END LOOP;
+      temp_license_flag := 'Y';
+      if c1.drive_type in ('I', 'C') then
+      BEGIN
+		 SELECT 'N'
+           INTO temp_license_flag
+           FROM DUAL
+          WHERE exists
+           (SELECT 'unlicensed vehicle'
+              FROM drive_vehicles dv, valid_vehicles vv
+             WHERE dv.drive_id = c1.drive_id
+               AND dv.chapter_id = c1.chapter_id
+               AND dv.vehicle_id = vv.vehicle_id
+               AND vv.vehicle_type = 'COACH'
+               AND sysdate between vv.eff_date and nvl(vv.term_date, sysdate+1)
+               AND (nvl(fda_license_date, c1.drive_date+1) > trunc(c1.drive_date)
+                    OR nvl(fda_license_renewal, c1.drive_date+1) < trunc(c1.drive_date)));
+      EXCEPTION
+         WHEN no_data_found THEN
+              temp_license_flag := 'Y';
+      END;
+      else
+      BEGIN
+	SELECT 'N'
+	INTO temp_license_flag
+	FROM DUAL
+	where exists
+	(select 'x'
+	from locations
+	where location_id = c1.location_id
+	 and nvl(fda_license_date, c1.drive_date+1) > trunc(c1.drive_date));
+      EXCEPTION
+         WHEN no_data_found THEN
+              temp_license_flag := 'Y';
+      END;
+      end if;
+/*      IF (c1.os_ok_flag != 'Y') then
+         temp_license_flag := 'N';
+      END IF;
+      */
+      BEGIN
+         SELECT sponsor_id
+           INTO temp_sponsor_id
+           FROM drive_sponsors ds
+          WHERE ds.drive_id = c1.drive_id
+            AND ds.chapter_id = c1.chapter_id
+            AND rownum < 2;
+      EXCEPTION
+         WHEN no_data_found THEN
+         temp_sponsor_id := null;
+      END;
+      SELECT count(*)
+        INTO drive_count
+        FROM drives_lab -- IM 314
+       WHERE drive_id = substr(c1.drive_id,5,6);
+      IF (drive_count = 0) then
+        INSERT into drives_lab 
+           (drive_id, chapter_id, drive_type, group_site_id,
+            drive_sch_date, nursing_flag, osok_flag)
+        VALUES
+           (substr(c1.drive_id,5,6),
+            c1.chapter_id, c1.drive_type, 'G'||substr(temp_sponsor_id,5,6),
+            c1.drive_date, 'Y', temp_license_flag);
+        dbms_output.put_line ('Inserted drive ID: '||substr(c1.drive_id,5,6));
+        number_inserts := number_inserts + 1;
+      ELSE
+         UPDATE drives_lab
+            SET drive_type = substr(c1.drive_type,1,1),
+                group_site_id = 'G'||substr(temp_sponsor_id,5,6),
+                drive_sch_date = c1.drive_date, 
+                osok_flag = temp_license_flag
+          WHERE drive_id = substr(c1.drive_id,5,6)
+            AND chapter_id = c1.chapter_id
+            AND rownum < 2;
+        dbms_output.put_line ('Updated drive ID: '||substr(c1.drive_id,5,6));
+        number_updates := number_updates + 1;
+      END IF;
+   END LOOP;
+   UPDATE interface_log
+      SET no_of_units = no_of_units + number_attempts,
+          no_xfer_count = no_xfer_count + number_failures,
+          complete_count = complete_count + number_successes,
+          end_time = sysdate
+    WHERE interface_id = i_interface_id;
+   COMMIT;
+   dbms_output.put_line ('End of Drive Interface: '||i_interface_id||
+                        '  Time: '||to_char(sysdate,'MM-DD-YY HH24:MI:SS'));
+   dbms_output.put_line ('Inserted: '||to_char(number_inserts,'9999')||
+                        '  Updated: '||to_char(number_updates, '9999'));
+END; /*    Procedure  */
+END don_lab_drv;
+/
+
+
+create or replace public synonym don_lab_drv for OPS$SBCSYS.don_lab_drv;
+
+Show errors
+
+

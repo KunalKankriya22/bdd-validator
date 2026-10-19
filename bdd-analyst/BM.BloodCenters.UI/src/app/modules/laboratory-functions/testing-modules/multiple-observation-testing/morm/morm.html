@@ -1,0 +1,335 @@
+<div class="morm-page">
+  <div class="page-wrapper">
+    <h1 class="cdk-visually-hidden">Multiple Observation Result Matrix</h1>
+    <app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+    <!-- FILTER CARD -->
+    <section class="filter-section" aria-labelledby="filter-heading">
+      <h2 id="filter-heading" class="sr-only">Filter Criteria</h2>
+
+      <form [formGroup]="filterForm" (ngSubmit)="onRetrieve()" novalidate>
+        <div class="filter-row">
+          <!-- Test ID -->
+          <mat-form-field appearance="fill" subscriptSizing="dynamic" class="filter-field test-id-field">
+            <mat-label>Test ID</mat-label>
+            <mat-select formControlName="testId"
+                        required
+                        (selectionChange)="onTestIdChanged()"
+                        (openedChange)="onTestSelectOpened($event)"
+                        aria-label="Test ID"
+                        aria-required="true">
+
+              <mat-select-trigger>
+                <span class="test-id-display">{{ filterForm.get('testId')?.value || '' }}</span>
+              </mat-select-trigger>
+
+              @if (loadingDropdowns()) {
+                <mat-option [value]="selectPanelLoadingValue" disabled class="filter-panel__option--status">
+                  <span class="filter-panel__loading" role="status" aria-live="polite">
+                    <mat-spinner diameter="20" class="filter-panel__spinner" aria-hidden="true"></mat-spinner>
+                    <span>Loading...</span>
+                  </span>
+                </mat-option>
+              } @else if (tests().length === 0) {
+                <mat-option [value]="selectPanelEmptyValue" disabled class="filter-panel__option--status">
+                  No data available
+                </mat-option>
+              } @else {
+                @if (tests().length >= 3) {
+                  <mat-option>
+                    <ngx-mat-select-search [formControl]="testSearchControl"
+                      placeholderLabel="Search tests..."
+                      noEntriesFoundLabel="No matching tests"
+                      aria-label="Search test IDs">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                }
+                @for (test of filteredTests(); track test.testId) {
+                  <mat-option [value]="test.testId">
+                    {{ test.display }}
+                  </mat-option>
+                }
+                @if (filteredTests().length === 0) {
+                  <mat-option disabled class="filter-panel__option--status">
+                    No Data Available
+                  </mat-option>
+                }
+              }
+
+            </mat-select>
+            <mat-error>Test ID is required</mat-error>
+          </mat-form-field>
+
+          <!-- Description (Display-only) -->
+          <mat-form-field appearance="fill" subscriptSizing="dynamic" class="filter-field description-field">
+            <mat-label>Description</mat-label>
+            <input
+              matInput
+              [value]="testDescription()"
+              readonly
+              aria-readonly="true"
+              aria-label="Description - automatically populated when a test is selected">
+          </mat-form-field>
+
+          <!-- Test Type -->
+          <mat-form-field appearance="fill" subscriptSizing="dynamic" class="filter-field test-type-field">
+            <mat-label>Test Type</mat-label>
+            <mat-select formControlName="testType"
+                        required
+                        (selectionChange)="onTestTypeChanged()"
+                        (openedChange)="onTestTypeSelectOpened($event)"
+                        aria-label="Test Type"
+                        aria-required="true">
+
+              @if (loadingDropdowns()) {
+                <mat-option [value]="selectPanelLoadingValue" disabled class="filter-panel__option--status">
+                  <span class="filter-panel__loading" role="status" aria-live="polite">
+                    <mat-spinner diameter="20" class="filter-panel__spinner" aria-hidden="true"></mat-spinner>
+                    <span>Loading...</span>
+                  </span>
+                </mat-option>
+              } @else if (testTypes().length === 0) {
+                <mat-option [value]="selectPanelEmptyValue" disabled class="filter-panel__option--status">
+                  No data available
+                </mat-option>
+              } @else {
+                @if (testTypes().length >= 3) {
+                  <mat-option>
+                    <ngx-mat-select-search [formControl]="testTypeSearchControl"
+                      placeholderLabel="Search test types..."
+                      noEntriesFoundLabel="No matching test types"
+                      aria-label="Search test types">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                }
+                @for (type of filteredTestTypes(); track type.testType) {
+                  <mat-option [value]="type.testType">
+                    {{ type.display }}
+                  </mat-option>
+                }
+                @if (filteredTestTypes().length === 0) {
+                  <mat-option disabled class="filter-panel__option--status">
+                    No Data Available
+                  </mat-option>
+                }
+              }
+
+            </mat-select>
+            <mat-error>Test Type is required</mat-error>
+          </mat-form-field>
+
+          <!-- Filter Actions (inline) -->
+          <div class="filter-actions" role="group" aria-label="Filter actions">
+            <button
+              mat-flat-button
+              type="submit"
+              class="retrieve-btn"
+              [disabled]="!canRetrieve() || loading()"
+              aria-label="Retrieve multiple observation result matrix data">
+              RETRIEVE
+            </button>
+            <button
+              mat-button
+              type="button"
+              class="clear-btn"
+              [disabled]="!canClearFilters()"
+              (click)="onClearAllFilters()"
+              aria-label="Clear all filters">
+              CLEAR ALL
+            </button>
+          </div>
+        </div>
+      </form>
+    </section>
+
+    <!-- Results Section -->
+    <section class="results-section" aria-labelledby="results-heading">
+      <h2 id="results-heading" class="sr-only">Search Results</h2>
+
+      <!-- Initial State (Before First Search) -->
+      @if (!hasData() && !loading()) {
+        <div class="initial-empty-state" role="status">
+          <mat-icon class="empty-state-icon" aria-hidden="true">search</mat-icon>
+          <h3 class="empty-state-title">No Results to Display</h3>
+          <p class="empty-state-message">Use the fields above to get started.</p>
+        </div>
+      }
+
+      <!-- Loading State -->
+      @if (!hasData() && loading()) {
+        <div class="loading-state" role="status" aria-live="polite" aria-atomic="true">
+          <mat-spinner diameter="50" aria-label="Loading multiple observation result matrix data"></mat-spinner>
+          <p class="loading-text">Loading data...</p>
+        </div>
+      }
+
+      <!-- Table Section -->
+      @if (hasData()) {
+        <div class="table-section">
+        <div class="table-wrapper">
+          @if (loading()) {
+            <div class="data-table__loading" role="status" aria-live="polite" aria-label="Loading table data">
+              <mat-spinner diameter="36" aria-hidden="true"></mat-spinner>
+            </div>
+          } @else {
+            <div class="data-table-scroll-wrapper"
+                 tabindex="0"
+                 role="region"
+                 aria-label="Scrollable result matrix table">
+              <table class="morm-table"
+                     role="grid"
+                     aria-label="Multiple Observation Result Matrix"
+                     [attr.aria-rowcount]="resultRows().length + 2"
+                     [attr.aria-colcount]="testBands().length + 4">
+                <thead>
+                  <tr class="section-header-row" role="row">
+                    <th [attr.colspan]="testBands().length"
+                        scope="colgroup"
+                        class="section-title-cell"
+                        role="columnheader">
+                      {{ sectionHeaders.bandValues }}
+                    </th>
+                    <th class="col-gap" rowspan="2" role="presentation"></th>
+                    <th colspan="3"
+                        scope="colgroup"
+                        class="section-title-cell"
+                        role="columnheader">
+                      {{ sectionHeaders.resultInterpretation }}
+                    </th>
+                  </tr>
+                  <tr role="row">
+                    @for (band of testBands(); track trackByBand($index, band)) {
+                      <th scope="col" class="col-band" role="columnheader">{{ band.bandName }}</th>
+                    }
+                    <th scope="col" class="col-result-intp" role="columnheader">{{ columnHeaders.resultInterpretation }}</th>
+                    <th scope="col" class="col-eff-date" role="columnheader">{{ columnHeaders.effectiveDate }}</th>
+                    <th scope="col" class="col-term-date" role="columnheader">{{ columnHeaders.terminationDate }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (row of resultRows(); track trackByRow($index, row)) {
+                    @if (!row.isDeleted) {
+                      <tr>
+                        @for (band of testBands(); track trackByBand($index, band)) {
+                          <td class="col-band">
+                            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field"
+                                            [class.mat-form-field-invalid]="getBandError(row, getBandKey(band))">
+                              <mat-select [(ngModel)]="row.results[getBandKey(band)]"
+                                          (ngModelChange)="onBandValueChange(row, getBandKey(band), $event)"
+                                          (openedChange)="!$event && onBandBlur(row, getBandKey(band))"
+                                          [errorStateMatcher]="getBandMatcher(row, getBandKey(band))"
+                                          [attr.aria-label]="'Band ' + band.bandName">
+                                <mat-select-trigger>{{ row.results[getBandKey(band)] || '' }}</mat-select-trigger>
+                                @for (opt of bandValues; track opt.key) {
+                                  <mat-option [value]="opt.key">{{ opt.value }}</mat-option>
+                                }
+                              </mat-select>
+                              <mat-error>{{ getBandError(row, getBandKey(band)) }}</mat-error>
+                            </mat-form-field>
+                          </td>
+                        }
+                        <td class="col-gap"></td>
+                        <!-- Test Interpretation -->
+                        <td class="col-result-intp">
+                          <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field"
+                                          [class.mat-form-field-invalid]="getTestIntpError(row)">
+                            <mat-select [(ngModel)]="row.testIntp"
+                                        (ngModelChange)="onTestIntpChange(row, $event)"
+                                        (openedChange)="onTestIntpDropdownOpened($event, row)"
+                                        [errorStateMatcher]="getTestIntpMatcher(row)"
+                                        aria-label="Result Interpretation">
+                              @for (intp of resultInterpretations(); track intp.resultCode) {
+                                <mat-option [value]="intp.resultCode"
+                                            [matTooltip]="getResultInterpretationDisplay(intp)"
+                                            matTooltipPosition="right">
+                                  {{ getResultInterpretationDisplay(intp) }}
+                                </mat-option>
+                              }
+                            </mat-select>
+                            <mat-error>{{ getTestIntpError(row) }}</mat-error>
+                          </mat-form-field>
+                        </td>
+                        <!-- Effective Date -->
+                        <td class="col-eff-date">
+                          @if (row.isNew) {
+                            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field date-cell"
+                                            [class.mat-form-field-invalid]="getEffDateError(row)">
+                              <input matInput [matDatepicker]="effDatePicker"
+                                     [(ngModel)]="row.effDate"
+                                     [matDatepickerFilter]="effDateFilter"
+                                     [errorStateMatcher]="getEffDateMatcher(row)"
+                                     (input)="onEffDateInput($event, row)"
+                                     (blur)="onEffDateBlur(row)"
+                                     (dateChange)="onEffDateChange(row, $event.value)"
+                                     placeholder="DD-MMM-YYYY"
+                                     aria-required="true"
+                                     aria-label="Effective Date">
+                              <mat-datepicker-toggle matIconSuffix
+                                                     [for]="effDatePicker"
+                                                     aria-label="Open effective date calendar picker"></mat-datepicker-toggle>
+                              <mat-datepicker #effDatePicker></mat-datepicker>
+                              <mat-error>{{ getEffDateError(row) }}</mat-error>
+                            </mat-form-field>
+                          } @else {
+                            <div class="readonly-cell"
+                                 role="cell"
+                                 aria-readonly="true"
+                                 [attr.aria-label]="'Effective date: ' + formatDate(row.effDate) + ', read-only'">
+                              {{ formatDate(row.effDate) }}
+                            </div>
+                          }
+                        </td>
+                        <!-- Termination Date -->
+                        <td class="col-term-date">
+                          <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field date-cell"
+                                          [class.mat-form-field-invalid]="getTermDateError(row)">
+                            <input matInput [matDatepicker]="termDatePicker"
+                                   [(ngModel)]="row.termDate"
+                                   [errorStateMatcher]="getTermDateMatcher(row)"
+                                   [matDatepickerFilter]="getTermDateFilter(row)"
+                                   (input)="onTermDateInput($event, row)"
+                                   (blur)="onTermDateBlur(row)"
+                                   (dateChange)="onTermDateChange(row, $event.value)"
+                                   placeholder="DD-MMM-YYYY"
+                                   aria-label="Termination Date">
+                            <mat-datepicker-toggle matIconSuffix
+                                                   [for]="termDatePicker"
+                                                   aria-label="Open termination date calendar picker"></mat-datepicker-toggle>
+                            <mat-datepicker #termDatePicker></mat-datepicker>
+                            <mat-error>{{ getTermDateError(row) }}</mat-error>
+                          </mat-form-field>
+                        </td>
+                      </tr>
+                    }
+                  }
+                </tbody>
+              </table>
+            </div>
+          }
+        </div>
+
+          <div class="table-toolbar">
+            <button type="button" mat-button class="btn-clear" (click)="onCancel()"
+                    aria-label="Cancel all changes and return">
+              CANCEL
+            </button>
+            <button type="button" mat-button class="btn-clear" (click)="onClearAllTable()"
+                    [disabled]="!hasDirtyRows()"
+                    aria-label="Clear all unsaved changes in the table">
+              CLEAR ALL
+            </button>
+            <button type="button"
+                    class="btn-save"
+                    (click)="onSave()"
+                    [disabled]="!hasDirtyRows() || saving() || hasDuplicates()"
+                    [matTooltip]="hasDuplicates() ? duplicateErrorMessage() : ''"
+                    matTooltipPosition="above"
+                    [attr.aria-label]="saving() ? 'Saving changes...' : hasDuplicates() ? duplicateErrorMessage() : 'Save all changes to result matrix'">
+              SAVE
+            </button>
+          </div>
+        </div>
+      }
+    </section>
+  </div>
+</div>

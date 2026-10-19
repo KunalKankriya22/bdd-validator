@@ -1,0 +1,531 @@
+CREATE OR REPLACE PACKAGE generate_series_report
+IS
+  /*
+  Created By : M. Ansell
+  Created On : 10/8/2018
+  Purpose    : To populate the RPT_PARM and RPT_PARM_SELECT tables based on
+  records in the CNF_RPT_PARM_SELECT table
+  Version    : 01 (MLT-870)
+  Version    : 02 (MLT-967) After time query added to cnf_rpt_cur
+  ---------------------------------------------------------------------------------
+  */
+PROCEDURE pop_rpt_parm_tables
+                             (
+                               pl_report_id   IN VARCHAR2 ,
+                               pl_user_id     IN VARCHAR2 ,
+                               pl_chapter_id  IN VARCHAR2 ,
+                               pl_mode        IN VARCHAR2 ,
+                               pl_start_time  IN DATE
+                             ) ;
+END generate_series_report;
+/
+CREATE OR REPLACE PACKAGE BODY generate_series_report
+IS
+PROCEDURE pop_rpt_parm_tables
+                             (
+                               pl_report_id   IN VARCHAR2 ,
+                               pl_user_id     IN VARCHAR2 ,
+                               pl_chapter_id  IN VARCHAR2 ,
+                               pl_mode        IN VARCHAR2 ,
+                               pl_start_time  IN DATE
+                             )
+IS
+
+  v_od_value          varchar2(1)                 := null;
+  v_parm_id           rpt_parm.parm_id%type       := null;
+  v_parm_id_seq       number(9)                   := 0;
+  v_report_name       rpt_parm.report_name%type   := 'CFRSERIS' ;
+  v_extract_id        cnf_extract.extract_id%type := null ;
+  v_unit_id           units.unit_id%type          := null ;
+  v_sql_error_message varchar2(2000)              := null ;
+  v_client_msg        rpt_parm.client_msg%type    := null ;
+  v_start_time        rpt_parm.start_time%type    := null ;
+  v_rpt_parm_count    number(9)                   := 0 ;
+  
+  CURSOR cnf_rpt_cur  IS
+    -- creates records for when package is called by submit report form for specified
+    -- test_series_id 
+    select DISTINCT
+      C.extract_id     extract_id,
+      C.contract_id    contract_id,
+      C.test_series_id test_series_id,
+      c.unit_id        unit_id,
+      'ALL'            test_id
+    from
+      cnf_extract_units c,
+      utrs              u
+    where pl_mode = 'F'                     
+      and u.unit_id = c.unit_id
+      and c.extract_date is not null
+      and c.test_series_id is not null
+      and c.test_id is null
+      and c.extract_id in
+      (
+        select
+          parm_select
+        from
+          cnf_rpt_parm_select
+        where
+          appl_id         = 'DON'
+          and report_name = v_report_name
+          and user_name   = pl_user_id
+          and parm_id     = pl_report_id
+          and parm_code   = 'EXTID'
+      )
+      and c.contract_id in
+      (
+        select
+          decode(parm_select, 'ALL',contract_id, parm_select)
+        from
+          cnf_rpt_parm_select
+        where
+          appl_id         = 'DON'
+          and report_name = v_report_name
+          and user_name   = pl_user_id
+          and parm_id     = pl_report_id
+          and parm_code   = 'CON'
+      )
+      and c.unit_id in
+      (
+        select
+          decode(parm_select, 'ALL', c.unit_id, parm_select)
+        from
+          cnf_rpt_parm_select
+        where
+          appl_id         = 'DON'
+          and report_name = v_report_name
+          and user_name   = pl_user_id
+          and parm_id     = pl_report_id
+          and parm_code   = 'UNIT'
+      )
+      and c.test_series_id in
+      (
+        select decode(parm_select, 'ALL', c.test_series_id, parm_select)
+        from
+          cnf_rpt_parm_select
+        where
+          appl_id         = 'DON'
+          and report_name = v_report_name
+          and user_name   = pl_user_id
+          and parm_id     = pl_report_id
+          and parm_code   = 'TSID'
+      ) 
+                                                        
+   UNION ALL
+   -- creates records for when package is called from the form and additional tests 
+   -- or specific test_id's are entered   
+    select DISTINCT
+      C.extract_id,
+      C.contract_id,
+      'ALL',
+      c.unit_id,
+      c.test_id
+    from
+      cnf_extract_units c,
+      utrs              u
+    where pl_mode = 'F'                 -- CALLED FROM SUBMIT FORM
+      and u.unit_id = c.unit_id
+      and c.extract_date is not null
+      and c.test_id is not null
+      and c.test_series_id is null
+      and c.extract_id in
+      (
+        select
+          parm_select
+        from
+          cnf_rpt_parm_select
+        where
+          appl_id         = 'DON'
+          and report_name = v_report_name
+          and user_name   = pl_user_id
+          and parm_id     = pl_report_id
+          and parm_code   = 'EXTID'
+      )
+      and c.contract_id in
+      (
+        select
+          decode(parm_select, 'ALL',contract_id, parm_select)
+        from
+          cnf_rpt_parm_select
+        where
+          appl_id         = 'DON'
+          and report_name = v_report_name
+          and user_name   = pl_user_id
+          and parm_id     = pl_report_id
+          and parm_code   = 'CON'
+      )
+      and c.unit_id in
+      (
+        select
+          decode(parm_select, 'ALL', c.unit_id, parm_select)
+        from
+          cnf_rpt_parm_select
+        where
+          appl_id         = 'DON'
+          and report_name = v_report_name
+          and user_name   = pl_user_id
+          and parm_id     = pl_report_id
+          and parm_code   = 'UNIT'
+      )
+      and c.test_id in
+      (
+        select decode(parm_select, 'ALL', c.test_id, parm_select)
+        from
+          cnf_rpt_parm_select
+        where
+          appl_id         = 'DON'
+          and report_name = v_report_name
+          and user_name   = pl_user_id
+          and parm_id     = pl_report_id
+          and parm_code   = 'TSTID'
+      ) 
+    UNION ALL
+    -- creates records for when package is called by EXTRACT process
+    select DISTINCT
+      C.extract_id,
+      C.contract_id,
+      nvl(c.test_series_id,'ALL'),
+      c.unit_id,
+      nvl(c.test_id,'ALL')
+    from
+      cnf_extract_units c,
+      utrs              u
+    where pl_mode = 'E'                
+      and u.unit_id = c.unit_id
+      and c.extract_date is not null
+      and c.re_extract_flag is null
+      and c.extract_id in
+      (
+        select
+          parm_select
+        from
+          cnf_rpt_parm_select
+        where
+          appl_id         = 'DON'
+          and report_name = v_report_name
+          and user_name   = pl_user_id
+          and parm_id     = pl_report_id
+          and parm_code   = 'EXTID'
+      )
+    UNION ALL
+    -- creates records for when package is called by RE-EXTRACT process
+    select DISTINCT
+      C.extract_id,
+      C.contract_id,
+      nvl(c.test_series_id,'ALL'),
+      c.unit_id,
+      nvl(c.test_id,'All')
+    from
+      cnf_extract_units c,
+      utrs              u
+    where pl_mode = 'R'                
+      and u.unit_id = c.unit_id
+      and c.extract_date is not null
+      and c.re_extract_flag = 'Y'
+      and c.extract_id in
+      (
+        select
+          parm_select
+        from
+          cnf_rpt_parm_select
+        where
+          appl_id         = 'DON'
+          and report_name = v_report_name
+          and user_name   = pl_user_id
+          and parm_id     = pl_report_id
+          and parm_code   = 'EXTID'
+      ) 
+    UNION ALL     
+    --V02 creates records for when package is called by EXTRACT process WITH AFTER TIME OPTION
+    select DISTINCT
+      C.extract_id,
+      C.contract_id,
+      nvl(c.test_series_id,'ALL'),
+      c.unit_id,
+      nvl(c.test_id,'ALL')
+    from
+      cnf_extract_units c,
+      cnf_schedule_extract cse,
+      utrs              u
+    where pl_mode = 'E'                
+      and u.unit_id = c.unit_id
+      and c.extract_id = cse.extract_id 
+      and nvl(cse.status,'N') <> 'C' 
+      and c.extract_date is null -- not yet extracted.
+      and c.re_extract_flag is null
+      and c.extract_id in
+      (
+        select
+          parm_select
+        from
+          cnf_rpt_parm_select
+        where
+          appl_id         = 'DON'
+          and report_name = v_report_name
+          and user_name   = pl_user_id
+          and parm_id     = pl_report_id
+          and parm_code   = 'EXTID'
+      )
+    UNION ALL
+    --V02 creates records for when package is called by RE-EXTRACT process WITH AFTER TIME OPTION
+    select DISTINCT
+      C.extract_id,
+      C.contract_id,
+      nvl(c.test_series_id,'ALL'),
+      c.unit_id,
+      nvl(c.test_id,'All')
+    from
+      cnf_extract_units c,
+      cnf_schedule_extract cse,
+      utrs              u
+    where pl_mode = 'R'                
+      and u.unit_id = c.unit_id
+      and c.extract_id = cse.extract_id
+      and nvl(cse.status,'N') <> 'C' 
+      and c.extract_date is not null
+      and c.re_extract_flag = 'X'
+      and c.extract_id in
+      (
+        select
+          parm_select
+        from
+          cnf_rpt_parm_select
+        where
+          appl_id         = 'DON'
+          and report_name = v_report_name
+          and user_name   = pl_user_id
+          and parm_id     = pl_report_id
+          and parm_code   = 'EXTID' 
+      )            
+ order by 1 ;  
+      
+  
+BEGIN
+
+  
+  FOR r_cnf_rpt in cnf_rpt_cur
+  LOOP
+    v_extract_id := r_cnf_rpt.extract_id ;
+    v_unit_id    := r_cnf_rpt.unit_id ;
+
+    select SBCSYS.SERIES_REPFILE_SEQ.nextval
+      into v_parm_id_seq 
+      from dual ;
+      
+    v_parm_id := pl_report_id
+                 || '_'
+                 || v_parm_id_seq 
+                 || '_'
+                 || r_cnf_rpt.contract_id
+                 || '_'
+                 || SUBSTR(r_cnf_rpt.unit_id,-6,6);
+                 
+    v_client_msg := 'CFRSERIS_' || v_parm_id || '.pdf' ;
+    
+    if pl_start_time is null then
+      v_start_time := (SYSDATE + 1 / 60 / 24) ;
+    else    
+      v_start_time := (pl_start_time + 1 / 60 / 24) ;
+    end if ;
+    
+    INSERT INTO rpt_parm
+      ( APPL_ID     ,
+        USER_NAME   ,
+        REPORT_NAME ,
+        PARM_ID     ,
+        PARM_DATE   ,
+        SUBMIT_DATE ,
+        START_TIME  ,
+        REPORT_STATUS,
+        CHAPTER_ID,
+        CLIENT_MSG
+      )
+      VALUES
+      ( 'DON'          ,
+        pl_user_id     ,
+        v_report_name  ,
+        v_parm_id      ,
+        sysdate        ,
+        sysdate        ,
+        v_start_time   ,
+        'S'            ,
+        pl_chapter_id,
+        v_client_msg
+      ) ;
+    
+    INSERT INTO rpt_parm_select
+      ( APPL_ID     ,
+        USER_NAME   ,
+        REPORT_NAME ,
+        PARM_ID     ,
+        PARM_NO     ,
+        PARM_SELECT ,
+        PARM_CODE
+      )
+      VALUES
+      ( 'DON'                ,
+        pl_user_id           ,
+        v_report_name       ,
+        v_parm_id            ,
+        1                    ,
+        r_cnf_rpt.extract_id ,
+        'EXTID'
+      ) ;
+    
+    INSERT INTO rpt_parm_select
+      ( APPL_ID     ,
+        USER_NAME   ,
+        REPORT_NAME ,
+        PARM_ID     ,
+        PARM_NO     ,
+        PARM_SELECT ,
+        PARM_CODE
+      )
+      VALUES
+      ( 'DON'                 ,
+        pl_user_id            ,
+        v_report_name        ,
+        v_parm_id             ,
+        2                     ,
+        r_cnf_rpt.contract_id ,
+        'CON'
+      ) ;
+    
+    INSERT INTO rpt_parm_select
+      ( APPL_ID     ,
+        USER_NAME   ,
+        REPORT_NAME ,
+        PARM_ID     ,
+        PARM_NO     ,
+        PARM_SELECT ,
+        PARM_CODE
+      )
+      VALUES
+      ( 'DON'                    ,
+        pl_user_id               ,
+        v_report_name           ,
+        v_parm_id                ,
+        3                        ,
+        r_cnf_rpt.test_series_id ,
+        'TSID'
+      ) ;
+    
+    INSERT INTO rpt_parm_select
+      ( APPL_ID     ,
+        USER_NAME   ,
+        REPORT_NAME ,
+        PARM_ID     ,
+        PARM_NO     ,
+        PARM_SELECT ,
+        PARM_CODE
+      )
+      VALUES
+      ( 'DON'             ,
+        pl_user_id        ,
+        v_report_name    ,
+        v_parm_id         ,
+        4                 ,
+        r_cnf_rpt.unit_id ,
+        'UNIT'
+      ) ;
+
+    INSERT INTO rpt_parm_select
+      ( APPL_ID     ,
+        USER_NAME   ,
+        REPORT_NAME ,
+        PARM_ID     ,
+        PARM_NO     ,
+        PARM_SELECT ,
+        PARM_CODE
+      )
+      VALUES
+      ( 'DON'             ,
+        pl_user_id        ,
+        v_report_name    ,
+        v_parm_id         ,
+        5                 ,
+        r_cnf_rpt.test_id ,
+        'TSTID'
+      ) ;      
+ 
+    IF pl_mode = 'F' then
+      INSERT INTO rpt_parm_select
+        ( APPL_ID, USER_NAME, REPORT_NAME, PARM_ID, PARM_NO, PARM_SELECT, PARM_CODE )
+      SELECT 'DON', pl_user_id, v_report_name, v_parm_id, 6, parm_select, 'ODVAL'
+        FROM cnf_rpt_parm_select
+       WHERE appl_id         = 'DON'
+         AND report_name = v_report_name
+         AND user_name   = pl_user_id
+         AND parm_id     = pl_report_id
+         AND parm_code   = 'ODVAL' ;
+    ELSE
+      INSERT INTO rpt_parm_select
+        ( APPL_ID, USER_NAME, REPORT_NAME, PARM_ID, PARM_NO, PARM_SELECT, PARM_CODE )
+      VALUES
+        ( 'DON', pl_user_id, v_report_name, v_parm_id, 6, 'N', 'ODVAL' ) ;
+    END IF ;
+    
+   
+  END LOOP;
+ 
+  -- delete cnf_rpt_parm_select records if rpt_parm records were successfully created, if not
+  -- insert a message into the lifetrak_api_log and then delete cnf_rpt_parm_select records
+  
+  SELECT nvl(COUNT(*),0)
+    INTO v_rpt_parm_count
+    FROM RPT_PARM    
+   WHERE user_name  = pl_user_id
+     AND parm_id    LIKE pl_report_id || '%'
+     AND chapter_id = pl_chapter_id ;
+
+  IF v_rpt_parm_count = 0 then
+    insert into lifetrak_api_log(
+                                 SOURCE_ID,
+                                 EXTERNAL_ID,
+                                 INTERNAL_ID,
+                                 PROGRAM_ID, 
+                                 LOG_TEXT,
+                                 INSERT_DATE
+                                )
+	                     values ( 
+                                 'SERIS',
+                                 pl_report_id,
+                                 pl_user_id,
+                                 'SERIES_REPORT',
+                                 'Error: Series Report process did not create Report Parameter Records.',
+                                 sysdate
+                                ) ;
+  END IF ;
+
+  DELETE FROM CNF_RPT_PARM_SELECT
+   WHERE user_name  = pl_user_id
+     AND parm_id    = pl_report_id ;
+      
+  commit;
+EXCEPTION
+  WHEN OTHERS THEN
+    v_sql_error_message := sqlcode || ': ' || substr(sqlerrm,1,75) ;
+    insert into lifetrak_api_log(
+                                 SOURCE_ID,
+                                 EXTERNAL_ID,
+                                 INTERNAL_ID,
+                                 PROGRAM_ID, 
+                                 LOG_TEXT,
+                                 INSERT_DATE
+                                )
+	                     values ( 
+                                 'SERIS',
+                                 v_extract_id,
+                                 v_unit_id,
+                                 'SERIES_REPORT',
+                                 v_sql_error_message ,
+                                 sysdate
+                                ) ;
+    commit ;                                 
+  
+END pop_rpt_parm_tables;
+END generate_series_report;
+/
+DROP PUBLIC SYNONYM generate_series_report;
+CREATE PUBLIC SYNONYM generate_series_report FOR generate_series_report;
+GRANT EXECUTE ON generate_series_report TO PUBLIC;

@@ -1,0 +1,211 @@
+<div class="main-content">
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <div class="lab-warehouse-checkout-container">
+
+    <!-- ── Filter / Batch Header Section ────────────────────────────────────── -->
+    <form [formGroup]="filterForm" class="filter-section">
+
+      <!-- Row 1: Batch ID | Send To | Checkout Temp | Batch Date | Created By -->
+      <div class="filter-fields-row">
+
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Batch ID</mat-label>
+          <mat-select
+            formControlName="batchId"
+            aria-label="Select Batch ID"
+            (selectionChange)="onBatchIdSelected($event.value)">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="batchSearchControl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="No matching batches">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (batch of filteredBatchIds(); track batch.batchId) {
+              <mat-option [value]="batch.batchId">
+                {{ batch.batchId }}@if (batch.batchName) { – {{ batch.batchName }}}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Send to Warehouse</mat-label>
+          <mat-select
+            formControlName="sendToWarehouse"
+            aria-label="Select destination warehouse"
+            required>
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="warehouseSearchControl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="No matching warehouses">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (warehouse of filteredWarehouses(); track warehouse.warehouseId) {
+              <mat-option [value]="warehouse.warehouseId">
+                {{ warehouse.warehouseId }}@if (warehouse.warehouseName) { – {{ warehouse.warehouseName }}}
+              </mat-option>
+            }
+          </mat-select>
+          @if (filterForm.get('sendToWarehouse')?.invalid && filterForm.get('sendToWarehouse')?.touched) {
+            <mat-error>{{ getErrorMessage(filterForm, 'sendToWarehouse') }}</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- FMB CHECKOUT_TEMP: required input, format 999.99, validated against product min/max -->
+        <mat-form-field appearance="fill" class="temp-field">
+          <mat-label>Temperature</mat-label>
+          <input
+            matInput
+            formControlName="checkoutTemp"
+            type="number"
+            step="0.01"
+            aria-label="Checkout temperature in Celsius"
+            required />
+          @if (filterForm.get('checkoutTemp')?.invalid && filterForm.get('checkoutTemp')?.touched) {
+            <mat-error>{{ getErrorMessage(filterForm, 'checkoutTemp') }}</mat-error>
+          }
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" floatLabel="always" class="filter-field readonly-field">
+          <mat-label>Batch Date</mat-label>
+          <input matInput [value]="batchDate() || ''" placeholder="—" readonly tabindex="-1" aria-label="Batch date" />
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" floatLabel="always" class="filter-field readonly-field">
+          <mat-label>Created By</mat-label>
+          <input matInput [value]="batchCreatedBy() || ''" placeholder="—" readonly tabindex="-1" aria-label="Created by" />
+        </mat-form-field>
+      </div>
+
+      <!-- Row 2: Remarks + RETRIEVE + CLEAR ALL -->
+      <div class="filter-actions-row">
+        <mat-form-field appearance="fill" class="remarks-field">
+          <mat-label>Remarks</mat-label>
+          <input matInput formControlName="remarks" aria-label="Remarks" />
+        </mat-form-field>
+
+        <div class="filter-actions">
+          <button
+            mat-stroked-button
+            type="button"
+            class="retrieve-btn"
+            (click)="onRetrieve()"
+            [disabled]="isRetrieveDisabled"
+            aria-label="Retrieve batch details">
+            {{ isRetrieving() ? 'RETRIEVING...' : 'RETRIEVE' }}
+          </button>
+          <button
+            mat-button
+            type="button"
+            class="clear-all-btn"
+            (click)="clearAll()"
+            [disabled]="isClearAllDisabled"
+            aria-label="Clear all fields">
+            CLEAR ALL
+          </button>
+        </div>
+      </div>
+    </form>
+
+    <!-- ── Unit Entry Section (shown after batch retrieved or for new batch) ── -->
+    @if (batchRetrieved()) {
+      <div class="unit-entry-section">
+        <form [formGroup]="unitEntryForm" class="unit-entry-form">
+
+          <!-- Unit ID (scan or type; 'M' opens manual entry dialog) -->
+          <app-unit-id-field
+            #unitIdField
+            [required]="true"
+            [label]="'Unit ID'"
+            [placeholder]="'Scan or type Unit ID'"
+            [validateFfValue]="'N'"
+            (postValidate)="onPostValidate($event)"
+            (cleared)="currentUnitId.set(null)">
+          </app-unit-id-field>
+
+          <!-- Collection date (read-only, populated after unit scan) -->
+          <mat-form-field appearance="fill" floatLabel="always" class="readonly-field" subscriptSizing="dynamic">
+            <mat-label>Collection Date</mat-label>
+            <input matInput [value]="collectionDate() || ''" placeholder="—" readonly tabindex="-1" aria-label="Collection date" />
+          </mat-form-field>
+
+          <!-- Product Code: always visible, disabled until unit scan populates options -->
+          <mat-form-field appearance="fill">
+            <mat-label>Product Code</mat-label>
+            <mat-select
+              formControlName="productCode"
+              aria-label="Select product code"
+              [disabled]="!showProductDropdown()"
+              [required]="showProductDropdown()"
+              (selectionChange)="onProductSelected($event.value)">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="productSearchControl"
+                  placeholderLabel="Search..."
+                  noEntriesFoundLabel="No results found">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (product of filteredProductOptions(); track product.productCode) {
+                <mat-option [value]="product">
+                  {{ product.productCode }}@if (product.productDescription) { — {{ product.productDescription }}}
+                </mat-option>
+              }
+            </mat-select>
+            @if (unitEntryForm.get('productCode')?.invalid && unitEntryForm.get('productCode')?.touched) {
+              <mat-error>{{ getErrorMessage(unitEntryForm, 'productCode') }}</mat-error>
+            }
+          </mat-form-field>
+
+        </form>
+      </div>
+
+      <!-- ── Warehouse Section ─────────────────────────────────────────── -->
+      <div class="warehouse-section">
+        <mat-icon aria-hidden="true">format_list_bulleted</mat-icon>
+        <span>{{ warehouseLocation() }}</span>
+        <mat-icon class="arrow-icon" aria-hidden="true">arrow_forward</mat-icon>
+        <mat-icon aria-hidden="true">format_list_bulleted</mat-icon>
+        <span>{{ sendToWarehouseLabel() || '–' }}</span>
+        <div class="warehouse-spacer"></div>
+        <button
+          mat-raised-button
+          color="primary"
+          type="button"
+          class="close-batch-btn"
+          (click)="onCloseBatch()"
+          [disabled]="!hasUnits() || isClosingBatch()"
+          aria-label="Close batch and generate checkout slip">
+          {{ isClosingBatch() ? 'CLOSING...' : 'CLOSE BATCH' }}
+        </button>
+      </div>
+
+      <!-- ── Units Table ──────────────────────────────────────────────────── -->
+      <div class="units-table-container">
+        <app-data-table
+          [config]="unitsTableConfig"
+          [data]="units()"
+          [loading]="isLoading()"
+          (pageChange)="onUnitsPageChange($event)"
+          (sortChange)="onUnitsSortChange($event)"
+          aria-label="Units in batch">
+        </app-data-table>
+      </div>
+
+    }
+
+    <!-- ── Initial State (before retrieve) ──────────────────────────────────── -->
+    @if (!batchRetrieved()) {
+      <div class="initial-state">
+        <div class="empty-icon-circle" aria-hidden="true">
+          <mat-icon class="empty-icon">search</mat-icon>
+        </div>
+        <p class="empty-message">No Results to Display</p>
+        <p class="empty-hint">Please enter search criteria to view results</p>
+      </div>
+    }
+
+  </div>
+</div>

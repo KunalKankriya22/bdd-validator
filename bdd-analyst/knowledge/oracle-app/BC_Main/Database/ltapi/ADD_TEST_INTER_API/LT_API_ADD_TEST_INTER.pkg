@@ -1,0 +1,896 @@
+CREATE OR REPLACE PACKAGE LTAPI.LT_API_ADD_TEST_INTER IS
+/* ************************************************************
+  This is an API to schedule any test or interdiction . The tests/interdictions
+  should have been populated in the ADDTEST_API table.
+   
+  This interface pull the data from teh table and  upload into the LT tables.
+  This is a generic interface.
+  Stauts: C -> completed
+          E -> Error
+          H -> Hold (The unit is waiting to be checked in)
+
+  Compatibility     time zone enabled (not for 4.6.x)
+ 
+  Created By        : Basker Edwin S. 
+  Date Of Creation  : 06/27/2015
+  Version           : 01 [06/7/15] - Edwin
+                    : 02 [07/16/15] IM: 61, 62
+                    : 03 [07/17/15] IM: 63,64
+                    : 04 [07/23/15] IM:65
+                    : 05 [08/04/15] LT 2015 (SCR:21571)
+                    : 06 [08/19/15] IM: 68,69
+                    : 07 [08/21/15] IM: 71, 72 
+
+  **********LT_2018 Version update ****
+
+		    : 01 [05/11/16] - Seshu Renamed Below
+                                       tables for merging database work
+			             	RPT_PARM table as RPT_PARM_LAB
+                    : 02 (11/20.17) Edwin , table name chnage 
+
+                    : 03 (08/07/18)  Edwin , chapter ID was added to the units query
+                    : 04 (10/16/24)  - MLT 7207
+  
+*****************************************   */
+
+  procedure add_log_entry(p_log_text in varchar2);
+  procedure main_proc( pl_batch_id in varchar2,
+                       pl_chapter_id in varchar2,
+                       pl_upload_status out varchar2);
+  
+  Procedure process_records; 
+  procedure init_variables;
+  procedure convert_unit_id(ok_status out varchar2) ;
+  procedure update_rpt_parm;
+  procedure rollback_and_exit ;
+  procedure archive_processed_data(pl_ext_batch_id in varchar2);
+  temp_coll_date         DATE;
+  logfile                UTL_FILE.FILE_TYPE;
+  instfile               UTL_FILE.FILE_TYPE;
+  LogDir                 VARCHAR2(50);
+  logfilename            VARCHAR2(50);
+  p_file_name            VARCHAR2(50);
+  read_record            VARCHAR2(500);
+  fetch_count            NUMBER:=0;
+  first_unit             BOOLEAN:=TRUE;
+  process_date_time      VARCHAR2(25);
+  v_test_id              VARCHAR2(10);
+  v_unit_id              VARCHAR2(15);
+  v_relabel_unit         VARCHAR2(15);
+  codabar_unit_scheme    VARCHAR2(1);
+  v_chapter_id           VARCHAR2(4);
+  batch_created          BOOLEAN:=FALSE;
+  test_created           BOOLEAN:=FALSE;
+  record_count           NUMBER:=0;
+  upload_count           NUMBER:=0;
+  nHold_count            NUMBER:=0;
+  --good_unit              BOOLEAN;
+  err_msg                VARCHAR2(400);
+  temp_test_id           VARCHAR2(20);
+  ncount                 NUMBER:=0;
+  no_of_units            NUMBER:=0; 
+  g_local_time           DATE;
+  upload_status          VARCHAR2(1);
+  p_chp_sys_date         DATE;
+  upload_flag            VARCHAR2(1);
+  g_batch_id             varchar2(50);
+  C1_days                varchar2(3);
+end LT_API_ADD_TEST_INTER;
+/
+create or replace package body LTAPI.LT_API_ADD_TEST_INTER is
+
+PROCEDURE add_log_entry(p_log_text varchar2) is
+BEGIN
+         UTL_FILE.putf(logfile,'%s\n',p_log_text);
+         UTL_FILE.fflush(logfile);
+END add_log_entry;
+
+procedure main_proc( pl_batch_id in varchar2,
+                     pl_chapter_id in varchar2,
+                     pl_upload_status out varchar2) is
+
+ start_time             VARCHAR2(30);
+ end_time               VARCHAR2(30);
+ nRun                   NUMBER:=0;
+ pl_days                number:=0;
+Begin
+      dbms_output.enable(50000000);
+      v_chapter_id:=pl_chapter_id;
+      g_batch_id:=LTrim(pl_batch_id);
+     -- p_chp_sys_date:= sysdate;
+      
+     p_chp_sys_date:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                                  sysdate);
+
+
+  -- Get the configuration values from the master codes table
+    begin
+     select code_desc into C1_days from master_codes where
+     code_type='APADD' and code='DAYS' and p_chp_sys_date between eff_date and
+     nvl(term_date,sysdate+1);
+    exception when no_data_found then
+      raise;
+    end;
+    pl_days:=to_number(C1_days);
+
+      ---check if the batch should be running
+       select nvl(count(*),0) into nRun from API_ADD_TEST_INTER Z1
+        where z1.ext_batch_id=g_batch_id AND
+        (z1.process_status is null
+         Or
+           (z1.process_status='H' and 
+            trunc(sysdate)-trunc(z1.insert_date)>pl_days)
+         Or
+          (z1.process_status='H' and exists (select 'x' from units u where
+                                             u.unit_id=Z1.unit_id))
+        );
+
+   
+     IF nRun > 0 then 
+    
+      -- create the log file
+      begin
+           select code_desc into LogDir from master_codes
+           where code_type='LOGDR' and code='ILOG' and p_chp_sys_date
+	   between eff_date and nvl(term_date,p_chp_sys_date+10);
+      exception
+           when no_data_found then 
+               dbms_output.put_line('Invalid path or filename');
+	       raise;
+           when others then 
+           dbms_output.put_line('Error in prepare_log_filename');
+	   raise;
+       end;
+
+      begin
+       p_file_name:='ADTSTAPI_'||nvl(g_batch_id,'NOBATCH');
+       select p_file_name||'_'||to_char(p_chp_sys_date,'mmddyyhh24miss')||'.r'
+       into logfilename from dual;
+      exception
+	  when others then
+	     dbms_output.put_line('Error in getting logfilename ... Aborting');
+	     raise;
+      end;
+
+        begin
+           
+         g_local_time:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                                   sysdate);
+           --g_local_time:=sysdate;
+
+	   start_time := to_char(g_local_time,'mm-dd-yy hh24:mi:ss');
+           logfile:=UTL_FILE.fopen(LogDir,logfilename, 'w');
+
+           add_log_entry('Add Test/Interdiction Interface Log');
+           add_log_entry('-----------------------------------');
+           add_log_entry(' ');
+	   add_log_entry('Interface Start Time:'||start_time);
+	   add_log_entry('Log Name   : '||logfilename);
+	   add_log_entry('--------------------------------------');
+
+       exception
+	  when utl_file.invalid_path then
+	   dbms_output.put_line('Invalid path/Directory or filename'); raise;
+        end;
+
+          init_variables;
+	  dbms_output.put_line('variable is initialised');
+           
+          If nvl(upload_flag,'X')!='A' then 
+	    process_records;   ---- (result_file_name,v_machine_id);
+            dbms_output.put_line('Process_and_upload is done');
+          End If;
+
+       If nvl(upload_flag,'X')!='A'  then
+          update_rpt_parm;
+          dbms_output.put_line('rpt parm is updated'); 
+
+          add_log_entry('No. of Records in Batch   :'||to_char(no_of_units));
+	  add_log_entry('No. of Records Successful :'||to_char(upload_count));
+          add_log_entry('No. of Records Hold Status:'||to_char(nHold_count));
+          add_log_entry('No. of results Rejected   :'||
+	  to_char(no_of_units - (upload_count+nHold_count)));
+          add_log_entry(' ');
+	  add_log_entry(' Interface has run successfully .....');
+
+          g_local_time:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+          sysdate);
+          --g_local_time:=sysdate;
+          upload_flag:='S';
+       End If;
+
+          end_time := to_char(g_local_time,'mm-dd-yy hh24:mi:ss');
+	  add_log_entry('Program End Time:'||end_time);
+     	  add_log_entry('*********************End****************************');
+
+          commit;
+	  UTL_FILE.fclose(logfile);
+          pl_upload_status:=upload_flag;
+    
+    ELSE
+       null;
+       pl_upload_status:='N';
+    END IF;
+End main_proc;
+
+Procedure process_records  is
+
+ v_result         VARCHAR2(80);
+ skip_unit        EXCEPTION; 
+ special_skip     EXCEPTION;
+ not_processed    EXCEPTION;
+ roll_back        EXCEPTION;
+ unit_details     varchar2(17);
+ nUTRS            NUMBER:=0;
+ nUTB             NUMBER:=0;
+ nHOLDQ           NUMBER:=0;
+ nUTRSExist       NUMBER:=0;
+ nContrExist      Number:=0;
+ nTestExist       NUMBER:=0;
+ nInterExist      NUMBER:=0;
+ nInterDup        NUMBER:=0;
+ nCancelCount     NUMBER:=0;
+ p_error_message  VARCHAR2(200);
+ good_unit        BOOLEAN:=TRUE;
+ result_date      date;
+ nChapterCount    NUMBER:=0;
+ temp_coll_date   date;
+ v_contract_id    varchar2(14);
+ c_status         varchar2(200);
+ pl_cancel_reason varchar2(5);
+ multiple_utrs     boolean;
+ nSameTests        NUMBER:=0;
+nUnitCount         NUMBER:=0;
+pl_temp_chapter_id VARCHAR2(5);
+
+
+/* CURSOR ADD_TEST_INTER_CUR (p_ext_batch_id in varchar2,pl_days in number)  is
+        select * from API_ADD_TEST_INTER where ext_batch_id=p_ext_batch_id AND
+        (process_status is null or 
+         (process_status='H' and sysdate-insert_date>pl_days));
+ 
+*/
+
+   CURSOR ADD_TEST_INTER_CUR (p_ext_batch_id in varchar2,p_days in number)  is
+          select * from API_ADD_TEST_INTER Z1
+          where z1.ext_batch_id=p_ext_batch_id AND
+          ( z1.process_status is null 
+           Or
+            (z1.process_status='H' and
+             trunc(sysdate)-trunc(z1.insert_date)>p_days) 
+           Or
+            (z1.process_status='H' and exists (select 'x' from units u where
+                                                   u.unit_id=Z1.unit_id))
+           );
+
+BEGIN
+
+/* -- Get the configuration values from the master codes table
+  begin
+   select code_desc into C1_days from master_codes where
+   code_type='APADD' and code='DAYS' and p_chp_sys_date between eff_date and
+   nvl(term_date,sysdate+1);
+  exception when no_data_found then
+      add_log_entry('DAYS code is not defined in the Master code ... Aborting');
+      rollback_and_exit;
+      raise roll_back;
+  end;
+*/
+
+
+     If g_batch_id is null then 
+        add_log_entry('External Batch ID must have a valid value ... Aborting');
+        rollback_and_exit;
+        raise roll_back;
+     End If;
+
+    add_log_entry('Ext. Batch ID : '||g_batch_id);
+
+    dbms_output.put_line('Processing batch ID:'||g_batch_id);
+
+   FOR Z in ADD_TEST_INTER_CUR(g_batch_id,to_number(C1_days)) loop
+
+    BEGIN
+
+     v_unit_id:=null;
+     v_relabel_unit:=null;
+     temp_coll_date:=null;
+     pl_temp_chapter_id:=v_chapter_id;
+
+     
+  /* 
+       -- Validate chapter ID
+     If Z.chapter_id <> v_chapter_id then 
+        err_msg:=Z.chapter_id||'-Invalid Chapter/wrong chapter for this setup';
+        raise skip_unit;
+     End If;
+*/
+
+      ---**** Validate the Unit ID *******
+
+     IF Length(Z.unit_id) in (10,13,16,14,15) then  -- ISBT unit
+
+        /* If Length(Z.unit_id) in (15,16) then
+            select nvl(count(*),0) into nFlag from valid_ff_values where
+            source_code=substr(Z.unit_id,-2) and
+            substr(Z.unit_id,2,5)=coll_id and chapter_id=v_chapter_id and
+            sysdate between eff_date and nvl(term_date,sysdate+2);
+
+           If nFlag = 0 then
+              err_msg:='Invalid ISBT unit-Flag characters are invalid';
+              raise unit_skip;
+           End If;
+          End If;
+      */
+
+       if Length(Z.unit_id) in (14,16) then
+          v_unit_id:=substr(Z.unit_id,2,13);
+       elsif Length(Z.unit_id) = 15 then
+          v_unit_id:=substr(Z.unit_id,1,13);
+       else
+         v_unit_id:=Z.unit_id;
+       end if;
+     ELSE  --codabar
+       if length(Z.unit_id)=9 then  -- this check is for cases like d7812345d
+          v_unit_id:=substr(Z.unit_id,2,7);
+       else
+          v_unit_id := Z.unit_id;
+       end if;
+     END IF;
+
+     no_of_units:=no_of_units+1;
+
+    --Performing the unit validation.
+     If length(v_unit_id)=6 then 
+       If ASCII(substr(v_unit_id,1,1)) not between 65 and 90 then
+          err_msg:='Invalid Unit ';
+          raise skip_unit;
+       Else
+          v_unit_id:=' '||v_unit_id;
+       End If;
+     End If;
+
+     If length(v_unit_id) not in (7,13,10) then
+        err_msg:='Invalid Unit Length';
+        raise skip_unit;
+     End if;
+
+
+     If length(v_unit_id) in (6,7) then
+       if codabar_unit_scheme='A' and ltrim(v_unit_id,'0123456789') is null then
+          convert_unit_id(c_status);
+          if nvl(c_status,' ')!='OK' then
+            err_msg:=c_status;
+	    good_unit:=FALSE;
+	    raise skip_unit;
+          end if;
+       end if;
+     End If;
+     
+     dbms_output.put_line(v_unit_id);
+     process_date_time:=to_char(p_chp_sys_date,'mm-dd-yyyy hh24:mi');
+
+     select nvl(count(*),0) into nUnitCount from units where unit_id=Z.unit_id and
+     chapter_id=Z.chapter_id;   -- Check if the unit is checked in the same chepater ID as in the API table 
+
+     If nUnitCount > 0 then 
+ 
+      Begin
+          select coll_date,contract_id into temp_coll_date,v_contract_id
+          from UNITS where unit_id=v_unit_id and chapter_id=v_chapter_id and
+          rownum=1;
+      Exception 
+          When no_data_found then 
+             temp_coll_date:=null;
+             --err_msg:=Z.test_id||'-Test ID is not ordered because '||
+             --' the unit is not checked into the system ';
+             --raise special_skip;
+           When others then
+              err_msg:='3.1 '||sqlerrm;
+             raise skip_unit;
+      End;
+   Else
+       -- get the chapter ID from the units table if the
+       -- order chapter ID is different than the units table chapter id
+
+       begin
+        select chapter_id into pl_temp_chapter_id from units where unit_id=Z.unit_id and
+        insert_dats=(select max(insert_dats) from units where unit_id=Z.unit_id);
+       exception when no_data_found then 
+           pl_temp_chapter_id:=v_chapter_id;
+       end;
+
+
+       begin
+          select coll_date,contract_id into temp_coll_date,v_contract_id
+          from UNITS where unit_id=v_unit_id and chapter_id=pl_temp_chapter_id and
+          rownum=1;
+       exception 
+          When no_data_found then 
+             temp_coll_date:=null;
+           When others then
+              err_msg:='3.2 '||sqlerrm;
+             raise skip_unit;
+       End;
+ 
+   End If;
+
+
+   -- check if the holded records should be removed from the table  
+     If nvl(Z.process_status,'X') ='H' then
+       if (trunc(sysdate) - trunc(Z.insert_date)) > To_Number(C1_days) then 
+         err_msg:=Z.test_id||' has been removed from the API ,'
+                           ||' exceeded HOLD time'; 
+         raise not_processed;
+       end if;
+    End If;
+
+  --  check if the test ID is valid if it was defined
+
+    IF Z.test_ID IS NOT NULL THEN
+
+       -- check if the unit is checked in or not
+
+         If temp_coll_date is null then 
+            err_msg:=Z.test_id||'-Test ID is not ordered/cancelled '||
+                     ' because the unit is not checked into the system ';
+            raise special_skip;
+        End If; 
+           
+      --  check if the test ID is valid if it was defined
+       
+       select nvl(count(*),0)  into nTestExist from valid_tests where
+       test_id=Z.test_id and p_chp_sys_date between eff_date and 
+       nvl(term_date,sysdate+10);
+      
+       if nTestExist = 0 then
+          err_msg:= Z.test_id||' - Test ID is not ordered/cancelled '
+                    ||'because the test ID is not valid in LifeTrak ';
+          raise skip_unit;
+       end if;
+
+       -- check if the test needs to be scheduled or not
+
+       If Z.cancel_flag is null then
+
+          select nvl(count(*),0) into nUTRSExist from UTRS where
+          unit_id=v_unit_id and test_id=Z.test_id and cancel_flag is null;
+
+          select nvl(count(*),0) into nUTB from unit_test_base where
+          unit_id=v_unit_id and test_id=Z.test_id and cancel_flag is null;
+
+          select nvl(count(*),0) into nHOLDQ from holding_tests where
+          unit_id=v_unit_id and test_id=Z.test_id;
+
+
+          If (nUTRSExist > 0) or (nUTB > 0) or (nHOLDQ > 0 ) then 
+             err_msg:=Z.test_id||'-Test ID is not ordered , test '
+                               ||'already exists in UTRS/UTB/HOLDING_TESTS ';
+             raise skip_unit;
+          End If;
+
+          select nvl(count(*),0) into nUTRSExist from UTRS where
+          unit_id=v_unit_id and test_id=Z.test_id and cancel_flag is not null;
+          
+          If nUTRSExist > 0 then
+             err_msg:=Z.test_id||'-Test ID is not ordered because the'
+                               ||' test ID in UTRS has been cancelled';
+             raise skip_unit;
+          End If;
+
+         /* select nvl(count(*),0) into nContrExist from contract_tests
+            where test_id=Z.test_id and contract_id=v_contract_id;
+            If nContrExist > 0 then 
+              err_msg:=Z.test_id||'- Test ID is not ordered '
+                                ||'part of the contract';
+              raise skip_unit;
+           End if;
+         */
+
+            begin
+             insert into utrs
+                (unit_id, coll_date, chapter_id,
+	         test_id, test_seq_no, program_id, insert_dats,
+		 insert_user_id, test_mode,
+		 test_chapter_id, tb_id)
+	      values
+		   (v_unit_id, temp_coll_date,pl_temp_chapter_id, -- Z.chapter_id,
+		    Z.test_id, 1,'ADTSTAPI', sysdate, 
+                    'LTAPI', 'M', pl_temp_chapter_id, null);
+            exception
+	           when others then
+		   add_log_entry('Error in inserting into utrs: '||sqlerrm);
+	           raise skip_unit;
+	    end;
+              --add_log_entry(Z.test_id||' Ordered Successfully');
+
+       Else     --   if cancel flag is not null
+          ---steps to cancel the tests
+
+          select nvl(count(*),0) into nUTRS from utrs where unit_id=Z.unit_id 
+          and test_id=Z.test_id and result_status_1 is null;
+          
+          select nvl(count(*),0) into nUTB from unit_test_base where 
+          unit_id=Z.unit_id and test_id=Z.test_id ;
+
+          select nvl(count(*),0) into nHOLDQ from holding_tests
+           where unit_id=Z.unit_id and test_id=Z.test_id ;
+
+          
+          if nUTRS = 0 and nUTB=0 and nHOLDQ=0 then
+             err_msg:=Z.test_id||'- Test ID is not cancelled because the '
+                              ||'test was not ordered ';
+            raise skip_unit;
+          end if;
+        
+         begin
+           select code_desc into pl_cancel_reason from master_codes 
+           where code_type='APADD' and code='CANR' and
+           p_chp_sys_date between eff_date and nvl(term_date,p_chp_sys_date+10);
+         exception
+          when no_data_found then 
+              err_msg:=Z.test_id||'- Test ID is not cancelled because the '
+                       ||'cancel reason is not defined in APADD master code';
+               raise skip_unit;
+          when others then
+             err_msg:=Z.test_id||' 3.4 '||sqlerrm;
+             raise skip_unit;
+         end;
+        
+        begin  
+          select code into pl_cancel_reason from master_codes where
+          code_type='VOID' and code=pl_cancel_reason and
+          p_chp_sys_date between
+          eff_date and nvl(term_date,p_chp_sys_date+10) ;
+         exception 
+           when no_data_found then  
+               err_msg:=Z.test_id||'- Test ID is not cancelled because the '
+                      ||'cancel reason is not defined in the VOID master code';
+               raise skip_unit;
+          when others then
+              err_msg:=Z.test_id||' 3.50 '||sqlerrm;
+              raise skip_unit;
+         end;
+
+
+          -- check if the results are already in place for the test
+          select nvl(count(*),0) into nUTRS from utrs where unit_id=Z.unit_id
+          and test_id=Z.test_id and result_status_1 is not null;
+      
+          multiple_utrs:=FALSE;
+          If nUTRS > 0 then 
+             -- make sure no other same tests without results
+            select nvl(count(*),0) into nSameTests from utrs 
+            where unit_id=Z.unit_id and test_id=Z.test_id and
+            result_status_1 is null;
+
+            if nSameTests = 0 then 
+               err_msg:=Z.test_id||'- Test ID is not cancelled because the '
+                                 ||'test is resulted in UTRS';
+               raise skip_unit;
+            else
+               multiple_utrs:=TRUE;
+            end if;
+          End If;
+
+          select nvl(count(*),0) into nUTB from unit_test_base
+          where unit_id=Z.unit_id and test_id=Z.test_id and
+           result_status_1 is not null;
+
+          if nUTB > 0 and multiple_utrs=FALSE then
+             err_msg:=Z.test_id||'- Test ID is not Cancelled because the '
+                              ||'test is resulted in UNIT_TEST_BASE';
+            raise skip_unit;
+          end if;
+
+          select nvl(count(*),0) into nHOLDQ from holding_tests
+          where unit_id=Z.unit_id and test_id=Z.test_id and 
+          result_status_1 is not null;
+          
+          if nHOLDQ > 0 and multiple_utrs=FALSE then
+             err_msg:=Z.test_id||'- Test ID is not cancelled because the '
+                              ||'test is resulted in HOLDING_TESTS';
+            raise skip_unit;
+          end if;
+          -- if passes all the conditions for cancelling then cancel the test
+          Begin
+
+           select nvl(count(*),0) into nUTRS from utrs where unit_id=Z.unit_id
+           and test_id=Z.test_id and result_status_1 is null;
+
+           If nUTRS = 0 then 
+              err_msg:=Z.test_id||' - Test Id is not cancelled because '
+                 ||' the test ID is not in the UTRS for the cancel operation';
+              raise skip_unit;
+           End If;
+
+           update utrs set cancel_flag='Y' where unit_id=Z.unit_id and 
+           test_id=Z.test_id and result_status_1 is null;
+
+            /* insert into test_voids
+                      (unit_id,coll_date,chapter_id,
+                       test_seq_no, test_id,
+                       insert_dats, insert_user_id,
+                       void_type, void_reason_code,
+                      void_dats, void_user_id)
+                    values
+                      (Z.unit_id, temp_coll_date, v_chapter_id,
+                      1, Z.test_id,
+                      p_chp_sys_date,'LTAPI',
+                      'C', pl_cancel_reason,
+                      p_chp_sys_date, 'LTAPI');
+            */
+
+              insert into test_voids
+                    (unit_id,coll_date,chapter_id,
+                     test_seq_no, test_id,
+                     insert_dats, insert_user_id,
+                     void_type, void_reason_code,
+                     void_dats, void_user_id)
+              select Z.unit_id,temp_coll_date,pl_temp_chapter_id,test_seq_no,
+                     test_id,p_chp_sys_date,'LTAPI','C',
+                     pl_cancel_reason,p_chp_sys_date,'LTAPI' from 
+              UTRS where unit_id=Z.unit_id and test_id=Z.test_id and
+                   result_status_1 is null and rownum=1; 
+
+          Exception when others then 
+            err_msg:=Z.test_id||': 3.3 '||sqlerrm;
+            raise skip_unit;
+          End;
+
+
+          ---add_log_entry(Z.test_id||' Cancelled Successfully');
+        
+        End If;  --- for if cancel flag is null  
+     END IF;  -- for it z.test_id is not null
+  
+     -- processing the interdictions 
+
+    IF Z.INTER_CODE is not null then 
+
+       -- check if the unit is checked in the system
+       If temp_coll_date is null then
+          err_msg:=Z.inter_code||'-Interdiction is not placed/released '
+                 ||'because the unit does not exist in the system';
+          raise special_skip;
+       End if;
+ 
+     
+       -- check if the interdiction is a valid 
+
+        select nvl(count(*),0) into nInterExist from valid_interdictions_lab
+        where p_chp_sys_date between eff_date and
+        nvl(term_date,p_chp_sys_date+10) and
+        inter_code=Z.inter_code and rownum=1;
+        
+        If nInterExist = 0 then 
+           err_msg:='Interdiction not placed/released because the  '
+                    ||'inter code is not valid in LifeTrak';
+          raise skip_unit;
+        End If;
+ 
+        If Z.inter_release_flag is null then -- place the interdiction
+
+           -- check if the same interdiction is already present
+           select nvl(count(*),0) into nInterDup from unit_interdictions
+           where unit_id=Z.unit_id and inter_code=Z.inter_code;
+
+           If nInterDup = 0 then 
+             begin
+               insert into unit_interdictions(
+                     unit_id,coll_date,
+                     chapter_id,inter_code,
+                     insert_dats,inter_user_id,
+                     source_test_id,audit_key,
+                     program_id)
+              VALUES 
+                    (Z.unit_id,temp_coll_date,
+                     pl_temp_chapter_id,Z.inter_code,
+                     sysdate,'LTAPI',
+                     Z.test_id,audit_seq.nextval,
+                     'ADTSTAPI'
+                    );
+             exception 
+               when others then 
+                   err_msg:='Cannot place interdiction:'||Z.inter_code||' '||
+                            sqlerrm;
+                   raise skip_unit;
+             end;
+           Else
+            err_msg:=Z.inter_code||'-Interdiction is not placed because '||
+                      'it already exists on the unit (duplicate)';
+            raise skip_unit;
+           End If;
+ 
+       Else   -- if z.inter_release_flag is not null
+           
+          -- the flag value should be Y only
+          If upper(Z.inter_release_flag)!='Y' then
+             err_msg:=Z.inter_code||' -Interdiction is not released, '
+                                  ||'invalid release flag';
+             raise skip_unit;
+          End if;
+
+          -- check if the same interdiction is already present
+          select nvl(count(*),0) into nInterExist from unit_interdictions
+          where unit_id=Z.unit_id and inter_code=Z.inter_code;
+
+         If nInterExist = 0 then 
+            err_msg:=Z.inter_code||'-Interdiction is not released because '||
+                     'the interdiction is not present on the unit';
+             raise skip_unit;
+         Else
+           delete from unit_interdictions where unit_id=Z.unit_id and
+           inter_code=Z.inter_code;
+        End If;
+      End If;
+   END IF;  -- For inter code is not null;
+
+   --- update the API table
+   update API_ADD_TEST_INTER set process_status='C' where
+   ext_batch_id=Z.ext_batch_id and unit_id=Z.unit_id and
+   audit_key=Z.audit_key;
+
+   upload_count:=upload_count+1;
+                 
+ EXCEPTION 
+   When skip_unit then
+     add_log_entry(v_unit_id||': '||err_msg);
+   
+     update API_ADD_TEST_INTER set process_status='E' where
+     ext_batch_id=Z.ext_batch_id and unit_id=Z.unit_id and 
+     audit_key=Z.audit_key;
+
+   When special_skip then 
+     If nvl(Z.process_status,'X')!='H' then 
+        add_log_entry(v_unit_id||': '||err_msg);
+   
+        update API_ADD_TEST_INTER set process_status='H' where
+        ext_batch_id=Z.ext_batch_id and unit_id=Z.unit_id and 
+        audit_key=Z.audit_key;
+        nHold_count:=nHold_count+1;
+     Else
+       nHold_count:=nHold_count+1;
+     End If;
+  When not_processed then
+      add_log_entry(v_unit_id||': '||err_msg);
+
+      update API_ADD_TEST_INTER set process_status='X' where
+      ext_batch_id=Z.ext_batch_id and unit_id=Z.unit_id and
+      audit_key=Z.audit_key;
+  when others then 
+    add_log_entry(v_unit_id||' '||sqlerrm);
+    update API_ADD_TEST_INTER set process_status='E' where
+    ext_batch_id=Z.ext_batch_id and unit_id=Z.unit_id and
+    audit_key=Z.audit_key; 
+ 
+  END;
+  END LOOP;  --- for test cursor (inner cursor)
+  archive_processed_data(g_batch_id);
+  add_log_entry(' ');
+  add_log_entry('*********Batch Over**********');
+
+EXCEPTION when roll_back then
+  null;
+END process_records;
+
+Procedure archive_processed_data(pl_ext_batch_id in varchar2) is
+Begin
+  insert into API_ADD_TEST_INTER_ARC select * from 
+  API_ADD_TEST_INTER where ext_batch_id=pl_ext_batch_id and
+  nvl(process_status,'X')!='H';
+
+  delete from API_ADD_TEST_INTER 
+  where ext_batch_id=pl_ext_batch_id and
+  nvl(process_status,'X')!='H';
+
+   -- change the status back to H in the archive table 
+   --from the temporary status X
+
+  update API_ADD_TEST_INTER_ARC set process_status='H' where
+  process_status='X' and ext_batch_id=pl_ext_batch_id;
+
+Exception when others then 
+ add_log_entry('Archive='||sqlerrm);
+End archive_processed_data;
+
+Procedure init_variables is
+ l_inst_id    varchar2(10);
+ chapCount    number:=0;
+Begin
+
+  upload_count:=0;
+  nHold_count:=0;
+  no_of_units:=0;
+  chapCount:=0;
+  upload_flag:=null;
+  first_unit:=TRUE;
+  
+  --- Verify the chapter ID
+
+     select nvl(count(*),0) into chapCount from chapters where
+     chapter_id=v_chapter_id and sysdate between eff_date and
+     nvl(term_date,sysdate+1);
+
+   If chapCount = 0 then 
+      add_log_entry('Invalid Chapter ID.... Aborting');
+      rollback_and_exit;
+  Else
+     /* begin
+          SELECT testing_lab_code into testing_lab_code
+          from system_users where user_id = user and sysdate between
+          eff_date and nvl(term_date,sysdate);
+        exception when no_data_found then
+         testing_lab_code:='99';
+         --v_chapter_id:='WAD';
+        end;
+     */
+
+    begin
+        select nvl(codabar_unit_scheme,'*') into  codabar_unit_scheme
+        from institutions where sysdate between eff_date and
+        nvl(term_date,sysdate);
+    exception when no_data_found then
+      add_log_entry('No institution data available .... Aborting');
+      rollback_and_exit;
+    end;
+
+ End If;
+
+End init_variables;
+
+procedure convert_unit_id(ok_status out varchar2) is
+Begin
+    select eye_read_trns||substr(v_unit_id,3) into
+    v_unit_id from bar_code_prefixes where
+    machine_code=substr(v_unit_id,1,2) and sysdate between 
+    eff_date and nvl(term_date,sysdate);
+    ok_status:='OK';
+Exception 
+    when others then
+    ok_status:='bar code translation'||sqlerrm;
+End convert_unit_id;
+
+procedure rollback_and_exit is
+end_time  varchar2(30);
+Begin
+rollback;
+add_log_entry('Aborting');
+--UTL_FILE.fclose(logfile);
+upload_count:=0;
+nHold_count:=0;
+no_of_units:=0;
+upload_flag:='A';
+dbms_output.put_line('Rollback and Exit');
+
+--update_api_inst_upload;
+--delete from api_locked_file where machine_id=v_machine_id;
+commit;
+return;
+
+--raise_application_error('-20000','Aborting');
+End rollback_and_exit;
+
+procedure update_rpt_parm is
+Begin
+
+begin
+   insert into rpt_parm(appl_id, user_name, report_name, parm_id,
+			 parm_date, submit_date,report_status,output_file)
+	values ('DON', decode(substr(user,1,4),'OPS$',substr(user,5),user),
+                'ADTSTAPI', audit_seq.nextval, sysdate, sysdate,
+                'C',logfilename);
+    exception 
+	when others then 
+	add_log_entry('Error inserting into rpt_parm table');
+	add_log_entry(sqlerrm);
+end;
+End update_rpt_parm;
+
+END LT_API_ADD_TEST_INTER;
+/
+
+create or replace public synonym LT_API_ADD_TEST_INTER for LTAPI.LT_API_ADD_TEST_INTER
+/
+Show errors;
+

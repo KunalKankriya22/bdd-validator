@@ -1,0 +1,327 @@
+<div class="side-panel-wrapper">
+
+  <!-- Header -->
+  <div class="panel-header">
+    <div class="header-content">
+      <h2 class="panel-title">{{ title }}</h2>
+    </div>
+
+    <button type="button" mat-icon-button class="close-btn" (click)="onCancel()" aria-label="Close panel">
+      <mat-icon>close</mat-icon>
+    </button>
+  </div>
+
+  <!-- Body -->
+  <div class="panel-body" [formGroup]="form">
+    <!-- Row 1: Type, Short Name -->
+    <div class="form-row">
+      <!-- Type field - ADD mode: dropdown, EDIT mode: read-only card -->
+      <mat-form-field class="form-field" appearance="fill" *ngIf="mode === 'add'">
+        <mat-label>Type </mat-label>
+        <mat-select formControlName="productType">
+          @if (isLoadingProductTypes) {
+            <mat-option
+              [value]="selectPanelLoadingValue"
+              disabled
+              class="filter-panel__option--status">
+              <span class="filter-panel__loading">
+                <mat-spinner diameter="20" class="filter-panel__spinner" aria-hidden="true"></mat-spinner>
+                <span>Loading...</span>
+              </span>
+            </mat-option>
+          } @else if (productTypeOptionsSignal().length === 0) {
+            <mat-option
+              [value]="selectPanelEmptyValue"
+              disabled
+              class="filter-panel__option--status">
+              No data available
+            </mat-option>
+          } @else {
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="productTypeSearchCtrl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="No results found">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (option of filteredProductTypeOptions(); track option) {
+              <mat-option [value]="option">
+                {{ option }}
+              </mat-option>
+            }
+            @if (filteredProductTypeOptions().length === 0) {
+              <mat-option
+                disabled
+                class="filter-panel__option--status">
+                No Data Available
+              </mat-option>
+            }
+          }
+        </mat-select>
+        <mat-error *ngIf="form.get('productType')?.hasError('required')">Type is required</mat-error>
+        <mat-error *ngIf="form.get('productType')?.hasError('pattern')">Only letters and numbers allowed (no spaces or symbols)</mat-error>
+        <mat-error *ngIf="form.get('productType')?.hasError('minlength') || form.get('productType')?.hasError('maxlength')">
+          Type must be 1-5 characters
+        </mat-error>
+      </mat-form-field>
+
+      <!-- EDIT mode: read-only card for Type -->
+      <div class="field-display-card" *ngIf="mode === 'edit'" role="group" aria-label="Type">
+        <div class="field-label">Type</div>
+        <div class="field-value">{{ form.getRawValue().productType }}</div>
+      </div>
+
+      <mat-form-field class="form-field" appearance="fill">
+        <mat-label>Short Name</mat-label>
+        <input matInput formControlName="shortName" maxlength="10" />
+        <mat-error *ngIf="form.get('shortName')?.hasError('required')">Short Name is required</mat-error>
+        <mat-error *ngIf="form.get('shortName')?.hasError('maxlength')">Max 10 characters</mat-error>
+      </mat-form-field>
+    </div>
+
+    <!-- Row 2: Description, Price -->
+    <div class="form-row">
+      <mat-form-field class="form-field" appearance="fill">
+        <mat-label>Description</mat-label>
+        <input matInput formControlName="description" maxlength="50" (keydown)="preventLeadingSpace($event, 'description')" />
+        <mat-error *ngIf="form.get('description')?.hasError('required')">Description is required</mat-error>
+        <mat-error *ngIf="form.get('description')?.hasError('whitespaceOnly')">Description cannot contain only spaces</mat-error>
+        <mat-error *ngIf="form.get('description')?.hasError('maxlength')">Max 50 characters</mat-error>
+      </mat-form-field>
+
+      <div class="custom-price-field form-field">
+        <div class="input-wrapper"
+             [class.focused]="isPriceFocused"
+             [class.has-value]="form.get('price')?.value !== null && form.get('price')?.value !== ''"
+             [class.has-error]="(form.get('price')?.touched || form.get('price')?.dirty) && form.get('price')?.invalid">
+          <span class="currency" *ngIf="form.get('price')?.value !== null && form.get('price')?.value !== ''">$</span>
+          <input
+            type="text"
+            inputmode="decimal"
+            formControlName="price"
+            maxlength="10"
+            placeholder=" "
+            matTooltip="Range: -999,999.99 to 999,999.99"
+            matTooltipPosition="above"
+            (focus)="isPriceFocused = true"
+            (blur)="isPriceFocused = false"
+            (keydown)="preventInvalidPriceInput($event)"
+            (paste)="preventInvalidPricePaste($event)" />
+        </div>
+        <label [class.active]="isPriceFocused || (form.get('price')?.value !== null && form.get('price')?.value !== '')">Price</label>
+        <div class="error-message" *ngIf="(form.get('price')?.touched || form.get('price')?.dirty) && form.get('price')?.invalid">
+          <span *ngIf="form.get('price')?.hasError('min') || form.get('price')?.hasError('max')">
+            Price must be between -999,999.99 and 999,999.99
+          </span>
+          <span *ngIf="form.get('price')?.hasError('twoDecimalPlaces')">
+            Price can have at most 2 decimal places
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 3: Life Span (3 cols), Lifespan Unit (3 cols), Grouping (6 cols) -->
+    <div class="form-row form-row-custom">
+      <mat-form-field class="form-field form-field-quarter" appearance="fill">
+        <mat-label>Life Span</mat-label>
+        <input
+          matInput
+          type="text"
+          inputmode="numeric"
+          formControlName="lifeSpan"
+          maxlength="5"
+          (keydown)="preventInvalidNumericInput($event, 5)"
+          (paste)="preventNonNumericPaste($event)" />
+        <mat-error *ngIf="form.get('lifeSpan')?.invalid">
+          {{ getLifeSpanError() }}
+        </mat-error>
+      </mat-form-field>
+
+      <mat-form-field class="form-field form-field-quarter" appearance="fill">
+        <mat-label>Lifespan Unit</mat-label>
+        <mat-select formControlName="lifeSpanInd">
+          <mat-option *ngFor="let option of lifeSpanIndOptions" [value]="option">
+            {{ option }}
+          </mat-option>
+        </mat-select>
+        <mat-error *ngIf="form.get('lifeSpanInd')?.invalid">
+          {{ getLifeSpanIndError() }}
+        </mat-error>
+      </mat-form-field>
+
+      <mat-form-field class="form-field form-field-half" appearance="fill">
+        <mat-label>Grouping</mat-label>
+        <mat-select formControlName="productGrouping">
+          @if (isLoadingDropdowns) {
+            <mat-option
+              [value]="selectPanelLoadingValue"
+              disabled
+              class="filter-panel__option--status">
+              <span class="filter-panel__loading">
+                <mat-spinner diameter="20" class="filter-panel__spinner" aria-hidden="true"></mat-spinner>
+                <span>Loading...</span>
+              </span>
+            </mat-option>
+          } @else if (groupingOptionsSignal().length === 0) {
+            <mat-option
+              [value]="selectPanelEmptyValue"
+              disabled
+              class="filter-panel__option--status">
+              No data available
+            </mat-option>
+          } @else {
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="groupingSearchCtrl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="No results found">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (option of filteredGroupingOptions(); track option.code) {
+              <mat-option [value]="option.code">
+                {{ option.description || option.code }}
+              </mat-option>
+            }
+            @if (filteredGroupingOptions().length === 0) {
+              <mat-option
+                disabled
+                class="filter-panel__option--status">
+                No Data Available
+              </mat-option>
+            }
+          }
+        </mat-select>
+        <mat-error *ngIf="form.get('productGrouping')?.hasError('required')">Grouping is required</mat-error>
+      </mat-form-field>
+    </div>
+
+    <!-- Row 4: Sequence, ABO Only, Rh Required, Import Allowed -->
+    <div class="form-row form-row-four">
+      <mat-form-field class="form-field" appearance="fill">
+        <mat-label>Sequence</mat-label>
+        <input
+          matInput
+          type="text"
+          inputmode="numeric"
+          formControlName="sortSequence"
+          maxlength="2"
+          matTooltip="Maximum: 99"
+          matTooltipPosition="above"
+          (keydown)="preventInvalidNumericInput($event, 2)"
+          (paste)="preventNonNumericPaste($event)" />
+        <mat-error *ngIf="form.get('sortSequence')?.hasError('min') || form.get('sortSequence')?.hasError('max')">
+          Sequence must be between 0 and 99
+        </mat-error>
+        <mat-error *ngIf="form.get('sortSequence')?.hasError('pattern')">
+          Sequence must be a whole number
+        </mat-error>
+      </mat-form-field>
+
+      <mat-form-field class="form-field" appearance="fill">
+        <mat-label>ABO Only</mat-label>
+        <mat-select formControlName="aboOnly">
+          <mat-option *ngFor="let option of booleanOptions" [value]="option">
+            {{ option }}
+          </mat-option>
+        </mat-select>
+      </mat-form-field>
+
+      <mat-form-field class="form-field" appearance="fill">
+        <mat-label>Rh Required</mat-label>
+        <mat-select formControlName="rhRequired">
+          <mat-option *ngFor="let option of booleanOptions" [value]="option">
+            {{ option }}
+          </mat-option>
+        </mat-select>
+      </mat-form-field>
+
+      <mat-form-field class="form-field" appearance="fill">
+        <mat-label>Import Allowed</mat-label>
+        <mat-select formControlName="importAllowed">
+          <mat-option *ngFor="let option of booleanOptions" [value]="option">
+            {{ option }}
+          </mat-option>
+        </mat-select>
+      </mat-form-field>
+    </div>
+
+    <!-- Row 5: Pooled Product Toggle (Full Width) -->
+    <div class="toggle-container">
+      <div class="toggle-wrapper">
+        <mat-slide-toggle formControlName="pooledProduct" color="primary" class="ws-toggle" aria-label="Pooled Product">
+        </mat-slide-toggle>
+        <div class="toggle-content">
+          <div class="toggle-label">Pooled Product</div>
+          <div class="toggle-description">When this setting is enabled the product is identified as a pooled product.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 6: Special Product Toggle (Full Width) -->
+    <div class="toggle-container">
+      <div class="toggle-wrapper">
+        <mat-slide-toggle formControlName="specialInventory" color="primary" class="ws-toggle" aria-label="Special Product">
+        </mat-slide-toggle>
+        <div class="toggle-content">
+          <div class="toggle-label">Special Product</div>
+          <div class="toggle-description">When this setting is enabled the product is treated as a special inventory item.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 7: Effective Date, Termination Date -->
+    <div class="form-row">
+      <!-- Effective Date (Editable in both modes) -->
+      <mat-form-field class="form-field" appearance="fill">
+        <mat-label>Effective Date</mat-label>
+        <input matInput
+          [matDatepicker]="effectiveDatePicker"
+          formControlName="effectiveDate"
+          [min]="minDate"
+          [errorStateMatcher]="effDateErrorMatcher"
+          (input)="onEffectiveDateInput($event)"
+          placeholder="DD-MMM-YYYY"
+          aria-required="true">
+        <mat-datepicker-toggle matIconSuffix [for]="effectiveDatePicker"></mat-datepicker-toggle>
+        <mat-datepicker #effectiveDatePicker></mat-datepicker>
+        <mat-error *ngIf="form.get('effectiveDate')?.invalid || form.hasError('dateRangeInvalid')">
+          {{ getEffectiveDateError() }}
+        </mat-error>
+      </mat-form-field>
+
+      <!-- Termination Date (Editable in both modes) -->
+      <mat-form-field class="form-field" appearance="fill">
+        <mat-label>Termination Date</mat-label>
+        <input matInput
+          [matDatepicker]="terminationDatePicker"
+          formControlName="terminationDate"
+          [min]="terminationMinDate || minDate"
+          [errorStateMatcher]="termDateErrorMatcher"
+          (input)="onTerminationDateInput($event)"
+          placeholder="DD-MMM-YYYY"
+          >
+        <mat-datepicker-toggle matIconSuffix [for]="terminationDatePicker"></mat-datepicker-toggle>
+        <mat-datepicker #terminationDatePicker></mat-datepicker>
+        <mat-error *ngIf="form.get('terminationDate')?.invalid || form.hasError('dateRangeInvalid')">
+          {{ getTerminationDateError() }}
+        </mat-error>
+      </mat-form-field>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="panel-footer">
+    <div class="footer-actions">
+      <button type="button" mat-button class="cancel-btn" (click)="onCancel()">CANCEL</button>
+      <button
+        type="button"
+        mat-raised-button
+        class="primary-btn"
+        [disabled]="form.invalid || form.pristine"
+        (click)="onSave()">
+        {{ mode === 'add' ? 'ADD' : 'SAVE' }}
+      </button>
+    </div>
+  </div>
+
+</div>

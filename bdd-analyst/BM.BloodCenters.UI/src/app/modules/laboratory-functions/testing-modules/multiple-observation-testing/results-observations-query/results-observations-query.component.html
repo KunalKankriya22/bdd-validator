@@ -1,0 +1,241 @@
+<app-page-header-with-breadcrumb [config]="headerConfig" />
+
+<div class="results-observations-container">
+  <!-- Search Section -->
+  <div class="search-section">
+    <div class="search-row">
+      <!-- Unit ID Field -->
+      <app-unit-id-field
+        [validateFfValue]="'N'"
+        [required]="true"
+        [showBarcodeIcon]="true"
+        (validated)="onUnitValidated($event)"
+        (cleared)="onUnitCleared()"
+        class="unit-id-field"
+      />
+
+      <!-- Test ID Searchable Dropdown -->
+      <mat-form-field appearance="fill" class="test-id-field">
+        <mat-label>Test ID</mat-label>
+        <mat-select
+          [formControl]="testIdControl"
+          required
+          [disabled]="!testsAvailable()"
+          (selectionChange)="onTestSelected()"
+        >
+          <mat-option>
+            <ngx-mat-select-search
+              [formControl]="testSearchControl"
+              placeholderLabel="Search Test ID..."
+              noEntriesFoundLabel="No tests found"
+            ></ngx-mat-select-search>
+          </mat-option>
+          <mat-option *ngFor="let test of filteredTests()" [value]="test.testId">
+            {{ test.testId }}
+          </mat-option>
+        </mat-select>
+      </mat-form-field>
+
+      <!-- Description Field (Display only) -->
+      <div class="display-field" role="group" [attr.aria-label]="'Description'">
+        <span class="display-field__label" aria-hidden="true">Description</span>
+        @if (isLoading()) {
+          <mat-spinner diameter="16" class="display-field__spinner" [attr.aria-label]="'Loading description'"></mat-spinner>
+        } @else {
+          <span class="display-field__value">{{ selectedTestDescription || '-' }}</span>
+        }
+      </div>
+
+      <!-- Clear All Button -->
+      <button type="button" class="query-clear-btn" mat-button (click)="clearAll()">
+        CLEAR ALL
+      </button>
+    </div>
+  </div>
+
+  <!-- Results Section -->
+  <div class="results-section" *ngIf="hasResults()">
+    <div class="results-grid">
+      <!-- Left Panel: Test Batch List -->
+      <div class="test-batch-panel">
+        <div class="panel-title">
+          <span>Test Batch ID</span>
+          <span>Seq</span>
+        </div>
+
+        <div class="batch-list" *ngIf="!isLoadingBatches(); else batchLoader" role="listbox" [attr.aria-label]="'Test batches'">
+          <div
+            *ngFor="let batch of testBatches(); let i = index"
+            class="batch-row"
+            [class.selected]="selectedBatchIndex() === i"
+            (click)="selectBatch(i)"
+            tabindex="0"
+            (keydown.enter)="selectBatch(i)"
+            (keydown.space)="selectBatch(i); $event.preventDefault()"
+            role="option"
+            [attr.aria-selected]="selectedBatchIndex() === i"
+          >
+            <div class="batch-id">{{ batch.tbId }}</div>
+            <div class="batch-seq">{{ batch.tbSeqNo }}</div>
+          </div>
+
+          <div *ngIf="testBatches().length === 0" class="no-data-message">
+            No test batches found
+          </div>
+        </div>
+
+        <ng-template #batchLoader>
+          <div class="loader-container" role="status" aria-live="polite">
+            <mat-spinner diameter="40" [attr.aria-label]="'Loading test batches'"></mat-spinner>
+          </div>
+        </ng-template>
+      </div>
+
+      <!-- Middle Panel: Band Details -->
+      <div class="band-details-panel">
+        <div class="panel-title">
+          <span>Band</span>
+          <span>Result</span>
+        </div>
+
+        @if (isLoadingBandDetails()) {
+          <div class="loader-container" role="status" aria-live="polite">
+            <mat-spinner diameter="40" [attr.aria-label]="'Loading band details'"></mat-spinner>
+          </div>
+        } @else if (bandDetails()) {
+          <div class="band-list">
+            <div *ngFor="let band of bandDetails()!.bandDetails" class="band-row">
+              <div class="band-name">{{ band.bandName }}</div>
+              <div class="band-result">{{ band.displayBandVal || '--' }}</div>
+            </div>
+
+            <div *ngIf="bandDetails()!.bandDetails.length === 0" class="no-data-message">
+              No band details found
+            </div>
+          </div>
+        } @else {
+          <div class="no-data-message">
+            No band details found
+          </div>
+        }
+      </div>
+
+      <!-- Right Panel: Test Details and Other Bands (Stacked) -->
+      <div class="right-panel-wrapper">
+        <!-- Test Details Card -->
+        <div class="test-details-panel" *ngIf="selectedBatch()">
+          <div class="details-title">Test Details</div>
+
+          <div class="details-content">
+            <!-- Row 1: Status, Test Type, Control Value -->
+            <div class="detail-row triple">
+              <div class="detail-field">
+                <label class="field-label">Status</label>
+                <div class="field-value">{{ selectedBatch()!.scheduled }}</div>
+              </div>
+              <div class="detail-field">
+                <label class="field-label">Test Type</label>
+                <div class="field-value">{{ bandDetails()?.testType || '--' }}</div>
+              </div>
+              <div class="detail-field">
+                <label class="field-label">Control Value</label>
+                <div class="field-value">{{ bandDetails()?.ctrlVal || '--' }}</div>
+              </div>
+            </div>
+
+            <!-- Row 2: Result and Description -->
+            <div class="detail-row double">
+              <div class="detail-field">
+                <label class="field-label">Result</label>
+                <div class="field-value">{{ selectedBatch()!.resultStatus || '--' }}</div>
+              </div>
+              <div class="detail-field">
+                <label class="field-label">Description</label>
+                <div class="field-value">{{ selectedBatch()!.resultDescription || '--' }}</div>
+              </div>
+            </div>
+
+            <!-- Row 3: Result Date and Time -->
+            <div class="detail-row single">
+              <div class="detail-field full-width">
+                <label class="field-label">Result Date and Time</label>
+                <div class="field-value">
+                  {{ selectedBatch()!.resultTimestamp | date: 'dd-MMM-yyyy, HH:mm' : undefined : 'en-US' | uppercase }}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Other Bands Detected Between Card (Separate) -->
+        <div class="other-bands-panel" *ngIf="selectedBatch()">
+          <div class="details-title">Other Bands Detected Between</div>
+          <div class="other-bands-content">
+            <div class="other-bands-header-row">
+              <div class="header-cell">From</div>
+              <div class="header-cell">To</div>
+            </div>
+            <div class="other-bands-data" *ngIf="bandDetails() && bandDetails()!.otherBandsEnabled && bandDetails()!.otherBands.length > 0">
+              <div *ngFor="let otherBand of bandDetails()!.otherBands" class="data-row">
+                <div class="data-cell">{{ otherBand.band1 || '-' }}</div>
+                <div class="data-cell">{{ otherBand.band2 }}</div>
+              </div>
+            </div>
+            <div class="other-bands-data" *ngIf="!bandDetails() || !bandDetails()!.otherBandsEnabled || bandDetails()!.otherBands.length === 0">
+              <div class="data-row">
+                <div class="data-cell">-</div>
+                <div class="data-cell">-</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Notes Section (Read-only - Always show when results exist) -->
+    <div class="notes-section" *ngIf="hasResults()">
+      <div class="notes-header">
+        <span class="notes-title">Notes</span>
+      </div>
+
+      <!-- Notes List (Read-only) -->
+      <div class="notes-list">
+        @if (bandDetails()?.noteDetails?.note) {
+          <div class="note-card">
+            <div class="note-header-row">
+              <div class="author-info-section">
+                <div class="author-avatar">
+                  {{ (bandDetails()!.noteDetails!.insertUser || 'U').charAt(0).toUpperCase() }}
+                </div>
+                <div class="author-metadata">
+                  <div class="author-name">{{ bandDetails()!.noteDetails!.insertUser || 'Unknown' }}</div>
+                  <div class="note-timestamp">
+                    1.0 | {{ bandDetails()!.noteDetails!.insertDate | date: 'dd-MMM-yyyy' : undefined : 'en-US' | uppercase }}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="note-body">
+              {{ bandDetails()!.noteDetails!.note }}
+            </div>
+          </div>
+        } @else {
+          <div class="notes-empty">
+            <p class="empty-message">No notes available</p>
+          </div>
+        }
+      </div>
+    </div>
+  </div>
+
+  <!-- No Results Message -->
+  <div class="no-results-section" *ngIf="!hasResults() && !isLoading()" role="status">
+    <p class="no-results-text">Enter a Unit ID and select a Test to view results</p>
+  </div>
+
+  <!-- Loading Spinner -->
+  <div class="loading-overlay" *ngIf="isLoading()" role="status" aria-live="polite">
+    <mat-spinner diameter="60" [attr.aria-label]="'Loading results'"></mat-spinner>
+  </div>
+
+</div>

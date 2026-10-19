@@ -1,0 +1,408 @@
+<!-- Layout Wrapper -->
+<div class="layout-wrapper" [class.side-panel-active]="isSidePanelOpen()">
+  <!-- Main Content -->
+  <div class="main-content">
+    <div class="maintain-drive-location" role="region" [attr.aria-label]="'Maintain Drive Location'">
+  <h1 class="cdk-visually-hidden">Maintain Drive Location</h1>
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Card Container -->
+  <div class="maintain-drive-location__card">
+
+    <!-- Controls (Filter + Search) -->
+    <div class="maintain-drive-location__controls">
+      <div class="maintain-drive-location__controls-left">
+        <!-- Filter Button -->
+        <button mat-button
+                class="filter-button"
+                [class.filter-button--active]="isFilterOpen()"
+                (click)="toggleFilter()"
+                [attr.aria-expanded]="isFilterOpen()"
+                [attr.aria-label]="isFilterOpen() ? 'Close filter panel' : 'Open filter panel'"
+                cdkOverlayOrigin
+                #filterTrigger="cdkOverlayOrigin"
+                data-testid="filter-btn">
+          <mat-icon aria-hidden="true">filter_list</mat-icon> FILTER
+        </button>
+
+        <!-- Filter Chips -->
+        <app-filter-chips *ngIf="filterChips().length > 0"
+                          [chips]="filterChips()"
+                          (removeChip)="removeFilterChip($event)"
+                          (clearAll)="clearAllFilters()"
+                          data-testid="filter-chips"></app-filter-chips>
+      </div>
+
+      <!-- Search Bar -->
+      <app-search-bar [config]="searchConfig"
+                      (search)="onSearch($event)"
+                      data-testid="search-bar" />
+    </div>
+
+    <!-- Filter Panel Overlay -->
+    <ng-template cdkConnectedOverlay
+                 [cdkConnectedOverlayOrigin]="filterTrigger"
+                 [cdkConnectedOverlayOpen]="isFilterOpen()"
+                 [cdkConnectedOverlayHasBackdrop]="true"
+                 [cdkConnectedOverlayBackdropClass]="'cdk-overlay-transparent-backdrop'"
+                 (backdropClick)="toggleFilter()">
+      <app-maintain-drive-location-filter-panel
+        [currentFilters]="appliedFilters()"
+        [applicationDateTime]="chapterTimezoneService.chapterLocalDate()"
+        (apply)="applyFilters($event)"
+        (close)="toggleFilter()"
+        data-testid="filter-panel"></app-maintain-drive-location-filter-panel>
+    </ng-template>
+
+    <!-- Error State -->
+    <div *ngIf="hasError() && !isLoading()"
+         class="maintain-drive-location__error"
+         role="alert"
+         data-testid="error-message">
+      <mat-icon class="error-icon" aria-hidden="true">inbox</mat-icon>
+      <p class="error-message">{{ errorMessage() }}</p>
+    </div>
+
+    <!-- Table with Expandable Rows -->
+    <div *ngIf="!hasError()" class="maintain-drive-location__table-wrapper">
+      <table class="drive-location-table" [attr.aria-label]="'Drive locations'" data-testid="main-table">
+        <thead>
+          <tr>
+            <!-- Expand Column (empty header, buttons in rows only) -->
+            <th class="expand-column" scope="col" [attr.aria-label]="'Row expand/collapse'"></th>
+
+            <!-- Location Type (Sortable) -->
+            <th class="sortable" scope="col" data-testid="header-location-type">
+              <div class="header-with-sort">
+                <span>Location Type</span>
+                <button type="button"
+                        class="sort-button"
+                        (click)="onSortChange('locationType')"
+                        [attr.aria-label]="'Sort by location type, currently ' + getSortDirection('locationType') + '. Click to toggle sort direction'"
+                        data-testid="sort-location-type">
+                  <mat-icon aria-hidden="true">{{ getSortIcon('locationType') }}</mat-icon>
+                </button>
+              </div>
+            </th>
+
+            <!-- Other Headers (Non-sortable) -->
+            <th scope="col" data-testid="header-location-id">Location ID</th>
+            <th scope="col" data-testid="header-draw-site">Draw Site</th>
+            <th scope="col" data-testid="header-sponsor">Sponsor</th>
+            <th scope="col" data-testid="header-city">City</th>
+            <th scope="col" data-testid="header-effective-date">Effective Date</th>
+            <th scope="col" data-testid="header-termination-date">Termination Date</th>
+            <!-- Edit Action Column (blank header) -->
+            <th class="edit-action-column" scope="col" [attr.aria-label]="'Edit action'" data-testid="header-edit-action"></th>
+            <!-- View Action Column (blank header) -->
+            <th class="view-action-column" scope="col" [attr.aria-label]="'More actions'" data-testid="header-view-action"></th>
+          </tr>
+        </thead>
+
+        <tbody *ngIf="!isLoading()">
+          <ng-container *ngFor="let row of dataSource(); let i = index">
+            <!-- Main Row -->
+            <tr class="main-row"
+                [class.row-highlighted]="isRowBeingEdited(row)"
+                [attr.data-testid]="'table-row-' + i">
+              <td class="expand-column">
+                <button type="button"
+                        class="expand-button"
+                        [class.expanded]="isRowExpanded(i)"
+                        (click)="toggleRow(i)"
+                        [attr.aria-label]="(isRowExpanded(i) ? 'Collapse' : 'Expand') + ' row for location ' + row.locationId"
+                        [attr.aria-expanded]="isRowExpanded(i)"
+                        [attr.data-testid]="'expand-row-' + i">
+                  <mat-icon aria-hidden="true">{{ isRowExpanded(i) ? 'keyboard_arrow_up' : 'keyboard_arrow_down' }}</mat-icon>
+                </button>
+              </td>
+              <td>
+                <span #locTypeCellContent class="cell-content"
+                  #locTypeTooltip="matTooltip"
+                  [matTooltip]="row.locationType || '-'"
+                  [matTooltipShowDelay]="300"
+                  matTooltipPosition="above"
+                  (mouseenter)="showTooltipIfOverflowing(locTypeCellContent, locTypeTooltip)">
+                  {{ row.locationType || '-' }}
+                </span>
+              </td>
+              <td>
+                <span #locIdCellContent class="cell-content"
+                  #locIdTooltip="matTooltip"
+                  [matTooltip]="row.locationId"
+                  [matTooltipShowDelay]="300"
+                  matTooltipPosition="above"
+                  (mouseenter)="showTooltipIfOverflowing(locIdCellContent, locIdTooltip)">
+                  {{ row.locationId }}
+                </span>
+              </td>
+              <td>
+                <span #drawSiteCellContent class="cell-content"
+                  #drawSiteTooltip="matTooltip"
+                  [matTooltip]="row.locationName || '-'"
+                  [matTooltipShowDelay]="300"
+                  matTooltipPosition="above"
+                  (mouseenter)="showTooltipIfOverflowing(drawSiteCellContent, drawSiteTooltip)">
+                  {{ row.locationName || '-' }}
+                </span>
+              </td>
+              <td>
+                <span #sponsorCellContent class="cell-content"
+                  #sponsorTooltip="matTooltip"
+                  [matTooltip]="row.sponsorName || '-'"
+                  [matTooltipShowDelay]="300"
+                  matTooltipPosition="above"
+                  (mouseenter)="showTooltipIfOverflowing(sponsorCellContent, sponsorTooltip)">
+                  {{ row.sponsorName || '-' }}
+                </span>
+              </td>
+              <td>
+                <span #cityCellContent class="cell-content"
+                  #cityTooltip="matTooltip"
+                  [matTooltip]="row.city || '-'"
+                  [matTooltipShowDelay]="300"
+                  matTooltipPosition="above"
+                  (mouseenter)="showTooltipIfOverflowing(cityCellContent, cityTooltip)">
+                  {{ row.city || '-' }}
+                </span>
+              </td>
+              <td>
+                <span #effDateCellContent class="cell-content"
+                  #effDateTooltip="matTooltip"
+                  [matTooltip]="formatDate(row.effDate)"
+                  [matTooltipShowDelay]="300"
+                  matTooltipPosition="above"
+                  (mouseenter)="showTooltipIfOverflowing(effDateCellContent, effDateTooltip)">
+                  {{ formatDate(row.effDate) }}
+                </span>
+              </td>
+              <td>
+                <span #termDateCellContent class="cell-content"
+                  #termDateTooltip="matTooltip"
+                  [matTooltip]="formatDate(row.termDate)"
+                  [matTooltipShowDelay]="300"
+                  matTooltipPosition="above"
+                  (mouseenter)="showTooltipIfOverflowing(termDateCellContent, termDateTooltip)">
+                  {{ formatDate(row.termDate) }}
+                </span>
+              </td>
+              <!-- Edit Action Column -->
+              <td class="edit-action-column">
+                <button type="button"
+                        mat-icon-button
+                        class="action-button action-button--edit"
+                        (click)="onEdit(row, $event)"
+                        [attr.aria-label]="'Edit location ' + row.locationId"
+                        [attr.data-testid]="'edit-btn-' + i">
+                  <mat-icon aria-hidden="true">edit</mat-icon>
+                </button>
+              </td>
+              <!-- View Action Column (3-dot menu) -->
+              <td class="view-action-column">
+                <button type="button"
+                        mat-icon-button
+                        class="action-button action-button--menu"
+                        [matMenuTriggerFor]="actionMenu"
+                        (click)="$event.stopPropagation()"
+                        [attr.aria-label]="'More actions for location ' + row.locationId"
+                        [attr.data-testid]="'menu-btn-' + i">
+                  <mat-icon aria-hidden="true">more_vert</mat-icon>
+                </button>
+
+                <mat-menu #actionMenu="matMenu" xPosition="before">
+                  <button mat-menu-item (click)="onViewDirection(row)" [attr.data-testid]="'menu-view-direction-' + i"
+                          [attr.aria-label]="'View direction for location ' + row.locationId">
+                    <span>View Direction</span>
+                  </button>
+                  <button mat-menu-item (click)="onViewContactAddress(row)" [attr.data-testid]="'menu-view-contact-' + i"
+                          [attr.aria-label]="'View contact address for location ' + row.locationId">
+                    <span>View Contact Address</span>
+                  </button>
+                  <button mat-menu-item (click)="onViewInternationalAddress(row)" [attr.data-testid]="'menu-view-international-' + i"
+                          [attr.aria-label]="'View international address for location ' + row.locationId">
+                    <span>View International Address</span>
+                  </button>
+                </mat-menu>
+              </td>
+            </tr>
+
+            <!-- Expanded Row (Hidden by default) -->
+            <tr *ngIf="isRowExpanded(i)"
+                class="expanded-row"
+                [attr.data-testid]="'expanded-content-' + i">
+              <td colspan="10">
+                <div class="expanded-content">
+                  <div class="expanded-grid">
+                    <dl class="expanded-field">
+                      <dt class="field-label">Hospital ID</dt>
+                      <dd #hospIdContent class="field-value cell-content"
+                        #hospIdTooltip="matTooltip"
+                        [matTooltip]="row.nearestHospitalId || '-'"
+                        [matTooltipShowDelay]="300"
+                        matTooltipPosition="above"
+                        (mouseenter)="showTooltipIfOverflowing(hospIdContent, hospIdTooltip)">
+                        {{ row.nearestHospitalId || '-' }}
+                      </dd>
+                    </dl>
+                    <dl class="expanded-field">
+                      <dt class="field-label">Distance</dt>
+                      <dd #distContent class="field-value cell-content"
+                        #distTooltip="matTooltip"
+                        [matTooltip]="row.travelDistance ? row.travelDistance + ' Miles' : '-'"
+                        [matTooltipShowDelay]="300"
+                        matTooltipPosition="above"
+                        (mouseenter)="showTooltipIfOverflowing(distContent, distTooltip)">
+                        {{ row.travelDistance ? row.travelDistance + ' Miles' : '-' }}
+                      </dd>
+                    </dl>
+                    <dl class="expanded-field">
+                      <dt class="field-label">Travel Time</dt>
+                      <dd #travelContent class="field-value cell-content"
+                        #travelTooltip="matTooltip"
+                        [matTooltip]="row.travelTime ? row.travelTime + ' Minutes' : '-'"
+                        [matTooltipShowDelay]="300"
+                        matTooltipPosition="above"
+                        (mouseenter)="showTooltipIfOverflowing(travelContent, travelTooltip)">
+                        {{ row.travelTime ? row.travelTime + ' Minutes' : '-' }}
+                      </dd>
+                    </dl>
+                    <dl class="expanded-field">
+                      <dt class="field-label">Time Close</dt>
+                      <dd #closeContent class="field-value cell-content"
+                        #closeTooltip="matTooltip"
+                        [matTooltip]="formatTime(row.closeTime)"
+                        [matTooltipShowDelay]="300"
+                        matTooltipPosition="above"
+                        (mouseenter)="showTooltipIfOverflowing(closeContent, closeTooltip)">
+                        {{ formatTime(row.closeTime) }}
+                      </dd>
+                    </dl>
+                    <dl class="expanded-field">
+                      <dt class="field-label">Staff Facility</dt>
+                      <dd #staffContent class="field-value cell-content"
+                        #staffTooltip="matTooltip"
+                        [matTooltip]="row.staffFacility || '-'"
+                        [matTooltipShowDelay]="300"
+                        matTooltipPosition="above"
+                        (mouseenter)="showTooltipIfOverflowing(staffContent, staffTooltip)">
+                        {{ row.staffFacility || '-' }}
+                      </dd>
+                    </dl>
+                    <dl class="expanded-field">
+                      <dt class="field-label">FDA License Date</dt>
+                      <dd #fdaContent class="field-value cell-content"
+                        #fdaTooltip="matTooltip"
+                        [matTooltip]="formatDate(row.fdaLicenseDate)"
+                        [matTooltipShowDelay]="300"
+                        matTooltipPosition="above"
+                        (mouseenter)="showTooltipIfOverflowing(fdaContent, fdaTooltip)">
+                        {{ formatDate(row.fdaLicenseDate) }}
+                      </dd>
+                    </dl>
+                    <dl class="expanded-field">
+                      <dt class="field-label">Rotation Flag</dt>
+                      <dd #rotContent class="field-value cell-content"
+                        #rotTooltip="matTooltip"
+                        [matTooltip]="formatRotationFlag(row.rotationFlag)"
+                        [matTooltipShowDelay]="300"
+                        matTooltipPosition="above"
+                        (mouseenter)="showTooltipIfOverflowing(rotContent, rotTooltip)">
+                        {{ formatRotationFlag(row.rotationFlag) }}
+                      </dd>
+                    </dl>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          </ng-container>
+        </tbody>
+
+        <!-- Loading State -->
+        <tbody *ngIf="isLoading()">
+          <tr>
+            <td colspan="10" class="loading-cell">
+              <app-loading-spinner
+                [size]="'medium'"
+                [message]="'Loading drive locations...'"
+                [color]="'#1a6269'">
+              </app-loading-spinner>
+            </td>
+          </tr>
+        </tbody>
+
+        <!-- Empty State -->
+        <tbody *ngIf="!isLoading() && dataSource().length === 0 && !hasError()">
+          <tr>
+            <td colspan="10" class="empty-cell">
+              <div class="empty-state">
+                <mat-icon class="empty-icon" aria-hidden="true">inbox</mat-icon>
+                <p>No drive locations found</p>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- Pagination -->
+      <mat-paginator *ngIf="!isLoading() && !hasError() && dataSource().length > 0"
+                     [length]="totalRecords()"
+                     [pageSize]="pageSize"
+                     [pageIndex]="pageIndex"
+                     [pageSizeOptions]="[10, 25, 50, 100]"
+                     [showFirstLastButtons]="true"
+                     (page)="onPageChange($event)"
+                     [attr.aria-label]="'Drive locations pagination'"
+                     data-testid="paginator">
+      </mat-paginator>
+    </div>
+  </div>
+    </div>
+  </div>
+
+  <!-- Side Panel -->
+  <div class="side-panel-container"
+       *ngIf="isSidePanelOpen()"
+       role="complementary"
+       [attr.aria-label]="sidePanelMode === 'add' ? 'Add drive location panel' : 'Edit drive location panel'"
+       cdkTrapFocus
+       (keydown.escape)="closeSidePanel()">
+    <!-- Form View -->
+    <app-add-edit-drive-location
+      [hidden]="sidePanelView !== 'form'"
+      [mode]="sidePanelMode"
+      [data]="sidePanelData"
+      [internationalAddressData]="appliedInternationalAddressData"
+      (saveSuccess)="onSaveSuccess()"
+      (closePanel)="closeSidePanel()"
+      (openInternationalAddress)="openInternationalAddress($event)">
+    </app-add-edit-drive-location>
+
+    <!-- International Address View -->
+    <app-drive-location-international-address
+      *ngIf="sidePanelView === 'international-address'"
+      [locationId]="internationalAddressRecordKey"
+      [hasUSAddressData]="hasUSAddressData"
+      [existingData]="appliedInternationalAddressData"
+      (applyData)="onInternationalAddressApply($event)"
+      (saveSuccess)="onSaveSuccess()"
+      (closePanel)="closeInternationalAddress()">
+    </app-drive-location-international-address>
+
+    <!-- View Contact Address -->
+    <app-view-contact-address
+      *ngIf="sidePanelView === 'view-contact-address'"
+      [locationId]="viewContactAddressData?.locationId || ''"
+      [address]="viewContactAddressData?.address"
+      (closePanel)="closeSidePanel()">
+    </app-view-contact-address>
+
+    <!-- View International Address -->
+    <app-view-international-address
+      *ngIf="sidePanelView === 'view-international-address'"
+      [locationId]="viewInternationalAddressData?.locationId || ''"
+      [address]="viewInternationalAddressData?.address"
+      (closePanel)="closeSidePanel()">
+    </app-view-international-address>
+  </div>
+</div>

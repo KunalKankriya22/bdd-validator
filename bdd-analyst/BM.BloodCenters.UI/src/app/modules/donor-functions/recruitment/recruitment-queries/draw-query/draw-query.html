@@ -1,0 +1,175 @@
+<app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+<div class="draw-query-container">
+  <div class="filter-section">
+    <!-- WCAG 1.3.1/2.4.6: aria-label gives the filter form an accessible name for AT landmark navigation -->
+    <form [formGroup]="filterForm" class="filter-form" aria-label="Draw query filters">
+      <!-- Drive Type -->
+      <div class="field-wrapper">
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Drive Type</mat-label>
+          <mat-select formControlName="driveType">
+            <!-- WCAG 4.1.2: aria-hidden on the search wrapper mat-option prevents AT from announcing
+                 a blank/valueless option — ngx-mat-select-search handles its own input labeling internally -->
+            <mat-option *ngIf="driveTypes.length > 3" aria-hidden="true">
+              <ngx-mat-select-search
+                [formControl]="driveTypeSearchControl"
+                placeholderLabel="Search drive types..."
+                noEntriesFoundLabel="No matching drive types">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option *ngFor="let type of filteredDriveTypes" [value]="type.code">
+              {{ type.description }}
+            </mat-option>
+            <mat-option *ngIf="filteredDriveTypes.length === 0" disabled>
+              No Data Available
+            </mat-option>
+          </mat-select>
+        </mat-form-field>
+        <!-- WCAG 4.1.3/3.3.1: persistent live region — @if keeps element in DOM so role=alert fires on content change -->
+        <div class="validation-error" role="alert" aria-live="assertive" aria-atomic="true">
+          @if (filterForm.get('driveType')?.touched && filterForm.get('driveType')?.hasError('required')) {
+            Drive Type is required
+          }
+        </div>
+      </div>
+
+      <!-- Donation Type -->
+      <div class="field-wrapper">
+        <mat-form-field appearance="fill" class="filter-field donation-field">
+          <mat-label>Donation</mat-label>
+          <mat-select formControlName="donationType">
+            <!-- WCAG 4.1.2: aria-hidden prevents AT from announcing the valueless search wrapper option -->
+            <mat-option *ngIf="donationTypes.length > 3" aria-hidden="true">
+              <ngx-mat-select-search
+                [formControl]="donationTypeSearchControl"
+                placeholderLabel="Search donations..."
+                noEntriesFoundLabel="No matching donations">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option *ngFor="let donation of filteredDonationTypes" [value]="donation.code">
+              {{ donation.code }} - {{ donation.description }}
+            </mat-option>
+            <mat-option *ngIf="isLoadingDropdowns" disabled>
+              <span>Loading...</span>
+            </mat-option>
+            <mat-option *ngIf="!isLoadingDropdowns && filteredDonationTypes.length === 0" disabled>
+              No Data Available
+            </mat-option>
+          </mat-select>
+        </mat-form-field>
+      </div>
+
+      <!-- From Date -->
+      <div class="field-wrapper">
+        <mat-form-field appearance="fill" class="filter-field date-field" [class.has-error]="getFromDateError()" [class.no-error]="!getFromDateError()">
+          <mat-label>From Date</mat-label>
+          <!-- WCAG 2.5.3: no aria-label — mat-label provides the accessible name via mat-form-field -->
+          <!-- WCAG 3.3.1: aria-invalid signals error state to AT; aria-describedby links to live region below -->
+          <input
+            matInput
+            #fromDateInput
+            [matDatepicker]="fromDatePicker"
+            formControlName="fromDate"
+            (input)="onFromDateInput($event)"
+            (blur)="onDateBlur('fromDate', fromDateInput)"
+            placeholder="DD-MMM-YYYY"
+            [attr.aria-invalid]="getFromDateError() ? true : null"
+            [attr.aria-describedby]="getFromDateError() ? 'from-date-error' : null" />
+          <mat-datepicker-toggle matIconSuffix [for]="fromDatePicker"></mat-datepicker-toggle>
+          <mat-datepicker #fromDatePicker></mat-datepicker>
+          <!-- Visual error uses mat-hint (CSS-controlled via no-error class — independent of touched state) -->
+          <mat-hint class="custom-error" *ngIf="getFromDateError()">{{ getFromDateError() }}</mat-hint>
+        </mat-form-field>
+        <!-- WCAG 3.3.1/4.1.3: AT live region — persistent element announces error when content changes -->
+        <span id="from-date-error" class="cdk-visually-hidden" role="alert" aria-live="assertive" aria-atomic="true">
+          {{ getFromDateError() }}
+        </span>
+      </div>
+
+      <!-- To Date -->
+      <div class="field-wrapper">
+        <mat-form-field appearance="fill" class="filter-field date-field" [class.has-error]="getToDateError()" [class.no-error]="!getToDateError()">
+          <mat-label>To Date</mat-label>
+          <!-- WCAG 2.5.3: no aria-label — mat-label provides the accessible name via mat-form-field -->
+          <!-- WCAG 3.3.1: aria-invalid signals error state to AT; aria-describedby links to live region below -->
+          <input
+            matInput
+            #toDateInput
+            [matDatepicker]="toDatePicker"
+            formControlName="toDate"
+            (input)="onToDateInput($event)"
+            (blur)="onDateBlur('toDate', toDateInput)"
+            placeholder="DD-MMM-YYYY"
+            [attr.aria-invalid]="getToDateError() ? true : null"
+            [attr.aria-describedby]="getToDateError() ? 'to-date-error' : null" />
+          <mat-datepicker-toggle matIconSuffix [for]="toDatePicker"></mat-datepicker-toggle>
+          <mat-datepicker #toDatePicker></mat-datepicker>
+          <!-- Visual error uses mat-hint (CSS-controlled via no-error class — independent of touched state) -->
+          <mat-hint class="custom-error" *ngIf="getToDateError()">{{ getToDateError() }}</mat-hint>
+        </mat-form-field>
+        <!-- WCAG 3.3.1/4.1.3: AT live region — persistent element announces error when content changes -->
+        <span id="to-date-error" class="cdk-visually-hidden" role="alert" aria-live="assertive" aria-atomic="true">
+          {{ getToDateError() }}
+        </span>
+      </div>
+
+      <!-- Action Buttons -->
+      <!-- WCAG 2.5.3: aria-label removed — visible text IS the accessible name; keeping aria-label
+           overrides visible label and breaks voice-control ("click RETRIEVE" vs "Retrieve draw query records") -->
+      <div class="filter-actions">
+        <button
+          mat-raised-button
+          type="button"
+          class="btn-retrieve"
+          (click)="onRetrieve()"
+          [disabled]="isRetrieveDisabled">
+          RETRIEVE
+        </button>
+        <button
+          mat-button
+          type="button"
+          class="btn-clear"
+          [disabled]="isClearAllDisabled"
+          (click)="onClearAll()">
+          CLEAR ALL
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- WCAG 4.1.3: persistent live region announces API errors to AT when errorMessage changes -->
+  <div role="status" aria-live="polite" aria-atomic="true" class="cdk-visually-hidden">
+    {{ errorMessage }}
+  </div>
+
+  <div class="table-section">
+    <!-- Show error state when there's an error -->
+    <div class="initial-empty-state" *ngIf="!isLoadingData && errorMessage">
+      <div class="empty-state-icon" aria-hidden="true">
+        <mat-icon>edit</mat-icon>
+      </div>
+      <p class="empty-state-message">No draw query records available to display</p>
+    </div>
+
+    <!-- Show empty state when no data and no error -->
+    <div class="initial-empty-state" *ngIf="!isLoadingData && !errorMessage && (!dataSource || dataSource.length === 0)">
+      <div class="empty-state-icon" aria-hidden="true">
+        <mat-icon>edit</mat-icon>
+      </div>
+      <h3 class="empty-state-title">No Drive Selected</h3>
+      <p class="empty-state-message">Please select a drive type to view draw query records</p>
+    </div>
+
+    <!-- Show table and footer when there's data -->
+    <div class="table-with-footer" *ngIf="isLoadingData || (dataSource && dataSource.length > 0)">
+      <app-data-table
+        [config]="tableConfig"
+        [data]="dataSource"
+        [loading]="isLoadingData"
+        (rowAction)="onRowAction($event)" />
+
+      <app-draw-query-footer *ngIf="!isLoadingData && dataSource && dataSource.length > 0" [data]="footerData" [driveTypeDescription]="selectedDriveTypeDescription"></app-draw-query-footer>
+    </div>
+  </div>
+</div>

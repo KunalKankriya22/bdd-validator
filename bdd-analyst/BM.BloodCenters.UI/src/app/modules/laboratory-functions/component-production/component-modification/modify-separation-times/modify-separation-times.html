@@ -1,0 +1,247 @@
+<div class="modify-sep-layout" role="main">
+
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <div class="content-area">
+
+    <!-- ── FILTER / SEARCH BAR ── -->
+    <div class="filter-panel" role="search" aria-label="Separation times search criteria">
+
+        <!-- Unit ID -->
+        <div class="unit-id-wrapper filter-field--unit-id">
+          <app-unit-id-field
+            [validateFfValue]="'N'"
+            [required]="true"
+            [label]="'Unit ID'"
+            (postValidate)="onPostValidate($event)"
+            (validated)="onUnitValidated($event)"
+            (cleared)="onUnitCleared()"
+          />
+          <mat-icon class="unit-id-barcode-icon" fontSet="material-symbols-outlined" aria-hidden="true">barcode</mat-icon>
+        </div>
+
+        <!-- Collection Date dropdown -->
+        @if (collectionDates().length > 0) {
+          <mat-form-field appearance="fill" class="filter-field--coll-date" subscriptSizing="dynamic">
+            <mat-label>Collection Date</mat-label>
+            <mat-select
+              [value]="selectedCollDate()"
+              (selectionChange)="onCollectionDateChange($event.value)"
+              aria-label="Collection date">
+              @for (d of collectionDates(); track d.collDate) {
+                <mat-option [value]="d.collDate">{{ formatCollDateDisplay(d.collDate) }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+        } @else if (selectedCollDate()) {
+          <div class="info-field" role="group" [attr.aria-label]="'Collection Date: ' + formatCollDateDisplay(selectedCollDate())">
+            <span class="info-field__label">Collection Date</span>
+            <span class="info-field__value">{{ formatCollDateDisplay(selectedCollDate()) }}</span>
+          </div>
+        } @else {
+          <div class="info-field" role="group" aria-label="Collection Date: —">
+            <span class="info-field__label">Collection Date</span>
+            <span class="info-field__value">—</span>
+          </div>
+        }
+
+        <!-- CLEAR button -->
+        <button
+          mat-button
+          type="button"
+          class="filter-clear-btn"
+          [class.filter-clear-btn--active]="!!validatedUnitId()"
+          [disabled]="!validatedUnitId()"
+          (click)="onClearFilter()"
+          aria-label="Clear search and results">
+          CLEAR
+        </button>
+    </div>
+
+    <!-- ── EMPTY STATE (default, before scan) ── -->
+    @if (!hasResults() && !isLoading()) {
+      <div class="empty-state" role="status" aria-live="polite">
+        <div class="empty-state__icon-wrapper" aria-hidden="true">
+          <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="32" cy="32" r="32" fill="#E4E7E9"/>
+            <circle cx="28.5" cy="28.5" r="8.5" stroke="#3D5463" stroke-width="2"/>
+            <path d="M35 35L43 43" stroke="#3D5463" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <p class="empty-state__title">No Results to Display</p>
+        <p class="empty-state__subtitle">Scan or enter a Unit ID to begin,</p>
+      </div>
+    }
+
+    <!-- ── LOADING STATE ── -->
+    @if (isLoading()) {
+      <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+        <mat-spinner diameter="40"></mat-spinner>
+        <span class="sr-only">Loading separation times...</span>
+      </div>
+    }
+
+    <!-- ── DETAIL CARD (shown after unit validated) ── -->
+    @if (hasResults()) {
+      <div class="detail-card" role="region" [attr.aria-labelledby]="elementId('detail-heading')">
+        <h2 class="sr-only" [id]="elementId('detail-heading')">Separation Details</h2>
+        <form [formGroup]="detailForm">
+
+          <!-- First Separation Details Section -->
+          <div class="section" role="group" [attr.aria-labelledby]="elementId('first-sep-heading')">
+            <div class="section__header">
+              <h3 class="section__title" [id]="elementId('first-sep-heading')">First Separation Details</h3>
+              <button
+                mat-button
+                type="button"
+                class="section__clear-btn"
+                (click)="onClearFirstSep()"
+                aria-label="Clear first separation fields">
+                CLEAR ALL
+              </button>
+            </div>
+            <div class="section__fields">
+              <mat-form-field appearance="fill" class="field field--date" subscriptSizing="dynamic">
+                <mat-label>First Separation Date</mat-label>
+                <input matInput [matDatepicker]="firstDatePicker" formControlName="firstSepDate"
+                       [matDatepickerFilter]="futureDateFilter"
+                       [errorStateMatcher]="firstDateErrorMatcher"
+                       (input)="onFirstSepDateInput($event)"
+                       placeholder="DD-MMM-YYYY"
+                       [id]="elementId('firstSepDate')" aria-label="First separation date">
+                <mat-datepicker-toggle matSuffix [for]="firstDatePicker"></mat-datepicker-toggle>
+                <mat-datepicker #firstDatePicker></mat-datepicker>
+                @let firstError = getFirstSepDateError();
+                @if (firstError) {
+                  <mat-error>{{ firstError }}</mat-error>
+                } @else if (validationHints().first) {
+                  <mat-error>{{ validationHints().first }}</mat-error>
+                }
+              </mat-form-field>
+              <mat-form-field appearance="fill" class="field field--time" subscriptSizing="dynamic">
+                <mat-label>Time (HH:MM)</mat-label>
+                <input matInput type="text" formControlName="firstSepTime"
+                       placeholder="HH:MM" maxlength="5"
+                       (input)="onTimeInput($event, 'firstSepTime')"
+                       [id]="elementId('firstSepTime')" aria-label="First separation time (24-hour format)">
+              </mat-form-field>
+              <mat-form-field appearance="fill" class="field field--centrifuge" subscriptSizing="dynamic">
+                <mat-label>Centrifuge ID</mat-label>
+                <mat-select formControlName="firstSepCentrifugeId"
+                            [id]="elementId('firstSepCentrifugeId')" aria-label="First separation centrifuge"
+                            (selectionChange)="firstCentrifugeSearch.reset()">
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="firstCentrifugeSearch"
+                      placeholderLabel="Search..."
+                      noEntriesFoundLabel="No matching centrifuges">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @for (c of filteredFirstCentrifuges(); track c.equipId) {
+                    <mat-option [value]="c.equipId">{{ c.equipId }} - {{ c.serialNumber }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+            </div>
+          </div>
+
+          <!-- Second Separation Details Section -->
+          <div class="section" role="group" [attr.aria-labelledby]="elementId('second-sep-heading')">
+            <div class="section__header">
+              <h3 class="section__title" [id]="elementId('second-sep-heading')">Second Separation Details</h3>
+              <button
+                mat-button
+                type="button"
+                class="section__clear-btn"
+                (click)="onClearSecondSep()"
+                aria-label="Clear second separation fields">
+                CLEAR ALL
+              </button>
+            </div>
+            <div class="section__fields">
+              <mat-form-field appearance="fill" class="field field--date" subscriptSizing="dynamic">
+                <mat-label>Second Separation Date</mat-label>
+                <input matInput [matDatepicker]="secondDatePicker" formControlName="secondSepDate"
+                       [matDatepickerFilter]="futureDateFilter"
+                       [errorStateMatcher]="secondDateErrorMatcher"
+                       (input)="onSecondSepDateInput($event)"
+                       placeholder="DD-MMM-YYYY"
+                       [id]="elementId('secondSepDate')" aria-label="Second separation date">
+                <mat-datepicker-toggle matSuffix [for]="secondDatePicker"></mat-datepicker-toggle>
+                <mat-datepicker #secondDatePicker></mat-datepicker>
+                @let secondError = getSecondSepDateError();
+                @if (secondError) {
+                  <mat-error>{{ secondError }}</mat-error>
+                } @else if (validationHints().second) {
+                  <mat-error>{{ validationHints().second }}</mat-error>
+                }
+              </mat-form-field>
+              <mat-form-field appearance="fill" class="field field--time" subscriptSizing="dynamic">
+                <mat-label>Time (HH:MM)</mat-label>
+                <input matInput type="text" formControlName="secondSepTime"
+                       placeholder="HH:MM" maxlength="5"
+                       (input)="onTimeInput($event, 'secondSepTime')"
+                       [id]="elementId('secondSepTime')" aria-label="Second separation time (24-hour format)">
+              </mat-form-field>
+              <mat-form-field appearance="fill" class="field field--centrifuge" subscriptSizing="dynamic">
+                <mat-label>Centrifuge ID</mat-label>
+                <mat-select formControlName="secondSepCentrifugeId"
+                            [id]="elementId('secondSepCentrifugeId')" aria-label="Second separation centrifuge"
+                            (selectionChange)="secondCentrifugeSearch.reset()">
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="secondCentrifugeSearch"
+                      placeholderLabel="Search..."
+                      noEntriesFoundLabel="No matching centrifuges">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @for (c of filteredSecondCentrifuges(); track c.equipId) {
+                    <mat-option [value]="c.equipId">{{ c.equipId }} - {{ c.serialNumber }}</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+            </div>
+          </div>
+
+        </form>
+      </div>
+    }
+
+  </div>
+
+  <!-- ── FOOTER ACTIONS (fixed bottom bar, outside scrollable content) ── -->
+  @if (hasResults()) {
+    <div class="footer-bar">
+      <button
+        mat-button
+        type="button"
+        class="footer-btn footer-btn--cancel"
+        (click)="onCancel()"
+        [disabled]="isSaving()"
+        aria-label="Cancel changes">
+        CANCEL
+      </button>
+      <button
+        mat-button
+        type="button"
+        class="footer-btn footer-btn--clear"
+        (click)="onClearAll()"
+        [disabled]="isSaving()"
+        aria-label="Clear all fields">
+        CLEAR ALL
+      </button>
+      <button
+        mat-raised-button
+        color="primary"
+        type="button"
+        class="footer-btn footer-btn--save"
+        (click)="onSave()"
+        [disabled]="!unitIdField?.isValid || isSaving() || !hasFormChanges() || detailForm.invalid"
+        aria-label="Save separation times">
+        {{ isSaving() ? 'SAVING...' : 'SAVE' }}
+      </button>
+    </div>
+  }
+
+</div>

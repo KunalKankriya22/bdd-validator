@@ -1,0 +1,443 @@
+/*------------------------------------------------------------------------
+PROCEDURE : LTHCLLIN
+PURPOSE   : Create an Interface file to sent unit data from LifeTrak to HCLL
+PARAMETERS: None
+DEVELOPER : Subhash
+DEV. DATE : September 2003
+VERSION   : 02
+MOD. DATE : 09-05-2006
+          : 04-16-09 [Ver:03]
+           log file name was added to the OUPUT_FILE filed in the 
+           RPT_PARM table
+
+          : 01-10-2013 [Ver: 04] - Kishore
+            IM 5775- Add a new parameter for chapter id and use it in the main cursor
+          
+          : 09-19-2016 [Ver: 05] - LT2018 - valid_interdictions to valid_interdictions_lab table.
+          
+          : 12-18-2017 [Ver: 02] - LT2018 - SSN (lpad zeroes to 9 characters) 
+NOTES     : 
+-----------------------------------------------------------------------*/
+CREATE OR REPLACE PACKAGE LTHCLLIN as
+   --PROCEDURE LTHCLLIN(warehouse char,facility char,rundate date); -- Commented by Kishore on 01/10/2013. IM 5775
+   PROCEDURE LTHCLLIN(warehouse char,facility char,rundate date, p_chapter_id in varchar2); -- Added by Kishore on 01/10/2013. IM 5775
+End LTHCLLIN;
+/
+CREATE OR REPLACE PACKAGE BODY LTHCLLIN AS
+ --PROCEDURE LTHCLLIN(warehouse char,facility char,rundate date) is -- Commented by Kishore on 01/10/2013. IM 5775
+ PROCEDURE LTHCLLIN(warehouse char,facility char,rundate date, p_chapter_id in varchar2) is -- Added by Kishore on 01/10/2013. IM 5775
+   --MAIN CURSOR TO GET PRODUCTS FROM LAB
+   cursor comp is
+   select c.unit_id unit_id, c.chapter_id chapter_id, 
+          c.component_prefix aliquot, c.product_code product_code, 
+	  to_char(c.coll_date,'YYYYMMDDHH24MI') ccolldate,
+          to_char(c.expiry_date,'YYYYMMDDHH24MI') expiry_date, 
+	  c.system_label_decision blood_type, 
+          c.label_dats label_dats, 
+	  u.drive_id drive_id, u.coll_date coll_date, 
+          u.group_site_id group_site_id, u.contract_id contract_id,
+          nvl(u.unit_scheme_type,decode(length(u.unit_id),13,'I','C')) 
+          code_scheme, u.chk_digit chk_digit, c.component_weight
+   from   components c, units u
+   where  c.unit_id          = u.unit_id
+   and    c.coll_date        = u.coll_date
+   and    c.chapter_id       = u.chapter_id
+   and    c.chapter_id       = p_chapter_id -- Added by Kishore on 01/10/2013. IM 5775
+   and    c.component_status = 'L'
+   and    c.system_label_decision is not null
+   and    expiry_date is not null
+   and    expiry_date  > sysdate
+   and    c.warehouse_id=warehouse
+   and    substr(c.product_code,1,5) not in
+		(select product_code from valid_products
+                 where pool_product_code='Y')
+   and    ((nvl(u.unit_scheme_type,decode(length(u.unit_id),13,'I','C')) 
+         = 'I' AND c.system_label_decision not in ('Mb','Mq','Mx','Md','Mf'))
+         OR (nvl(u.unit_scheme_type,decode(length(u.unit_id),13,'I','C')) 
+         = 'C' AND c.system_label_decision not in ('21','39','47','49','58')))
+   and not exists (SELECT 'x' FROM component_attributes
+                   WHERE unit_id = c.unit_id
+                   AND chapter_id = c.chapter_id
+                   AND coll_date = c.coll_date
+                   AND attrib_code = 'CP6I')
+   and c.system_label_decision not in ('71')
+   and not exists (select 'x' from valid_abo_values 
+                   where unit_scheme_type = decode(length(c.product_code),
+                                                          5,'C','I')
+                   and abo_label = c.system_label_decision
+                   and identifier_code = 'EM')
+   order by c.product_code, c.unit_id;
+
+   cursor unit_attr(unit varchar2,prod varchar2,coll date) is
+      select attrib_code 
+        from unit_attributes
+       where unit_id=unit 
+         and coll_date=coll 
+         and chapter_id = p_chapter_id -- Added by Kishore on 01/10/2013. IM 5775
+         and (attrib_group, attrib_code) in (select code_desc, code 
+                                               from master_codes 
+                                              where code_type='INATT'
+                                                and sysdate between eff_date and nvl(term_date,sysdate))
+      union
+      select attrib_code 
+        from component_attributes
+       where unit_id=unit 
+         and coll_date=coll 
+         and product_code=prod
+         and chapter_id = p_chapter_id -- Added by Kishore on 01/10/2013. IM 5775
+         and (attrib_group, attrib_code) in (select code_desc, code 
+                                               from master_codes 
+                                              where code_type='INATT'
+                                                and sysdate between eff_date and nvl(term_date,sysdate));
+
+   c_rec                   comp%rowtype;
+   attr_rec                unit_attr%rowtype;
+   prd_type                varchar2(5);
+   x                       char(1);
+   row_count               number(3):= 0;
+   log_file                utl_file.file_type;                    
+   extract_file            utl_file.file_type;                    
+   chkin_log               varchar2(30) 
+       := 'LTHCLLIN_ERR_'||to_char(rundate,'MMDDYYHH24MISS')||'.log';
+   log_loc                 varchar2(50);
+   succ_log                utl_file.file_type;
+   succ_chkn               varchar2(30) 
+       := 'LTHCLLIN_SUC_'||to_char(rundate,'MMDDYYHH24MISS')||'.log';
+   ext_file varchar2(30) := 'LTHCLLIN_'||to_char(rundate,'MMDDYYHH24MISS')||'.dat';
+   import_flag             char(1);
+   Error                   exception;
+   err_event               number;
+   succ_row                number := 0;
+   err_row                 number := 0;
+   err_text                varchar2(50);
+   ctr                     number := 0;
+   abo                     varchar2(6); 
+   interdiction            varchar2(4);
+   UNT_Segment             varchar2(1023);
+   MSH_Segment varchar2(100);
+   EVN_Segment varchar2(100);
+   UNIT_ABO                varchar2(2);
+   UNIT_Rh                 varchar2(1);
+   unit_type               varchar2(1);
+   pat_last_name               varchar2(48);
+   pat_first_name              varchar2(48);
+   ssn                  varchar2(20);
+   dob                  varchar2(12);
+   surgery_date              varchar2(12);
+   consignee_id              varchar2(10);
+   unit_blood_type     varchar2(2);
+   product_volume number;
+   UNB_Segment varchar2(50);
+begin
+     dbms_output.enable(500000);
+   begin 
+           select code_desc into log_loc
+           from vserv_master
+           where code_type = 'MISC'
+           and code = 'LOGDR'
+           and sysdate between eff_date and nvl(term_date,sysdate);
+        exception
+           when no_data_found then
+              dbms_output.put_line('Log Dir not maintained');
+ 	      return;
+           when others then
+              dbms_output.put_line('Error in fetching Log Dir :'|| sqlerrm);
+	      return;
+   end;
+   open  comp;
+   if utl_file.is_open(log_file) then
+      utl_file.fclose(log_file);
+   end if;
+   log_file := utl_file.fopen(log_loc,chkin_log,'w');
+   succ_log := utl_file.fopen(log_loc,succ_chkn,'w');
+   extract_file := utl_file.fopen(log_loc,ext_file,'w');
+   utl_file.put_line(log_file,'Errors in LT-Interface - dated '||
+                     to_char(sysdate,'MM-DD-YY HH24:MI'));
+   utl_file.put_line(log_file,'(These units are still in LT-LAB)');
+   utl_file.put_line(log_file,'--------------------------------------------------------------------------------');
+   utl_file.put_line(log_file,' #     Unit Id         Product  Error');
+   utl_file.put_line(log_file,'--------------------------------------------------------------------------------');
+   utl_file.put_line(succ_log,'Successful Interface file extraction from LT/Lab - dated '||
+                     to_char(sysdate,'MM-DD-YY HH24:MI'));
+   utl_file.put_line(succ_log,'(These units have been extracted into the interface file )');
+   utl_file.put_line(succ_log,'----------------------------------------------------');
+   utl_file.put_line(succ_log,' #     Unit Id         Product                 ');
+   utl_file.put_line(succ_log,'----------------------------------------------------');
+   begin
+      utl_file.put_line(extract_file,chr(2));
+      loop
+      begin
+	 UNT_segment:=null;
+         fetch  comp into c_rec;
+         exit when comp%notfound;
+         row_count := row_count + 1;
+         UNT_Segment:='UNT|'||c_rec.product_code||'|'||c_rec.unit_id||'|';
+	 begin
+	     select result_status_1 into unit_blood_type from utrs 
+	     where unit_id=c_rec.unit_id
+	     and test_id='ABORH' and cancel_flag is null and rownum=1;
+         	exception when others  then
+	           err_text := 'Error selecting ABO Test result for unit';
+	           raise Error;
+         end;
+	 UNIT_ABO:=null;
+	 begin
+	    select decode(unit_blood_type,'06','A','17','B','28','AB',
+	    '51','O','62','A','73','B','84','AB','95','O') 
+	    into UNIT_ABO from dual;
+	    exception when others
+		then 
+	     err_text := 'Error selecting ABO for unit';
+             raise Error;
+	 end;
+	 UNIT_Rh:=null;
+	 begin
+	    select decode(unit_blood_type,'06','N','17','N','28','N',
+	    '51','P','62','P','73','P','84','P','95','N') 
+	    into UNIT_Rh from dual;
+	    exception when others
+		then 
+	     err_text := 'Rh Could not be identified for unit';
+             raise Error;
+	 end;
+		  pat_last_name:=null;
+		  pat_first_name:=null;
+		  ssn:=null;
+		  dob:=null;
+		  surgery_Date:=null;
+		  consignee_id:=null;
+	 begin
+	  select  decode(attrib_code,'00','A','07','D',null) into
+	  unit_type from unit_attributes
+          where  chapter_id   = c_rec.chapter_id
+          and    unit_id      = c_rec.unit_id
+          and    coll_date    = c_rec.coll_date
+	  and    attrib_group='DON';
+	  exception 
+	      when no_data_found then 
+		  unit_type:='#';
+	      when others  then
+	     err_text := 'Error selecting attribute';
+             raise Error;
+	 end;
+         if unit_type in ('A','D') then
+          begin
+	      select pat_last_name, pat_first_name, lpad(ssn,9, '0'), -- IM 679
+	      to_char(dob,'yyyymmddhh24mi'),
+	      to_char(surg_date,'yyyymmddhh24mi'), 
+	      consignee_id
+	      into pat_last_name, pat_first_name, ssn,
+	      dob,
+	      surgery_date, 
+	      consignee_id
+	      from special_patients sp, transf_details td, special_units su
+	      where su.unit_id=c_rec.unit_id and su.coll_date=c_rec.coll_date
+	      and su.surg_id=td.surg_id and su.pat_id=td.pat_id and
+	      td.pat_id=sp.pat_id;
+	      exception when no_data_found then
+		err_text:='Patient information not available';
+		raise Error;
+		when others then
+	     err_text := 'Error selecting patient information';
+             raise Error;
+	  end;
+         end if;
+	 if c_rec.component_weight is not null then
+	 begin
+	   select c_rec.component_weight/specific_gravity into product_volume
+	   from valid_products where
+	   product_code=substr(c_rec.product_code,1,5);  --SCR#902
+	   exception when others then 
+	   err_text:='Error in selecting product_volume';
+	   raise Error;
+	 end;
+	 else
+	     product_volume:=null;
+	 end if;
+	 UNT_Segment:=UNT_Segment||UNIT_ABO||'|'||UNIT_Rh||'||'||c_rec.expiry_date||'|'||c_rec.ccolldate||'|'||ltrim(to_char(product_volume,9999))||'|'||unit_type||'|AV||'||pat_last_name||'|'||pat_first_name||'|'||ssn||'|'||dob||'|'||surgery_date||'|'||consignee_id;
+        --------------------------------------------------
+	---- Checking for Component and Unit Interdictions
+	--------------------------------------------------
+        begin
+	  select inter_code
+	  into   interdiction 
+          from   component_interdictions 
+          where  chapter_id   = c_rec.chapter_id
+          and    unit_id      = c_rec.unit_id
+	  and    product_code = c_rec.product_code
+          and    coll_date    = c_rec.coll_date
+          and    insert_dats > nvl(c_rec.label_dats,sysdate - 1000000);
+	  err_text := 'Component Interdiction '||interdiction;
+          raise Error;
+        exception
+	  when no_data_found
+	  then
+             null;
+          when too_many_rows then
+	  err_text := 'Component Interdiction '||interdiction;
+          raise Error;
+          when others then
+	  err_text := 'Component Interdiction '||interdiction;
+          raise Error;
+	End;
+	Begin
+          select ui.inter_code
+	  into   interdiction
+          from   unit_interdictions ui, valid_interdictions_lab vi 
+          where  chapter_id     =  c_rec.chapter_id
+          and    unit_id        =  c_rec.unit_id
+          and    coll_date      =  c_rec.coll_date
+          and    ui.inter_code  =  vi.inter_code
+          and    vi.inter_type  != 'I'
+          and    (vi.inter_type != 'B'
+                 or c_rec.blood_type not in ('40','71'))
+          and    sysdate  between  vi.eff_date
+                 and nvl(vi.term_date,sysdate)
+          and    insert_dats > nvl(c_rec.label_dats,sysdate - 1000000);
+          err_text := 'Unit Interdiction '||interdiction;
+	  raise Error;
+        Exception
+	  when no_data_found 
+	  then
+	     null;
+          when too_many_rows then
+          err_text := 'Unit Interdiction '||interdiction;
+	  raise Error;
+          when others then
+          err_text := 'Unit Interdiction '||interdiction;
+	  raise Error;
+        End;
+       ------------------------------------------------------------------------
+       -- CREATE INTERFACE DATA
+       -------------------------------------------------------------------------
+       begin
+   dbms_output.put_line('Before Creating the output file');
+          begin
+             select chr(11)||'MSH|^~\&|LT|'||warehouse||'|HCLL|'||facility||'|'||
+             to_char(sysdate,'yyyymmddhh24mi')||'||UNT^U01|'||
+             to_char(int_seq.nextval)||'|P|2.3||'
+             into MSH_Segment from dual;
+             exception when others then
+                 err_text := 'Error creating MSH Segment';
+	         raise Error;
+          end;
+               utl_file.put_line(extract_file,MSH_Segment||chr(13));
+	       EVN_Segment :='EVN|U01|'||to_char(sysdate,'yyyymmddhh24mi')||'||||'||chr(13);
+               utl_file.put_line(extract_file,EVN_Segment);
+               utl_file.put_line(extract_file,UNT_Segment||chr(13));
+	       if unit_type='A' then
+	       begin
+	          select 'x' into x from unit_interdictions 
+		  where unit_id=c_rec.unit_id
+	          and coll_date=c_rec.coll_date and chapter_id=c_rec.chapter_id
+	          and inter_code in (select inter_code from valid_interdictions_lab
+	          where inter_type='B');
+	           UNB_Segment:='UNB|BIO||||';
+                  utl_file.put_line(extract_file,UNB_Segment);
+	          exception when no_data_found then null;
+	             when too_many_rows then
+	              UNB_Segment:='UNB|BIO||||';
+                     utl_file.put_line(extract_file,UNB_Segment);
+                     when OTHERS then
+                        err_text := sqlerrm;
+                        raise Error;
+	       end;
+	       end if;
+	       begin
+	       open unit_attr (c_rec.unit_id, c_rec.product_code, c_rec.coll_date);
+	       loop
+	          begin
+                      fetch  unit_attr into attr_rec;
+                      exit when unit_attr%notfound;
+	              UNB_Segment:='UNB|'||attr_rec.attrib_code||'|||'||chr(13);
+	              utl_file.put_line(extract_file, UNB_Segment);
+	          end;
+	       end loop;
+	       close unit_attr;
+               utl_file.put_line(extract_file,chr(28)||chr(13));
+               utl_file.fflush(extract_file);
+	       end;
+            dbms_output.put_line('After Writing file');       
+       exception
+          when OTHERS then
+             err_text := sqlerrm;
+             raise Error;
+       end;
+       begin
+          update components
+          set component_status   = 'S', 
+              program_id         = 'IMIHCLL',
+              out_of_system_dats = sysdate
+          where  unit_id          =  c_rec.unit_id
+          and    coll_date        =  c_rec.coll_date
+          and    chapter_id       =  c_rec.chapter_id
+          and    product_code     =  c_rec.product_code
+          and    component_prefix =  c_rec.aliquot;
+       exception
+          when OTHERS then
+             err_text := sqlerrm;
+             raise Error;
+       end;
+       succ_row := succ_row + 1;
+       if c_rec.chk_digit is not null then
+          utl_file.putf(succ_log,'\n'||lpad(succ_row,4)||
+                        ' | '||rpad(c_rec.unit_id||'-'||
+                        c_rec.chk_digit,15)||' | '||
+                       c_rec.product_code 
+                        ||' |' );
+        else
+           utl_file.putf(succ_log,'\n'||lpad(succ_row,4)||
+                         ' | '||rpad(c_rec.unit_id,15)||' | '||
+                         c_rec.product_code||
+                         ' |');
+        end if;
+        if row_count = 100 then
+           commit; 
+           row_count := 0;
+        end if;
+      exception
+         when utl_file.invalid_filehandle then
+            dbms_output.put_line('Invalid Filehandle');
+         when utl_file.invalid_path then
+            dbms_output.put_line('Invalid Path');
+         when utl_file.invalid_mode then
+            dbms_output.put_line('Invalid Mode');
+         when utl_file.invalid_operation then
+            dbms_output.put_line('Invalid Operation');
+         when Error then
+            err_row := err_row + 1;
+            if c_rec.chk_digit is not null then
+               utl_file.putf(log_file,'\n'||lpad(err_row,4)||' | '||
+                           rpad(c_rec.unit_id||'-'||c_rec.chk_digit,15)||' | '||
+                           rpad( c_rec.product_code,5) ||
+                           '| '||'| '||err_text);
+            else
+	           utl_file.putf(log_file,'\n'||lpad(err_row,4)||' | '||
+                            rpad(c_rec.unit_id,15)||' | '||
+	                    rpad(c_rec.product_code,5) ||
+                            '| '||'| '||err_text);
+            end if;
+      end;
+   end loop;
+   close comp;
+   utl_file.new_line(log_file);
+   utl_file.put_line(log_file,'--------------------------------------------------------------------------------');
+   utl_file.put_line(log_file,'End of Check in '||to_char(sysdate,'MM-DD-YY HH24:MI'));
+   utl_file.new_line(succ_log);
+   utl_file.put_line(succ_log,'----------------------------------------------------');
+   utl_file.put_line(succ_log,'End of Check in '||to_char(sysdate,'MM-DD-YY HH24:MI'));
+   utl_file.put_line(extract_file,chr(3));
+   utl_file.fclose(extract_file);
+   utl_file.fclose(log_file);
+   utl_file.fclose(succ_log);
+   commit; 
+end;     
+end lthcllin;
+end;
+/
+grant all on LTHCLLIN to public
+/
+create public synonym lthcllin for lthcllin
+
+
+/

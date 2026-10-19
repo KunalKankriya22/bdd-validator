@@ -1,0 +1,191 @@
+<div class="reject-inventory-container">
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+  <div class="page-wrapper">
+  <!-- Filter Section -->
+  <section
+    class="filter-section"
+    [attr.aria-labelledby]="elementId('filter-heading')"
+    role="region">
+    <h2 [id]="elementId('filter-heading')" class="sr-only">Search Filters</h2>
+
+    <div
+      [id]="elementId('filter-form')"
+      [formGroup]="filterForm"
+      class="filter-form">
+
+      <div class="filter-row">
+        <!-- Unit ID (shared component — handles barcode format, double-entry, postValidate) -->
+        <div class="unit-field-wrapper">
+          <app-unit-id-field
+            (postValidate)="onUnitPostValidate($event)"
+            (validated)="onUnitValidated($event)"
+            (cleared)="onUnitCleared()"
+            class="unit-id-input">
+          </app-unit-id-field>
+          <img src="assets/images/icons/Scan.svg" aria-hidden="true" class="scan-indicator" width="24" height="24" />
+        </div>
+
+        <!-- Product Code Dropdown with Search -->
+        <div class="dropdown-field-wrapper">
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label>Product Code</mat-label>
+            <mat-select
+              [id]="elementId('productCode')"
+              formControlName="productCode"
+              [disabled]="!unitIdField?.isValid"
+              (openedChange)="onDropdownOpened($event)">
+              <mat-select-trigger>
+                <span #productTrigger class="select-trigger-text"
+                      (mouseenter)="checkProductTruncation(productTrigger)"
+                      (focus)="checkProductTruncation(productTrigger)"
+                      [matTooltip]="selectedProductDisplay()"
+                      [matTooltipDisabled]="!isProductTruncated"
+                      matTooltipPosition="above">
+                  {{ selectedProductDisplay() }}
+                </span>
+              </mat-select-trigger>
+
+              @if (isLoadingProductCodes()) {
+                <mat-option disabled>
+                  <mat-spinner diameter="20" aria-label="Loading"></mat-spinner>
+                  <span>Loading...</span>
+                </mat-option>
+              } @else if (productCodes().length === 0) {
+                <mat-option disabled>{{ unitIdField?.isValid ? 'No products available for this unit' : 'Validate unit first' }}</mat-option>
+              } @else if (productCodes().length <= 3) {
+                @for (code of productCodes(); track code.code || code.productCode) {
+                  <mat-option [value]="code.code || code.productCode">
+                    {{ code.code || code.productCode }}{{ code.description || code.productDesc ? ' - ' + (code.description || code.productDesc) : '' }}
+                  </mat-option>
+                }
+              } @else {
+                <mat-option>
+                  <ngx-mat-select-search
+                    [formControl]="productCodeSearchControl"
+                    placeholderLabel="Search..."
+                    noEntriesFoundLabel="No matching results">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (code of filteredProductCodes(); track code.code || code.productCode) {
+                  <mat-option [value]="code.code || code.productCode">
+                    {{ code.code || code.productCode }}{{ code.description || code.productDesc ? ' - ' + (code.description || code.productDesc) : '' }}
+                  </mat-option>
+                }
+                @if (filteredProductCodes().length === 0) {
+                  <mat-option disabled>No data available</mat-option>
+                }
+              }
+            </mat-select>
+          </mat-form-field>
+          <img src="assets/images/icons/Scan.svg" aria-hidden="true" class="scan-indicator-dropdown" />
+        </div>
+
+        <!-- Rejection Code Dropdown with Search -->
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label>Rejection Code</mat-label>
+          <mat-select
+            [id]="elementId('rejectionCode')"
+            formControlName="rejectionCode"
+            (openedChange)="onDropdownOpened($event)"
+            (selectionChange)="onRejectionCodeSelected($event)">
+            <mat-select-trigger>
+              <span #rejectionTrigger class="select-trigger-text"
+                    (mouseenter)="checkRejectionTruncation(rejectionTrigger)"
+                    (focus)="checkRejectionTruncation(rejectionTrigger)"
+                    [matTooltip]="selectedRejectionDisplay()"
+                    [matTooltipDisabled]="!isRejectionTruncated"
+                    matTooltipPosition="above">
+                {{ selectedRejectionDisplay() }}
+              </span>
+            </mat-select-trigger>
+
+            @if (isLoadingRejectionCodes()) {
+              <mat-option disabled>
+                <mat-spinner diameter="20"></mat-spinner>
+                <span>Loading...</span>
+              </mat-option>
+            } @else if (rejectionCodes().length === 0) {
+              <mat-option disabled>{{ (!unitIdField?.isValid || !f['productCode'].value) ? 'Select product code first' : 'No data available' }}</mat-option>
+            } @else if (rejectionCodes().length <= 3) {
+              @for (code of rejectionCodes(); track code.code) {
+                <mat-option [value]="code.code">
+                  {{ code.code }}{{ code.description ? ' - ' + code.description : '' }}
+                </mat-option>
+              }
+            } @else {
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="rejectionCodeSearchControl"
+                  placeholderLabel="Search..."
+                  noEntriesFoundLabel="">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (code of filteredRejectionCodes(); track code.code) {
+                <mat-option [value]="code.code">
+                  {{ code.code }}{{ code.description ? ' - ' + code.description : '' }}
+                </mat-option>
+              }
+              @if (filteredRejectionCodes().length === 0) {
+                <mat-option disabled>No data available</mat-option>
+              }
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Action Buttons -->
+        <div class="button-wrapper">
+          <button mat-raised-button
+                  type="button"
+                  class="btn-reject"
+                  [disabled]="!isRejectEnabled()"
+                  (click)="onRejectClick()"
+                  aria-label="Reject inventory product">
+            REJECT
+          </button>
+          <button mat-raised-button
+                  type="button"
+                  class="btn-clear"
+                  [disabled]="!isClearEnabled()"
+                  (click)="onClearClick()"
+                  aria-label="Clear all fields">
+            CLEAR
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Results Section -->
+  <section
+    class="results-section"
+    [attr.aria-labelledby]="elementId('results-heading')"
+    role="region">
+    <h2 [id]="elementId('results-heading')" class="sr-only">Search Results</h2>
+
+    <!-- Loading State -->
+    @if (loading()) {
+      <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+        <mat-spinner diameter="40" aria-label="Loading results"></mat-spinner>
+        <span class="sr-only">Loading results, please wait...</span>
+      </div>
+    }
+
+    <!-- Error State -->
+    @if (error()) {
+      <div class="error-container" role="alert" aria-live="assertive" [id]="elementId('error-container')">
+        <mat-icon aria-hidden="true">error</mat-icon>
+        <p>{{ error() }}</p>
+      </div>
+    }
+
+    <!-- Data Table - Always Visible -->
+    <app-data-table
+      [config]="tableConfig"
+      [data]="inventoryData()"
+      [loading]="loading()">
+    </app-data-table>
+  </section>
+  </div>
+</div>

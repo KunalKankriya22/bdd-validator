@@ -1,0 +1,224 @@
+<app-page-header-with-breadcrumb [config]="headerConfig" />
+
+<div class="cryo-details-container">
+  <!-- Filter Section - Only show in separation mode or when no workflow selected -->
+  @if (workflowMode() !== 'freeze') {
+    <div class="filter-section">
+      <form [formGroup]="filterForm" class="filter-form">
+        <div class="filter-row">
+          <!-- Thaw Method -->
+          <mat-form-field appearance="fill" class="filter-field">
+            <mat-label>Thaw Method</mat-label>
+            <mat-select formControlName="thawMethod" [id]="elementId('thaw-method')">
+              @for (option of thawMethodOptions(); track option.thawMethod) {
+                <mat-option [value]="option.thawMethod">
+                  {{ option.thawMethod }} - {{ option.methodDesc }}
+                </mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <!-- Temperature (C) -->
+          <mat-form-field appearance="fill" class="filter-field">
+            <mat-label>Temperature (C) <span class="required-marker">*</span></mat-label>
+            <input matInput type="number" formControlName="temperature" [id]="elementId('temperature')" placeholder="Enter temperature" />
+            @if (filterForm.get('temperature')?.hasError('required')) {
+              <mat-error>Temperature is required</mat-error>
+            }
+            @if (filterForm.get('temperature')?.hasError('temperatureOutOfRange')) {
+              <mat-error>{{ filterForm.get('temperature')?.errors?.['temperatureOutOfRange']?.message }}</mat-error>
+            }
+          </mat-form-field>
+
+          <!-- Centrifuge ID -->
+          <div class="dropdown-field-wrapper">
+            <mat-form-field appearance="fill" class="filter-field">
+              <mat-label>Centrifuge ID @if (workflowMode() === 'separation') {<span class="required-marker">*</span>}</mat-label>
+              <mat-select formControlName="centrifugeId" [id]="elementId('centrifuge-id')">
+                @for (option of centrifugeOptions(); track option.equipId) {
+                  <mat-option [value]="option.equipId">
+                    {{ option.equipId }}@if (option.serialNumber) { ({{ option.serialNumber }}) }
+                  </mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+            <img src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-indicator-dropdown" width="24" height="24" />
+          </div>
+
+          <!-- Separation Date/Time -->
+          <mat-form-field appearance="fill" class="filter-field">
+            <mat-label>Separation Date/Time</mat-label>
+            <input matInput formControlName="separationDateTime" [id]="elementId('separation-datetime')" placeholder="DD-MMM-YYYY HH:mm" />
+            @if (filterForm.get('separationDateTime')?.hasError('invalidFormat')) {
+              <mat-error>{{ filterForm.get('separationDateTime')?.errors?.['invalidFormat']?.message }}</mat-error>
+            }
+            @if (filterForm.get('separationDateTime')?.hasError('futureDate')) {
+              <mat-error>{{ filterForm.get('separationDateTime')?.errors?.['futureDate']?.message }}</mat-error>
+            }
+            @if (filterForm.get('separationDateTime')?.hasError('sepBeforeCollDate')) {
+              <mat-error>{{ filterForm.get('separationDateTime')?.errors?.['sepBeforeCollDate']?.message }}</mat-error>
+            }
+          </mat-form-field>
+
+          <!-- Clear All Button - Enabled when any filter has value -->
+          <button mat-flat-button type="button" class="clear-all-btn" (click)="onClearAllFilters()" [disabled]="!hasFilterValues()" aria-label="Clear all filter fields">
+            CLEAR ALL
+          </button>
+        </div>
+      </form>
+    </div>
+  }
+
+  <!-- Display-Only Separation Data Section - Only show in freeze mode -->
+  @if (workflowMode() === 'freeze' && displaySeparationData()) {
+    <div class="separation-display-section">
+      <div class="separation-display-row">
+        <!-- Thaw Method (Display Only) -->
+        <div class="readonly-field readonly-field--active">
+          <label>Thaw Method</label>
+          <div class="readonly-field__value">{{ displaySeparationData()?.thawMethod || '-' }}@if (displaySeparationData()?.thawMethodDesc) { - {{ displaySeparationData()?.thawMethodDesc }} }</div>
+        </div>
+
+        <!-- Temperature (Display Only) -->
+        <div class="readonly-field readonly-field--active">
+          <label>Temperature (C)</label>
+          <div class="readonly-field__value">{{ displaySeparationData()?.temperature || '-' }}</div>
+        </div>
+
+        <!-- Centrifuge ID (Display Only) -->
+        <div class="readonly-field readonly-field--active">
+          <label>Centrifuge ID</label>
+          <div class="readonly-field__value">{{ displaySeparationData()?.centrifugeId || '-' }}</div>
+        </div>
+
+        <!-- Separation Date/Time (Display Only) -->
+        <div class="readonly-field readonly-field--active">
+          <label>Separation Date/Time</label>
+          <div class="readonly-field__value">{{ displaySeparationData()?.separationDateTime || '-' }}</div>
+        </div>
+      </div>
+    </div>
+  }
+
+  <!-- Unit Entry Section -->
+  <div class="unit-entry-section">
+    <form [formGroup]="unitForm" class="unit-form">
+      <div class="unit-row unit-row--primary">
+        <!-- Unit ID (Required) - Using shared component with scan icon -->
+        <div class="unit-field-wrapper">
+          <app-unit-id-field
+            [label]="'Unit ID'"
+            [required]="true"
+            [validateFfValue]="'DONOR'"
+            (validated)="onUnitValidated($event)"
+            (cleared)="onUnitCleared()"
+            class="unit-id-input"
+          ></app-unit-id-field>
+          <img src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-indicator" width="24" height="24" />
+        </div>
+
+        <!-- Destined (Read-only) - Only enabled after unit validated -->
+        <div class="readonly-field" [class.readonly-field--disabled]="!isUnitValidated()">
+          <label>Destined</label>
+          <div class="readonly-field__value">{{ unitForm.get('destined')?.value || '-' }}</div>
+        </div>
+
+        <!-- Catalog No (Read-only) - Only enabled after unit validated -->
+        <div class="readonly-field" [class.readonly-field--disabled]="!isUnitValidated()">
+          <label>Catalog No</label>
+          <div class="readonly-field__value">{{ unitForm.get('catalogNo')?.value || '-' }}</div>
+        </div>
+
+        <!-- Cryo Product Code (Read-only) - Only enabled after unit validated -->
+        <div class="readonly-field" [class.readonly-field--disabled]="!isUnitValidated()">
+          <label>Cryo Product Code</label>
+          <div class="readonly-field__value">
+            {{ unitForm.get('cryoProductCode')?.value || '-' }}
+            @if (currentIntendedUse()) {
+              <span class="intended-use-badge" [title]="currentIntendedUseDesc() || ''">{{ currentIntendedUse() }}</span>
+            }
+          </div>
+        </div>
+
+        <!-- Reprint Button - Only enabled in separation mode when verify product code is selected -->
+        <button mat-stroked-button type="button" class="reprint-btn" (click)="onReprintLabel()" [disabled]="workflowMode() !== 'separation' || !unitForm.get('verifyProductCode')?.value" aria-label="Reprint label">
+          <mat-icon>print</mat-icon>
+          REPRINT
+        </button>
+
+        <!-- Verify Product Code (Input field in both modes - enabled in separation, disabled in freeze) -->
+        <div class="unit-field-wrapper">
+          <mat-form-field appearance="fill" class="unit-field unit-field--required">
+            <mat-label>Verify Product Code <span class="required-marker">*</span></mat-label>
+            <input matInput formControlName="verifyProductCode" [id]="elementId('verify-product-code')" placeholder="Scan or enter product code" />
+            @if (unitForm.get('verifyProductCode')?.hasError('required')) {
+              <mat-error>Verify Product Code is required</mat-error>
+            }
+            @if (unitForm.get('verifyProductCode')?.hasError('productCodeMismatch')) {
+              <mat-error>{{ unitForm.get('verifyProductCode')?.errors?.['productCodeMismatch']?.message }}</mat-error>
+            }
+          </mat-form-field>
+          <img src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-indicator" width="24" height="24" />
+        </div>
+      </div>
+
+      <!-- Second row - Always visible -->
+      <div class="unit-row unit-row--secondary">
+        <!-- Freeze Time - Required in freeze mode, disabled in separation mode -->
+        <mat-form-field appearance="fill" class="unit-field">
+          <mat-label>Freeze Time @if (workflowMode() === 'freeze') {<span class="required-marker">*</span>}</mat-label>
+          <input matInput formControlName="freezeTime" [id]="elementId('freeze-time')" placeholder="DD-MMM-YYYY HH:mm" />
+          @if (unitForm.hasError('freezeTimeRequired')) {
+            <mat-error>{{ unitForm.errors?.['freezeTimeRequired']?.message }}</mat-error>
+          }
+          @if (unitForm.get('freezeTime')?.hasError('invalidFormat')) {
+            <mat-error>{{ unitForm.get('freezeTime')?.errors?.['invalidFormat']?.message }}</mat-error>
+          }
+          @if (unitForm.get('freezeTime')?.hasError('futureDate')) {
+            <mat-error>{{ unitForm.get('freezeTime')?.errors?.['futureDate']?.message }}</mat-error>
+          }
+          @if (unitForm.get('freezeTime')?.hasError('freezeBeforeSep')) {
+            <mat-error>{{ unitForm.get('freezeTime')?.errors?.['freezeBeforeSep']?.message }}</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- CRYO Acceptable? - Required in freeze mode, disabled in separation mode -->
+        <mat-form-field appearance="fill" class="unit-field">
+          <mat-label>CRYO Acceptable? @if (workflowMode() === 'freeze') {<span class="required-marker">*</span>}</mat-label>
+          <mat-select formControlName="cryoAcceptable" [id]="elementId('cryo-acceptable')">
+            @for (option of cryoAcceptableOptions(); track option.code) {
+              <mat-option [value]="option.code">
+                {{ option.description }}
+              </mat-option>
+            }
+          </mat-select>
+          @if (unitForm.get('cryoAcceptable')?.hasError('required')) {
+            <mat-error>CRYO Acceptable is required</mat-error>
+          }
+          @if (unitForm.get('cryoAcceptable')?.hasError('invalidValue')) {
+            <mat-error>{{ unitForm.get('cryoAcceptable')?.errors?.['invalidValue']?.message }}</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Clear All Button (Unit Section) - Enabled when form has values -->
+        <button mat-flat-button type="button" class="clear-all-btn" (click)="onClearAllUnit()" [disabled]="!hasUnitValues()" aria-label="Clear unit entry fields">
+          CLEAR ALL
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Data Table -->
+  <div class="table-section">
+    <app-data-table [config]="tableConfig" [data]="tableData()" />
+  </div>
+
+  <!-- Bottom Actions - DEFINE PLASMA Section (Only visible when table has data) -->
+  @if (tableData().length > 0) {
+    <div class="plasma-actions">
+      <button mat-raised-button color="primary" class="define-plasma-btn" (click)="onDefinePlasma()" aria-label="Define plasma">
+        DEFINE PLASMA
+      </button>
+    </div>
+  }
+</div>

@@ -1,0 +1,252 @@
+<app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+<div class="layout-wrapper">
+  <main class="enter-unit-attributes main-content" aria-label="Enter unit attributes">
+    <!-- SER-01: aria-live region for dynamic state changes (results load, save, edit mode) -->
+    <div aria-live="polite" aria-atomic="true" class="cdk-visually-hidden" id="ua-status-announcer">{{ statusAnnouncement }}</div>
+
+    <!-- Form Card: Unit ID + Display Fields -->
+    <div class="enter-unit-attributes__form-card">
+      <div class="form-row">
+        <div class="form-field-wrapper unit-id-wrapper">
+          <app-unit-id-field
+            [validateFfValue]="'N'"
+            [required]="true"
+            [label]="'Unit ID'"
+            [hintDefault]="''"
+            [showBarcodeIcon]="true"
+            (validated)="onUnitValidated($event)"
+            (cleared)="onUnitCleared()"
+            class="unit-id-field"
+          />
+        </div>
+
+        <!-- MOD-01: dl/dt/dd for programmatic label-value association -->
+        <dl class="form-field-wrapper field-display">
+          <dt class="field-label">Collection Date</dt>
+          <dd class="field-value">{{ collectionDateDisplay }}</dd>
+        </dl>
+
+        <dl class="form-field-wrapper field-display">
+          <dt class="field-label">Contract ID</dt>
+          <dd class="field-value">{{ unitValidation()?.contractId || '-' }}</dd>
+        </dl>
+
+        <dl class="form-field-wrapper field-display description-display">
+          <dt class="field-label">Description</dt>
+          <dd class="field-value">{{ unitValidation()?.contractName || '-' }}</dd>
+        </dl>
+
+        <div class="form-actions">
+          <button
+            type="button"
+            mat-button
+            class="clear-all-button"
+            (click)="onClearAll()"
+            [disabled]="!hasFormData"
+            aria-label="Clear all fields">
+            CLEAR ALL
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Results Card — aria-busy signals loading state to AT -->
+    <div class="enter-unit-attributes__results-card" [attr.aria-busy]="isLoading() || null">
+
+      <!-- Loading State -->
+      @if (isLoading()) {
+        <!-- MIN-04/05: aria-busy moves to results-card; spinner is decorative -->
+        <div class="loading-container" role="status" aria-live="polite">
+          <mat-spinner diameter="40" aria-hidden="true"></mat-spinner>
+          <p class="loading-text">Loading data...</p>
+        </div>
+      }
+
+      <!-- Action Bar — SER-02: [hidden] keeps DOM stable for aria-expanded; MIN-03: aria-hidden on icons -->
+      @if (unitValidation() && !isLoading()) {
+        <div class="panel-actions">
+          <!-- R3: visually-hidden keeps button in a11y tree; tabindex=-1 removes from tab order when hidden -->
+          <button
+            mat-stroked-button
+            class="action-btn"
+            type="button"
+            [attr.aria-expanded]="isEditMode()"
+            aria-controls="edit-mode-controls"
+            [class.visually-hidden]="isEditMode()"
+            [attr.tabindex]="isEditMode() ? -1 : null"
+            (click)="onToggleEdit()">
+            ADD / EDIT
+          </button>
+          <div id="edit-mode-controls" [hidden]="!isEditMode()">
+            <button
+              mat-stroked-button
+              class="action-btn add-new-btn"
+              type="button"
+              (click)="onAddAttribute()">
+              <mat-icon aria-hidden="true">add</mat-icon> ADD NEW ROW
+            </button>
+            <span class="button-separator" aria-hidden="true"></span>
+            <button
+              mat-stroked-button
+              class="action-btn cancel-btn"
+              type="button"
+              (click)="onCancelEdit()">
+              <mat-icon aria-hidden="true">close</mat-icon> CANCEL
+            </button>
+            <button
+              mat-flat-button
+              class="save-btn"
+              type="button"
+              (click)="onSaveAll()"
+              [disabled]="saving()">
+              <mat-icon aria-hidden="true">check</mat-icon> SAVE
+            </button>
+          </div>
+        </div>
+      }
+
+      <!-- Table + Pagination (same structure as DataTable shared component) -->
+      @if (!isLoading() && unitValidation() && attributesArray.length > 0) {
+        <div class="data-table-container">
+          <!-- Scroll wrapper: only table rows scroll here, header stays sticky -->
+          <div class="data-table-scroll-wrapper">
+            <form [formGroup]="attributesForm">
+              <table
+                mat-table
+                #attrTable
+                [dataSource]="attributesArray.controls"
+                class="attributes-table"
+                aria-label="Unit attributes">
+
+                <!-- Attribute Group Column -->
+                <ng-container matColumnDef="attribGroup">
+                  <th mat-header-cell *matHeaderCellDef>Attribute Group</th>
+                  <td mat-cell *matCellDef="let control; let i = index">
+                    @if (isEditMode() && $any(control).get('isNew')?.value) {
+                      <mat-form-field appearance="fill" class="table-field compact-field">
+                        <mat-select
+                          [formControl]="$any(control).get('attribGroup')"
+                          (selectionChange)="onGroupChange($any(control))"
+                          aria-label="Attribute Group"
+                          panelClass="attribute-select-panel"
+                          hideSingleSelectionIndicator>
+                          <mat-option>
+                            <ngx-mat-select-search
+                              [formControl]="getGroupSearchControl($any(control))"
+                              placeholderLabel="Search..."
+                              noEntriesFoundLabel="No matching groups">
+                            </ngx-mat-select-search>
+                          </mat-option>
+                          @for (group of getFilteredGroups($any(control)); track group.code) {
+                            <mat-option [value]="group.code">{{ group.code }}</mat-option>
+                          }
+                        </mat-select>
+                      </mat-form-field>
+                    } @else {
+                      {{ $any(control).get('attribGroup')?.value || '-' }}
+                    }
+                  </td>
+                </ng-container>
+
+                <!-- Group Description Column — MOD-02: disambiguate from Code Description -->
+                <ng-container matColumnDef="attribGroupDesc">
+                  <th mat-header-cell *matHeaderCellDef>Group Description</th>
+                  <td mat-cell *matCellDef="let control">
+                    {{ $any(control).get('attribGroupDesc')?.value || '' }}
+                  </td>
+                </ng-container>
+
+                <!-- Attribute Code Column -->
+                <ng-container matColumnDef="attribCode">
+                  <th mat-header-cell *matHeaderCellDef>Attribute Code</th>
+                  <td mat-cell *matCellDef="let control; let i = index">
+                    @if (isEditMode() && $any(control).get('isNew')?.value) {
+                      <mat-form-field appearance="fill" class="table-field compact-field">
+                        <mat-select
+                          [formControl]="$any(control).get('attribCode')"
+                          (selectionChange)="onCodeChange($any(control))"
+                          [disabled]="!$any(control).get('attribGroup')?.value"
+                          aria-label="Attribute Code"
+                          panelClass="attribute-select-panel"
+                          hideSingleSelectionIndicator>
+                          <mat-option>
+                            <ngx-mat-select-search
+                              [formControl]="getCodeSearchControl($any(control))"
+                              placeholderLabel="Search..."
+                              noEntriesFoundLabel="No matching codes">
+                            </ngx-mat-select-search>
+                          </mat-option>
+                          @for (code of getFilteredCodes($any(control)); track code.code) {
+                            <mat-option [value]="code.code">{{ code.code }}</mat-option>
+                          }
+                        </mat-select>
+                      </mat-form-field>
+                    } @else {
+                      {{ $any(control).get('attribCode')?.value || '-' }}
+                    }
+                  </td>
+                </ng-container>
+
+                <!-- Code Description Column — MOD-02: disambiguate from Group Description -->
+                <ng-container matColumnDef="attribCodeDesc">
+                  <th mat-header-cell *matHeaderCellDef>Code Description</th>
+                  <td mat-cell *matCellDef="let control">
+                    {{ $any(control).get('attribCodeDesc')?.value || '' }}
+                  </td>
+                </ng-container>
+
+                <!-- Actions Column -->
+                <ng-container matColumnDef="actions">
+                  <th mat-header-cell *matHeaderCellDef aria-label="Row actions"></th>
+                  <td mat-cell *matCellDef="let control; let i = index">
+                    <!-- MOD-04: row-specific aria-label so AT users know which row they're deleting -->
+                    <button
+                      mat-icon-button
+                      type="button"
+                      (click)="onDeleteAttribute(i)"
+                      [disabled]="saving()"
+                      matTooltip="Delete row"
+                      [attr.aria-label]="'Delete attribute ' + ($any(control).get('attribGroup')?.value || 'row ' + (i + 1)) + ($any(control).get('attribCode')?.value ? ' / ' + $any(control).get('attribCode')?.value : '')">
+                      <mat-icon aria-hidden="true">delete</mat-icon>
+                    </button>
+                  </td>
+                </ng-container>
+
+                <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+                <tr mat-row *matRowDef="let row; columns: displayedColumns;"></tr>
+              </table>
+            </form>
+          </div>
+
+        </div>
+
+        <!-- Pagination (pinned at bottom of results card) -->
+        <nav class="data-table__pagination" aria-label="Table pagination">
+          <mat-paginator
+            [length]="totalRecords"
+            [pageSize]="pageSize"
+            [pageIndex]="pageIndex"
+            [pageSizeOptions]="[10, 25, 50, 100]"
+            [showFirstLastButtons]="true"
+            (page)="onPageChange($event)"
+            aria-label="Select page of attributes">
+          </mat-paginator>
+        </nav>
+
+
+      }
+
+      <!-- Empty State -->
+      @if (attributesArray.length === 0 && !isLoading()) {
+        <div class="empty-state">
+          <div class="empty-icon-wrapper">
+            <mat-icon class="empty-icon" aria-hidden="true">search</mat-icon>
+          </div>
+          <p class="empty-message">No Results to Display</p>
+          <p class="empty-hint">Please enter search criteria to view results</p>
+        </div>
+      }
+    </div>
+  </main>
+</div>

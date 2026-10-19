@@ -1,0 +1,1606 @@
+
+create or replace package DOD_DONOR_INFO is
+/* ************************************************************
+  This is to extract DOD donor information from the string
+  sent to LifeTrak.
+
+  Created By        : Kishore Gummadi
+  Date Of Creation  : 02/15/2011
+  Version           : [01] Kishore                    
+                      [02] Ashok    Issue: unable to parse data based on line feeds as forms is not reading linefeeds.
+		                    Modified logic to look for value betweeen data identifiers.
+                      [03] Ashok    CAC Card identifier string length modified to be in 88, 89, 90
+                      [04] Ashok    MLT-4322: extract_cac_pdf417 updated to rewrite 1Type, NType and added MType (no changes to out parameters)
+
+  *****************************************   */
+  procedure GET_RETURN_VALUE(p_display_value in  varchar2,
+				     p_return_value  out number,
+				     p_status        out varchar2);
+
+  procedure CONVERT_BASE32_TO_ASCII(p_base32   in  varchar2,
+						p_ascii    out varchar2,
+					      p_status   out varchar2);
+
+  procedure EXTRACT_CAC_PDF417_OLD( p_string              in  varchar2,
+                                    p_bar_code_ver_code   out varchar2,
+                                    p_pdi                 out varchar2,
+                                    p_pd_type_code        out varchar2,
+                                    p_edipi               out varchar2,
+                                    p_first_name          out varchar2,
+                                    p_surname             out varchar2,
+                                    p_dob                 out date,
+                                    p_personnel_cat_code  out varchar2,
+                                    p_branch_code         out varchar2,
+                                    p_pect                out varchar2,
+                                    p_rank                out varchar2,
+                                    p_pay_plan_code       out varchar2,
+                                    p_pay_plan_grade_code out varchar2,
+                                    p_card_issue_date     out date,
+                                    p_card_exp_date       out date,
+                                    p_card_inst_idt       out varchar2,
+                                    p_status              out varchar2);
+
+  procedure EXTRACT_CAC_PDF417( p_string              in  varchar2,
+                                p_bar_code_ver_code   out varchar2,
+                                p_pdi                 out varchar2,
+                                p_pd_type_code        out varchar2,
+                                p_edipi               out varchar2,
+                                p_first_name          out varchar2,
+                                p_surname             out varchar2,
+                                p_dob                 out date,
+                                p_personnel_cat_code  out varchar2,
+                                p_branch_code         out varchar2,
+                                p_pect                out varchar2,
+                                p_rank                out varchar2,
+                                p_pay_plan_code       out varchar2,
+                                p_pay_plan_grade_code out varchar2,
+                                p_card_issue_date     out date,
+                                p_card_exp_date       out date,
+                                p_card_inst_idt       out varchar2,
+                                p_status              out varchar2);
+                            
+                            
+  procedure EXTRACT_CAC_CODE39(p_string              in  varchar2,
+				 	 p_ssn                 out varchar2,
+				 	 p_alt_id              out varchar2,
+                               p_status              out varchar2);
+
+  procedure EXTRACT_AAMVA_PDF417(p_string			in  varchar2,
+					   p_ssn			out varchar2,
+                                 p_last_name		out varchar2,
+                                 p_first_name         out varchar2,
+                                 p_mid_name           out varchar2,
+                                 p_dob                out date,
+                                 p_sex                out varchar2,
+                                 p_height             out varchar2,
+                                 p_alt_id             out varchar2,
+                                 p_alias              out varchar2,
+                                 p_suffix             out varchar2,
+                                 p_ethnic_grp         out varchar2,
+                                 p_street             out varchar2,
+                                 p_apt_suite          out varchar2,
+                                 p_city               out varchar2,
+                                 p_state              out varchar2,
+                                 p_zip                out varchar2,
+                                 p_country            out varchar2,
+                                 p_status             out varchar2);
+
+  procedure EXTRACT_CREDIT_CARD;
+
+  procedure EXTRACT_AAMVA_MAG_STRIPE;
+
+  procedure DETERMINE_STR_TYPE(p_string          in  varchar2,
+                               p_string_type	 out varchar2,
+                               p_status          out varchar2);
+
+  procedure EXTRACT_DONOR_DATA(p_string          in  varchar2,
+                               p_string_type     out varchar2,
+                               p_last_name       out varchar2,
+                               p_first_name      out varchar2,
+                               p_dob             out date,
+                               p_ssn             out varchar2,
+                               p_sex             out varchar2,
+                               p_alt_id          out varchar2,
+                               p_alt_type        out varchar2,
+                               p_addr1           out varchar2,
+                               p_addr2           out varchar2,
+                               p_addr3           out varchar2,
+                               p_city            out varchar2,
+                               p_state           out varchar2,
+                               p_zip             out varchar2,
+                               p_country         out varchar2,
+                               p_status          out varchar2);
+                               
+  procedure SET_DEBUG_ON;
+  
+  procedure SET_DEBUG_OFF;
+end DOD_DONOR_INFO;
+/
+
+
+create or replace package body DOD_DONOR_INFO is
+  debug_on BOOLEAN := FALSE;
+
+  PROCEDURE SET_DEBUG_ON IS
+  BEGIN
+    debug_on := TRUE;
+  END SET_DEBUG_ON;
+  
+  PROCEDURE SET_DEBUG_OFF IS
+  BEGIN
+    debug_on := FALSE;
+  END SET_DEBUG_OFF;
+
+  procedure GET_RETURN_VALUE(p_display_value in  varchar2,
+                             p_return_value  out number,
+      			     p_status        out varchar2) is 
+
+    type display_value_type is table of varchar2(1)
+    index by binary_integer;
+
+    type return_value_type is table of number
+    index by binary_integer;
+
+    display_value display_value_type;
+    return_value 	return_value_type;
+    v_dv_index 	BINARY_INTEGER := 0;
+
+  begin
+    p_status := 'OK';
+    display_value(1) := '0'; return_value(1) := 0;
+    display_value(2) := '1'; return_value(2) := 1;
+    display_value(3) := '2'; return_value(3) := 2;
+    display_value(4) := '3'; return_value(4) := 3;
+    display_value(5) := '4'; return_value(5) := 4;
+    display_value(6) := '5'; return_value(6) := 5;
+    display_value(7) := '6'; return_value(7) := 6;
+    display_value(8) := '7'; return_value(8) := 7;
+    display_value(9) := '8'; return_value(9) := 8;
+    display_value(10) := '9'; return_value(10) := 9;
+    display_value(11) := 'A'; return_value(11) := 10;
+    display_value(12) := 'B'; return_value(12) := 11;
+    display_value(13) := 'C'; return_value(13) := 12;
+    display_value(14) := 'D'; return_value(14) := 13;
+    display_value(15) := 'E'; return_value(15) := 14;
+    display_value(16) := 'F'; return_value(16) := 15;
+    display_value(17) := 'G'; return_value(17) := 16;
+    display_value(18) := 'H'; return_value(18) := 17;
+    display_value(19) := 'I'; return_value(19) := 18;
+    display_value(20) := 'J'; return_value(20) := 19;
+    display_value(21) := 'K'; return_value(21) := 20;
+    display_value(22) := 'L'; return_value(22) := 21;
+    display_value(23) := 'M'; return_value(23) := 22;
+    display_value(24) := 'N'; return_value(24) := 23;
+    display_value(25) := 'O'; return_value(25) := 24;
+    display_value(26) := 'P'; return_value(26) := 25;
+    display_value(27) := 'Q'; return_value(27) := 26;
+    display_value(28) := 'R'; return_value(28) := 27;
+    display_value(29) := 'S'; return_value(29) := 28;
+    display_value(30) := 'T'; return_value(30) := 29;
+    display_value(31) := 'U'; return_value(31) := 30;
+    display_value(32) := 'V'; return_value(32) := 31;
+
+    for i in display_value.first .. display_value.last loop
+      if display_value(i) = p_display_value then
+        v_dv_index := i;
+      end if;
+    end loop;
+
+    p_return_value := return_value(v_dv_index);
+  exception
+    when others then
+      p_status := 'Error: ' || SQLCODE || ' - ' || SQLERRM;
+  end GET_RETURN_VALUE;
+
+  procedure CONVERT_BASE32_TO_ASCII(p_base32   in  varchar2,
+						p_ascii    out varchar2,
+					      p_status   out varchar2) is
+    t_char      varchar2(1);
+    t_ret_val   number;
+    t_conv      number := 0;
+  begin
+    p_status := 'OK';
+    if p_base32 is not null then
+      for i in 1 .. length(p_base32) loop
+        begin
+          select substr(p_base32, i, 1)
+            into t_char
+            from dual;
+        end;
+
+        GET_RETURN_VALUE(t_char, t_ret_val, p_status);
+
+        if p_status = 'OK' then
+          t_conv := (t_conv * 32) + t_ret_val;
+        else
+          exit;
+        end if;
+      end loop;
+
+      p_ascii := to_char(t_conv);
+    else
+      p_ascii := null;
+    end if;
+  end CONVERT_BASE32_TO_ASCII;
+
+
+  procedure EXTRACT_CAC_PDF417( p_string              in  varchar2,
+                                p_bar_code_ver_code   out varchar2,
+                                p_pdi                 out varchar2,
+                                p_pd_type_code        out varchar2,
+                                p_edipi               out varchar2,
+                                p_first_name          out varchar2,
+                                p_surname             out varchar2,
+                                p_dob                 out date,
+                                p_personnel_cat_code  out varchar2,
+                                p_branch_code         out varchar2,
+                                p_pect                out varchar2,
+                                p_rank                out varchar2,
+                                p_pay_plan_code       out varchar2,
+                                p_pay_plan_grade_code out varchar2,
+                                p_card_issue_date     out date,
+                                p_card_exp_date       out date,
+                                p_card_inst_idt       out varchar2,
+                                p_status              out varchar2) is
+
+    PROCEDURE Parse1Type(p_string IN VARCHAR2) IS 
+        
+        t_version_code          VARCHAR2(1);
+        t_pdi			        VARCHAR2(6);
+        t_pd_type_code          VARCHAR2(1);
+        t_edipi			        VARCHAR2(10);
+        t_first_name            VARCHAR2(30);
+        t_surname               VARCHAR2(30);
+        t_dob_str		        VARCHAR2(4);
+        t_dob			        VARCHAR2(10);
+        t_personnel_cat_code    VARCHAR2(30);
+        t_branch_code           VARCHAR2(30);
+        t_pect                  VARCHAR2(30);
+        t_rank                  VARCHAR2(30);
+        t_pay_plan_code         VARCHAR2(30);
+        t_pay_plan_grade_code   VARCHAR2(30);
+        t_card_issue_dt_str     VARCHAR2(4);
+        t_card_issue_dt	        VARCHAR2(10);        
+        t_card_exp_dt_str	    VARCHAR2(4);
+        t_card_exp_dt		    VARCHAR2(10);        
+        t_card_inst_idt         VARCHAR2(30);
+        t_ascii                 VARCHAR2(30);
+        n_pos                   NUMBER;
+        error_print		        EXCEPTION;
+        
+        PROCEDURE handle_error IS
+        BEGIN
+            IF p_status != 'OK' then
+                RAISE error_print;
+            END IF;
+        END handle_error;
+    BEGIN
+        IF debug_ON THEN
+            DBMS_OUTPUT.PUT_LINE('********DEBUG MODE TURNED ON********');
+            DBMS_OUTPUT.PUT_LINE('String                ' || p_string);
+            DBMS_OUTPUT.PUT_LINE('Length                ' || LENGTH(p_string));
+        END IF;
+        
+        -- PARSE data tokens
+        n_pos := 1;
+        
+        t_version_code := substr(p_string, n_pos, 1);
+        n_pos := n_pos + 1;
+        
+        t_pdi := substr(p_string, n_pos, 6);
+        n_pos := n_pos + 6;
+        
+        t_pd_type_code := substr(p_string, n_pos, 1);
+        n_pos := n_pos + 1;
+        
+        t_edipi := substr(p_string, n_pos, 7);
+        n_pos := n_pos + 7;
+        
+        t_first_name := substr(p_string, n_pos, 20);
+        n_pos := n_pos + 20;
+        
+        t_surname := substr(p_string, n_pos, 26);
+        n_pos := n_pos + 26;
+        
+        t_dob_str := substr(p_string, n_pos, 4);
+        n_pos := n_pos + 4;
+        
+        t_personnel_cat_code := substr(p_string, n_pos, 1);
+        n_pos := n_pos + 1;
+        
+        t_branch_code := substr(p_string, n_pos, 1);
+        n_pos := n_pos + 1;        
+        
+        t_pect := substr(p_string, n_pos, 2);
+        n_pos := n_pos + 2;
+        
+        t_rank := substr(p_string, n_pos, 6);
+        n_pos := n_pos + 6;
+        
+        t_pay_plan_code := substr(p_string, n_pos, 2);
+        n_pos := n_pos + 2;
+        
+        t_pay_plan_grade_code := substr(p_string, n_pos, 2);
+        n_pos := n_pos + 2;
+        
+        t_card_issue_dt_str := substr(p_string, n_pos, 4);
+        n_pos := n_pos + 4;
+        
+        t_card_exp_dt_str := substr(p_string, n_pos, 4);
+        n_pos := n_pos + 4;
+        
+        t_card_inst_idt := substr(p_string, n_pos, 1);
+        -------------------
+        
+        -- SET OUTPUT PARAMETERS.
+        p_bar_code_ver_code := t_version_code;
+        
+        CONVERT_BASE32_TO_ASCII(t_pdi, t_ascii, p_status);
+        handle_error;
+        p_pdi := t_ascii; 
+        
+        p_pd_type_code := t_pd_type_code;
+        
+        CONVERT_BASE32_TO_ASCII(t_edipi, t_ascii, p_status);
+        handle_error;        
+        p_edipi := t_ascii;
+        
+        p_first_name := t_first_name;
+        
+        p_surname    := t_surname;
+        
+        CONVERT_BASE32_TO_ASCII(t_dob_str, t_ascii, p_status);
+        handle_error;
+        t_dob := t_ascii;
+        begin
+            select to_date('01-01-1000', 'MM-DD-YYYY') + to_number(t_dob) - 5
+              into p_dob
+              from dual;
+        end;        
+        
+        p_personnel_cat_code := t_personnel_cat_code;
+        
+        p_branch_code := t_branch_code;
+        
+        p_pect := t_pect;
+        
+        p_rank := t_rank;
+        
+        p_pay_plan_code := t_pay_plan_code;
+        
+        p_pay_plan_grade_code := t_pay_plan_grade_code;        
+        
+        CONVERT_BASE32_TO_ASCII(t_card_issue_dt_str, t_ascii, p_status);
+        handle_error;
+        t_card_issue_dt := t_ascii;     
+        begin
+            select to_date('01-01-1000', 'MM-DD-YYYY') + to_number(t_card_issue_dt) - 5
+              into p_card_issue_date
+              from dual;
+        end;
+        
+        CONVERT_BASE32_TO_ASCII(t_card_exp_dt_str, t_ascii, p_status);
+        handle_error;
+        t_card_exp_dt := t_ascii;
+        
+        begin
+          select to_date('01-01-1000', 'MM-DD-YYYY') + to_number(t_card_exp_dt) - 5
+            into p_card_exp_date
+            from dual;
+        end;        
+        
+        p_card_inst_idt := t_card_inst_idt;
+    EXCEPTION
+        WHEN error_print THEN
+            dbms_output.put_line(p_status);  
+    END Parse1Type;
+
+    PROCEDURE ParseNType(p_string IN VARCHAR2) IS
+    BEGIN
+        Parse1Type(p_string);
+    END ParseNType;
+  
+    PROCEDURE ParseMType(p_string IN VARCHAR2) IS 
+        
+        t_version_code          VARCHAR2(1);
+        t_pdi			        VARCHAR2(6);    -- not used
+        t_pd_type_code          VARCHAR2(1);    -- not used
+        t_edipi			        VARCHAR2(10);   
+        t_first_name            VARCHAR2(30);
+        t_surname               VARCHAR2(30);
+        t_dob_str		        VARCHAR2(4);
+        t_dob			        VARCHAR2(10);
+        t_personnel_cat_code    VARCHAR2(30);
+        t_branch_code           VARCHAR2(30);
+        t_pect                  VARCHAR2(30);
+        t_rank                  VARCHAR2(30);
+        t_pay_plan_code         VARCHAR2(30);
+        t_pay_plan_grade_code   VARCHAR2(30);
+        t_card_issue_dt_str     VARCHAR2(4);
+        t_card_issue_dt	        VARCHAR2(10);        
+        t_card_exp_dt_str	    VARCHAR2(4);
+        t_card_exp_dt		    VARCHAR2(10);        
+        t_card_inst_idt         VARCHAR2(30);
+        t_ascii                 VARCHAR2(30);
+        n_pos                   NUMBER;
+        error_print		        EXCEPTION;
+        
+        t_benefits_number       VARCHAR2(30); -- new added for M type, not assigned to out parameter.
+        t_middle_name           VARCHAR2(30); -- new added for M type, not assigned to out parameter.
+        t_unique_identifier     VARCHAR2(30); -- new added for M type, not assigned to out parameter.
+        t_country_of_citizenship    VARCHAR2(30); -- new added for M type, not assigned to out parameter.
+        
+        PROCEDURE handle_error IS
+        BEGIN
+            IF p_status != 'OK' then
+                RAISE error_print;
+            END IF;
+        END handle_error;
+    BEGIN
+        IF debug_ON THEN
+            DBMS_OUTPUT.PUT_LINE('********DEBUG MODE TURNED ON********');
+            DBMS_OUTPUT.PUT_LINE('String                ' || p_string);
+            DBMS_OUTPUT.PUT_LINE('Length                ' || LENGTH(p_string));
+        END IF;
+        
+        -- PARSE data tokens
+        n_pos := 1;
+        
+        t_version_code := substr(p_string, n_pos, 1);
+        n_pos := n_pos + 1;
+        
+        t_edipi := substr(p_string, n_pos, 7);
+        n_pos := n_pos + 7;
+        
+        t_benefits_number := substr(p_string, n_pos, 8);
+        n_pos := n_pos + 8;
+        
+        t_first_name := substr(p_string, n_pos, 20);
+        n_pos := n_pos + 20;
+        
+        t_middle_name := substr(p_string, n_pos, 1);
+        n_pos := n_pos + 1;
+        
+        t_surname := substr(p_string, n_pos, 26);
+        n_pos := n_pos + 26;
+        
+        t_dob_str := substr(p_string, n_pos, 4);
+        n_pos := n_pos + 4;
+        
+        t_country_of_citizenship := substr(p_string, n_pos, 3);
+        n_pos := n_pos + 3;        
+        
+        t_personnel_cat_code := substr(p_string, n_pos, 1);
+        n_pos := n_pos + 1;
+        
+        t_branch_code := substr(p_string, n_pos, 1);
+        n_pos := n_pos + 1;        
+        
+        t_pect := substr(p_string, n_pos, 2);
+        n_pos := n_pos + 2;
+        
+        t_rank := substr(p_string, n_pos, 6);
+        n_pos := n_pos + 6;
+        
+        t_pay_plan_code := substr(p_string, n_pos, 2);
+        n_pos := n_pos + 2;
+        
+        t_pay_plan_grade_code := substr(p_string, n_pos, 2);
+        n_pos := n_pos + 2;
+        
+        t_card_inst_idt := substr(p_string, n_pos, 1);
+        n_pos := n_pos + 1;
+        
+        t_card_issue_dt_str := substr(p_string, n_pos, 4);
+        n_pos := n_pos + 4;
+        
+        t_card_exp_dt_str := substr(p_string, n_pos, 4);
+        n_pos := n_pos + 4;
+        
+        t_unique_identifier := substr(p_string, n_pos, 6);
+        
+        -------------------
+        
+        -- SET OUTPUT PARAMETERS.
+        p_bar_code_ver_code := t_version_code;
+        
+        p_pdi := t_pdi; -- NOT USED;
+        
+        p_pd_type_code := t_pd_type_code; -- NOT USED
+        
+        CONVERT_BASE32_TO_ASCII(t_edipi, t_ascii, p_status);
+        handle_error;        
+        p_edipi := t_ascii;
+        
+        p_first_name := t_first_name;
+        
+        p_surname    := t_surname;
+        
+        CONVERT_BASE32_TO_ASCII(t_dob_str, t_ascii, p_status);
+        handle_error;
+        t_dob := t_ascii;
+        begin
+            select to_date('01-01-1000', 'MM-DD-YYYY') + to_number(t_dob) - 5
+              into p_dob
+              from dual;
+        end;        
+        
+        p_personnel_cat_code := t_personnel_cat_code;
+        
+        p_branch_code := t_branch_code;
+        
+        p_pect := t_pect;
+        
+        p_rank := t_rank;
+        
+        p_pay_plan_code := t_pay_plan_code;
+        
+        p_pay_plan_grade_code := t_pay_plan_grade_code;        
+        
+        CONVERT_BASE32_TO_ASCII(t_card_issue_dt_str, t_ascii, p_status);
+        handle_error;
+        t_card_issue_dt := t_ascii;     
+        begin
+            select to_date('01-01-1000', 'MM-DD-YYYY') + to_number(t_card_issue_dt) - 5
+              into p_card_issue_date
+              from dual;
+        end;
+        
+        CONVERT_BASE32_TO_ASCII(t_card_exp_dt_str, t_ascii, p_status);
+        handle_error;
+        t_card_exp_dt := t_ascii;
+        
+        begin
+          select to_date('01-01-1000', 'MM-DD-YYYY') + to_number(t_card_exp_dt) - 5
+            into p_card_exp_date
+            from dual;
+        end;        
+        
+        p_card_inst_idt := t_card_inst_idt;
+    EXCEPTION
+        WHEN error_print THEN
+            dbms_output.put_line(p_status);  
+    END ParseMType;
+
+  begin
+    p_status := 'OK';
+
+    if p_string is not null and length(p_string) in (88,89,90,99) then
+      p_bar_code_ver_code := substr(p_string, 1, 1);
+      
+      IF p_bar_code_ver_code = '1' THEN
+        Parse1Type(p_string);
+      ELSIF p_bar_code_ver_code = 'N' THEN
+        ParseNType(p_string);
+      ELSIF p_bar_code_ver_code = 'M' THEN
+        ParseMType(p_string);
+      END IF;
+    else
+        p_status := 'Error: Invalid String';
+    end if;
+    
+    IF debug_ON THEN
+        DBMS_OUTPUT.PUT_LINE('p_pdi                 ' || p_pdi);
+        DBMS_OUTPUT.PUT_LINE('p_pd_type_code        ' || p_pd_type_code);  
+        DBMS_OUTPUT.PUT_LINE('p_edipi               ' || p_edipi);
+        DBMS_OUTPUT.PUT_LINE('p_first_name          ' || p_first_name);
+        DBMS_OUTPUT.PUT_LINE('p_surname             ' || p_surname);
+        DBMS_OUTPUT.PUT_LINE('p_dob                 ' || TO_CHAR(p_dob,'MMDDYYYY'));  
+        DBMS_OUTPUT.PUT_LINE('p_personnel_cat_code  ' || p_personnel_cat_code);
+        DBMS_OUTPUT.PUT_LINE('p_branch_code         ' || p_branch_code);
+        DBMS_OUTPUT.PUT_LINE('p_pect                ' || p_pect);
+        DBMS_OUTPUT.PUT_LINE('p_rank                ' || p_rank); 
+        DBMS_OUTPUT.PUT_LINE('p_pay_plan_code       ' || p_pay_plan_code);  
+        DBMS_OUTPUT.PUT_LINE('p_pay_plan_grade_code ' || p_pay_plan_grade_code);
+        DBMS_OUTPUT.PUT_LINE('p_card_issue_date     ' || TO_CHAR(p_card_issue_date, 'MMDDYYYY'));
+        DBMS_OUTPUT.PUT_LINE('p_card_exp_date       ' || TO_CHAR(p_card_exp_date, 'MMDDYYYY'));
+        DBMS_OUTPUT.PUT_LINE('p_card_inst_idt       ' || p_card_inst_idt);
+        DBMS_OUTPUT.PUT_LINE('p_status              ' || p_status);
+        DBMS_OUTPUT.PUT_LINE('************************************');
+    END IF;
+  end EXTRACT_CAC_PDF417;
+
+  procedure EXTRACT_CAC_PDF417_OLD(p_string              in  varchar2,
+				 	 p_bar_code_ver_code   out varchar2,
+				 	 p_pdi                 out varchar2,
+        			 	 p_pd_type_code        out varchar2,
+				 	 p_edipi               out varchar2,
+				 	 p_first_name          out varchar2,
+				 	 p_surname             out varchar2,
+				 	 p_dob                 out date,
+				       p_personnel_cat_code  out varchar2,
+				       p_branch_code         out varchar2,
+				       p_pect                out varchar2,
+				       p_rank                out varchar2,
+				       p_pay_plan_code       out varchar2,
+				       p_pay_plan_grade_code out varchar2,
+				       p_card_issue_date     out date,
+				       p_card_exp_date       out date,
+				       p_card_inst_idt       out varchar2,
+                               p_status              out varchar2) is
+
+    t_pdi			varchar2(6);
+    t_ssn			varchar2(9);
+    t_edipi			varchar2(10);
+    t_dob_str		varchar2(4);
+    t_dob			varchar2(10);
+    t_card_issue_dt_str varchar2(4);
+    t_card_issue_dt	varchar2(10);
+    t_card_exp_dt_str	varchar2(4);
+    t_card_exp_dt		varchar2(10);
+    error_print		exception;
+
+  begin
+    p_status := 'OK';
+
+    if p_string is not null and length(p_string) in (88,89,90) then
+      p_bar_code_ver_code := substr(p_string, 1, 1);
+
+      t_pdi := substr(p_string, 2, 6);
+      CONVERT_BASE32_TO_ASCII(t_pdi, t_ssn, p_status);
+      p_pdi := t_ssn;
+
+      if p_status = 'OK' then
+        p_pd_type_code := substr(p_string, 8, 1);
+      else
+        raise error_print;
+      end if;
+
+      t_edipi := substr(p_string, 9, 7);
+      CONVERT_BASE32_TO_ASCII(t_edipi, p_edipi, p_status);
+
+      if p_status = 'OK' then
+        p_first_name := substr(p_string, 16, 20);
+        p_surname := substr(p_string, 36, 26);
+      else
+        raise error_print;
+      end if;
+
+      t_dob_str := substr(p_string, 62, 4);
+      CONVERT_BASE32_TO_ASCII(t_dob_str, t_dob, p_status);
+      begin
+        select to_date('01-01-1000', 'MM-DD-YYYY') + to_number(t_dob) - 5
+          into p_dob
+          from dual;
+      end;
+
+      if p_status = 'OK' then
+        p_personnel_cat_code := substr(p_string, 66, 1);
+        p_branch_code := substr(p_string, 67, 1);
+        p_pect := substr(p_string, 68, 2);
+        p_rank := substr(p_string, 70, 6);
+        p_pay_plan_code := substr(p_string, 76, 2);
+        p_pay_plan_grade_code := substr(p_string, 78, 2);
+      else
+        raise error_print;
+      end if;
+
+      t_card_issue_dt_str := substr(p_string, 80, 4);
+      CONVERT_BASE32_TO_ASCII(t_card_issue_dt_str, t_card_issue_dt, p_status);
+      begin
+        select to_date('01-01-1000', 'MM-DD-YYYY') + to_number(t_card_issue_dt) - 5
+          into p_card_issue_date
+          from dual;
+      end;
+
+      if p_status = 'OK' then
+        t_card_exp_dt_str := substr(p_string, 84, 4);
+        CONVERT_BASE32_TO_ASCII(t_card_exp_dt_str, t_card_exp_dt, p_status);
+        begin
+          select to_date('01-01-1000', 'MM-DD-YYYY') + to_number(t_card_exp_dt) - 5
+            into p_card_exp_date
+            from dual;
+        end;
+      else
+        raise error_print;
+      end if;
+
+      if p_status = 'OK' then
+        p_card_inst_idt := substr(p_string, 88, 1);
+      else
+        raise error_print;
+      end if;
+
+    else
+      p_status := 'Error: Invalid String';
+    end if; -- if p_string is not null then
+  exception
+    when error_print then
+      dbms_output.put_line(p_status);
+  end EXTRACT_CAC_PDF417_OLD;
+
+  procedure EXTRACT_CAC_CODE39(p_string              in  varchar2,
+				 	 p_ssn                 out varchar2,
+				 	 p_alt_id              out varchar2,
+                               p_status              out varchar2) is
+    t_ssn              varchar2(9);
+    t_alt_id           varchar2(15);
+  begin
+    p_status := 'OK';
+ 
+    CONVERT_BASE32_TO_ASCII(substr(p_string, 2, 6), t_ssn, p_status);
+    p_ssn := t_ssn;
+
+    if p_status = 'OK' then
+      CONVERT_BASE32_TO_ASCII(substr(p_string, 9, 7), t_alt_id, p_status);
+      p_alt_id := t_alt_id;
+    else
+      dbms_output.put_line(p_status);
+    end if;
+  end EXTRACT_CAC_CODE39;
+
+
+  procedure EXTRACT_AAMVA_PDF417(p_string			in  varchar2,
+				 p_ssn			out varchar2,
+                                 p_last_name		out varchar2,
+                                 p_first_name         out varchar2,
+                                 p_mid_name           out varchar2,
+                                 p_dob                out date,
+                                 p_sex                out varchar2,
+                                 p_height             out varchar2,
+                                 p_alt_id             out varchar2,
+                                 p_alias              out varchar2,
+                                 p_suffix             out varchar2,
+                                 p_ethnic_grp         out varchar2,
+                                 p_street             out varchar2,
+                                 p_apt_suite          out varchar2,
+                                 p_city               out varchar2,
+                                 p_state              out varchar2,
+                                 p_zip                out varchar2,
+                                 p_country            out varchar2,
+                                 p_status             out varchar2) is
+    t_string        varchar2(2000);
+    t_dob	    varchar2(8);
+    type idntfr_type is table of varchar2(3);
+
+    idntfrs idntfr_type := idntfr_type(
+   		   'DBA', 'DBB', 'DBC', 'DBD', 'DBG','DBK','DBM','DBN','DBO','DBP',
+                 'DAQ', 'DAA', 'DAB', 'DAC', 'DAD', 'DAE', 'DAG', 'DAH', 'DAI', 'DAJ', 'DAK', 'DAL', 'DAM', 'DAN', 'DAP', 'DAR', 'DAS', 'DAT', 'DAU', 'DAW', 'DAY', 'DAZ',
+                 'DCE', 'DCF', 'DCG', 'DCH', 'DCK', 'DCL', 'DCS', 'DCT', 'DCU',
+                 'DDB', 'DDE', 'DDF', 'DDG'
+                  );
+
+    procedure get_pos(id_in IN VARCHAR2, pos OUT NUMBER) is
+      nEndPos NUMBER;
+      nPos Number;
+      nStartPos NUMBER;
+    begin
+      nEndPos := -1;
+      nStartPos := instr(t_string, id_in, 1, 1);
+      for i in idntfrs.first .. idntfrs.last loop
+        if idntfrs(i) != id_in then
+	   nPos := instr(t_string, idntfrs(i), 1, 1);
+          if nPos <> 0 then
+            if nPos > nStartPos then
+               if nEndPos = -1 then
+                  nEndPos := nPos;
+               elsif npos < nEndPos then
+                  nEndPos := nPos;
+               end if;
+            end if;
+          end if;
+        end if;
+      end loop;
+   
+     if nEndPos = -1 then
+       --dbms_output.put_line('Element not found');
+       pos := nStartPos;
+     else
+       pos := nEndPos;
+       --dbms_output.put_line( 'Next element postion');
+     end if;
+   end get_pos;
+
+  begin
+    p_status := 'OK';
+
+    t_string := replace(p_string, chr(10), '');
+
+    ------1. Get SSN-------
+    select decode(instr(t_string,'DBK', 1, 1), 
+                  0, 
+                  decode(instr(t_string,'DBM', 1, 1), 
+                         0, 
+                         null,
+			       substr(t_string, (instr(t_string, 'DBM', 1, 1) + 3), 9)), 
+			substr(t_string, (instr(t_string, 'DBK', 1, 1) + 3), 9))
+      into p_ssn
+      from dual;
+
+    dbms_output.put_line('SSN ' || p_ssn);
+    -----------------------
+
+    /*
+    *********
+    -- 2. Date of Birth
+    *********
+    */
+    declare
+     l_temp VARCHAR2(2);
+    begin
+     select decode(instr(t_string, 'DBB', 1, 1),
+                  0, 
+			null,
+			substr(t_string, (instr(t_string, 'DBB', 1, 1) + 3), 8))
+      into t_dob
+      from dual;
+      
+      l_temp := SUBSTR(t_dob, 0, 2);
+      if l_temp >= 19 then -- first two letters are from year;
+        p_dob := to_date(t_dob, 'YYYYMMDD');
+        dbms_output.put_line('DOB - yyyymmdd ' || to_char(p_dob, 'yyyymmdd'));
+      else
+	 p_dob := to_date(t_dob, 'MMDDYYYY');
+        dbms_output.put_line('DOB - mmddyyyy ' || to_char(p_dob, 'mmddyyyy'));
+      end if;
+     exception
+        when others then
+         p_dob := null;
+     end;
+    ------------------------- 
+
+ 
+    /*
+    -- 3. Gender
+    */
+    declare
+      l_sex VARCHAR2(1);
+    begin
+       select decode(instr(t_string, 'DBC', 1, 1),
+                     0, null,
+			substr(t_string, (instr(t_string, 'DBC', 1, 1) + 3), 1)
+                    )
+         into l_sex
+         from dual;
+            
+       if l_sex = '1' then
+         p_sex := 'M';
+       elsif l_sex = '0' then
+         p_sex := 'F';
+       else
+         p_sex := null;
+       end if;
+
+        dbms_output.put_line('sex ' || p_sex);
+    end;
+
+    /*
+    -- 4.Alternate ID;
+    */
+   declare
+    ele_pos NUMBER;
+    next_pos NUMBER;
+   begin
+    ele_pos := instr(t_string, 'DAQ', 1, 1);
+    if ele_pos != 0 then
+       GET_POS('DAQ', next_pos);
+       p_alt_id := trim( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+    end if;
+     dbms_output.put_line('alt id ' || p_alt_id);
+   end;
+   
+
+   /*
+   -- Height not required for Find Donor's
+   -- Height
+   declare
+    ele_pos number;
+    next_pos number;
+   begin
+    ele_pos := instr(t_string, 'DAU', 1, 1);
+    if ele_pos != 0 then
+      get_pos('DAU', next_pos);      
+      p_height := trim (substr(t_string, ele_pos + 3, next_pos - (ele_pos + 3)) ) ;
+    end if;
+    dbms_output.put_line('height ' || p_height);
+   end;
+   */
+   
+    /*
+    -- 5.LAST NAME, FIRST NAME, MIDDLE NAME;
+    */
+
+  /**********
+  -- DAA - (LAST NAME, GIVEN NAMES) -- (LAST NAME, FIRST NAME , MIDDLE NAME)
+  -- DAB - LAST NAME
+  -- DAC - FIRST NAME
+  -- DAD - MIDDLE NAME
+  -- DCS - LAST NAME
+  -- DCT - FIRST NAME
+  ***********/
+  declare
+    ele_pos NUMBER;
+    next_pos NUMBER;
+    l_full_name VARCHAR2(100);
+    l_last_name VARCHAR2(100);
+    l_first_name VARCHAR2(100);
+    l_mid_name VARCHAR2(100);
+    npos1 NUMBER;
+    npos2 number;
+    npos3 NUMBER;
+  begin
+    -- Check 'DAA' (Format: last name, given names)
+    ele_pos := instr(t_string, 'DAA', 1, 1);
+    if ele_pos != '0' then
+      get_pos('DAA',next_pos);
+      l_full_name := trim( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+      npos1 := instr(l_full_name, ',', 1, 1);
+      if npos1 = 0 then
+         l_last_name := l_full_name;
+         l_first_name := null;
+         l_mid_name   := null;
+      else
+         l_last_name := substr(l_full_name, 0, npos1 -1);
+         npos2 := instr(l_full_name, ',', 1, 2);
+         if npos2 = 0 then
+            l_first_name := substr(l_full_name, npos1 + 1);
+            l_mid_name := null;
+         else
+            l_first_name := substr(l_full_name, npos1 + 1, npos2 - npos1 -1);
+            npos3 := instr(l_full_name, ',', 1, 3);
+            if npos3 = 0 then
+               l_mid_name := substr(l_full_name, npos2 + 1);
+            else
+                l_mid_name := substr(l_full_name, npos3 + 1);
+	     end if;
+          end if;
+       end if;
+    else
+      -- Check 'DAB' , 'DAC', 'DAD' (for lastname, firstname, middle name) 
+      -- Check for last name
+      --'DAB'
+      ele_pos := instr(t_string,'DAB',1,1);
+      if ele_pos != 0 then
+        get_pos('DAB', next_pos);
+        l_last_name := trim( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+      end if;
+      
+      -- 'DCS'
+      if l_last_name is null then
+        ele_pos := instr(t_string,'DCS',1,1);
+        if ele_pos != 0 then
+          get_pos('DCS', next_pos);
+          l_last_name := trim( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+        end if;
+      end if;
+      
+      -- Check for first name;
+      --'DAC'
+      ele_pos := instr(t_string,'DAC',1,1);
+      if ele_pos != 0 then
+        get_pos('DAC', next_pos);
+        l_first_name := trim( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+      end if;  
+     
+      -- 'DCT'
+      if l_first_name is null then
+        ele_pos := instr(t_string,'DCT',1,1);
+        if ele_pos != 0 then
+          get_pos('DCT', next_pos);
+          l_first_name := trim( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );     
+        end if;
+      end if;
+
+      -- Check for middle name;
+      -- 'DAD'
+      ele_pos := instr(t_string,'DAD',1,1);
+      if ele_pos != 0 then
+        get_pos('DAD', next_pos);
+        l_mid_name := trim( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+      end if;
+    end if;
+    
+    p_last_name  := l_last_name;
+    p_first_name := l_first_name;
+    p_mid_name   := l_mid_name;
+    dbms_output.put_line(' FULL NAME -new ' || l_full_name);
+    dbms_output.put_line(' LAST NAME -new ' || l_last_name);
+    dbms_output.put_line(' FRST NAME -new ' || l_first_name);
+    dbms_output.put_line(' MDDL NAME -new ' || l_mid_name);
+
+  end;
+
+-- Not required for find donor's block
+/*
+-- Alias 
+  select decode(instr(t_string, 'DBO', 1, 1),
+                  0, 
+			decode(instr(t_string, 'DBN', 1, 1),
+                         0, 
+			       null,
+			       substr(t_string, (instr(t_string, 'DBN', 1, 1) + 3), 
+                                (instr(t_string,  '%', (instr(t_string, 'DBN', 1, 1) + 3), 1)) -
+			              (instr(t_string, 'DBN', 1, 1) + 3))),
+			substr(t_string, (instr(t_string, 'DBO', 1, 1) + 3), 
+                         (instr(t_string,  '%', (instr(t_string, 'DBO', 1, 1) + 3), 1)) -
+			       (instr(t_string, 'DBO', 1, 1) + 3))) || ' ' ||
+	     decode(instr(t_string, 'DBP', 1, 1),
+                  0, 
+			decode(instr(t_string, 'DBG', 1, 1),
+                         0, 
+			       null,
+			       substr(t_string, (instr(t_string, 'DBG', 1, 1) + 3), 
+                                (instr(t_string,  '%', (instr(t_string, 'DBG', 1, 1) + 3), 1)) -
+			              (instr(t_string, 'DBG', 1, 1) + 3))),
+			substr(t_string, (instr(t_string, 'DBP', 1, 1) + 3), 
+                         (instr(t_string,  '%', (instr(t_string, 'DBP', 1, 1) + 3), 1)) -
+			       (instr(t_string, 'DBP', 1, 1) + 3)))
+      into p_alias
+      from dual;
+    dbms_output.put_line(' alias ' || p_alias);
+*/
+
+-- Not required for Find Donor's Block
+/*  
+  -- Suffix;  
+  declare
+    ele_pos NUMBER;
+    next_pos 	NUMBER;
+  begin
+   ele_pos := instr(t_string,'DCU', 1, 1);
+   if ele_pos != 0 then
+     GET_POS('DCU', next_pos);
+     p_suffix := trim ( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+   else
+     ele_pos := instr(t_string, 'DAE', 1, 1);
+     if ele_pos != 0 then
+       GET_POS('DCU', next_pos);
+       p_suffix := trim ( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+     else
+       p_suffix := null;
+     end if;
+   end if;
+  dbms_output.put_line('Suffix ' || p_suffix);
+  end;
+*/
+
+  -- Not required for Find Donor's Block
+  /*
+  -- Ethnic Group;  
+  declare
+    ele_pos NUMBER;
+    next_pos 	NUMBER;
+  begin
+   ele_pos := instr(t_string,'DCL', 1, 1);
+   if ele_pos != 0 then
+     GET_POS('DCL', next_pos);
+     p_ethnic_grp := trim ( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+   end if;
+  end;
+  dbms_output.put_line('Eth Grp ' || p_ethnic_grp);
+*/
+
+  -- Not Required for Find Donor's Block;
+  /*
+  -- Street;  
+  declare
+    ele_pos NUMBER;
+    next_pos 	NUMBER;
+  begin
+   ele_pos := instr(t_string,'DAG', 1, 1);
+   if ele_pos != 0 then
+     GET_POS('DAG', next_pos);
+     p_street := trim ( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+   else
+     ele_pos := instr(t_string, 'DAL', 1, 1);
+     if ele_pos != 0 then
+       GET_POS('DAL', next_pos);
+       p_street := trim ( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+     else
+       p_street := null;
+     end if;
+   end if;
+  dbms_output.put_line('Street ' || p_street);
+  end;
+ */
+
+  -- Not Required for Find Donor's Block;
+  /*
+  -- Apt Suite;
+  declare
+    ele_pos NUMBER;
+    next_pos 	NUMBER;
+  begin
+   ele_pos := instr(t_string,'DAH', 1, 1);
+   if ele_pos != 0 then
+     GET_POS('DAH', next_pos);
+     p_apt_suite := trim ( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+   else
+     ele_pos := instr(t_string, 'DAM', 1, 1);
+     if ele_pos != 0 then
+       GET_POS('DAM', next_pos);
+       p_apt_suite := trim ( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+     else
+       p_apt_suite := null;
+     end if;
+   end if;
+  dbms_output.put_line('Apt Suite ' || p_apt_suite);
+  end;
+  */
+
+ -- Not required for Find Donor's Block
+  /*
+  -- City;  
+  declare
+    ele_pos NUMBER;
+    next_pos 	NUMBER;
+  begin
+   ele_pos := instr(t_string,'DAI', 1, 1);
+   if ele_pos != 0 then
+     GET_POS('DAI', next_pos);
+     p_city := trim ( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+   else
+     ele_pos := instr(t_string, 'DAN', 1, 1);
+     if ele_pos != 0 then
+       GET_POS('DAN', next_pos);
+       p_city := trim ( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+     else
+       p_city := null;
+     end if;
+   end if;
+  end;
+  dbms_output.put_line('City ' || p_city);
+   */
+   
+  -- Not Required for Find Donor's Block
+  /*
+  -- State;
+
+  declare
+    ele_pos NUMBER;
+    next_pos 	NUMBER;
+  begin
+   ele_pos := instr(t_string,'DAJ', 1, 1);
+   if ele_pos != 0 then
+     GET_POS('DAJ', next_pos);
+     p_state := trim ( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+   end if;
+  end;
+  dbms_output.put_line('State ' || p_state);
+ */
+
+  -- Not required for Find Donor's Block
+  /*
+  -- Zip;
+  declare
+    ele_pos NUMBER;
+    next_pos 	NUMBER;
+  begin
+   ele_pos := instr(t_string,'DAK', 1, 1);
+   if ele_pos != 0 then
+     GET_POS('DAK', next_pos);
+     p_zip := trim ( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+   else
+     ele_pos := instr(t_string, 'DAP', 1, 1);
+     if ele_pos != 0 then
+       GET_POS('DAP', next_pos);
+       p_zip := trim ( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+     else
+       p_zip := null;
+     end if;
+   end if;
+  end;
+  dbms_output.put_line('Zip ' || p_zip);
+ */
+
+  -- Not required for Find Donor's block;
+  /*
+  -- Country;
+  declare
+    ele_pos NUMBER;
+    next_pos 	NUMBER;
+  begin
+   ele_pos := instr(t_string,'DCG', 1, 1);
+   if ele_pos != 0 then
+     GET_POS('DCG', next_pos);
+     p_country := trim ( substr(t_string, ele_pos + 3, next_pos - (ele_pos +3)) );
+   end if;
+  end;
+  dbms_output.put_line('Country ' || p_country);
+  */
+
+ -- OLD Code commented
+ /*
+  select decode(instr(t_string,'DAA', 1, 1), 
+                  0, 
+                  decode(instr(t_string,'DAB', 1, 1), 
+                         0, 
+                         decode(instr(t_string,'DCS', 1, 1), 
+                                0, null, 
+			              substr(t_string, 
+			                     (instr(t_string, 'DCS', 1, 1) + 3), 
+					         (instr(t_string, '%', (instr(t_string, 'DCS', 1, 1) + 3), 1) - 1) - 
+                                                             (instr(t_string, 'DCS', 1, 1) + 3) + 1)), 
+			       substr(t_string, 
+			              (instr(t_string, 'DAB', 1, 1) + 3), 
+					  (instr(t_string, '%', (instr(t_string, 'DAB', 1, 1) + 3), 1) - 1) - 
+                                                      (instr(t_string, 'DAB', 1, 1) + 3) + 1)), 
+			substr(t_string, 
+			       (instr(t_string, 'DAA', 1, 1) + 3), 
+			       (instr(t_string, ',', (instr(t_string, 'DAA', 1, 1) + 3), 1) - 1) - 
+                                               (instr(t_string, 'DAA', 1, 1) + 3) + 1))
+      into p_last_name
+      from dual;
+
+    select decode(instr(t_string, 'DAA', 1, 1),
+                  0, 
+                  decode(instr(t_string, 'DAC', 1, 1),
+                         0, 
+                         decode(instr(t_string, 'DCT', 1, 1),
+                                0, null, 
+			              substr(t_string, (instr(t_string, 'DCT', 1, 1) + 3), 
+                                       (instr(t_string,  '%', (instr(t_string, 'DCT', 1, 1) + 3), 1)) -
+			                     (instr(t_string, 'DCT', 1, 1) + 3))), 
+			       substr(t_string, (instr(t_string, 'DAC', 1, 1) + 3), 
+                                (instr(t_string,  '%', (instr(t_string, 'DAC', 1, 1) + 3), 1)) -
+			              (instr(t_string, 'DAC', 1, 1) + 3))), 
+			substr(t_string, (instr(t_string,  ',', (instr(t_string, 'DAA', 1, 1) + 3), 1) + 1), 
+			       (instr(t_string,  ',', (instr(t_string, 'DAA', 1, 1) + 3), 2) - 1) - 
+				 (instr(t_string,  ',', (instr(t_string, 'DAA', 1, 1) + 3), 1))))
+      into p_first_name
+      from dual;
+
+    dbms_output.put_line('FIRST NAME ' || p_first_name);
+
+
+    select decode(instr(t_string, 'DAA', 1, 1),
+                  0, 
+			decode(instr(t_string, 'DAD', 1, 1),
+                         0, null,
+			       substr(t_string, (instr(t_string, 'DAD', 1, 1) + 3), 
+                                (instr(t_string,  '%', (instr(t_string, 'DAD', 1, 1) + 3), 1)) -
+			              (instr(t_string, 'DAD', 1, 1) + 3))),
+			substr(t_string, (instr(t_string,  ',', (instr(t_string, 'DAA', 1, 1) + 3), 2) + 1), 
+                         (instr(t_string,  ',', (instr(t_string, 'DAA', 1, 1) + 3), 3)) -
+			       (instr(t_string,  ',', (instr(t_string, 'DAA', 1, 1) + 3), 2) + 1)))
+      into p_mid_name
+      from dual;
+
+       dbms_output.put_line(' Mid name ' || p_mid_name);
+    
+    select decode(instr(t_string, 'DCU', 1, 1),
+                  0, 
+			decode(instr(t_string, 'DAE', 1, 1),
+                         0, null,
+			       substr(t_string, (instr(t_string, 'DAE', 1, 1) + 3), 
+                                (instr(t_string,  '%', (instr(t_string, 'DAE', 1, 1) + 3), 1)) -
+			              (instr(t_string, 'DAE', 1, 1) + 3))),
+			substr(t_string, (instr(t_string, 'DCU', 1, 1) + 3), 
+                         (instr(t_string,  '%', (instr(t_string, 'DCU', 1, 1) + 3), 1)) -
+			       (instr(t_string, 'DCU', 1, 1) + 3)))
+      into p_suffix
+      from dual;
+    dbms_output.put_line(' suffix ' || p_suffix);
+
+    select decode(instr(t_string, 'DCL', 1, 1),
+                  0, 
+			null,
+			substr(t_string, (instr(t_string, 'DCL', 1, 1) + 3), 
+                         (instr(t_string,  '%', (instr(t_string, 'DCL', 1, 1) + 3), 1)) -
+			       (instr(t_string, 'DCL', 1, 1) + 3)))
+      into p_ethnic_grp
+      from dual;
+   dbms_output.put_line('ethnic ' || p_ethnic_grp);
+
+    select decode(instr(t_string, 'DAG', 1, 1),
+                  0, 
+			decode(instr(t_string, 'DAL', 1, 1),
+                         0, null,
+			       substr(t_string, (instr(t_string, 'DAL', 1, 1) + 3), 
+                                (instr(t_string,  '%', (instr(t_string, 'DAL', 1, 1) + 3), 1)) -
+			              (instr(t_string, 'DAL', 1, 1) + 3))),
+			substr(t_string, (instr(t_string, 'DAG', 1, 1) + 3), 
+                         (instr(t_string,  '%', (instr(t_string, 'DAG', 1, 1) + 3), 1)) -
+			       (instr(t_string, 'DAG', 1, 1) + 3)))
+      into p_street
+      from dual;
+    dbms_output.put_line('STREET ' || p_street);
+
+    select decode(instr(t_string, 'DAH', 1, 1),
+                  0, 
+			decode(instr(t_string, 'DAM', 1, 1),
+                         0, null,
+			       substr(t_string, (instr(t_string, 'DAM', 1, 1) + 3), 
+                                (instr(t_string,  '%', (instr(t_string, 'DAM', 1, 1) + 3), 1)) -
+			              (instr(t_string, 'DAM', 1, 1) + 3))),
+			substr(t_string, (instr(t_string, 'DAH', 1, 1) + 3), 
+                         (instr(t_string,  '%', (instr(t_string, 'DAH', 1, 1) + 3), 1)) -
+			       (instr(t_string, 'DAH', 1, 1) + 3)))
+      into p_apt_suite
+      from dual;
+    dbms_output.put_line('Apt Suite ' || p_apt_suite);
+    select decode(instr(t_string, 'DAI', 1, 1),
+                  0, 
+			decode(instr(t_string, 'DAN', 1, 1),
+                         0, null,
+			       substr(t_string, (instr(t_string, 'DAN', 1, 1) + 3), 
+                                (instr(t_string,  '%', (instr(t_string, 'DAN', 1, 1) + 3), 1)) -
+			              (instr(t_string, 'DAN', 1, 1) + 3))),
+			substr(t_string, (instr(t_string, 'DAI', 1, 1) + 3), 
+                         (instr(t_string,  '%', (instr(t_string, 'DAI', 1, 1) + 3), 1)) -
+			       (instr(t_string, 'DAI', 1, 1) + 3)))
+      into p_city
+      from dual;
+    dbms_output.put_line('CITY ' || p_city);
+
+    select decode(instr(t_string, 'DAJ', 1, 1),
+                  0, 
+			null,
+			substr(t_string, (instr(t_string, 'DAJ', 1, 1) + 3), 
+                         (instr(t_string,  '%', (instr(t_string, 'DAJ', 1, 1) + 3), 1)) -
+			       (instr(t_string, 'DAJ', 1, 1) + 3)))
+      into p_state
+      from dual;
+    dbms_output.put_line('state ' || p_state);
+    select decode(instr(t_string, 'DAK', 1, 1),
+                  0, 
+			decode(instr(t_string, 'DAP', 1, 1),
+                         0, null,
+			       substr(t_string, (instr(t_string, 'DAP', 1, 1) + 3), 
+                                (instr(t_string,  '%', (instr(t_string, 'DAP', 1, 1) + 3), 1)) -
+			              (instr(t_string, 'DAP', 1, 1) + 3))),
+			substr(t_string, (instr(t_string, 'DAK', 1, 1) + 3), 
+                         (instr(t_string,  '%', (instr(t_string, 'DAK', 1, 1) + 3), 1)) -
+			       (instr(t_string, 'DAK', 1, 1) + 3)))
+      into p_zip
+      from dual;
+    dbms_output.put_line('ZIP ' || p_zip);
+    select decode(instr(t_string, 'DCG', 1, 1),
+                  0, 
+			null,
+			substr(t_string, (instr(t_string, 'DCG', 1, 1) + 3), 
+                         (instr(t_string,  '%', (instr(t_string, 'DCG', 1, 1) + 3), 1)) -
+			       (instr(t_string, 'DCG', 1, 1) + 3)))
+      into p_country
+      from dual;
+    dbms_output.put_line('Country ' || p_country);
+ */
+ end EXTRACT_AAMVA_PDF417;
+
+
+  procedure EXTRACT_CREDIT_CARD is
+  begin
+    null;
+  end EXTRACT_CREDIT_CARD;
+
+
+  procedure EXTRACT_AAMVA_MAG_STRIPE is
+  begin
+    null;
+  end EXTRACT_AAMVA_MAG_STRIPE;
+
+
+  procedure DETERMINE_STR_TYPE(p_string          in  varchar2,
+                               p_string_type	 out varchar2,
+                               p_status          out varchar2) is
+    t_str_type              varchar2(20);
+    t_status                varchar2(200);
+  begin
+    p_status := 'OK';
+
+    if length(p_string) > 1 then
+      if length(p_string) in (88,89,90,99) and 
+         substr(p_string, 1, 1) not in ('@', '%') then
+        t_str_type := 'CAC_PDF417';
+      elsif length(p_string) = 18 and 
+            substr(p_string, 1, 1) not in ('@', '%') then
+        t_str_type := 'CAC_CODE39';
+      elsif substr(p_string, 1, 1) = '@' then
+        t_str_type := 'AAMVA_PDF417';
+      elsif substr(p_string, 1, 1) = '%' then
+        if substr(p_string, 2, 1) = 'B' then
+          t_str_type := 'CREDIT_CARD';
+        else
+          t_str_type := 'AAMVA_MAG_STRIPE';
+        end if;
+      end if;
+    else
+      p_status := 'Error: Invalid String';
+    end if;
+    
+    p_string_type := t_str_type;
+  end DETERMINE_STR_TYPE;
+
+
+  procedure EXTRACT_DONOR_DATA(p_string          in  varchar2,
+                               p_string_type     out varchar2,
+                               p_last_name       out varchar2,
+                               p_first_name      out varchar2,
+                               p_dob             out date,
+                               p_ssn             out varchar2,
+                               p_sex             out varchar2,
+                               p_alt_id          out varchar2,
+                               p_alt_type        out varchar2,
+                               p_addr1           out varchar2,
+                               p_addr2           out varchar2,
+                               p_addr3           out varchar2,
+                               p_city            out varchar2,
+                               p_state           out varchar2,
+                               p_zip             out varchar2,
+                               p_country         out varchar2,
+                               p_status          out varchar2) is
+    t_bar_code_ver_code     varchar2(1);
+    t_pdi                   varchar2(9);
+    t_pd_type_code          varchar2(1);
+    t_edipi                 varchar2(10);
+    t_first_name            varchar2(20);
+    t_surname               varchar2(26);
+    t_dob                   date;
+    t_personnel_cat_code    varchar2(1);
+    t_branch_code           varchar2(1);
+    t_pect                  varchar2(2);
+    t_rank                  varchar2(6);
+    t_pay_plan_code         varchar2(2);
+    t_pay_plan_grade_code   varchar2(2);
+    t_card_issue_date       date;
+    t_card_exp_date         date;
+    t_card_inst_idt         varchar2(1);
+    t_str_type		    varchar2(20);
+    t_ssn                   varchar2(9);
+    t_alt_id                varchar2(15);
+    t_ssn_aamva             varchar2(9);
+    t_last_name             varchar2(50);
+    t_first_name_aamva      varchar2(50);
+    t_mid_name              varchar2(30);
+    t_dob_aamva             date;
+    t_sex                   varchar2(1);
+    t_height                varchar2(10);
+    t_alt_id_aamva          varchar2(30);
+    t_alias                 varchar2(70);
+    t_suffix                varchar2(50);
+    t_ethnic_grp            varchar2(50);
+    t_street                varchar2(100);
+    t_apt_suite             varchar2(50);
+    t_city                  varchar2(50);
+    t_state                 varchar2(2);
+    t_zip                   varchar2(20);
+    t_country               varchar2(70);
+    t_status                varchar2(200);
+  begin
+    DETERMINE_STR_TYPE(p_string, t_str_type, t_status);
+    p_string_type := t_str_type;
+    p_last_name := null;
+    p_first_name := null;
+    p_dob := null;
+    p_ssn := null;
+    p_sex := null;
+    p_alt_id := null;
+    p_alt_type := null;
+    p_addr1 := null;
+    p_addr2 := null;
+    p_addr3 := null;
+    p_city := null;
+    p_state := null;
+    p_zip := null;
+    p_country := null;
+
+    if t_status = 'OK' then
+      if t_str_type = 'CAC_PDF417' then
+        extract_cac_pdf417(p_string,
+                           t_bar_code_ver_code,
+				   t_pdi,
+        			   t_pd_type_code,
+				   t_edipi,
+				   t_first_name,
+				   t_surname,
+				   t_dob,
+				   t_personnel_cat_code,
+				   t_branch_code,
+				   t_pect,
+				   t_rank,
+				   t_pay_plan_code,
+				   t_pay_plan_grade_code,
+				   t_card_issue_date,
+				   t_card_exp_date,
+				   t_card_inst_idt,
+                           t_status);
+
+        p_last_name := t_surname;
+        p_first_name := t_first_name;
+        p_dob := t_dob;
+        p_ssn := t_pdi;
+        p_alt_id := t_edipi;
+        p_status := t_status;
+
+        /*dbms_output.put_line('Bar Code Version Code: ' || t_bar_code_ver_code);
+        dbms_output.put_line('PDI: ' || t_pdi);
+        dbms_output.put_line('PD Type COde: ' || t_pd_type_code);
+        dbms_output.put_line('EDIPI: ' || t_edipi);
+        dbms_output.put_line('First Name: ' || t_first_name);
+        dbms_output.put_line('Surname: ' || t_surname);
+        dbms_output.put_line('Date of Birth: ' || to_char(t_dob, 'MM-DD-YYYY'));
+        dbms_output.put_line('Personnel Cat Code: ' || t_personnel_cat_code);
+        dbms_output.put_line('Branch Code: ' || t_branch_code);
+        dbms_output.put_line('PECT: ' || t_pect);
+        dbms_output.put_line('Rank: ' || t_rank);
+        dbms_output.put_line('Pay Plan Code: ' || t_pay_plan_code);
+        dbms_output.put_line('Pay Plan Grade Code: ' || t_pay_plan_grade_code);
+        dbms_output.put_line('Card Issue Date: ' || to_char(t_card_issue_date, 'MM-DD-YYYY'));
+        dbms_output.put_line('Card Exp Date: ' || to_char(t_card_exp_date, 'MM-DD-YYYY'));
+        dbms_output.put_line('Card Inst Identifier: ' || t_card_inst_idt);*/
+      elsif t_str_type = 'CAC_CODE39' then
+        extract_cac_code39(p_string,
+				   t_ssn,
+				   t_alt_id,
+                           t_status);
+
+        p_ssn := t_ssn;
+        p_alt_id := t_alt_id;
+        p_status := t_status;
+
+        /*dbms_output.put_line('SSN: ' || t_ssn);
+        dbms_output.put_line('Alt ID: ' || t_alt_id);*/
+      elsif t_str_type = 'AAMVA_PDF417' then
+        extract_aamva_pdf417(p_string,
+				     t_ssn_aamva,
+                             t_last_name,
+                             t_first_name_aamva,
+                             t_mid_name,
+                             t_dob_aamva,
+                             t_sex,
+                             t_height,
+                             t_alt_id_aamva,
+                             t_alias,
+                             t_suffix,
+                             t_ethnic_grp,
+                             t_street,
+                             t_apt_suite,
+                             t_city,
+                             t_state,
+                             t_zip,
+                             t_country,
+                             t_status);
+
+        p_last_name := t_last_name;
+        p_first_name := t_first_name_aamva;
+        p_dob := t_dob_aamva;
+        p_ssn := t_ssn_aamva;
+        p_sex := t_sex;
+        p_alt_id := t_alt_id_aamva;
+        p_addr1 := t_street;
+        p_city := t_city;
+        p_state := t_state;
+        p_zip := t_zip;
+        p_country := t_country;
+        p_status := t_status;
+
+        dbms_output.put_line('SSN: ' || t_ssn_aamva);
+        dbms_output.put_line('Last Name: ' || t_last_name);
+        dbms_output.put_line('First Name: ' || t_first_name_aamva);
+        dbms_output.put_line('Mid Name: ' || t_mid_name);
+        dbms_output.put_line('Date of Birth: ' || to_char(t_dob_aamva, 'MM-DD-YYYY'));
+        dbms_output.put_line('Sex: ' || t_sex);
+        dbms_output.put_line('Height: ' || t_height);
+        dbms_output.put_line('Alt ID: ' || t_alt_id_aamva);
+        dbms_output.put_line('Alias: ' || t_alias);
+        dbms_output.put_line('Suffix: ' || t_suffix);
+        dbms_output.put_line('Ethnic Group: ' || t_ethnic_grp);
+        dbms_output.put_line('Street: ' || t_street);
+        dbms_output.put_line('Apt / Suite: ' || t_apt_suite);
+        dbms_output.put_line('City: ' || t_city);
+        dbms_output.put_line('State: ' || t_state);
+        dbms_output.put_line('Zip: ' || t_zip);
+        dbms_output.put_line('Country: ' || t_country);
+      elsif t_str_type = 'AAMVA_MAG_STRIPE' then
+        extract_aamva_mag_stripe;
+      else
+        extract_credit_card;
+      end if;
+    else
+      p_status := t_status;
+      dbms_output.put_line(p_status);
+    end if;
+  exception
+    when others then
+      p_status := substr(sqlerrm, 1, 100);
+      dbms_output.put_line(p_status);
+
+  end EXTRACT_DONOR_DATA;
+
+end DOD_DONOR_INFO;
+
+/
+create or replace public synonym DOD_DONOR_INFO for DOD_DONOR_INFO
+/
+grant execute on DOD_DONOR_INFO to LT_DONOR,UTIL 
+/

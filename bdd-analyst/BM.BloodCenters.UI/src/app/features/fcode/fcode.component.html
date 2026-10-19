@@ -1,0 +1,218 @@
+<!-- Layout Wrapper for Side Panel Management -->
+<div class="layout-wrapper" [class.side-panel-active]="sidePanelOpen()">
+
+  <!-- Main Content Area -->
+  <main class="fcode main-content"
+        aria-label="Enter Master Service Codes content"
+        role="main">
+
+    <!-- Page Header with Breadcrumb -->
+    <app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+    <!-- Table Card Container -->
+    <div class="fcode__card" #tableCard>
+
+      <!-- Controls: Filter button + Chips (left) + Search (right) -->
+      <div class="fcode__controls">
+        <div class="fcode__controls-left">
+          <button
+            mat-button
+            type="button"
+            class="filter-button"
+            #filterButton
+            [class.filter-button--active]="hasActiveFilters || showFilterPanel"
+            aria-label="Open filter options"
+            (click)="onOpenFilterPanel()">
+            <span class="filter-icon" aria-hidden="true"></span>
+            FILTER
+          </button>
+
+          @if (hasActiveFilters) {
+            <app-filter-chips
+              [chips]="filterChips"
+              [maxVisible]="3"
+              (removeChip)="onRemoveFilterChip($event)"
+              (clearAll)="onClearFilters()">
+            </app-filter-chips>
+          }
+        </div>
+
+        <app-search-bar
+          [config]="searchBarConfig"
+          (search)="onSearch($event)" />
+      </div>
+
+      <!-- Error State -->
+      @if (hasError() && !loading()) {
+        <div class="fcode__error" role="alert" aria-live="assertive">
+          <mat-icon class="error-icon" aria-hidden="true">error_outline</mat-icon>
+          <p class="error-message">{{ error() }}</p>
+          <button type="button" mat-raised-button color="primary" (click)="onRetry()">
+            Retry
+          </button>
+        </div>
+      }
+
+      <!-- Table Wrapper -->
+      @if (!hasError()) {
+        <div class="fcode__table-wrapper">
+          <div class="fcode__table-scroll">
+          <table class="fcode-table" aria-label="Master service codes table">
+            <thead>
+              <tr>
+                <th><span class="header-text">Code</span></th>
+                <th><span class="header-text">Description</span></th>
+                <th><span class="header-text">Effective Date</span></th>
+                <th><span class="header-text">Termination Date</span></th>
+                <th class="actions-column"></th>
+              </tr>
+            </thead>
+
+            @if (loading()) {
+              <tbody>
+                <tr>
+                  <td colspan="5" class="loading-cell">
+                    <div class="loading-spinner">
+                      <mat-spinner diameter="48"></mat-spinner>
+                      <p class="loading-text">Loading data...</p>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            } @else if (isEmpty()) {
+              <tbody>
+                <tr>
+                  <td colspan="5" class="no-data-cell">
+                    <p>No master service codes found</p>
+                  </td>
+                </tr>
+              </tbody>
+            } @else {
+              <tbody>
+                @for (row of data(); track row.billingCode) {
+                  <tr class="main-row" [class.main-row--editing]="row.billingCode === editingRow()">
+                    <td>{{ row.billingCode }}</td>
+                    <td>{{ row.codeDesc }}</td>
+                    <td>{{ formatDate(row.effDate) }}</td>
+                    <td>{{ formatDate(row.termDate) }}</td>
+                    <td class="actions-cell">
+                      <button
+                        type="button"
+                        class="action-btn"
+                        [attr.aria-label]="'Edit master service code ' + row.billingCode"
+                        (click)="onEdit(row)">
+                        <mat-icon>edit</mat-icon>
+                      </button>
+                    </td>
+                  </tr>
+                }
+              </tbody>
+            }
+          </table>
+          </div>
+
+          <!-- Pagination — pinned at bottom, outside scroll area -->
+          @if (totalRecords() > 0) {
+            <nav class="data-table__pagination" aria-label="Table pagination navigation">
+              <mat-paginator
+                [length]="totalRecords()"
+                [pageSize]="pageSize()"
+                [pageIndex]="pageIndex()"
+                [pageSizeOptions]="pageSizeOptions"
+                [showFirstLastButtons]="true"
+                (page)="onPageChange($event)">
+              </mat-paginator>
+            </nav>
+          }
+        </div>
+      }
+
+    </div>
+
+    <!-- Filter Panel Overlay -->
+    @if (showFilterPanel) {
+      <div class="filter-panel-overlay">
+        <div class="filter-panel-wrapper"
+             [style.top.px]="filterPanelTop"
+             [style.left.px]="filterPanelLeft">
+          <app-filter-panel-base
+            title="Filters"
+            [width]="350"
+            [maxContentHeight]="360"
+            [applyDisabled]="!filterCanApply()"
+            [clearDisabled]="!filterHasValues()"
+            (apply)="onApplyFilters()"
+            (clear)="onClearFilterPanel()"
+            (close)="onCloseFilterPanel()">
+
+            <form [formGroup]="filterPanelForm">
+              <div class="filter-panel__date-group">
+                <div class="filter-panel__date-row">
+                  <mat-form-field appearance="fill" class="filter-panel__period-field">
+                    <mat-label>Period</mat-label>
+                    <mat-select formControlName="effectiveDatePeriod">
+                      @for (option of periodOptions; track option) {
+                        <mat-option [value]="option">{{ option }}</mat-option>
+                      }
+                    </mat-select>
+                    <mat-error>Period is required</mat-error>
+                  </mat-form-field>
+                  <mat-form-field appearance="fill" class="filter-panel__date-field">
+                    <mat-label>Effective Date</mat-label>
+                    <input matInput [matDatepicker]="effPicker" formControlName="effectiveDate" placeholder="DD-MMM-YYYY"
+                           (keydown)="onFilterDateKeyPress($event)"
+                           (input)="onFilterEffectiveDateInput($event)">
+                    <mat-datepicker-toggle matSuffix [for]="effPicker"></mat-datepicker-toggle>
+                    <mat-datepicker #effPicker></mat-datepicker>
+                    @if (getFilterEffectiveDateError()) {
+                      <mat-error>{{ getFilterEffectiveDateError() }}</mat-error>
+                    }
+                  </mat-form-field>
+                </div>
+              </div>
+
+              <div class="filter-panel__date-group">
+                <div class="filter-panel__date-row">
+                  <mat-form-field appearance="fill" class="filter-panel__period-field">
+                    <mat-label>Period</mat-label>
+                    <mat-select formControlName="terminationDatePeriod">
+                      @for (option of periodOptions; track option) {
+                        <mat-option [value]="option">{{ option }}</mat-option>
+                      }
+                    </mat-select>
+                    <mat-error>Period is required</mat-error>
+                  </mat-form-field>
+                  <mat-form-field appearance="fill" class="filter-panel__date-field">
+                    <mat-label>Termination Date</mat-label>
+                    <input matInput [matDatepicker]="termPicker" formControlName="terminationDate" placeholder="DD-MMM-YYYY"
+                           (keydown)="onFilterDateKeyPress($event)"
+                           (input)="onFilterTerminationDateInput($event)">
+                    <mat-datepicker-toggle matSuffix [for]="termPicker"></mat-datepicker-toggle>
+                    <mat-datepicker #termPicker></mat-datepicker>
+                    @if (getFilterTerminationDateError()) {
+                      <mat-error>{{ getFilterTerminationDateError() }}</mat-error>
+                    }
+                  </mat-form-field>
+                </div>
+              </div>
+            </form>
+
+          </app-filter-panel-base>
+        </div>
+      </div>
+    }
+
+  </main>
+
+  <!-- Side Panel Container -->
+  @if (sidePanelOpen()) {
+    <div class="side-panel-container">
+      <app-fcode-form-dialog
+        [mode]="sidePanelRecord() ? 'edit' : 'add'"
+        [data]="sidePanelRecord()"
+        (panelClosed)="onPanelClosed($event)">
+      </app-fcode-form-dialog>
+    </div>
+  }
+
+</div>

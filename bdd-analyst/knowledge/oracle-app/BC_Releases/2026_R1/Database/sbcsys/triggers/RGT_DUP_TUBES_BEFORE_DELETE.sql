@@ -1,0 +1,28 @@
+--------------------------------------------------------
+--  DDL for Trigger RGT_DUP_TUBES_BEFORE_DELETE
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "RGT_DUP_TUBES_BEFORE_DELETE" 
+BEFORE DELETE
+ON SBCSYS.RGT_DUP_TUBES
+REFERENCING NEW AS NEW OLD AS OLD
+FOR EACH ROW
+begin
+
+	insert into RGT_DUP_TUBES_AUDIT
+    (
+	CHAPTER_ID, CONTRACT_ID, CBC_UNIT_ID,
+	UNIT_ID, TUBE_CHECK_IN_DATE, TUBE_TYPE,
+	REASON_CODE, AUDIT_KEY,PROGRAM_ID,
+	AUDIT_INSERT_DATS, AUDIT_INSERT_USER
+    )
+    values
+    (
+	:old.CHAPTER_ID, :old.CONTRACT_ID, :old.CBC_UNIT_ID,
+	:old.UNIT_ID, :old.TUBE_CHECK_IN_DATE, :old.TUBE_TYPE,
+	:old.REASON_CODE, :old.AUDIT_KEY, 'DELETE',
+	sysdate, lt_user_session.get_userid
+    );
+end;
+/
+ALTER TRIGGER "RGT_DUP_TUBES_BEFORE_DELETE" ENABLE;

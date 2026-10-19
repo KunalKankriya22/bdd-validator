@@ -1,0 +1,1 @@
+connect vista/vista

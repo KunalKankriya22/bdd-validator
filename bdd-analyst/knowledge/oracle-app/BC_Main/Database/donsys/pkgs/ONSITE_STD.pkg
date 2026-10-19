@@ -1,0 +1,551 @@
+create or replace package ONSITE_STD is
+
+  -- Author  : ASHOKV
+  -- Created : 2/26/2019 8:07:26 PM
+  -- Purpose : All the standard routines for ONSITE web app module are located here.
+  /*
+  Modification History
+  ----------------------------------------------------------------------------
+  Modified by   |     on       |     Version    |  Remarks
+  ----------------------------------------------------------------------------
+  Ashok        |  02/26/2019  | 01 |  MLT - 1264
+  Edwin        |  04/18/2019  | 02 |  MLT - 1932  (creating a routine to check the user access)
+  Ashok        |  06/20/2019  | 03 |  MLT - 2235
+  Ashok        |  09/30/2019  | 04 |  MLT - 2583 consent_check routine modified.
+  Ashok        |  03/15/2021  | 05 |  MLT-4127 | consent_check routine modified to add chapter id to vdpc table.
+  Ashok        |  09/16/2021  | 06 |  MLT-4591 | Check_super_user_access updated to add timezone check.
+  Ashok        |  01/29/2024  | 07 |  MLT-6567 | Consent_check issue (DONOR_ID also used to check consents instead of just checking TRANSACTION_ID)
+  */
+  PROCEDURE consent_check(transaction_id_in IN VARCHAR2,
+                          chapter_id_in     IN VARCHAR2,
+                          status_out        OUT VARCHAR2);
+                          
+  PROCEDURE check_super_user_access(p_user_id      IN VARCHAR2,
+                                    p_password     in varchar2,
+                                    p_access_class in varchar2,
+                                    p_access_flag  OUT VARCHAR2);
+
+  PROCEDURE validate_deferral(p_def_id        in varchar2,
+                              p_deferral_flag out varchar2);
+
+  PROCEDURE remove_DNELG_holds(trn_id_in  IN VARCHAR2,
+                               user_id_in IN VARCHAR2,
+                               program_in IN VARCHAR2,
+                               status_out OUT VARCHAR2);
+                               
+  PROCEDURE place_DNELG_hold(trn_id_IN      IN VARCHAR2,
+                             user_id_IN     in varchar2,
+                             program_IN     IN VARCHAR2,
+                             reason_code_IN IN VARCHAR2,
+                             comments_IN    IN VARCHAR2,
+                             status_OUT     OUT VARCHAR2);                        
+end ONSITE_STD;
+/
+create or replace package body ONSITE_STD is
+
+  PROCEDURE consent_check(transaction_id_in IN VARCHAR2,
+                          chapter_id_in     IN VARCHAR2,
+                          status_out        OUT VARCHAR2) IS
+    /* -- Valid output values are 'Yes', 'No', 'Declined', 'N/A'.
+       -- called from onuntlnk, onibleed, onihlths as of 07/10/2013
+    */
+    CURSOR cons_reqd_param(chapter_id_in VARCHAR2) IS
+      SELECT parameter_value
+        FROM valid_parameters
+       WHERE UPPER(parameter_code) = 'OL_CON_RE'
+         AND lifetrack_timezone_convert.get_local_time(chapter_id_in,
+                                                       SYSDATE) BETWEEN
+             eff_date AND
+             NVL(term_date,
+                 lifetrack_timezone_convert.get_local_time(chapter_id_in,
+                                                           SYSDATE) + 1);
+    -- V04 -- 09/30/2019 (valid_donproc_consents table added)
+    CURSOR signed_cons_cur(don_type_in VARCHAR2, proc_code_in VARCHAR2, donor_id_in VARCHAR2) IS
+      SELECT COUNT(1)
+        FROM valid_letters vl, valid_donproc_consents vdpc, donor_consents dc
+       WHERE vl.letter_code = vdpc.consent_code
+         AND vl.letter_code LIKE 'DCON%'
+         AND vdpc.donation_type = don_type_in
+         AND vdpc.procedure_code = proc_code_in
+         AND vdpc.consent_code = dc.letter_code
+         AND vdpc.chapter_id = chapter_id_in
+         AND dc.transaction_id = transaction_id_in
+         AND dc.donor_id = donor_id_in
+         AND dc.donor_id IS NOT NULL
+         AND consent_status IS NOT NULL
+         AND lifetrack_timezone_convert.get_local_time(chapter_id_in, SYSDATE) BETWEEN
+             vl.eff_date AND NVL(vl.term_date, lifetrack_timezone_convert.get_local_time(chapter_id_in, SYSDATE) + 1)
+         AND lifetrack_timezone_convert.get_local_time(chapter_id_in, SYSDATE) BETWEEN
+             vdpc.eff_date AND NVL(vdpc.term_date, lifetrack_timezone_convert.get_local_time(chapter_id_in, SYSDATE) + 1);             
+                      
+    -- V04 -- 09/30/2019 (valid_donproc_consents table added)
+    CURSOR defined_cons_cur(chapter_id_in VARCHAR2, don_type_in VARCHAR2, proc_code_in VARCHAR2) IS
+      SELECT COUNT(1)
+        FROM valid_letters vl, valid_donproc_consents vdpc
+       WHERE vl.letter_code = vdpc.consent_code
+         AND vl.letter_code LIKE 'DCON%'
+         AND vdpc.donation_type = don_type_in
+         AND vdpc.procedure_code = proc_code_in
+         AND vdpc.chapter_id = chapter_id_in
+         AND lifetrack_timezone_convert.get_local_time(chapter_id_in, SYSDATE) BETWEEN
+             vl.eff_date AND NVL(vl.term_date, lifetrack_timezone_convert.get_local_time(chapter_id_in, SYSDATE) + 1)
+         AND lifetrack_timezone_convert.get_local_time(chapter_id_in, SYSDATE) BETWEEN
+             vdpc.eff_date AND NVL(vdpc.term_date, lifetrack_timezone_convert.get_local_time(chapter_id_in, SYSDATE) + 1);   
+  
+    CURSOR declined_cons_cur(don_type_in VARCHAR2, proc_code_in VARCHAR2)  IS
+      SELECT COUNT(1)
+        FROM valid_letters vl, valid_donproc_consents vdpc, donor_consents dc
+       WHERE vl.letter_code = vdpc.consent_code
+         AND vl.letter_code LIKE 'DCON%'
+         AND vdpc.donation_type = don_type_in
+         AND vdpc.procedure_code = proc_code_in
+         AND vdpc.consent_code = dc.letter_code
+         AND vdpc.chapter_id = chapter_id_in
+         AND dc.transaction_id = transaction_id_in
+          AND NVL(dc.consent_status, 'X') = 'D'
+         AND lifetrack_timezone_convert.get_local_time(chapter_id_in, SYSDATE) BETWEEN
+             vl.eff_date AND NVL(vl.term_date, lifetrack_timezone_convert.get_local_time(chapter_id_in, SYSDATE) + 1)
+         AND lifetrack_timezone_convert.get_local_time(chapter_id_in, SYSDATE) BETWEEN
+             vdpc.eff_date AND NVL(vdpc.term_date, lifetrack_timezone_convert.get_local_time(chapter_id_in, SYSDATE) + 1);  
+  
+    l_signed_cnt   NUMBER;
+    l_defined_cnt  NUMBER;
+    l_declined_cnt NUMBER;
+    gl_chapter_id  VARCHAR2(4);
+    l_cons_param   VARCHAR2(30);
+    lv_donType VARCHAR2(10);
+    lv_procCode VARCHAR2(10);
+    lv_donor_id VARCHAR2(20);
+  BEGIN
+  
+    gl_chapter_id := chapter_id_in;
+    status_out    := 'N/A'; -- Defualt output - consent check NOT APPLICABLE.
+  
+    -- Check if consent is configure;
+    l_cons_param := NULL;
+    OPEN cons_reqd_param(gl_chapter_id);
+    FETCH cons_reqd_param
+      INTO l_cons_param;
+    CLOSE cons_reqd_param;
+  
+    IF NVL(l_cons_param, '@#') = 'Y' THEN
+      -- V04 -- 09/30/2019 -- get donation type, procedure code and pass them to defined_cons_cur cursor.
+      select donation_type, procedure_code, donor_id
+        into lv_donType, lv_procCode, lv_donor_id
+        from donations
+       where transaction_id = transaction_id_in
+         and rownum = 1;
+         
+      -- Check only if consent is required.
+      -- Get the count of signed consents.
+      OPEN signed_cons_cur(lv_donType, lv_procCode, lv_donor_id);
+      FETCH signed_cons_cur
+        INTO l_signed_cnt;
+      CLOSE signed_cons_cur;
+    
+      -- Get the count of defined consents.
+      OPEN defined_cons_cur(gl_chapter_id, lv_donType, lv_procCode);
+      FETCH defined_cons_cur
+        INTO l_defined_cnt;
+      CLOSE defined_cons_cur;
+    
+      IF l_signed_cnt = 0 OR l_defined_cnt = 0 THEN
+        -- Consents are not defined or not signed.
+        status_out := 'No';
+        RETURN;
+      END IF;
+    
+      -- Get the count of declined consents
+      OPEN declined_cons_cur(lv_donType, lv_procCode);
+      FETCH declined_cons_cur
+        INTO l_declined_cnt;
+      CLOSE declined_cons_cur;
+    
+      IF l_declined_cnt > 0 THEN
+        -- one or more consents declined.
+        status_out := 'Declined';
+        RETURN;
+      END IF;
+    
+      if l_signed_cnt < l_defined_cnt then
+        status_out := 'No'; -- Consents are declined but still few are not signed yet.
+      else
+        status_out := 'Yes'; -- All consents are signed and accepted.
+      end if;
+    
+    END IF;
+  END consent_check;
+
+  PROCEDURE check_super_user_access(p_user_id      IN VARCHAR2,
+                                    p_password     in varchar2,
+                                    p_access_class in varchar2,
+                                    p_access_flag  OUT VARCHAR2) IS  
+    ld_SYSDATE      DATE;
+    lv_chapterId    VARCHAR2(10);
+    ln_count        NUMBER;
+  BEGIN
+    -- U : Invalid User
+    -- A : Invalid Aaccess
+    -- P : Invalid Password
+    p_access_flag := 'Y';
+  
+    --- Check if the user ID is valid
+    select DECODE(COUNT(1), 0, NULL, MAX(chapter_id))
+      into lv_chapterId
+      from system_users
+     where user_id = p_user_id
+       and sysdate between eff_date and nvl(term_date, sysdate + 10);
+
+    IF lv_chapterId IS NULL THEN
+      p_access_flag := 'U';
+      RETURN;
+    END IF;    
+    
+    --- Check if the user name and password is correct.
+    If p_password is not null then
+        If not lt_password_policy.check_hash(NVL(p_user_id, 'X'),
+                                             NVL(p_password, 'X')) then
+          p_access_flag := 'P';
+          RETURN;
+        End If;
+    End If;
+    
+    --- Check if the user has access in the UACCESS table
+    
+    ld_SYSDATE := TRUNC(lifetrack_timezone_convert.get_local_time(lv_chapterId, SYSDATE));
+    
+    -- access class is considered terminated on the day of term date not the day after term date.
+    select COUNT(1)
+      into ln_count
+      from valid_user_access_classes
+     where user_id = upper(p_user_id)
+       and access_class = p_access_class
+       and ld_SYSDATE >= eff_date
+       and ld_SYSDATE < NVL(TRUNC(term_date), ld_SYSDATE + 1);
+    
+    If ln_count = 0 then
+        p_access_flag := 'A';
+    Else
+        p_access_flag := 'Y';
+    End If;    
+
+  
+  Exception
+    when others then
+      p_access_flag := 'A';
+  end check_super_user_access;
+
+  PROCEDURE validate_deferral(p_def_id        in varchar2,
+                              p_deferral_flag out varchar2) IS
+  
+    nCount NUMBER := 0;
+  BEGIN
+    -- CHeck the length 
+  
+    If Length(p_def_id) != 8 then
+      p_deferral_flag := 'N';
+    Elsif LTRIM(p_def_id, '0123456789') is not null then
+      p_deferral_flag := 'N';
+    Else
+      select nvl(count(*), 0)
+        into nCount
+        from donations
+       where deferral_id = p_def_id;
+    
+      if nCount > 0 then
+        p_deferral_flag := 'D';
+      else
+        p_deferral_flag := 'Y';
+      end if;
+    End If;
+  
+  END validate_deferral;
+  
+  -- Added on 06/20/2019 -- Routine removes DNELG holds (donations and donor as per the DNELG configuration)
+  PROCEDURE remove_DNELG_holds(trn_id_in  IN VARCHAR2,
+                               user_id_in IN VARCHAR2,
+                               program_in IN VARCHAR2,
+                               status_out OUT VARCHAR2) IS
+  
+    CURSOR di_cur IS
+      SELECT dri.transaction_id,
+             dri.unit_id,
+             dri.inter_code,
+             dri.originated_from,
+             dri.reason_code,
+             dri.group_id,
+             dri.group_mode,
+             dri.eff_date,
+             dri.insert_date,
+             dri.term_date
+        FROM donor_interdictions dri
+       WHERE dri.release_date IS NULL
+         AND (dri.term_date is null or dri.term_date > dri.eff_date)
+         AND dri.transaction_id = trn_id_in
+         AND dri.inter_code = 'DNELG';
+  
+    lv_status        VARCHAR2(500);
+    lv_inter_owner   VARCHAR2(1);
+    ld_chp_sysdate   DATE;
+    lv_chapter_id    VARCHAR2(4);
+    lv_donor_id      VARCHAR2(10);
+    lv_multi_chapter VARCHAR2(4);
+    ld_date          DATE;
+  
+  BEGIN
+    status_out := NULL;
+  
+    -- Get the transaction from donations table.
+    BEGIN
+      select donor_id, chapter_id
+        into lv_donor_id, lv_chapter_id
+        from donations
+       where transaction_id = trn_id_in;
+    EXCEPTION
+      WHEN others then
+        status_out := 'Error in retrieving transaction ' ||
+                      SUBSTR(SQLERRM, 1, 400);
+        RETURN;
+    END;
+  
+    -- chapter time.  
+    ld_chp_sysdate := lifetrack_timezone_convert.get_local_time(lv_chapter_id,
+                                                                SYSDATE);
+    -- get 
+    begin
+      select DECODE(multi_chapter, 'Y', 'ALL', lv_chapter_id)
+        into lv_multi_chapter
+        from lt_application_config;
+    exception
+      when no_data_found then
+        status_out := 'Multi Chapter configuration missing';
+        RETURN;
+    end;
+  
+    --Get the inter owner
+    Begin
+      select inter_owner
+        into lv_inter_owner
+        from valid_interdictions
+       where inter_code = 'DNELG'
+         and ld_chp_sysdate between eff_date and
+             nvl(term_date, ld_chp_sysdate + 1);
+    Exception
+      when others then
+        lv_inter_owner := 'U';
+    End;
+  
+    Begin
+      -- Remove/terminate donation interdiction.
+      IF lv_inter_owner in ('U', 'B') then
+        UPDATE donation_interdictions
+           SET release_user = user_id_in,
+               release_date = ld_chp_sysdate,
+               term_date    = NVL(term_date, ld_chp_sysdate),
+               term_reason  = 'NOPRO' -- problem resolved.
+         WHERE inter_code = 'DNELG'
+           AND transaction_id = trn_id_in
+           AND release_date IS NULL;
+      END IF;
+    
+      IF lv_inter_owner in ('D', 'B') then
+        -- Remove/terminate 
+        FOR di_rec IN di_cur LOOP
+          DON_INTER.inter_upgrade_remove(p_DONOR_ID        => lv_donor_id,
+                                         p_CHAPTER_ID      => lv_multi_chapter,
+                                         P_UNIT_ID         => di_rec.unit_id,
+                                         P_TRANSACTION_ID  => di_rec.transaction_id,
+                                         P_INTER_CODE      => di_rec.inter_code,
+                                         P_ORIGINATED_FROM => di_rec.originated_from,
+                                         P_REASON_CODE     => di_rec.reason_code,
+                                         P_USER_ID         => user_id_IN,
+                                         P_GROUP_MODE      => di_rec.group_mode,
+                                         P_GROUP_ID        => di_rec.group_id,
+                                         P_PROGRAM_ID      => program_in,
+                                         P_INCIDENT_DATE   => TRUNC(ld_chp_sysdate), -- validates if less than sysdate or not.
+                                         p_INSERT_DATE     => ld_date, -- dummy variable.  this is generated inside the routine.
+                                         P_TERM_DATE       => TRUNC(di_rec.term_date),
+                                         P_TERM_REASON     => 'NOPRO', -- problem resolved reason code. 
+                                         P_COMMENTS        => 'Updated procedure to an eligible procedure.',
+                                         P_STATUS          => lv_status);
+        
+          IF lv_status != 'OK' THEN
+            status_out := 'Error while removing interdiction from donor: ' ||
+                          SUBSTR(lv_status, 1, 400);
+            RETURN;
+          END IF;
+        END LOOP;
+      END IF;
+    
+    Exception
+      when others then
+        status_out := 'Error while removing the interdiction';
+        RETURN;
+    End;
+  
+    status_out := 'OK';
+  EXCEPTION
+    WHEN others then
+      status_out := 'Error in removing DNELG ' || SUBSTR(SQLERRM, 1, 400);
+      RETURN;
+  END remove_DNELG_holds;
+
+  -- Added on 06/20/2019 -- Routine adds DNELG holds (donations and donor as per the DNELG configuration)
+  PROCEDURE place_DNELG_hold(trn_id_IN      IN VARCHAR2,
+                             user_id_IN     in varchar2,
+                             program_IN     IN VARCHAR2,
+                             reason_code_IN IN VARCHAR2,
+                             comments_IN    IN VARCHAR2,
+                             status_OUT     OUT VARCHAR2) IS
+    lv_inter_owner   VARCHAR2(1);
+    ld_chp_sysdate   DATE;
+    lv_donor_id      VARCHAR2(10);
+    lv_chapter_id    VARCHAR2(4);
+    ld_coll_date     DATE;
+    lv_multi_chapter VARCHAR2(4);
+    lv_status        VARCHAR2(500);
+    nCount           NUMBER := 0;
+  BEGIN
+    status_out := NULL;
+  
+    -- Get the transaction from donations table.
+    BEGIN
+      select donor_id, chapter_id, coll_date
+        into lv_donor_id, lv_chapter_id, ld_coll_date
+        from donations
+       where transaction_id = trn_id_in;
+    EXCEPTION
+      WHEN others then
+        status_out := 'Error in retrieving transaction ' ||
+                      SUBSTR(SQLERRM, 1, 400);
+        RETURN;
+    END;
+  
+    -- chapter time.  
+    ld_chp_sysdate := lifetrack_timezone_convert.get_local_time(lv_chapter_id,
+                                                                SYSDATE);
+    -- get 
+    begin
+      select DECODE(multi_chapter, 'Y', 'ALL', lv_chapter_id)
+        into lv_multi_chapter
+        from lt_application_config;
+    exception
+      when no_data_found then
+        status_out := 'Multi Chapter configuration missing';
+        RETURN;
+    end;
+  
+    --Get the inter owner
+    Begin
+      select inter_owner
+        into lv_inter_owner
+        from valid_interdictions
+       where inter_code = 'DNELG'
+         and ld_chp_sysdate between eff_date and
+             nvl(term_date, ld_chp_sysdate + 1);
+    Exception
+      when others then
+        lv_inter_owner := 'U';
+    End;
+  
+    If lv_inter_owner in ('U', 'B') then
+    
+      select count(*)
+        into nCount
+        from donation_interdictions
+       where transaction_id = trn_id_IN
+         and inter_code = 'DNELG'
+         and release_date IS NULL;
+    
+      If nCount = 0 then
+        INSERT INTO DONATION_INTERDICTIONS
+          (TRANSACTION_ID,
+           CHAPTER_ID,
+           INTER_CODE,
+           INTER_TYPE,
+           SOURCE_CODE,
+           RELEASE_USER,
+           RELEASE_DATE,
+           UNIT_ID,
+           TERM_REASON,
+           TERM_DATE,
+           GROUP_ID,
+           ORIGINATED_FROM,
+           REASON_CODE,
+           GROUP_MODE,
+           PROGRAM_ID,
+           INSERT_USER,
+           INSERT_DATE,
+           COLL_DATE,
+           COMMENTS)
+        VALUES
+          (trn_id_IN,
+           lv_chapter_id,
+           'DNELG',
+           'HOLDS',
+           NULL,
+           NULL,
+           NULL,
+           NULL,
+           NULL,
+           NULL,
+           NULL,
+           'ONSITE',
+           reason_code_IN, -- can be null
+           NULL,
+           program_IN,
+           user_id_IN,
+           ld_chp_sysdate,
+           ld_coll_date, --trunc(chp_sysdate), -- IM:7021
+           comments_IN); -- can be null
+      End If;
+    
+    End If;
+  
+    If lv_inter_owner in ('D', 'B') then
+    
+      select count(*)
+        into nCount
+        from donor_interdictions
+       where transaction_id = trn_id_IN
+         and inter_code = 'DNELG'
+         and release_date IS NULL;
+    
+      IF nCount = 0 THEN
+        DON_INTER.inter_upgrade_place(lv_donor_id,
+                                      lv_multi_chapter, -- Changed "global.chapter_id" with "global.multi_chapter". Changed by Kishore on 05/05/2011
+                                      NULL,
+                                      trn_id_IN,
+                                      'DNELG',
+                                      'ONSITE',
+                                      reason_code_IN, -- Can be null
+                                      user_id_IN,
+                                      NULL,
+                                      null,
+                                      program_IN,
+                                      trunc(ld_chp_sysdate), --trunc(sysdate),
+                                      null,
+                                      null,
+                                      lv_status);
+      
+      END IF;
+    
+      if lv_status != 'OK' then
+        status_out := 'Could not place interdiction: ' ||
+                      SUBSTR(lv_status, 1, 400);
+        RETURN;
+        --show_error('16113', v_status);
+        --check_package_failure;
+      end if;
+    End If;
+  
+    status_out := 'OK';
+  
+  EXCEPTION
+    WHEN others then
+      status_out := 'Error in retrieving transaction ' ||
+                    SUBSTR(SQLERRM, 1, 400);
+      RETURN;
+  END place_DNELG_hold;
+end ONSITE_STD;
+/

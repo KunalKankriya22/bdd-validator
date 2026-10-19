@@ -1,0 +1,413 @@
+/*******************************************
+Version : 02 [04/04/11] To include the SRVCHK master code check
+Version : 03 [05/07/12] Added time zone changes
+Version : 04 [05/11/16] [Seshu]
+			Renamed Below tables for merging database work
+			DONOR_VALID_INTERDICTIONS	as	VALID_INTERDICTIONS
+      
+
+*******************************************/
+
+create or replace package SRVDON as
+
+   function donor_acceptable (
+      p_unit_id      in varchar2,
+      p_coll_date    in date,
+      p_chapter_id   in varchar2,
+      p_product_code in varchar2,
+      p_aliquot      in varchar2,   -- not currently used
+      p_debug        in boolean := FALSE
+      ) return varchar2;
+end;
+/
+create or replace package body SRVDON as
+   function check_db return boolean is
+      ping number;
+      cnt  number;
+      tmp  boolean;
+      v_temp varchar2(1);
+   begin
+      ping := dbms_sql.open_cursor;
+      dbms_sql.parse(ping,
+         'select ''x'' from valid_interdictions where rownum<2',2);
+      dbms_sql.define_column(ping,1,v_temp,1);
+      cnt := dbms_sql.execute_and_fetch(ping,tmp);
+      dbms_sql.close_cursor(ping);
+      if cnt = 1 then
+         return TRUE;
+      else
+         return FALSE;
+      end if;
+   exception
+      when others then
+         if dbms_sql.is_open(ping) then
+            dbms_sql.close_cursor(ping);
+         end if;
+         return FALSE;
+   end;
+
+
+
+/******************************************************************
+Function donor_acceptable will return the following values
+--'TRUE' - Donor acceptable
+--'FALSE'- Donor not acceptable
+--'NOREG'- Donation not registered
+--'NODON'- No Donor attached
+--'HOLD' - Hold Interdiction
+--'QUAR' - Quarantine Product
+--'UNKN' - Unknown Hold Flag
+--'RTNDF'- Donor has not returned
+--'INTST'- Incomplete Testing
+--'DHOLD'- HOLD till Donor system is available
+******************************************************************/
+
+
+   function donor_acceptable (
+      P_unit_id      in varchar2,
+      p_coll_date    in date,
+      p_chapter_id   in varchar2,
+      p_product_code in varchar2,
+      p_aliquot      in varchar2,
+      p_debug        in boolean := FALSE
+      )
+   return varchar2 is
+      v_contract_id  varchar2(15);
+      v_unit_id      varchar2(15);
+      v_donor_id     varchar2(15);
+      v_os_unit_id   varchar2(15);
+      v_type         varchar2(2);
+      v_product_type varchar2(5);
+      v_inter_type   varchar2(1);
+      v_decision     varchar2(1);
+      v_next_unit    varchar2(15);
+      v_next_coll    date;
+      cnt            number;
+      v_bool         varchar2(5);
+      v_temp         varchar2(5);
+      nCount         NUMBER:=0;
+      v_local_time   date;
+
+      cursor pool_members is
+         select unit_id, coll_date, chapter_id, 
+				substr(product_code,1,5) product_code,
+				component_prefix
+         from components
+         where chapter_id = p_chapter_id
+           and pooled_component_id = v_unit_id;
+      cursor donor_inter is
+         select v.inter_code, v.lab_hold_flag,
+                i.eff_date, i.term_date, i.unit_id
+         from donor_interdictions i,
+              valid_interdictions v
+         where i.donor_id = v_donor_id
+           and i.release_date is null
+           and v.inter_code = i.inter_code
+		 UNION
+         select v.inter_code, v.lab_hold_flag,
+                i.insert_date eff_date, i.term_date, i.unit_id
+         from donation_interdictions i,
+              valid_interdictions v
+         where i.unit_id = v_unit_id
+           and i.release_date is null
+           and v.inter_code = i.inter_code;
+
+      procedure msg(txt in varchar2) is
+      begin
+         if p_debug then
+            dbms_output.put_line(txt);
+         end if;
+      end;
+
+   begin
+      -- Added below line by Kishore on 05/07/2012. IM 8581
+      v_local_time := lifetrack_timezone_convert.get_local_time(p_chapter_id, sysdate); 
+
+      v_unit_id := p_unit_id;
+
+      -- get contract data and
+      begin
+         select u.contract_id, u.os_unit_id,
+                u.donor_decision_code
+         into v_contract_id, v_os_unit_id, v_decision
+         from units u 
+         where u.unit_id = p_unit_id
+           and u.chapter_id = p_chapter_id
+           and rownum=1;
+      exception
+         when others then
+            raise_application_error(-20001,'Missing:'||p_unit_id||
+                                    ' Chp='||p_chapter_id);
+      end;
+     -- Get the contract type
+
+     begin
+        select nvl(contract_type,'IN')
+        into v_type
+        from contracts c where  c.contract_id = v_contract_id and 
+        rownum =1;
+     exception
+        when others then
+          raise_application_error(-20003,'Contract cannot be found');
+     end;
+
+
+
+      -- use OS unit ID for component with converted barcode type
+      if v_contract_id = 'CONVERT' then
+         msg('Unit was converted...');
+         v_unit_id := v_os_unit_id;
+      end if;
+
+      -- no donor data unles an internal unit
+      If v_type != 'IN' then
+         select nvl(count(*),0) 
+           into nCount 
+           from master_codes 
+          where code_type='SRVCK' 
+            and code=substr(p_unit_id,1,5) 
+          --and sysdate between eff_date and nvl(term_date, sysdate + 1); -- Commented by Kishore on 05/07/2012. IM 8581
+            and v_local_time between eff_date and nvl(term_date, sysdate + 10); -- Added by Kishore on 05/07/2012. IM 8581
+
+       
+         if nCount = 0 then 
+            msg('Not internal...');
+            return 'TRUE';
+         else
+           null;
+         end if;
+      End if;
+
+     
+      -- check pool components
+      cnt := 0;
+      v_bool := 'TRUE';
+      for rec in pool_members loop
+         cnt := cnt + 1;
+         msg('Pool member:'||rec.unit_id||'...');
+         v_temp := donor_acceptable(rec.unit_id,rec.coll_date,rec.chapter_id,
+                                    rec.product_code,rec.component_prefix);
+         --if nvl(v_temp,'NULL') = 'FALSE' or
+         --(v_temp != 'FALSE' and v_bool = 'TRUE') then
+		 IF v_bool = 'TRUE' and v_temp != 'TRUE' THEN
+            v_bool := v_temp;
+         end if;
+      end loop;
+      if cnt > 0 then
+         return v_bool;
+      end if;
+
+      begin
+         select inv_product_type into v_product_type
+           from valid_products
+          where product_code = substr(p_product_code,1,5);
+      exception
+         when others then
+            raise;
+      end;
+
+      if check_db then
+         -- check acceptability in donor system
+
+         -- check for donor_id
+         begin
+            select donor_id into v_donor_id
+            from donations
+            where unit_id = v_unit_id
+              and coll_date = p_coll_date;
+         exception
+            when no_data_found then
+               -- donation not registered
+               msg('not registered...');
+               return 'NOREG';
+         end;
+         if v_donor_id is null then
+            -- no donor attached
+            msg('not attached...');
+            return 'NODON';
+         end if;
+
+         -- check donor interdictions
+         v_bool := 'TRUE';
+         for rec in donor_inter loop
+            msg('interdiction:'||rec.inter_code||'...');
+            v_temp := 'TRUE';
+            begin
+               select decode(max(decode(inter_type,
+                        'H',6, 'A',5, 'I',4, 'N',3, 'Q',2, 'C',1, null,0, 100)),
+                         6,'H', 5,'A', 4,'I', 3,'N', 2,'Q', 1,'C', 0,null,
+                         100,'?', null, rec.lab_hold_flag)
+                 into v_inter_type
+                 from valid_donor_overrides
+                where donor_decision_code = v_decision
+                  and product_type = v_product_type
+                  and inter_code = rec.inter_code
+                --and sysdate between eff_date and nvl(term_date, sysdate) -- Commented by Kishore on 05/07/2012. IM 8581
+                  and v_local_time between eff_date and nvl(term_date, sysdate + 10) -- Added by Kishore on 05/07/2012. IM 8581
+                  and (attrib_group is null or
+                      (attrib_group,attrib_code) in
+                         (select attrib_group, attrib_code
+                            from unit_attributes
+                           where unit_id = p_unit_id
+                             and chapter_id = p_chapter_id
+                             and coll_date = p_coll_date
+                         UNION
+                          select attrib_group, attrib_code
+                            from component_attributes
+                           where unit_id = p_unit_id
+                             and chapter_id = p_chapter_id
+                             and coll_date = p_coll_date
+                             and substr(product_code,1,5) = p_product_code));
+            exception
+               when no_data_found then
+                  v_inter_type := rec.lab_hold_flag;
+            end;
+            if v_inter_type is not null then
+               if v_inter_type = 'H' then
+                  -- hold component
+                  msg('H...');
+                  v_temp := 'HOLD';
+               elsif v_inter_type = 'A' then
+                  -- discard if interdiction is still active
+                  msg('A...');
+                  v_temp := 'FALSE';
+               elsif v_inter_type = 'Q' then
+                  -- quarantine responsible component, ship others
+                  msg('Q...');
+                  if rec.unit_id = v_unit_id then
+                     msg('this unit...');
+                     v_temp := 'QUAR';
+                  else
+                     msg('other unit...');
+                     v_temp := 'TRUE';
+                  end if;
+               elsif v_inter_type = 'C' then
+                  -- discard responsible component, ship others
+                  msg('C...');
+                  if rec.unit_id = v_unit_id then
+                     msg('this unit...');
+                     v_temp := 'FALSE';
+                  else
+                     msg('other unit...');
+                     v_temp := 'TRUE';
+                  end if;
+               elsif v_inter_type = 'I' then
+                  -- discard if unit collect during interdiction life
+                  msg('I...');
+                  if p_coll_date between trunc(rec.eff_date)
+                                 and nvl(rec.term_date,p_coll_date+1) then
+                     msg('in range...');
+                     v_temp := 'FALSE';
+                  else
+                     msg('outside range...');
+                     v_temp := 'TRUE';
+                  end if;
+               elsif v_inter_type = 'N' then
+                  msg('N...');
+                  null;
+               else
+                  msg('Unknown...');
+                  -- unknown flag, hold
+                  v_temp := 'UNKN';
+               end if;
+            else
+               msg('No flag...');
+            end if;
+
+		    IF v_bool = 'TRUE' and v_temp != 'TRUE' THEN
+               v_bool := v_temp;
+            end if;
+         end loop;
+         -- donor retested
+         if v_bool = 'TRUE' and v_product_type = 'DRP' then
+            msg('Donor retested...');
+            begin
+               select unit_id, coll_date
+               into v_next_unit, v_next_coll
+               from donations
+               where donor_id = v_donor_id
+                 and unit_id is not null
+                 and chapter_id = p_chapter_id
+                 and coll_date = (
+                     select unit_id
+                     from donations
+                     where donor_id = v_donor_id
+                       and unit_id is not null
+                       and chapter_id = p_chapter_id
+                       and coll_date > p_coll_date + 90);
+            exception
+               when no_data_found then
+                  msg('has not returned...');
+                  return 'RTNDF';
+            end;
+            begin
+               select count(*) into cnt
+               from contract_tests c
+               where contract_id = 'INTERNAL'
+                 and stop_label_flag = 'Y'
+                 and v_next_coll between eff_date
+                     and nvl(term_date,v_next_coll+1)
+                 and (not exists (
+                     select 1
+                     from utrs
+                     where unit_id = v_next_unit
+                       and coll_date = v_next_coll
+                       and chapter_id = p_chapter_id
+                       and test_id = c.test_id)
+                 or  exists (
+                     select 1
+                     from unit_test_base
+                     where unit_id = v_next_unit
+                       and coll_date = v_next_coll
+                       and chapter_id = p_chapter_id
+                       and test_id = c.test_id)
+                 or  exists (
+                     select 1
+                     from utrs
+                     where unit_id = v_next_unit
+                       and coll_date = v_next_coll
+                       and chapter_id = p_chapter_id
+                       and test_id = c.test_id
+                       and result_status_1 is null));
+            end;
+            if cnt != 0 then
+               msg('incomplete testing...');
+               return 'INTST';
+            end if;
+         end if;
+         return v_bool;
+
+      else
+         -- donor system unavailable, use local snapshot
+         msg('Donor system is down...');
+         if v_product_type = 'DRP' then
+            msg('Donor retested...');
+            return 'LDNRT';
+         end if;
+         begin
+            select count(*)
+            into   cnt
+            from   ddr_units
+            where  chapter_id = p_chapter_id
+              and  unit_id = v_unit_id
+              and  coll_date = p_coll_date;
+            if cnt != 0 then
+               --hold component until donor system is available
+               msg('in DDR...');
+               return 'DHOLD';
+            else
+               msg('not in DDR...');
+               return 'TRUE';
+            end if;
+         exception
+            when others then
+               raise;
+         end;
+      end if;
+   end;
+end;
+/
+
+show errors
+
+create or replace public synonym SRVDON for OPS$SRVSYS.SRVDON;

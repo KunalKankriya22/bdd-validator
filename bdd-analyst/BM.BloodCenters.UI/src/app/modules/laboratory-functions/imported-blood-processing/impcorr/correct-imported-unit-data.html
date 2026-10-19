@@ -1,0 +1,273 @@
+<div class="main-content">
+
+  <app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+  <div class="content-area">
+
+    <!-- Templates for attribute table custom cells (outside @if so ViewChild always resolves) -->
+    <ng-template #attributeGroupTmpl let-row>
+      <mat-form-field appearance="fill" class="table-field">
+        <mat-select
+          [(value)]="row.attributeGroup"
+          (opened)="onGroupSelectOpened()"
+          (selectionChange)="onAttributeGroupChange(row, $event.value)"
+          [attr.aria-label]="'Attribute Group, row ' + (rowIndices()[row.id] || 1)">
+          <mat-option>
+            <ngx-mat-select-search [formControl]="attribGroupSearch"
+              placeholderLabel="Search..." noEntriesFoundLabel="No matching groups">
+            </ngx-mat-select-search>
+          </mat-option>
+          @for (group of filteredAttributeGroups; track group.code) {
+            <mat-option [value]="group.code">{{ group.code }} - {{ group.description }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+    </ng-template>
+
+    <ng-template #attributeCodeTmpl let-row>
+      <mat-form-field appearance="fill" class="table-field">
+        <mat-select
+          [(value)]="row.attributeCode"
+          (opened)="onAttributeCodeSelectOpened(row)"
+          (selectionChange)="onAttributeCodeChange(row, $event.value)"
+          [disabled]="!row.attributeGroup"
+          [attr.aria-label]="'Attribute Code, row ' + (rowIndices()[row.id] || 1)">
+          <mat-option>
+            <ngx-mat-select-search [formControl]="attribCodeSearch"
+              placeholderLabel="Search..." noEntriesFoundLabel="No matching codes">
+            </ngx-mat-select-search>
+          </mat-option>
+          @for (code of (filteredCodesByRow[row.id] || []); track code.code) {
+            <mat-option [value]="code.code">{{ code.code }} - {{ code.description }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+    </ng-template>
+
+    <!-- ═══ Card 1 — Search Row ════════════════════════════════════════════ -->
+    <div class="section-card">
+      <div class="search-row">
+
+        <app-unit-id-field
+          class="unit-id-field"
+          label="Unit ID"
+          [required]="true"
+          placeholder="Scan or type Unit ID"
+          [skipDoubleEntry]="true"
+          [showBarcodeIcon]="true"
+          (validated)="onUnitValidated($event)"
+          (cleared)="onUnitCleared()"
+        />
+
+        <form [formGroup]="searchForm" aria-label="Search for imported unit">
+          <mat-form-field appearance="fill" class="product-code-field">
+            <mat-label>Product Code</mat-label>
+            <mat-select
+              formControlName="productCode"
+              required
+              [disabled]="productCodesLoading() || !unitIdValidated()"
+              [attr.aria-invalid]="searchFormControls['productCode'].invalid && (searchFormControls['productCode'].touched || submitted())"
+              [attr.aria-describedby]="searchFormControls['productCode'].invalid && (searchFormControls['productCode'].touched || submitted()) ? errorId('productCode') : null">
+              <mat-option>
+                <ngx-mat-select-search [formControl]="productCodeSearch"
+                  placeholderLabel="Search..." noEntriesFoundLabel="No matching product codes">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (product of filteredProductCodes; track product.code) {
+                <mat-option [value]="product.code">{{ product.code }}{{ product.description ? ' - ' + product.description : '' }}</mat-option>
+              }
+            </mat-select>
+            @if (productCodesLoading()) {
+              <mat-spinner matSuffix diameter="18" aria-label="Loading product codes" />
+            } @else {
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+            }
+            @if (searchFormControls['productCode'].invalid && (searchFormControls['productCode'].touched || submitted())) {
+              <mat-error [id]="errorId('productCode')">Product Code is required</mat-error>
+            }
+          </mat-form-field>
+        </form>
+
+        <div class="search-actions">
+          <button
+            mat-stroked-button
+            class="retrieve-btn"
+            type="button"
+            [id]="elementId('retrieve-btn')"
+            (click)="onRetrieve()"
+            [disabled]="loading()">
+            RETRIEVE
+          </button>
+          <button
+            mat-button
+            class="clear-all-btn"
+            type="button"
+            [id]="elementId('clear-all-btn')"
+            (click)="onClearAll()"
+            [disabled]="loading()">
+            CLEAR ALL
+          </button>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Loading -->
+    @if (loading()) {
+      <div class="loading-container" role="status" aria-live="polite">
+        <mat-spinner diameter="36" aria-label="Loading" />
+        <span class="sr-only">Loading, please wait...</span>
+      </div>
+    }
+
+    <!-- ═══ Card 2 — Unit Details (visible only after retrieve) ═══════════ -->
+    @if (!loading() && unitRetrieved()) {
+
+      <div class="section-card">
+        <form [formGroup]="unitDetailsForm" aria-label="Unit details">
+          <div class="details-grid">
+
+            <!-- Row 1: Contract ID | External Unit ID | Receipt Date | Batch ID -->
+            <div class="field-display" role="group" [attr.aria-labelledby]="elementId('contractId-label')">
+              <div class="field-display__label" [id]="elementId('contractId-label')">Contract ID</div>
+              <div class="field-display__value">{{ unitDetailsFormControls['contractId'].value || '-' }}</div>
+            </div>
+
+            <mat-form-field appearance="fill" class="details-field details-field--shift-down">
+              <mat-label>External Unit ID</mat-label>
+              <input matInput formControlName="externalUnitId" [id]="elementId('externalUnitId')" />
+            </mat-form-field>
+
+            <div class="field-display" role="group" [attr.aria-labelledby]="elementId('receiptDate-label')">
+              <div class="field-display__label" [id]="elementId('receiptDate-label')">Receipt Date</div>
+              <div class="field-display__value">{{ unitDetailsFormControls['receiptDate'].value || '-' }}</div>
+            </div>
+
+            <div class="field-display" role="group" [attr.aria-labelledby]="elementId('batchId-label')">
+              <div class="field-display__label" [id]="elementId('batchId-label')">Batch ID</div>
+              <div class="field-display__value">{{ unitDetailsFormControls['batchId'].value || '-' }}</div>
+            </div>
+
+            <!-- Row 2: Check-in User | Check-in Date | Product Code | ABO Label | Expiration Date -->
+            <div class="field-display row-start" role="group" [attr.aria-labelledby]="elementId('checkInUser-label')">
+              <div class="field-display__label" [id]="elementId('checkInUser-label')">Check-in User</div>
+              <div class="field-display__value">{{ unitDetailsFormControls['checkInUser'].value || '-' }}</div>
+            </div>
+
+            <div class="field-display" role="group" [attr.aria-labelledby]="elementId('checkInDate-label')">
+              <div class="field-display__label" [id]="elementId('checkInDate-label')">Check-in Date</div>
+              <div class="field-display__value">{{ unitDetailsFormControls['checkInDate'].value || '-' }}</div>
+            </div>
+
+            <mat-form-field appearance="fill" class="details-field">
+              <mat-label>Product Code</mat-label>
+              <mat-select formControlName="productCode" [id]="elementId('details-productCode')">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="validProductCodeSearch"
+                    placeholderLabel="Search..." noEntriesFoundLabel="No matching product codes">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (product of filteredValidProductCodes; track product.code) {
+                  <mat-option [value]="product.code">{{ product.code }}{{ product.description ? ' - ' + product.description : '' }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" class="details-field">
+              <mat-label>ABO Label</mat-label>
+              <mat-select formControlName="aboLabel" [id]="elementId('aboLabel')">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="aboLabelSearch"
+                    placeholderLabel="Search..." noEntriesFoundLabel="No matching labels">
+                  </ngx-mat-select-search>
+                </mat-option>
+                <mat-option value="">— None —</mat-option>
+                @for (label of filteredAboLabels; track label.code) {
+                  <mat-option [value]="label.code">{{ label.code }} - {{ label.description }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" class="details-field">
+              <mat-label>Expiration Date</mat-label>
+              <input matInput
+                     formControlName="expirationDate"
+                     [id]="elementId('expirationDate')"
+                     placeholder="DD-MMM-YYYY HH:mm"
+                     [matTooltip]="'Format: DD-MMM-YYYY HH:mm (e.g., 02-JAN-2025 14:30)'"
+                     matTooltipPosition="above"
+                     (blur)="onExpiryDateBlur()" />
+              @if (unitDetailsForm.get('expirationDate')?.hasError('invalidFormat')) {
+                <mat-error>Invalid format. Use DD-MMM-YYYY HH:mm</mat-error>
+              }
+              @if (unitDetailsForm.get('expirationDate')?.hasError('invalidDateTime')) {
+                <mat-error>Invalid date or time value</mat-error>
+              }
+              @if (unitDetailsForm.get('expirationDate')?.hasError('pastDate')) {
+                <mat-error>Product has already expired</mat-error>
+              }
+            </mat-form-field>
+
+            <!-- Row 3: License Flag -->
+            <mat-form-field appearance="fill" class="details-field row-start">
+              <mat-label>License Flag</mat-label>
+              <mat-select formControlName="licenseFlag" [id]="elementId('licenseFlag')">
+                <mat-option value="">— None —</mat-option>
+                <mat-option value="Y">Yes</mat-option>
+                <mat-option value="N">No</mat-option>
+              </mat-select>
+            </mat-form-field>
+
+          </div>
+        </form>
+      </div>
+
+      <!-- ═══ Card 3 — Attribute Details + Actions ══════════════════════════ -->
+      <div class="section-card attribute-card">
+
+        <div class="attribute-header">
+          <h3 class="card-section-title">Attribute Details</h3>
+          <button
+            mat-stroked-button
+            class="retrieve-btn"
+            type="button"
+            [id]="elementId('add-row-btn')"
+            (click)="onAddRow()"
+            [disabled]="loading()">
+            <mat-icon>add</mat-icon>
+            ADD ROW
+          </button>
+        </div>
+
+        <app-data-table
+          [config]="attributeTableConfig"
+          [data]="attributeRows()"
+          [loading]="loading()"
+          (rowAction)="onRowAction($event)" />
+
+        <div class="form-actions" role="group" aria-label="Form actions">
+          <button
+            mat-button
+            type="button"
+            (click)="onCancel()"
+            [id]="elementId('cancel-btn')"
+            [disabled]="loading()">
+            CANCEL
+          </button>
+          <button
+            mat-raised-button
+            color="primary"
+            type="button"
+            [id]="elementId('save-btn')"
+            (click)="onSave()"
+            [disabled]="loading()">
+            SAVE
+          </button>
+        </div>
+
+      </div>
+
+    }
+
+  </div>
+</div>

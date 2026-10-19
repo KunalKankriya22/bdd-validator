@@ -1,0 +1,254 @@
+<!-- Loading overlay for async operations -->
+<div
+  class="loading-overlay"
+  *ngIf="downloading() || deleting()"
+  role="alert"
+  aria-live="assertive">
+  <mat-spinner diameter="48" aria-hidden="true"></mat-spinner>
+  <span class="loading-overlay__text" *ngIf="downloading()">Downloading...</span>
+  <span class="loading-overlay__text" *ngIf="deleting()">Deleting...</span>
+</div>
+
+<div class="document-library-page">
+  <h1 class="cdk-visually-hidden">Document Library</h1>
+
+  <!-- Page header with breadcrumb -->
+  <app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+  <!-- Filter bar -->
+  <div class="filter-card">
+    <form [formGroup]="filterForm" class="filter-form" (ngSubmit)="retrieveDocuments()">
+
+      <!-- Table - searchable dropdown -->
+      <div class="filter-field-wrapper filter-field-wrapper--table">
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Table</mat-label>
+          <mat-select formControlName="table" aria-label="Table"
+                      panelClass="doc-library-select-panel">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="tableSearchControl"
+                placeholderLabel="Search tables..."
+                noEntriesFoundLabel="No matching tables">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option *ngIf="isLoadingFilters" disabled class="filter-panel__option--status">
+              <span class="filter-panel__loading">
+                <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+                <span>Loading...</span>
+              </span>
+            </mat-option>
+            <mat-option *ngIf="!isLoadingFilters && filteredTableOptions.length === 0" disabled
+                        class="filter-panel__option--status">
+              No data available
+            </mat-option>
+            <mat-option *ngFor="let table of filteredTableOptions" [value]="table">
+              {{ table }}
+            </mat-option>
+          </mat-select>
+        </mat-form-field>
+      </div>
+
+      <!-- Column - searchable dropdown, cascading from Table -->
+      <div class="filter-field-wrapper filter-field-wrapper--column">
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Column</mat-label>
+          <mat-select formControlName="column" aria-label="Column"
+                      panelClass="doc-library-select-panel">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="columnSearchControl"
+                placeholderLabel="Search columns..."
+                noEntriesFoundLabel="No matching columns">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option *ngIf="isLoadingFilters" disabled class="filter-panel__option--status">
+              <span class="filter-panel__loading">
+                <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+                <span>Loading...</span>
+              </span>
+            </mat-option>
+            <mat-option *ngIf="!isLoadingFilters && filteredColumnOptions.length === 0" disabled
+                        class="filter-panel__option--status">
+              No data available
+            </mat-option>
+            <mat-option *ngFor="let col of filteredColumnOptions" [value]="col">
+              {{ col }}
+            </mat-option>
+          </mat-select>
+        </mat-form-field>
+      </div>
+
+      <!-- Value - text input -->
+      <div class="filter-field-wrapper filter-field-wrapper--value">
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Value</mat-label>
+          <input matInput formControlName="value" maxlength="30" aria-label="Filter by value" />
+        </mat-form-field>
+      </div>
+
+      <!-- Document ID - text input -->
+      <div class="filter-field-wrapper filter-field-wrapper--docid">
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Document ID</mat-label>
+          <input matInput formControlName="docId" maxlength="30" aria-label="Filter by document ID" />
+        </mat-form-field>
+      </div>
+
+      <!-- From Date -->
+      <div class="filter-field-wrapper filter-field-wrapper--date">
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>From Date</mat-label>
+          <input
+            matInput
+            [matDatepicker]="fromPicker"
+            formControlName="fromDate"
+            [max]="maxDate()"
+            aria-label="From Date" />
+          <mat-datepicker-toggle matIconSuffix [for]="fromPicker" aria-label="Open from date calendar"></mat-datepicker-toggle>
+          <mat-datepicker #fromPicker></mat-datepicker>
+        </mat-form-field>
+      </div>
+
+      <!-- To Date -->
+      <div class="filter-field-wrapper filter-field-wrapper--date">
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>To Date</mat-label>
+          <input
+            matInput
+            [matDatepicker]="toPicker"
+            formControlName="toDate"
+            [max]="maxDate()"
+            aria-label="To Date" />
+          <mat-datepicker-toggle matIconSuffix [for]="toPicker" aria-label="Open to date calendar"></mat-datepicker-toggle>
+          <mat-datepicker #toPicker></mat-datepicker>
+        </mat-form-field>
+      </div>
+
+      <!-- RETRIEVE button -->
+      <div class="filter-actions">
+        <button
+          mat-stroked-button
+          type="submit"
+          class="retrieve-btn"
+          [disabled]="loading() || filterForm.invalid">
+          RETRIEVE
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Initial empty state -->
+  <div class="empty-state" *ngIf="!hasRetrieved() && !loading()">
+    <div class="empty-state__icon-wrapper">
+      <mat-icon class="empty-state__icon" aria-hidden="true">folder_open</mat-icon>
+    </div>
+    <h3 class="empty-state__title">Get Started</h3>
+    <p class="empty-state__message">
+      Use the filters above and click RETRIEVE to search for documents.
+    </p>
+  </div>
+
+  <!-- Loading state -->
+  <div class="loading-state" *ngIf="loading()" role="status" aria-live="polite" aria-busy="true">
+    <mat-spinner diameter="40" [attr.aria-label]="'Loading documents'"></mat-spinner>
+    <p>Loading documents...</p>
+  </div>
+
+  <!-- No results state -->
+  <div
+    class="empty-state"
+    *ngIf="hasRetrieved() && !loading() && !hasDocuments()">
+    <div class="empty-state__icon-wrapper">
+      <mat-icon class="empty-state__icon" aria-hidden="true">search_off</mat-icon>
+    </div>
+    <h3 class="empty-state__title">No Documents Found</h3>
+    <p class="empty-state__message">
+      No documents match your search criteria. Try adjusting the filters.
+    </p>
+  </div>
+
+  <!-- Split view panel -->
+  <div
+    class="split-view"
+    *ngIf="hasRetrieved() && !loading() && hasDocuments()">
+    <!-- Left panel: Documents list -->
+    <div class="documents-section">
+      <div class="documents-section__header">
+        <h3>Documents ({{ documents().length }})</h3>
+      </div>
+      <div class="documents-section__list">
+        <div
+          *ngFor="let doc of documents(); trackBy: trackBySessionId"
+          class="document-item"
+          [class.document-item--selected]="selectedDocument()?.sessionId === doc.sessionId"
+          (click)="selectDocument(doc)"
+          role="button"
+          tabindex="0"
+          [attr.aria-label]="'Select document ' + doc.docName"
+          (keydown.enter)="selectDocument(doc)"
+          (keydown.space)="selectDocument(doc); $event.preventDefault()">
+          <div class="document-item__icon" [ngClass]="getFileIconClass(doc.docType)">
+            <mat-icon aria-hidden="true">{{ getFileIcon(doc.docName) }}</mat-icon>
+          </div>
+          <div class="document-item__info">
+            <span
+              class="document-item__name"
+              [matTooltip]="doc.docName"
+              matTooltipPosition="above">
+              {{ doc.docName }}
+            </span>
+            <span class="document-item__meta">
+              {{ doc.docType || getFileExtension(doc.docName) }} / {{ doc.docId }}
+            </span>
+          </div>
+          <button
+            mat-icon-button
+            class="document-item__delete"
+            (click)="onDeleteDocument(doc, $event)"
+            [attr.aria-label]="'Delete ' + doc.docName"
+            [matTooltip]="'Delete document'">
+            <mat-icon aria-hidden="true">delete</mat-icon>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right panel: Linked Values -->
+    <div class="linked-values-section">
+      <div class="linked-values-section__header">
+        <h3>Linked Values ({{ linkedValues().length }})</h3>
+        <div class="linked-values-section__actions">
+          <button
+            mat-stroked-button
+            class="link-document-btn"
+            (click)="onLinkDocumentClick()"
+            [disabled]="!selectedDocument()">
+            <mat-icon aria-hidden="true">link</mat-icon>
+            LINK DOCUMENT
+          </button>
+        </div>
+      </div>
+      <div class="linked-values-section__content">
+        <ng-container *ngIf="selectedDocument(); else noDocSelected">
+          <app-data-table
+            *ngIf="hasLinkedValues()"
+            [config]="linkedValuesTableConfig"
+            [data]="linkedValues()"
+            (selectionChange)="onSelectionChange($event)"
+            (sortChange)="onLinkedValuesSortChange($event)"
+            (rowAction)="onRowAction($event)">
+          </app-data-table>
+          <div class="empty-state empty-state--inline" *ngIf="!hasLinkedValues()">
+            <p class="empty-state__message">No linked values for this document.</p>
+          </div>
+        </ng-container>
+        <ng-template #noDocSelected>
+          <div class="empty-state empty-state--inline">
+            <p class="empty-state__message">Select a document to view linked values.</p>
+          </div>
+        </ng-template>
+      </div>
+    </div>
+  </div>
+</div>

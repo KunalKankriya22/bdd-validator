@@ -1,0 +1,558 @@
+<div class="test-by-machine-id-page" role="main" aria-label="Test By Machine ID">
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Filter Controls Card -->
+  <div class="controls-card">
+    <div class="controls-row">
+      <!-- Instrument ID Dropdown -->
+      <mat-form-field appearance="fill" class="control-field">
+        <mat-label>Instrument ID</mat-label>
+        <mat-select
+          [formControl]="instrumentIdControl"
+          (selectionChange)="onInstrumentIdChange($event.value)"
+          placeholder="Select Instrument ID"
+          [disabled]="isEditMode"
+          aria-label="Select Instrument ID">
+          <!-- Search Component -->
+          <mat-option>
+            <ngx-mat-select-search
+              [formControl]="instrumentIdSearchControl"
+              placeholderLabel="Search..."
+              noEntriesFoundLabel="No Data Available">
+            </ngx-mat-select-search>
+          </mat-option>
+          <!-- Options -->
+          @for (option of filteredInstrumentIds(); track option.instrumentId) {
+            <mat-option [value]="option.instrumentId">
+              {{ option.instrumentId }}{{ option.description ? ' - ' + option.description : '' }}
+            </mat-option>
+          } @empty {
+            <mat-option disabled>No Data Available</mat-option>
+          }
+        </mat-select>
+        <mat-error *ngIf="instrumentIdControl.hasError('required')">
+          Instrument ID is required
+        </mat-error>
+      </mat-form-field>
+
+      <!-- Instrument Test ID Dropdown -->
+      <mat-form-field appearance="fill" class="control-field">
+        <mat-label>Instrument Test ID</mat-label>
+        <mat-select
+          [formControl]="testIdControl"
+          placeholder="Select Instrument Test ID"
+          [disabled]="isEditMode"
+          aria-label="Select Instrument Test ID">
+          <!-- Search Component -->
+          <mat-option>
+            <ngx-mat-select-search
+              [formControl]="testIdSearchControl"
+              placeholderLabel="Search..."
+              noEntriesFoundLabel="No Data Available">
+            </ngx-mat-select-search>
+          </mat-option>
+          <!-- Options -->
+          @for (option of filteredTestIds(); track option.testId) {
+            <mat-option [value]="option.testId">
+              {{ option.testId }}{{ option.description ? ' - ' + option.description : '' }}
+            </mat-option>
+          } @empty {
+            <mat-option disabled>No Data Available</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <!-- RETRIEVE Button -->
+      <button
+        mat-stroked-button
+        class="retrieve-button"
+        [disabled]="instrumentIdControl.invalid || isEditMode || isRetrieving"
+        (click)="onRetrieve()"
+        [attr.aria-busy]="isRetrieving"
+        [attr.aria-label]="isRetrieving ? 'Retrieving test data, please wait' : 'Retrieve test data'">
+        {{ isRetrieving ? 'RETRIEVING...' : 'RETRIEVE' }}
+      </button>
+    </div>
+  </div>
+
+  <div class="cdk-visually-hidden" aria-live="polite" aria-atomic="true">
+    {{ instrumentTestsData.length > 0 && !isRetrieving ? instrumentTestsData.length + ' instrument test records loaded' : '' }}
+  </div>
+
+  <!-- Main Content Card -->
+  <div class="test-by-machine-id__card">
+    <!-- Duplicate Combination Error (from API) -->
+    <div *ngIf="duplicateCombinationError" class="duplicate-error-banner" role="alert">
+      <mat-icon class="error-icon-small" aria-hidden="true">error</mat-icon>
+      <span>This combination already exists. Please enter a unique combination.</span>
+    </div>
+
+    <!-- Section Header with Title and Buttons -->
+    <div *ngIf="instrumentTestsData.length > 0 || instrumentIdControl.value" class="section-header">
+      <h2 class="section-title">Instrument Tests and Scheduling Tests ({{ instrumentTestsData.length }})</h2>
+
+      <div class="section-actions">
+        <!-- Normal mode: Show ADD NEW COMBINATION and EDIT COMBINATION buttons -->
+        <div *ngIf="!isEditMode" class="view-mode-actions">
+          <button
+            mat-stroked-button
+            class="btn-add-new"
+            [disabled]="!instrumentIdControl.value"
+            (click)="onAddNewCombination()"
+            aria-label="Add new combination">
+            <mat-icon>add</mat-icon>
+            ADD NEW COMBINATION
+          </button>
+
+          <button
+            mat-stroked-button
+            class="btn-edit"
+            [disabled]="!instrumentIdControl.value || instrumentTestsData.length === 0"
+            (click)="onEditCombination()"
+            aria-label="Edit combination">
+            EDIT COMBINATION
+          </button>
+        </div>
+
+        <!-- Edit mode: Show CANCEL and SAVE buttons -->
+        <div *ngIf="isEditMode" class="edit-mode-actions">
+          <button
+            mat-stroked-button
+            class="btn-cancel"
+            (click)="onCancelEdit()"
+            aria-label="Cancel editing">
+            <mat-icon>close</mat-icon>
+            CANCEL
+          </button>
+
+          <button
+            mat-raised-button
+            class="btn-save"
+            [disabled]="isLoading || duplicateCombinationError || hasValidationErrors()"
+            (click)="onSave()"
+            aria-label="Save changes">
+            <mat-icon>check</mat-icon>
+            SAVE
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Empty State (no data loaded yet) -->
+    <div *ngIf="!isEditMode && instrumentTestsData.length === 0 && !isRetrieving" class="empty-state-container">
+      <!-- Instrument Tests Empty Section -->
+      <div class="table-section">
+        <h4 class="table-subtitle">Instrument Tests ({{ instrumentTestsData.length }})</h4>
+        <div class="test-by-machine-id__empty">
+          <mat-icon class="test-by-machine-id__empty-icon" aria-hidden="true">edit</mat-icon>
+          <span class="test-by-machine-id__empty-title">Get Started</span>
+          <span class="test-by-machine-id__empty-subtitle">Choose an Instrument ID and Instrument Test ID to view and configure instrument tests and scheduling rules.</span>
+        </div>
+      </div>
+
+      <!-- Application Scheduling Tests Empty Section -->
+      <div class="table-section">
+        <h4 class="table-subtitle">Application Scheduling Tests ({{ applicationSchedulingTestsData.length }})</h4>
+        <div class="test-by-machine-id__empty">
+          <mat-icon class="test-by-machine-id__empty-icon" aria-hidden="true">edit</mat-icon>
+          <span class="test-by-machine-id__empty-title">Get Started</span>
+          <span class="test-by-machine-id__empty-subtitle">Choose an Instrument ID and Instrument Test ID to view and configure instrument tests and scheduling rules.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tables Section (View Mode) -->
+    <div *ngIf="instrumentTestsData.length > 0" class="tables-wrapper">
+      <!-- Instrument Tests Table -->
+      <div class="table-section">
+        <h4 class="table-subtitle" id="instrument-tests-heading">Instrument Tests ({{ instrumentTestsData.length }})</h4>
+        <div class="table-container">
+          <table class="readonly-table" aria-labelledby="instrument-tests-heading">
+            <thead>
+              <tr>
+                <th>Inst. Test ID</th>
+                <th class="sortable-header"
+                    [attr.tabindex]="isEditMode ? null : '0'"
+                    [attr.role]="isEditMode ? null : 'button'"
+                    [attr.aria-sort]="instrumentTestsSortDirection === 'asc' ? 'ascending' : 'descending'"
+                    (click)="!isEditMode && sortInstrumentTests()"
+                    (keydown.enter)="!isEditMode && sortInstrumentTests()"
+                    (keydown.space)="$event.preventDefault(); !isEditMode && sortInstrumentTests()">
+                  Test 1
+                  <mat-icon *ngIf="!isEditMode" class="sort-icon" aria-hidden="true">{{ instrumentTestsSortDirection === 'asc' ? 'arrow_downward' : 'arrow_upward' }}</mat-icon>
+                </th>
+                <th>Result 1</th>
+                <th>Test 2</th>
+                <th>Result 2</th>
+                <th>Test 3</th>
+                <th>Result 3</th>
+                <th>Test 4</th>
+                <th>Result 4</th>
+                <th>Test 5</th>
+                <th>Result 5</th>
+                <th>Pool Size</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let row of instrumentTestsData; let i = index"
+                  [class.selected]="selectedInstrumentRowIndex === i"
+                  [class.editing]="editingRowIndex === i"
+                  [attr.tabindex]="isEditMode ? null : '0'"
+                  [attr.aria-selected]="selectedInstrumentRowIndex === i"
+                  (click)="onInstrumentRowClick(i)"
+                  (keydown.enter)="onInstrumentRowClick(i)"
+                  (keydown.space)="$event.preventDefault(); onInstrumentRowClick(i)">
+                <!-- Inst. Test ID (read-only) -->
+                <td><span>{{ row.testId || '-' }}</span></td>
+                <!-- Test 1 (required) -->
+                <td>
+                  <mat-form-field *ngIf="editingRowIndex === i && editableInstrumentRow" appearance="outline" class="inline-edit-field"
+                                  [class.field-error]="editableInstrumentRow.errors?.['test1']"
+                                  [matTooltip]="editableInstrumentRow.errors?.['test1'] || ''"
+                                  [matTooltipDisabled]="!editableInstrumentRow.errors?.['test1']"
+                                  matTooltipPosition="above">
+                    <mat-select [(ngModel)]="editableInstrumentRow.test1"
+                               (ngModelChange)="onInstrumentRowFieldChange('test1', $event)"
+                               panelClass="inline-grid-select-panel"
+                               aria-label="Test 1">
+                      <mat-option>
+                        <ngx-mat-select-search
+                          [formControl]="instrTest1SearchControl"
+                          placeholderLabel="Search..."
+                          noEntriesFoundLabel="No Data Found">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (opt of filteredInstrTest1(); track opt.testId) {
+                        <mat-option [value]="opt.testId">{{ opt.testId }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>
+                      } @empty {
+                        <mat-option disabled>No Data Found</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                  <span *ngIf="editingRowIndex !== i">{{ row.test1 || '-' }}</span>
+                </td>
+                <!-- Result 1 -->
+                <td>
+                  <mat-form-field *ngIf="editingRowIndex === i && editableInstrumentRow" appearance="outline" class="inline-edit-field"
+                                  [class.field-error]="editableInstrumentRow.errors?.['result1']"
+                                  [matTooltip]="editableInstrumentRow.errors?.['result1'] || ''"
+                                  [matTooltipDisabled]="!editableInstrumentRow.errors?.['result1']"
+                                  matTooltipPosition="above">
+                    <mat-select [(ngModel)]="editableInstrumentRow.result1"
+                               (ngModelChange)="onInstrumentRowFieldChange('result1', $event)"
+                               aria-label="Result 1">
+                      @for (opt of instrumentResult1Options(); track opt) {
+                        <mat-option [value]="opt">{{ opt }}</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                  <span *ngIf="editingRowIndex !== i">{{ row.result1 || '-' }}</span>
+                </td>
+                <!-- Test 2 -->
+                <td>
+                  <mat-form-field *ngIf="editingRowIndex === i && editableInstrumentRow" appearance="outline" class="inline-edit-field">
+                    <mat-select [(ngModel)]="editableInstrumentRow.test2"
+                               (ngModelChange)="onInstrumentRowFieldChange('test2', $event)"
+                               panelClass="inline-grid-select-panel"
+                               aria-label="Test 2">
+                      <mat-option>
+                        <ngx-mat-select-search
+                          [formControl]="instrTest2SearchControl"
+                          placeholderLabel="Search..."
+                          noEntriesFoundLabel="No Data Found">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (opt of filteredInstrTest2(); track opt.testId) {
+                        <mat-option [value]="opt.testId">{{ opt.testId }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>
+                      } @empty {
+                        <mat-option disabled>No Data Found</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                  <span *ngIf="editingRowIndex !== i">{{ row.test2 || '-' }}</span>
+                </td>
+                <!-- Result 2 -->
+                <td>
+                  <mat-form-field *ngIf="editingRowIndex === i && editableInstrumentRow" appearance="outline" class="inline-edit-field"
+                                  [class.field-error]="editableInstrumentRow.errors?.['result2']"
+                                  [matTooltip]="editableInstrumentRow.errors?.['result2'] || ''"
+                                  [matTooltipDisabled]="!editableInstrumentRow.errors?.['result2']"
+                                  matTooltipPosition="above">
+                    <mat-select [(ngModel)]="editableInstrumentRow.result2"
+                               (ngModelChange)="onInstrumentRowFieldChange('result2', $event)"
+                               aria-label="Result 2">
+                      @for (opt of instrumentResult2Options(); track opt) {
+                        <mat-option [value]="opt">{{ opt }}</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                  <span *ngIf="editingRowIndex !== i">{{ row.result2 || '-' }}</span>
+                </td>
+                <!-- Test 3 -->
+                <td>
+                  <mat-form-field *ngIf="editingRowIndex === i && editableInstrumentRow" appearance="outline" class="inline-edit-field">
+                    <mat-select [(ngModel)]="editableInstrumentRow.test3"
+                               (ngModelChange)="onInstrumentRowFieldChange('test3', $event)"
+                               panelClass="inline-grid-select-panel"
+                               aria-label="Test 3">
+                      <mat-option>
+                        <ngx-mat-select-search
+                          [formControl]="instrTest3SearchControl"
+                          placeholderLabel="Search..."
+                          noEntriesFoundLabel="No Data Found">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (opt of filteredInstrTest3(); track opt.testId) {
+                        <mat-option [value]="opt.testId">{{ opt.testId }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>
+                      } @empty {
+                        <mat-option disabled>No Data Found</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                  <span *ngIf="editingRowIndex !== i">{{ row.test3 || '-' }}</span>
+                </td>
+                <!-- Result 3 -->
+                <td>
+                  <mat-form-field *ngIf="editingRowIndex === i && editableInstrumentRow" appearance="outline" class="inline-edit-field"
+                                  [class.field-error]="editableInstrumentRow.errors?.['result3']"
+                                  [matTooltip]="editableInstrumentRow.errors?.['result3'] || ''"
+                                  [matTooltipDisabled]="!editableInstrumentRow.errors?.['result3']"
+                                  matTooltipPosition="above">
+                    <mat-select [(ngModel)]="editableInstrumentRow.result3"
+                               (ngModelChange)="onInstrumentRowFieldChange('result3', $event)"
+                               aria-label="Result 3">
+                      @for (opt of instrumentResult3Options(); track opt) {
+                        <mat-option [value]="opt">{{ opt }}</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                  <span *ngIf="editingRowIndex !== i">{{ row.result3 || '-' }}</span>
+                </td>
+                <!-- Test 4 -->
+                <td>
+                  <mat-form-field *ngIf="editingRowIndex === i && editableInstrumentRow" appearance="outline" class="inline-edit-field">
+                    <mat-select [(ngModel)]="editableInstrumentRow.test4"
+                               (ngModelChange)="onInstrumentRowFieldChange('test4', $event)"
+                               panelClass="inline-grid-select-panel"
+                               aria-label="Test 4">
+                      <mat-option>
+                        <ngx-mat-select-search
+                          [formControl]="instrTest4SearchControl"
+                          placeholderLabel="Search..."
+                          noEntriesFoundLabel="No Data Found">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (opt of filteredInstrTest4(); track opt.testId) {
+                        <mat-option [value]="opt.testId">{{ opt.testId }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>
+                      } @empty {
+                        <mat-option disabled>No Data Found</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                  <span *ngIf="editingRowIndex !== i">{{ row.test4 || '-' }}</span>
+                </td>
+                <!-- Result 4 -->
+                <td>
+                  <mat-form-field *ngIf="editingRowIndex === i && editableInstrumentRow" appearance="outline" class="inline-edit-field"
+                                  [class.field-error]="editableInstrumentRow.errors?.['result4']"
+                                  [matTooltip]="editableInstrumentRow.errors?.['result4'] || ''"
+                                  [matTooltipDisabled]="!editableInstrumentRow.errors?.['result4']"
+                                  matTooltipPosition="above">
+                    <mat-select [(ngModel)]="editableInstrumentRow.result4"
+                               (ngModelChange)="onInstrumentRowFieldChange('result4', $event)"
+                               aria-label="Result 4">
+                      @for (opt of instrumentResult4Options(); track opt) {
+                        <mat-option [value]="opt">{{ opt }}</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                  <span *ngIf="editingRowIndex !== i">{{ row.result4 || '-' }}</span>
+                </td>
+                <!-- Test 5 -->
+                <td>
+                  <mat-form-field *ngIf="editingRowIndex === i && editableInstrumentRow" appearance="outline" class="inline-edit-field">
+                    <mat-select [(ngModel)]="editableInstrumentRow.test5"
+                               (ngModelChange)="onInstrumentRowFieldChange('test5', $event)"
+                               panelClass="inline-grid-select-panel"
+                               aria-label="Test 5">
+                      <mat-option>
+                        <ngx-mat-select-search
+                          [formControl]="instrTest5SearchControl"
+                          placeholderLabel="Search..."
+                          noEntriesFoundLabel="No Data Found">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (opt of filteredInstrTest5(); track opt.testId) {
+                        <mat-option [value]="opt.testId">{{ opt.testId }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>
+                      } @empty {
+                        <mat-option disabled>No Data Found</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                  <span *ngIf="editingRowIndex !== i">{{ row.test5 || '-' }}</span>
+                </td>
+                <!-- Result 5 -->
+                <td>
+                  <mat-form-field *ngIf="editingRowIndex === i && editableInstrumentRow" appearance="outline" class="inline-edit-field"
+                                  [class.field-error]="editableInstrumentRow.errors?.['result5']"
+                                  [matTooltip]="editableInstrumentRow.errors?.['result5'] || ''"
+                                  [matTooltipDisabled]="!editableInstrumentRow.errors?.['result5']"
+                                  matTooltipPosition="above">
+                    <mat-select [(ngModel)]="editableInstrumentRow.result5"
+                               (ngModelChange)="onInstrumentRowFieldChange('result5', $event)"
+                               aria-label="Result 5">
+                      @for (opt of instrumentResult5Options(); track opt) {
+                        <mat-option [value]="opt">{{ opt }}</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                  <span *ngIf="editingRowIndex !== i">{{ row.result5 || '-' }}</span>
+                </td>
+                <!-- Pool Size -->
+                <td>
+                  <mat-form-field *ngIf="editingRowIndex === i && editableInstrumentRow" appearance="outline" class="inline-edit-field pool-size-field"
+                                  [class.field-error]="editableInstrumentRow.errors?.['poolSize']"
+                                  [matTooltip]="editableInstrumentRow.errors?.['poolSize'] || ''"
+                                  [matTooltipDisabled]="!editableInstrumentRow.errors?.['poolSize']"
+                                  matTooltipPosition="above">
+                    <input matInput
+                           type="text"
+                           maxlength="4"
+                           [(ngModel)]="editableInstrumentRow.poolSize"
+                           (input)="onPoolSizeInput($event)"
+                           (ngModelChange)="onInstrumentRowFieldChange('poolSize', $event)"
+                           placeholder="e.g. 1, >1"
+                           aria-label="Pool Size">
+                  </mat-form-field>
+                  <span *ngIf="editingRowIndex !== i">{{ row.poolSize !== null && row.poolSize !== undefined ? row.poolSize : '-' }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Application Scheduling Tests Table -->
+      <div class="table-section">
+        <h4 class="table-subtitle" id="app-scheduling-tests-heading">Application Scheduling Tests ({{ applicationSchedulingTestsData.length }})</h4>
+        <div class="table-container">
+          <table class="readonly-table" aria-labelledby="app-scheduling-tests-heading">
+            <thead>
+              <tr>
+                <th class="sortable-header"
+                    [attr.tabindex]="isEditMode ? null : '0'"
+                    [attr.role]="isEditMode ? null : 'button'"
+                    [attr.aria-sort]="applicationTestsSortDirection === 'asc' ? 'ascending' : 'descending'"
+                    (click)="!isEditMode && sortApplicationTests()"
+                    (keydown.enter)="!isEditMode && sortApplicationTests()"
+                    (keydown.space)="$event.preventDefault(); !isEditMode && sortApplicationTests()">
+                  Test 1
+                  <mat-icon *ngIf="!isEditMode" class="sort-icon" aria-hidden="true">{{ applicationTestsSortDirection === 'asc' ? 'arrow_downward' : 'arrow_upward' }}</mat-icon>
+                </th>
+                <th>Result 1</th>
+                <th>Test 2</th>
+                <th>Result 2</th>
+                <th>Test 3</th>
+                <th>Result 3</th>
+                <th>Def Test 4</th>
+                <th>Result 4</th>
+                <th>Def Test 5</th>
+                <th>Result 5</th>
+                <th>Def Test 6</th>
+                <th>Result 6</th>
+                <th>Effective Date</th>
+                <th>Termination Date</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let row of applicationSchedulingTestsData; let i = index"
+                  [class.selected]="selectedApplicationRowIndex === i"
+                  [class.editing]="editingRowIndex === i"
+                  [attr.tabindex]="isEditMode ? null : '0'"
+                  [attr.aria-selected]="selectedApplicationRowIndex === i"
+                  (click)="onApplicationRowClick(i)"
+                  (keydown.enter)="onApplicationRowClick(i)"
+                  (keydown.space)="$event.preventDefault(); onApplicationRowClick(i)">
+                <!-- Test 1 -->
+                <td><mat-form-field *ngIf="editingRowIndex === i && editableApplicationRow" appearance="outline" class="inline-edit-field"><mat-select [(ngModel)]="editableApplicationRow.test1" (ngModelChange)="onApplicationRowFieldChange('test1', $event)" panelClass="inline-grid-select-panel" aria-label="Test 1"><mat-option><ngx-mat-select-search [formControl]="appTest1SearchControl" placeholderLabel="Search..." noEntriesFoundLabel="No Data Found"></ngx-mat-select-search></mat-option>@for (opt of filteredAppTest1(); track opt.testId) {<mat-option [value]="opt.testId">{{ opt.testId }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>} @empty {<mat-option disabled>No Data Found</mat-option>}</mat-select></mat-form-field><span *ngIf="editingRowIndex !== i">{{ row.test1 || '-' }}</span></td>
+                <!-- Result 1 -->
+                <td><mat-form-field *ngIf="editingRowIndex === i && editableApplicationRow" appearance="outline" class="inline-edit-field" [class.field-error]="editableApplicationRow.errors?.['result1']" [matTooltip]="editableApplicationRow.errors?.['result1'] || ''" [matTooltipDisabled]="!editableApplicationRow.errors?.['result1']" matTooltipPosition="above"><mat-select [(ngModel)]="editableApplicationRow.result1" (ngModelChange)="onApplicationRowFieldChange('result1', $event)" aria-label="Result 1">@for (opt of appResult1Options(); track opt) {<mat-option [value]="opt">{{ opt }}</mat-option>}</mat-select></mat-form-field><span *ngIf="editingRowIndex !== i">{{ row.result1 || '-' }}</span></td>
+                <!-- Test 2 -->
+                <td><mat-form-field *ngIf="editingRowIndex === i && editableApplicationRow" appearance="outline" class="inline-edit-field"><mat-select [(ngModel)]="editableApplicationRow.test2" (ngModelChange)="onApplicationRowFieldChange('test2', $event)" panelClass="inline-grid-select-panel" aria-label="Test 2"><mat-option><ngx-mat-select-search [formControl]="appTest2SearchControl" placeholderLabel="Search..." noEntriesFoundLabel="No Data Found"></ngx-mat-select-search></mat-option>@for (opt of filteredAppTest2(); track opt.testId) {<mat-option [value]="opt.testId">{{ opt.testId }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>} @empty {<mat-option disabled>No Data Found</mat-option>}</mat-select></mat-form-field><span *ngIf="editingRowIndex !== i">{{ row.test2 || '-' }}</span></td>
+                <!-- Result 2 -->
+                <td><mat-form-field *ngIf="editingRowIndex === i && editableApplicationRow" appearance="outline" class="inline-edit-field" [class.field-error]="editableApplicationRow.errors?.['result2']" [matTooltip]="editableApplicationRow.errors?.['result2'] || ''" [matTooltipDisabled]="!editableApplicationRow.errors?.['result2']" matTooltipPosition="above"><mat-select [(ngModel)]="editableApplicationRow.result2" (ngModelChange)="onApplicationRowFieldChange('result2', $event)" aria-label="Result 2">@for (opt of appResult2Options(); track opt) {<mat-option [value]="opt">{{ opt }}</mat-option>}</mat-select></mat-form-field><span *ngIf="editingRowIndex !== i">{{ row.result2 || '-' }}</span></td>
+                <!-- Test 3 -->
+                <td><mat-form-field *ngIf="editingRowIndex === i && editableApplicationRow" appearance="outline" class="inline-edit-field"><mat-select [(ngModel)]="editableApplicationRow.test3" (ngModelChange)="onApplicationRowFieldChange('test3', $event)" panelClass="inline-grid-select-panel" aria-label="Test 3"><mat-option><ngx-mat-select-search [formControl]="appTest3SearchControl" placeholderLabel="Search..." noEntriesFoundLabel="No Data Found"></ngx-mat-select-search></mat-option>@for (opt of filteredAppTest3(); track opt.testId) {<mat-option [value]="opt.testId">{{ opt.testId }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>} @empty {<mat-option disabled>No Data Found</mat-option>}</mat-select></mat-form-field><span *ngIf="editingRowIndex !== i">{{ row.test3 || '-' }}</span></td>
+                <!-- Result 3 -->
+                <td><mat-form-field *ngIf="editingRowIndex === i && editableApplicationRow" appearance="outline" class="inline-edit-field" [class.field-error]="editableApplicationRow.errors?.['result3']" [matTooltip]="editableApplicationRow.errors?.['result3'] || ''" [matTooltipDisabled]="!editableApplicationRow.errors?.['result3']" matTooltipPosition="above"><mat-select [(ngModel)]="editableApplicationRow.result3" (ngModelChange)="onApplicationRowFieldChange('result3', $event)" aria-label="Result 3">@for (opt of appResult3Options(); track opt) {<mat-option [value]="opt">{{ opt }}</mat-option>}</mat-select></mat-form-field><span *ngIf="editingRowIndex !== i">{{ row.result3 || '-' }}</span></td>
+                <!-- Def Test 4 -->
+                <td><mat-form-field *ngIf="editingRowIndex === i && editableApplicationRow" appearance="outline" class="inline-edit-field"><mat-select [(ngModel)]="editableApplicationRow.defTest4" (ngModelChange)="onApplicationRowFieldChange('defTest4', $event)" panelClass="inline-grid-select-panel" aria-label="Def Test 4"><mat-option><ngx-mat-select-search [formControl]="appTest4SearchControl" placeholderLabel="Search..." noEntriesFoundLabel="No Data Found"></ngx-mat-select-search></mat-option>@for (opt of filteredAppTest4(); track opt.testId) {<mat-option [value]="opt.testId">{{ opt.testId }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>} @empty {<mat-option disabled>No Data Found</mat-option>}</mat-select></mat-form-field><span *ngIf="editingRowIndex !== i">{{ row.defTest4 || '-' }}</span></td>
+                <!-- Result 4 -->
+                <td><mat-form-field *ngIf="editingRowIndex === i && editableApplicationRow" appearance="outline" class="inline-edit-field" [class.field-error]="editableApplicationRow.errors?.['result4']" [matTooltip]="editableApplicationRow.errors?.['result4'] || ''" [matTooltipDisabled]="!editableApplicationRow.errors?.['result4']" matTooltipPosition="above"><mat-select [(ngModel)]="editableApplicationRow.result4" (ngModelChange)="onApplicationRowFieldChange('result4', $event)" aria-label="Result 4">@for (opt of appResult4Options(); track opt) {<mat-option [value]="opt">{{ opt }}</mat-option>}</mat-select></mat-form-field><span *ngIf="editingRowIndex !== i">{{ row.result4 || '-' }}</span></td>
+                <!-- Def Test 5 -->
+                <td><mat-form-field *ngIf="editingRowIndex === i && editableApplicationRow" appearance="outline" class="inline-edit-field"><mat-select [(ngModel)]="editableApplicationRow.defTest5" (ngModelChange)="onApplicationRowFieldChange('defTest5', $event)" panelClass="inline-grid-select-panel" aria-label="Def Test 5"><mat-option><ngx-mat-select-search [formControl]="appTest5SearchControl" placeholderLabel="Search..." noEntriesFoundLabel="No Data Found"></ngx-mat-select-search></mat-option>@for (opt of filteredAppTest5(); track opt.testId) {<mat-option [value]="opt.testId">{{ opt.testId }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>} @empty {<mat-option disabled>No Data Found</mat-option>}</mat-select></mat-form-field><span *ngIf="editingRowIndex !== i">{{ row.defTest5 || '-' }}</span></td>
+                <!-- Result 5 -->
+                <td><mat-form-field *ngIf="editingRowIndex === i && editableApplicationRow" appearance="outline" class="inline-edit-field" [class.field-error]="editableApplicationRow.errors?.['result5']" [matTooltip]="editableApplicationRow.errors?.['result5'] || ''" [matTooltipDisabled]="!editableApplicationRow.errors?.['result5']" matTooltipPosition="above"><mat-select [(ngModel)]="editableApplicationRow.result5" (ngModelChange)="onApplicationRowFieldChange('result5', $event)" aria-label="Result 5">@for (opt of appResult5Options(); track opt) {<mat-option [value]="opt">{{ opt }}</mat-option>}</mat-select></mat-form-field><span *ngIf="editingRowIndex !== i">{{ row.result5 || '-' }}</span></td>
+                <!-- Def Test 6 -->
+                <td><mat-form-field *ngIf="editingRowIndex === i && editableApplicationRow" appearance="outline" class="inline-edit-field"><mat-select [(ngModel)]="editableApplicationRow.defTest6" (ngModelChange)="onApplicationRowFieldChange('defTest6', $event)" panelClass="inline-grid-select-panel" aria-label="Def Test 6"><mat-option><ngx-mat-select-search [formControl]="appTest6SearchControl" placeholderLabel="Search..." noEntriesFoundLabel="No Data Found"></ngx-mat-select-search></mat-option>@for (opt of filteredAppTest6(); track opt.testId) {<mat-option [value]="opt.testId">{{ opt.testId }}{{ opt.description ? ' - ' + opt.description : '' }}</mat-option>} @empty {<mat-option disabled>No Data Found</mat-option>}</mat-select></mat-form-field><span *ngIf="editingRowIndex !== i">{{ row.defTest6 || '-' }}</span></td>
+                <!-- Result 6 -->
+                <td><mat-form-field *ngIf="editingRowIndex === i && editableApplicationRow" appearance="outline" class="inline-edit-field" [class.field-error]="editableApplicationRow.errors?.['result6']" [matTooltip]="editableApplicationRow.errors?.['result6'] || ''" [matTooltipDisabled]="!editableApplicationRow.errors?.['result6']" matTooltipPosition="above"><mat-select [(ngModel)]="editableApplicationRow.result6" (ngModelChange)="onApplicationRowFieldChange('result6', $event)" aria-label="Result 6">@for (opt of appResult6Options(); track opt) {<mat-option [value]="opt">{{ opt }}</mat-option>}</mat-select></mat-form-field><span *ngIf="editingRowIndex !== i">{{ row.result6 || '-' }}</span></td>
+                <td>
+                  <div *ngIf="editingRowIndex === i && editableApplicationRow" class="date-field-wrapper">
+                    <mat-form-field appearance="outline"
+                                    class="inline-edit-field"
+                                    [class.date-field-error]="editableApplicationRow.errors?.['effectiveDate']">
+                      <input matInput
+                             #effectiveDateInput="ngModel"
+                             [matDatepicker]="effDatePicker"
+                             [(ngModel)]="editableApplicationRow.effectiveDate"
+                             (ngModelChange)="onApplicationRowFieldChange('effectiveDate', $event)"
+                             (dateChange)="onEffectiveDateChange($event)"
+                             (blur)="onEffectiveDateBlur($event)"
+                             [min]="(isAddingNewCombination || effDateTouched) ? minDate : null"
+                             placeholder="Select date *"
+                             aria-label="Effective Date"
+                             aria-required="true"
+                             [matTooltip]="editableApplicationRow.errors?.['effectiveDate'] || ''"
+                             [matTooltipDisabled]="!editableApplicationRow.errors?.['effectiveDate']"
+                             matTooltipPosition="above">
+                      <mat-datepicker-toggle matIconSuffix [for]="effDatePicker"></mat-datepicker-toggle>
+                      <mat-datepicker #effDatePicker></mat-datepicker>
+                    </mat-form-field>
+                  </div>
+                  <span *ngIf="editingRowIndex !== i">{{ formatDate(row.effectiveDate) }}</span>
+                </td>
+                <td>
+                  <div *ngIf="editingRowIndex === i && editableApplicationRow" class="date-field-wrapper">
+                    <mat-form-field appearance="outline"
+                                    class="inline-edit-field"
+                                    [class.date-field-error]="editableApplicationRow.errors?.['terminationDate']">
+                      <input matInput
+                             #terminationDateInput="ngModel"
+                             [matDatepicker]="termDatePicker"
+                             [(ngModel)]="editableApplicationRow.terminationDate"
+                             (ngModelChange)="onApplicationRowFieldChange('terminationDate', $event)"
+                             (dateChange)="onTerminationDateChange($event)"
+                             (blur)="onTerminationDateBlur($event)"
+                             [min]="editableApplicationRow.effectiveDate || minDate"
+                             placeholder="Select date"
+                             aria-label="Termination Date"
+                             [matTooltip]="editableApplicationRow.errors?.['terminationDate'] || ''"
+                             [matTooltipDisabled]="!editableApplicationRow.errors?.['terminationDate']"
+                             matTooltipPosition="above">
+                      <mat-datepicker-toggle matIconSuffix [for]="termDatePicker"></mat-datepicker-toggle>
+                      <mat-datepicker #termDatePicker></mat-datepicker>
+                    </mat-form-field>
+                  </div>
+                  <span *ngIf="editingRowIndex !== i">{{ formatDate(row.terminationDate) }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>

@@ -1,0 +1,1038 @@
+CREATE OR REPLACE package geltube_plasma is
+
+    -- Author     : ASHOKV
+    -- Created    : 10/08/2021 3:06:18 PM
+    -- Purpose    : This package provides routines
+    /*
+                  ins_upd_geltube_det  : to insert or update record into geltube_plasma_details table.
+    */
+    -- Versions   :
+    --  01  -   10/08/2021  -   Initial version of GelTube Plasma Feature package.
+    --  02  -   10/26/2021  -   Copied Edwin's gen_ebl_file routine from another pkg. Cleaned up as much as possible before merging.
+    --  03  -   01/14/2022  - MLT 4789, 4798
+    --  04      01/31/2022  -- to include the facility code in the EU check.
+    --  05      08/04/2022  -- MLT 5336/5339
+  
+    /*
+    to insert or update record into geltube_plasma_details table.
+    */
+    PROCEDURE ins_upd_geltube_det(rec_in IN GELTUBE_PLASMA_DETAILS%ROWTYPE);
+  
+    /*
+    to remove product code from geltube_plasma_details table.
+    */
+    PROCEDURE del_geltube_det(rec_in IN GELTUBE_PLASMA_DETAILS%ROWTYPE); 
+
+    /*
+    to get status of geltube unit id.
+    */  
+    PROCEDURE geltube_status(unit_id_in IN VARCHAR2, action_in IN VARCHAR2, status_out OUT VARCHAR2, reason_out OUT VARCHAR2);
+
+    /*
+    used for query mode for geltube checkin function.
+    */  
+    FUNCTION geltube_query_status(unit_id_in IN VARCHAR2) RETURN VARCHAR2;
+
+    /*
+    used to generate ebl file.
+    */
+    PROCEDURE gen_ebl_file (
+        plasma_ship_no_in   IN VARCHAR2,
+        status_out          OUT VARCHAR2
+    );
+
+    /*
+    Used in geltube manager to check access to buttons.
+    */
+    FUNCTION user_has_access(
+        user_in IN VARCHAR2,
+        pgm_in  IN VARCHAR2) RETURN BOOLEAN;
+end geltube_plasma;
+
+/
+
+
+CREATE OR REPLACE package body geltube_plasma is
+
+    PROCEDURE ins_upd_geltube_det(rec_in IN GELTUBE_PLASMA_DETAILS%ROWTYPE) IS
+        nCnt NUMBER;
+    BEGIN
+        SELECT COUNT(1) INTO nCnt
+          FROM geltube_plasma_details
+         WHERE unit_id = rec_in.UNIT_ID;
+        
+        IF nCnt = 0 THEN
+            INSERT INTO geltube_plasma_details
+              VALUES rec_in;
+        ELSE
+            UPDATE geltube_plasma_details
+              SET prod_code = rec_in.PROD_CODE
+             WHERE unit_id = rec_in.UNIT_ID
+               AND coll_date = rec_in.COLL_DATE
+               AND chapter_id = rec_in.CHAPTER_ID;
+        END IF;
+    END ins_upd_geltube_det;
+
+    PROCEDURE del_geltube_det(rec_in IN GELTUBE_PLASMA_DETAILS%ROWTYPE) IS
+        nCnt NUMBER;
+    BEGIN
+        SELECT COUNT(1) INTO nCnt
+          FROM geltube_plasma_details
+         WHERE unit_id = rec_in.UNIT_ID;
+        
+        IF nCnt > 0 THEN
+            UPDATE geltube_plasma_details
+              SET prod_code = NULL
+             WHERE unit_id = rec_in.UNIT_ID
+               AND coll_date = rec_in.COLL_DATE
+               AND chapter_id = rec_in.CHAPTER_ID
+               AND prod_code = rec_in.PROD_CODE;
+        END IF;
+    END del_geltube_det;
+
+
+    FUNCTION get_plasma_shipment_no(unit_in IN VARCHAR2, prod_code_in IN VARCHAR2) RETURN VARCHAR2 IS
+        lv_shipmentNo shipped_products.shipment_no%TYPE;
+    BEGIN
+        SELECT shipment_no INTO lv_shipmentNo
+          FROM shipped_products
+         WHERE unit_id = unit_in
+           AND product_code = prod_code_in;
+            
+            RETURN lv_shipmentNo;   
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN NULL;
+    END get_plasma_shipment_no;
+
+    PROCEDURE geltube_status(unit_id_in IN VARCHAR2, action_in IN VARCHAR2, status_out OUT VARCHAR2, reason_out OUT VARCHAR2) IS
+        lv_prodCode GELTUBE_PLASMA_DETAILS.PROD_CODE%TYPE;
+        lv_deleteReason GELTUBE_PLASMA_DETAILS.DELETE_REASON%TYPE;
+        lv_prodCodeCsv VSERV_MASTER.CODE_DESC%TYPE;
+        lv_plasma_shipmentNo shipped_products.shipment_no%TYPE;
+        ld_checkinDate  DATE;
+        
+        FUNCTION get_mcode_desc(codeType_in IN VARCHAR2, code_in IN VARCHAR2) RETURN VARCHAR2 IS
+            lv_Csv VSERV_MASTER.CODE_DESC%TYPE;
+        BEGIN
+            SELECT code_desc INTO lv_Csv
+              FROM vserv_master
+             WHERE code_type = codeType_in
+               AND code = code_in
+               AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 10);
+            RETURN lv_Csv;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN NULL;
+        END get_mcode_desc;
+        
+        FUNCTION is_product_rejected(unit_id_in IN VARCHAR2, prod_code_in IN VARCHAR2)
+            RETURN BOOLEAN IS
+          nCount NUMBER;          
+        BEGIN
+            SELECT count(1) INTO nCount
+              FROM components
+             WHERE unit_id = unit_id_in
+               AND product_code = lv_prodCode
+               AND reject_reason_code IS NOT NULL
+               AND relabel_product_code IS NULL;   
+            
+            RETURN nCount > 0;   
+        END is_product_rejected;
+
+        FUNCTION is_product_transfusable(prod_code_in IN VARCHAR2) RETURN BOOLEAN IS
+            lnCount NUMBER;
+        BEGIN
+            SELECT COUNT(1) INTO lnCount
+              FROM vserv_products
+             WHERE product_code = SUBSTR(prod_code_in, 1, 5)
+               AND NVL(oft_flag, 'X') = 'Y'
+               AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 10);
+            
+            RETURN lnCount > 0;   
+        END is_product_transfusable;
+    BEGIN
+        status_out := NULL;
+        reason_out := NULL;
+        IF unit_id_in IS NULL THEN
+            RETURN;
+        END IF;
+        
+        BEGIN
+            SELECT prod_code, checkin_date, delete_reason 
+              INTO lv_prodCode, ld_checkinDate, lv_deleteReason
+              FROM geltube_plasma_details
+             WHERE unit_id = unit_id_in;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                lv_prodCode := NULL;
+            WHEN OTHERS THEN
+                lv_prodCode := NULL;
+        END;
+
+        IF lv_prodCode IS NULL THEN
+            status_out := NULL;
+            reason_out := 'Plasma product not found';
+            RETURN;          
+        END IF;
+        
+        -- Do not check for this condition when checkin screen calls this routine.
+        IF NVL(action_in,'X') <> 'C' THEN
+            IF ld_checkinDate IS NULL THEN
+                status_out := NULL;
+                reason_out := 'GelTube not checked in';
+                RETURN;
+            END IF;
+        END IF;
+        
+        IF lv_deleteReason IS NOT NULL THEN
+            status_out := 'RD';
+            reason_out := 'GelTube deleted';
+            RETURN;
+        END IF;
+        
+        IF is_product_transfusable(lv_prodCode) THEN
+            status_out := 'RD';
+            reason_out := 'Plasma product Transfusable';
+            RETURN;           
+        END IF;           
+
+        IF is_product_rejected(unit_id_in, lv_prodCode) THEN
+            status_out := 'RD';
+            reason_out := 'Plasma product Rejected';
+            RETURN;           
+        END IF;   
+         
+        lv_plasma_shipmentNo := get_plasma_shipment_no(unit_id_in, lv_prodCode);         
+        
+        IF lv_plasma_shipmentNo IS NULL THEN
+            status_out := 'YL';
+            reason_out := 'Plasma product not in shipment';
+            RETURN;            
+        END IF;
+        
+        lv_prodCodeCsv := get_mcode_desc('EBLFL', 'CRYO');
+        IF INSTR(lv_prodCodeCsv, SUBSTR(lv_prodCode,1,5)) > 0 THEN
+            status_out := 'YL';
+            reason_out := 'Cryo Destined product';
+            RETURN;
+        END IF;
+
+        lv_prodCodeCsv := get_mcode_desc('EBLFL', 'PROC1');
+        IF INSTR(lv_prodCodeCsv, SUBSTR(lv_prodCode,1,5)) > 0 THEN
+            status_out := 'GR';
+            reason_out := 'Product Match found in PROC1';
+            RETURN;
+        END IF;        
+        
+    END geltube_status;
+    
+    FUNCTION geltube_query_status(unit_id_in IN VARCHAR2) RETURN VARCHAR2 IS
+        lv_status VARCHAR2(10);
+        lv_reason VARCHAR2(200);
+    BEGIN
+        geltube_plasma.geltube_status(unit_id_in, 'Q', lv_status, lv_reason);
+        RETURN lv_status;
+    END geltube_query_status;
+
+    PROCEDURE gen_ebl_file (
+        plasma_ship_no_in   IN VARCHAR2,
+        status_out          OUT VARCHAR2
+    ) IS
+    
+        ebl_file             utl_file.file_type;
+        log_file             utl_file.file_type;
+        
+        CURSOR ship_cur IS
+        SELECT
+            *
+        FROM
+            shipped_products
+        WHERE
+            shipment_no = plasma_ship_no_in;
+    
+        CURSOR ebl_test_result_cur IS
+        SELECT
+            code_desc
+        FROM
+            vserv_master
+        WHERE
+                code_type = 'EBLFL'
+            AND code LIKE 'ZTST%'
+        ORDER BY
+            code;
+    
+        TYPE ebl_det IS
+            TABLE OF VARCHAR2(500) INDEX BY BINARY_INTEGER;
+    
+        lv_chapter_id        VARCHAR2(5);
+        ld_chp_sysdate      DATE;
+        lv_chp_sysdate      VARCHAR2(50);
+        lv_user               VARCHAR2(15);
+        
+        ln_Count           NUMBER := 0;
+        rcount              NUMBER := 0;
+        ncount              NUMBER := 0;    
+    
+    
+        ebl_det_obj         ebl_det;
+    
+        lv_ebl_file           VARCHAR2(75);
+        lv_ebl_dir            VARCHAR2(70);
+    
+        lv_codabar_unit_scheme VARCHAR2(1);    
+        lv_unit_id           VARCHAR2(15);
+        
+        lv_status            VARCHAR2(200);
+    
+        rec_cnt                INTEGER := 0;
+        pl_unit_chapter_id  VARCHAR2(5);
+        pl_plasma_weight    NUMBER := 0.0;
+        pl_coll_date        VARCHAR2(10);
+        pl_plasma_mat_no    VARCHAR2(10);
+        pl_donor_id         VARCHAR2(10);
+        pl_unit_count       NUMBER := 0;
+        pl_result_string    VARCHAR2(100);
+        pl_hdrstring        VARCHAR2(500);
+        pl_h_rec_type       VARCHAR2(20);
+        pl_d_rec_type       VARCHAR2(20);
+        pl_f_rec_type       VARCHAR2(20);
+        pl_file_version     VARCHAR2(20);
+        pl_id_code          VARCHAR2(20);
+        pl_facility_code    VARCHAR2(10);
+        pl_drive_type       VARCHAR2(5);
+        pl_delivery_date    VARCHAR2(25);
+        pl_result_code      VARCHAR2(10);
+        pl_btc_code         VARCHAR2(10);
+        pl_temp_tare_wt     VARCHAR2(10);
+        pl_tare_weight      NUMBER(6, 3);
+        pl_total_weight     NUMBER := 0.0;
+        pl_ship_no          VARCHAR2(15);
+        pl_ship_date        VARCHAR2(10);
+        pl_detail_string    VARCHAR2(1000);
+        pl_footer_string    VARCHAR2(500);
+        pl_pallet_number    VARCHAR2(50);
+        pl_unit_id          VARCHAR2(15);
+        pl_location_id      VARCHAR2(10);
+        pl_drive_id         VARCHAR2(10);
+        pl_EuFlag           VARCHAR2(10);
+        
+        ebl_error       EXCEPTION;
+        logfile_error   EXCEPTION;
+    
+        FUNCTION check_log_file RETURN VARCHAR2 IS
+            lv_ebl_logDir   VARCHAR2(100);
+            lv_ebl_logFile  VARCHAR2(200);
+        BEGIN
+            SELECT
+                code_desc
+            INTO lv_ebl_logDir
+            FROM
+                vserv_master
+            WHERE
+                    code_type = 'EBLFL'
+                AND code = 'EBLER'
+                AND ROWNUM = 1
+                AND ld_chp_sysdate BETWEEN eff_date AND nvl(term_date, ld_chp_sysdate + 1);
+    
+            lv_ebl_logFile := 'EBLERRLOG'
+                         || '-'
+                         || plasma_ship_no_in
+                         || '_'
+                         || lv_chapter_id
+                         || '.log';
+    
+            log_file := utl_file.fopen(lv_ebl_logDir, lv_ebl_logFile, 'a');
+            RETURN ( 'OK' );
+        EXCEPTION
+            WHEN no_data_found THEN
+                RETURN ( '4312' );
+            WHEN utl_file.invalid_path THEN
+                RETURN ( '4311' );
+            WHEN OTHERS THEN
+                RETURN ( '4313' );
+        END check_log_file;
+    
+        FUNCTION get_master_data (
+            pl_code IN VARCHAR2
+        ) RETURN VARCHAR2 IS
+            lv_code_desc VARCHAR2(50);
+        BEGIN
+            SELECT
+                code_desc
+            INTO lv_code_desc
+            FROM
+                vserv_master
+            WHERE
+                    code_type = 'EBLFL'
+                AND code = pl_code
+                AND ld_chp_sysdate BETWEEN eff_date AND nvl(term_date, ld_chp_sysdate + 20);
+    
+            RETURN ( lv_code_desc );
+        EXCEPTION
+            WHEN no_data_found THEN
+                lv_code_desc := NULL;
+                lv_status := 'Master code '
+                            || pl_code
+                            || ' is not defined..';
+                RAISE ebl_error;
+        END get_master_data;
+
+
+       FUNCTION check_EU_flag (
+            pl_eu_type IN VARCHAR2,
+            pl_eu_code IN VARCHAR2,
+            pl_CHAP_id IN VARCHAR2
+        ) RETURN VARCHAR2 IS
+            lv_eu_flag VARCHAR2(1);
+        BEGIN
+            SELECT
+                eu_flag
+            INTO lv_eu_flag
+            FROM
+                geltube_ebl_eu_config
+            WHERE
+                   chapter_id=pl_chap_id
+                AND eu_type=pl_eu_type and
+                    eu_code=pl_eu_code
+                AND ld_chp_sysdate BETWEEN eff_date AND nvl(term_date, ld_chp_sysdate + 20);
+    
+            RETURN ( lv_eu_flag );
+        EXCEPTION
+            WHEN no_data_found THEN
+                lv_eu_flag:='N';
+                return(lv_eu_flag);
+            WHEN others THEN
+                lv_status := 'EU table config issue '
+                            || pl_eu_code
+                            || ' - '||substr(sqlerrm,1,15);
+                RAISE ebl_error;
+
+        END check_eu_flag;
+
+    
+    BEGIN   -- Main Begin
+        
+        lv_user := lt_user_session.get_userid;
+        -- get the chapter ID
+        BEGIN
+            SELECT
+                chapter_id
+            INTO lv_chapter_id
+            FROM
+                shipments
+            WHERE
+               shipment_no = plasma_ship_no_in;
+    
+        EXCEPTION
+            WHEN OTHERS THEN
+                lv_chapter_id := 'WAD';
+        END;
+    
+        ld_chp_sysdate := lifetrack_timezone_convert.get_local_time(lv_chapter_id, sysdate);
+        lv_chp_sysdate := TO_CHAR(ld_chp_sysdate, 'mm-dd-yy hh24:mi');
+        
+        
+        dbms_output.put_line('Date='
+                             || lv_chp_sysdate
+                             || 'Chp='
+                             || lv_chapter_id);
+       
+        
+        ---Check the Error Log file
+        BEGIN
+            lv_status := check_log_file;
+            dbms_output.put_line('Log file status=' || lv_status);
+            IF lv_status <> 'OK' THEN
+                RAISE logfile_error;
+            END IF;
+    
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE logfile_error;
+        END;
+    
+        -- Get the EBL file directory and create the file if successful
+        BEGIN
+            lv_ebl_dir := get_master_data('EBLDR');
+            IF lv_ebl_dir IS NULL THEN
+                lv_status := 'EBL file directory set up missing';
+                RAISE ebl_error;
+            END IF;
+        END;
+    
+        BEGIN
+            SELECT
+                nvl(codabar_unit_scheme, '*')
+            INTO lv_codabar_unit_scheme
+            FROM
+                institutions
+            WHERE
+                sysdate BETWEEN eff_date AND nvl(term_date, sysdate);
+    
+        EXCEPTION
+            WHEN no_data_found THEN
+                lv_status := 'No institution data available .... Aborting';
+                RAISE ebl_error;
+        END;
+    
+    
+        --- Get the header record type from the master code
+        pl_h_rec_type := get_master_data('RTHDR');
+        IF pl_h_rec_type IS NULL THEN
+            lv_status := 'File version (RTHDR) is not defined ';
+            RAISE ebl_error;
+        END IF;
+    
+        --- Get the file version number from the master code
+        pl_file_version := get_master_data('VER');
+        IF pl_file_version IS NULL THEN
+            lv_status := 'File version (VER) is not defined ';
+            RAISE ebl_error;
+        END IF;
+    
+        /*--- Get the ID code from the Geltube configuration table.
+          begin
+             select eu_code into pl_id_code from geltube_ebl_eu_config where
+             chapter_id=lv_chapter_id and eu_type='IDCDE' and
+             ld_chp_sysdate between eff_date and nvl(term_date,ld_chp_sysdate+20) and
+             rownum=1;
+          exception 
+               when no_data_found then 
+                    lv_status := 'ID Code (IDCDE) is not defined ';
+                    RAISE ebl_error;
+               when others then 
+                   lv_status := 'ID Code (IDCDE) is not defined- '||SQLERRM;
+                   RAISE ebl_error;            
+           end;
+         */
+
+        pl_delivery_date := to_char(ld_chp_sysdate, 'YYYYMMDD');
+    
+        --- Header string
+        pl_hdrstring := pl_h_rec_type
+                        || ';'
+                        || pl_file_version
+                        || ';'
+                        || pl_id_code
+                        || ';'
+                        || pl_delivery_date;
+    
+        dbms_output.put_line('Header record=' || pl_hdrstring);
+    
+        
+        /*
+        *********************************
+         Setting up the Detail records
+         The detail record has 14 buckets to fill
+        ********************************
+        */
+    
+        -- Get the record type for detail
+        pl_d_rec_type := get_master_data('RTDET');
+        IF pl_d_rec_type IS NULL THEN
+            lv_status := 'Record type for detail (RTDET) is not defined ';
+            RAISE ebl_error;
+        END IF;
+    
+
+        ---Take the units one by one(Loop for each units)
+       
+        FOR ship_rec IN ship_cur LOOP
+            rec_cnt := rec_cnt + 1;
+            pl_ship_no := plasma_ship_no_in;
+            pl_pallet_number := NULL; 
+    
+            --- Get the unit ID
+            IF length(ship_rec.unit_id) = 7 THEN
+                IF lv_codabar_unit_scheme = 'A' THEN
+                    BEGIN
+                        SELECT
+                            machine_code
+                            || substr(ship_rec.unit_id, 3)
+                        INTO lv_unit_id
+                        FROM
+                            bar_code_prefixes
+                        WHERE
+                                eye_read_trns = substr(ship_rec.unit_id, 1, 2)
+                            AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate);
+    
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            lv_status := 'Problem with bar_code translation for '
+                                        || ship_rec.unit_id
+                                        || ' '
+                                        || sqlerrm;
+                    END;
+    
+                ELSE
+                    lv_unit_id := ship_rec.unit_id;
+                END IF;
+            ELSE
+                lv_unit_id := ship_rec.unit_id;
+            END IF;
+    
+            pl_unit_id := lv_unit_id;
+            dbms_output.put_line('Unit ID=' || pl_unit_id);
+    
+            -- Get the coll date/chapter id/drive id
+
+            BEGIN
+                SELECT
+                    donor_id,
+                    to_char(coll_date, 'YYYYMMDD'),
+                    chapter_id,
+                    drive_id
+                INTO
+                    pl_donor_id,
+                    pl_coll_date,
+                    pl_unit_chapter_id,
+                    pl_drive_id
+                FROM
+                    donations
+                WHERE
+                      unit_id = pl_unit_id
+                    AND ROWNUM = 1;
+    
+            EXCEPTION
+                WHEN OTHERS THEN
+                    pl_coll_date := NULL;
+            END;
+
+          --- Get the location ID
+
+          begin
+             select location_id, drive_type  into pl_location_id, pl_drive_type
+             from drives where drive_id=pl_drive_id;
+          exception 
+              when others then 
+               lv_status := 'Cannot get the Location for the EU check'
+                                || substr(sqlerrm, 1, 50);
+                    RAISE ebl_error;
+          end;
+
+
+          If pl_drive_type in ('I','C') then   -- get the pl_facility_code
+             begin
+                select facility_code into pl_facility_code from drive_facilities where
+                drive_id=pl_drive_id;
+             exception 
+               when others then 
+                lv_status := 'Cannot get the facility code for the EU check'
+                                 || substr(sqlerrm, 1, 50);
+                     RAISE ebl_error;
+             end;
+          Else
+            null;
+          End If;
+
+             
+
+
+           --- Get the ID code from the Geltube configuration table.
+          begin
+             select eu_code into pl_id_code from geltube_ebl_eu_config where
+             chapter_id=lv_chapter_id and eu_type='IDCDE' and
+             ld_chp_sysdate between eff_date and nvl(term_date,ld_chp_sysdate+20) and
+             eu_code=substr(pl_unit_id,1,5);
+          exception 
+               when no_data_found then 
+                    lv_status := 'ID Code (IDCDE) is not defined ';
+                    RAISE ebl_error;
+               when others then 
+                   lv_status := 'ID Code (IDCDE) is not defined correctly- '||SQLERRM;
+                   RAISE ebl_error;            
+           end;
+
+
+
+
+    
+            pl_ship_date := to_char(lifetrack_timezone_convert.get_local_time(pl_unit_chapter_id, ship_rec.shipped_date), 'YYYYMMDD');
+    
+           --- Get the net weight of the plasma
+    
+            BEGIN
+                SELECT
+                    nvl(component_weight, 0)
+                INTO pl_plasma_weight
+                FROM
+                    components
+                WHERE
+                        unit_id = ship_rec.unit_id
+                    AND product_code = ship_rec.product_code
+                    AND component_prefix = ship_rec.aliquot
+                    AND reject_reason_code IS NULL
+                    AND coll_date = ship_rec.coll_date;
+    
+            EXCEPTION
+                WHEN no_data_found THEN
+                    lv_status := 'Component weight is not found ';
+                    RAISE ebl_error;
+                WHEN too_many_rows THEN
+                    lv_status := 'Duplicate records in the components table';
+                    RAISE ebl_error;
+                WHEN OTHERS THEN
+                    lv_status := 'Volume:'
+                                || substr(sqlerrm, 1, 50)
+                                || ' -Weight';
+                    RAISE ebl_error;
+            END;
+    
+            --- get the test result
+            dbms_output.put_line('Ready for result calculation');
+            pl_result_string := NULL;
+            FOR test_result_rec IN ebl_test_result_cur LOOP
+                SELECT
+                    COUNT(*)
+                INTO ln_Count
+                FROM
+                    utrs
+                WHERE
+                        unit_id = ship_rec.unit_id
+                    AND test_id = test_result_rec.code_desc
+                    AND nvl(cancel_flag, 'N') = 'N'
+                    AND cancel_flag IS NULL;
+    
+                IF ln_Count = 1 THEN
+                    SELECT
+                        decode(result_status_1, 'NR', 'N', 'N', 'N',
+                               'NEG', 'N', '-', 'N', 'R',
+                               'P', 'POS', 'P', '+', 'P',
+                               substr(result_status_1, 1, 1))
+                    INTO pl_result_code
+                    FROM
+                        utrs
+                    WHERE
+                            unit_id = ship_rec.unit_id
+                        AND test_id = test_result_rec.code_desc
+                        AND nvl(cancel_flag, 'N') = 'N'
+                        AND cancel_flag IS NULL;
+    
+                ELSIF ln_Count > 1 THEN   -- interpret the right code if multiple results
+    
+                    --- Get all the reactive results
+                    SELECT
+                        COUNT(*)
+                    INTO rcount
+                    FROM
+                        utrs
+                    WHERE
+                            unit_id = ship_rec.unit_id
+                        AND test_id = test_result_rec.code_desc
+                        AND nvl(cancel_flag, 'N') = 'N'
+                        AND result_status_1 IN (
+                            SELECT
+                                code
+                            FROM
+                                master_codes
+                            WHERE
+                                    code_type = 'REAC'
+                                AND ld_chp_sysdate BETWEEN eff_date AND nvl(term_date, ld_chp_sysdate + 10)
+                        );
+    
+                    --- Get all the non reactive results
+                    SELECT
+                        COUNT(*)
+                    INTO ncount
+                    FROM
+                        utrs
+                    WHERE
+                            unit_id = ship_rec.unit_id
+                        AND test_id = test_result_rec.code_desc
+                        AND nvl(cancel_flag, 'N') = 'N'
+                        AND result_status_1 IN ( 'N', 'NEG', 'NR','-' );
+    
+                    IF rcount > ncount THEN
+                        pl_result_code := 'P';
+                    ELSIF ncount > rcount THEN
+                        pl_result_code := 'N';
+                    ELSIF ncount = rcount THEN
+                        pl_result_code := 'P';
+                    END IF;
+    
+                ELSIF ln_Count = 0 THEN
+                    pl_result_code := ' ';   -- No result
+                END IF;
+    
+                pl_result_string := pl_result_string || pl_result_code;
+            END LOOP;
+    
+            dbms_output.put_line('Result String=' || pl_result_string);
+    
+         
+    
+            pl_plasma_mat_no := substr(ship_rec.product_code,1,5);
+            
+            -- get the EU Flag
+
+          Begin
+            select eu_flag into pl_EuFlag from geltube_ebl_eu_config
+            where chapter_id=lv_chapter_id and eu_type='PROD' and
+            eu_code=pl_plasma_mat_no and ld_chp_sysdate between eff_date and
+            nvl(term_date, ld_chp_sysdate+20);
+
+            If pl_drive_type not in ('I','C') then       -- If fixed drives 
+               select eu_flag into pl_EuFlag from geltube_ebl_eu_config
+               where chapter_id=lv_chapter_id and eu_type='LOCN' and
+               eu_code=pl_location_id and ld_chp_sysdate between eff_date and
+               nvl(term_date, ld_chp_sysdate+20);
+            Else
+
+               select eu_flag into pl_EuFlag from geltube_ebl_eu_config
+               where chapter_id=lv_chapter_id and eu_type='FACLT' and
+               eu_code=pl_facility_code and ld_chp_sysdate between eff_date and
+               nvl(term_date, ld_chp_sysdate+20);
+
+            End If;
+            
+           --- pl_EuFlag :='E';  versiti wanted to comment this line Pat eamail 10/03/22
+
+         Exception when no_data_found then 
+               pl_EuFlag:='N';
+            when others then  
+              lv_status := 'EU flag is not configured correctly for PROD or LOCN ';
+              RAISE ebl_error;
+          End;
+
+         pl_plasma_mat_no:=pl_plasma_mat_no||pl_EuFlag;
+
+    
+            dbms_output.put_line('Plasma Mat no=' || pl_plasma_mat_no);
+    
+            -- Get the Tare weight
+ 
+           pl_temp_tare_wt := get_master_data('TARE');
+           IF pl_temp_tare_wt IS NULL THEN
+              lv_status := 'Tare weight is not defined (TARE) is not defined ';
+              RAISE ebl_error;
+           END IF;
+
+
+            pl_unit_count := pl_unit_count + 1;
+            pl_total_weight := pl_total_weight + pl_plasma_weight;
+     
+            pl_detail_string := pl_d_rec_type
+                                || ';'
+                                || pl_ship_no
+                                || ';'
+                                || pl_ship_date
+                                || ';'
+                                || pl_unit_id
+                                || ';'
+                                || pl_coll_date
+                                || ';'
+                                || ltrim(rtrim(to_char(pl_plasma_weight, '9999')))
+                                || ';'
+                                || pl_result_string
+                                || ';'
+                                || pl_id_code
+                                || ';'
+                                || pl_plasma_mat_no
+                                || ';'
+                                || ltrim(rtrim(pl_temp_tare_wt));
+    
+            -- Print the detail record
+    
+            dbms_output.put_line('Plasma Wt='
+                                 || to_char(pl_plasma_weight, '9999')
+                                 || ' pl_total weight='
+                                 || to_char(pl_total_weight, '999999'));
+    
+            ebl_det_obj(rec_cnt) := pl_detail_string;
+        END LOOP;
+    
+        dbms_output.put_line('Detail is done');
+        --dbms_output.put_line('pl_total weight='|| to_char(pl_total_weight,'999999.99'));
+    
+        /* ******************************
+         Setting up the footer record
+        ***************************** */
+    
+        -- Get the footer record type
+        pl_f_rec_type := get_master_data('RTFOO');
+        IF pl_f_rec_type IS NULL THEN
+            lv_status := 'Footer record type (RTFOO) is not defined ';
+            RAISE ebl_error;
+        END IF;
+        pl_footer_string := pl_f_rec_type
+                            || ';'
+                            || pl_ship_no
+                            || ';'
+                            || ltrim(rtrim(to_char(pl_unit_count, '99999')))
+                            || ';'
+                            || ltrim(rtrim(to_char(pl_total_weight, '999999')));
+    
+        --- Construct the data file
+    
+        lv_ebl_file := plasma_ship_no_in
+                     || '_'
+                     || lv_chapter_id
+                     || '.ebl';
+        
+        ebl_file := utl_file.fopen(lv_ebl_dir, lv_ebl_file, 'w');
+        dbms_output.put_line('Data file-'
+                             || lv_ebl_file
+                             || ' is opened');
+
+
+    
+        -- Print the header record
+    
+        pl_hdrstring := pl_h_rec_type
+                        || ';'
+                        || pl_file_version
+                        || ';'
+                        || pl_id_code
+                        || ';'
+                        || pl_delivery_date;
+    
+        dbms_output.put_line('Header record=' || pl_hdrstring);
+
+        utl_file.put_line(ebl_file, pl_hdrstring);
+    
+        -- Print the detail records
+    
+        FOR indx IN 1..rec_cnt LOOP
+            utl_file.put_line(ebl_file, ebl_det_obj(indx));
+        END LOOP;
+    
+        dbms_output.put_line('Footer-' || pl_footer_string);
+    
+        -- Print footer string
+        utl_file.put_line(ebl_file, pl_footer_string);
+        utl_file.fclose(ebl_file);
+        utl_file.put_line(log_file, lv_chp_sysdate
+                                   || '  Status: '
+                                   || 'Successful'
+                                   || ' ['
+                                   || pl_ship_no
+                                   || ']'
+                                   || '  Chap='
+                                   || lv_chapter_id
+                                   || ' User='
+                                   || lt_user_session.get_userid);
+    
+        status_out := 'OK';
+        utl_file.fclose(log_file);
+    EXCEPTION
+        WHEN utl_file.invalid_path THEN
+            utl_file.put_line(log_file, lv_chp_sysdate
+                                       || '  Status: '
+                                       || 'Invalid File Directory'
+                                       || ' ['
+                                       || lv_user
+                                       || ']');
+    
+            utl_file.fclose(log_file);
+            status_out := 'NOTOK';
+        WHEN utl_file.invalid_operation THEN
+            utl_file.fclose(ebl_file);
+            utl_file.put_line(log_file, lv_chp_sysdate
+                                       || '  Status: '
+                                       || 'Invalid Operation'
+                                       || ' ['
+                                       || lv_user
+                                       || ']');
+    
+            utl_file.fclose(log_file);
+            status_out := 'NOTOK';
+        WHEN utl_file.invalid_filehandle THEN
+            utl_file.fclose(ebl_file);
+            utl_file.put_line(log_file, lv_chp_sysdate
+                                       || '  Status: '
+                                       || 'Invalid File Handle'
+                                       || ' ['
+                                       || lv_user
+                                       || ']');
+    
+            utl_file.fclose(log_file);
+            status_out := 'NOTOK';
+        WHEN utl_file.read_error THEN
+            utl_file.fclose(ebl_file);
+            utl_file.put_line(log_file, lv_chp_sysdate
+                                       || '  Status: '
+                                       || 'Read Error'
+                                       || ' ['
+                                       || lv_user
+                                       || ']');
+    
+            utl_file.fclose(log_file);
+            status_out := 'NOTOK';
+        WHEN ebl_error THEN
+            utl_file.fclose(ebl_file);
+            utl_file.put_line(log_file, lv_chp_sysdate
+                                       || '  Status: '
+                                       || lv_status
+                                       || ' ['
+                                       || lv_user
+                                       || ']');
+    
+            utl_file.fclose(log_file);
+            status_out := 'NOTOK';
+        WHEN logfile_error THEN
+            status_out := nvl(lv_status, '4313');
+        WHEN OTHERS THEN
+            utl_file.fclose(ebl_file);
+            utl_file.put_line(log_file, lv_chp_sysdate
+                                       || '  Status: '
+                                       || substr(sqlerrm, 1, 50)
+                                       || ' ['
+                                       || lv_user
+                                       || ']');
+    
+            utl_file.fclose(log_file);
+            status_out := 'NOTOK';
+    END gen_ebl_file;
+
+    FUNCTION user_has_access(user_in IN VARCHAR2, pgm_in IN VARCHAR2) RETURN BOOLEAN IS
+        nCnt NUMBER;
+    BEGIN
+        IF user_in IS NULL OR pgm_in IS NULL THEN
+            RETURN FALSE;
+        END IF;
+        
+        SELECT
+            COUNT(1) INTO nCnt
+        FROM
+            menu_item mi ,
+            menu_item mmi ,
+            fcn ,
+            fcn_grp_priv fgp
+        WHERE fcn.exec_name  = pgm_in
+            AND fcn.fcn_id = mi.fcn_id and
+            fcn.appl_id = mi.appl_id and
+            mmi.appl_id (+)  = mi.appl_id and
+            mmi.fcn_id (+) = mi.menu_id and
+            fgp.appl_id = mi.appl_id and
+            nvl(substr(mi.acc_lvl,
+                               to_number(substr(fgp.grp_id,4,2))+1,
+                               1),'9') <= to_char(fgp.acc_priv) and
+            substr(mi.acc_lvl,
+                to_number(substr(fgp.grp_id,4,2))+1,1) not in ('0',' ') and
+            fgp.user_id = user_in and
+            --nvl(mi.item_hide,'N') ='Y' and
+            to_char(fgp.acc_priv) >=
+            (select nvl(max(to_number(nvl(decode(
+                substr(pi.acc_lvl, to_number(substr(fgp.grp_id,4,2))+1,1),
+                ' ','10','0','10',
+                substr(pi.acc_lvl, to_number(substr(fgp.grp_id,4,2))+1,1)),'10'))),1)
+             from menu_item pi
+             where pi.appl_id = mi.appl_id
+             connect by pi.fcn_id = prior menu_id
+             start with pi.mnemonic = mmi.mnemonic);
+             
+        IF nCnt > 0 THEN
+            RETURN TRUE;
+        END IF;
+        
+        RETURN FALSE;
+    
+    END user_has_access;
+begin
+  -- Initialization
+  -- <Statement>;
+  null;
+end geltube_plasma;
+
+/

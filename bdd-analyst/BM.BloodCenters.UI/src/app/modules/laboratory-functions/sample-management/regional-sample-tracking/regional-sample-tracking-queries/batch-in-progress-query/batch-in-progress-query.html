@@ -1,0 +1,344 @@
+<div class="layout-wrapper">
+  <main class="batch-in-progress-query main-content" role="main">
+
+    <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+    <!-- WCAG 4.1.3 Status Messages - ARIA live region for announcements -->
+    <div id="selection-announcement" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+    <!-- Scrollable content area (excludes header) -->
+    <div class="batch-in-progress-query__scrollable-content">
+
+    <!-- Filter / Search Card -->
+    <div class="batch-in-progress-query__search-card">
+      <form [formGroup]="filterForm" (ngSubmit)="onRetrieve()" novalidate class="batch-in-progress-query__form">
+
+        <!-- Top Row: Contract ID, Facility Name, Query Mode, Stats, Checkbox (All in ONE LINE) -->
+        <div class="batch-in-progress-query__top-row">
+          <!-- Contract ID Dropdown -->
+          <mat-form-field appearance="fill" class="batch-in-progress-query__field batch-in-progress-query__field--contract" subscriptSizing="dynamic">
+            <mat-label [id]="labelId('contractId')">Contract ID</mat-label>
+            <mat-select
+              [id]="elementId('contractId')"
+              formControlName="contractId"
+              required
+              panelClass="contract-select-panel"
+              [matTooltip]="selectedContractInfo() ? selectedContractInfo()!.contractId + ' - ' + selectedContractInfo()!.company : 'Select a Contract ID'"
+              [attr.aria-required]="true"
+              [attr.aria-invalid]="f['contractId'].invalid && f['contractId'].touched"
+              [attr.aria-describedby]="f['contractId'].invalid && f['contractId'].touched ? errorId('contractId') : null">
+              @if (isLoadingContracts()) {
+                <mat-option disabled>
+                  <span class="panel-loading"><mat-spinner diameter="20"></mat-spinner><span>Loading...</span></span>
+                </mat-option>
+              } @else if (contractOptions().length === 0) {
+                <mat-option disabled>No data available</mat-option>
+              } @else {
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="contractSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="" aria-label="Search contracts by ID or name"></ngx-mat-select-search>
+                </mat-option>
+                @for (opt of filteredContracts(); track opt.contractId) {
+                  <mat-option [value]="opt.contractId">{{ opt.contractId }} - {{ opt.company }}</mat-option>
+                }
+                @if (filteredContracts().length === 0) {
+                  <mat-option disabled>No matches found</mat-option>
+                }
+              }
+            </mat-select>
+            @if (f['contractId'].invalid && f['contractId'].touched) {
+              <mat-error [id]="errorId('contractId')" role="alert" aria-live="polite">Contract ID is required</mat-error>
+            }
+          </mat-form-field>
+
+          <!-- Facility Name (Readonly Field Display) -->
+          <div class="batch-in-progress-query__readonly-field" role="group" aria-labelledby="facility-name-label">
+            <span id="facility-name-label" class="readonly-field-label">Facility Name</span>
+            <div class="readonly-field-value" aria-labelledby="facility-name-label">{{ selectedContractInfo()?.company || '-' }}</div>
+          </div>
+
+          <!-- Query Mode Dropdown -->
+          <mat-form-field appearance="fill" class="batch-in-progress-query__field batch-in-progress-query__field--compact" subscriptSizing="dynamic">
+            <mat-label [id]="labelId('queryMode')">All/Exceptions</mat-label>
+            <mat-select
+              [id]="elementId('queryMode')"
+              formControlName="queryMode">
+              <mat-option value="ALL">ALL</mat-option>
+              <mat-option value="EXCEPTIONS">Exceptions</mat-option>
+            </mat-select>
+          </mat-form-field>
+
+          <!-- Summary Stats (Readonly Fields) -->
+          <div class="batch-in-progress-query__stats">
+            <div class="batch-in-progress-query__readonly-field batch-in-progress-query__readonly-field--stat" role="group" aria-labelledby="batches-label">
+              <span id="batches-label" class="readonly-field-label">Batches</span>
+              <div class="readonly-field-value" aria-labelledby="batches-label">{{ totalBatches() || '-' }}</div>
+            </div>
+            <div class="batch-in-progress-query__readonly-field batch-in-progress-query__readonly-field--stat" role="group" aria-labelledby="units-label">
+              <span id="units-label" class="readonly-field-label">Units</span>
+              <div class="readonly-field-value" aria-labelledby="units-label">{{ totalUnits() || '-' }}</div>
+            </div>
+            <div class="batch-in-progress-query__readonly-field batch-in-progress-query__readonly-field--stat" role="group" aria-labelledby="units-without-results-label">
+              <span id="units-without-results-label" class="readonly-field-label">Units without Results</span>
+              <div class="readonly-field-value" aria-labelledby="units-without-results-label">{{ unitsWithoutResults() || '-' }}</div>
+            </div>
+          </div>
+
+          <!-- Include Units without Results Checkbox -->
+          <mat-checkbox formControlName="includeUnitsWithoutResults">
+            Include Units without Results
+          </mat-checkbox>
+        </div>
+
+        <!-- Chapter Filter Row -->
+        <div class="batch-in-progress-query__filters-row">
+          <!-- Chapter ID Filter Button -->
+          <button type="button"
+                  mat-flat-button
+                  class="filter-button"
+                  (click)="onFilterChapters()"
+                  aria-label="Filter by Chapter ID">
+            <mat-icon aria-hidden="true">filter_list</mat-icon>
+            FILTER CHAPTER ID
+          </button>
+
+          <!-- Chapter Filter Chips Display using shared component -->
+          <app-filter-chips
+            [chips]="BatchInProgressFilterChipsUtils.convertChapterFiltersToChips(selectedChapterFilters())"
+            [maxVisible]="3"
+            (removeChip)="onRemoveFilterChip($event)"
+            (clearAll)="clearAllChapterFilters()">
+          </app-filter-chips>
+        </div>
+
+        <!-- Batch Filter Row -->
+        <div class="batch-in-progress-query__filters-row">
+          <!-- Batch ID Filter Button -->
+          <button type="button"
+                  mat-flat-button
+                  class="filter-button"
+                  (click)="onFilterBatches()"
+                  aria-label="Filter by Batch ID">
+            <mat-icon aria-hidden="true">filter_list</mat-icon>
+            FILTER BATCH ID
+          </button>
+
+          <!-- Batch Filter Chips Display using shared component -->
+          <app-filter-chips
+            [chips]="BatchInProgressFilterChipsUtils.convertBatchFiltersToChips(selectedBatchFilters())"
+            [maxVisible]="3"
+            (removeChip)="onRemoveFilterChip($event)"
+            (clearAll)="clearAllBatchFilters()">
+          </app-filter-chips>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="batch-in-progress-query__search-actions">
+          <button type="submit"
+                  mat-raised-button
+                  color="primary"
+                  class="btn-retrieve"
+                  [disabled]="isLoadingSearch() || filterForm.invalid"
+                  [id]="elementId('retrieve-btn')"
+                  aria-label="Retrieve batches in progress">
+            RETRIEVE
+          </button>
+          <button type="button"
+                  mat-stroked-button
+                  class="btn-clear"
+                  [disabled]="!hasAnyFieldValue()"
+                  [id]="elementId('clear-btn')"
+                  (click)="onClearAll()"
+                  aria-label="Clear all filters">
+            CLEAR ALL
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Results Card - 3 Column Layout -->
+    <div class="batch-in-progress-query__card">
+
+      <!-- Loading State -->
+      @if (isLoadingSearch()) {
+        <div class="batch-in-progress-query__loading" role="status" aria-live="polite" aria-busy="true">
+          <mat-spinner diameter="40" aria-label="Loading batches"></mat-spinner>
+          <span class="sr-only">Loading batches, please wait...</span>
+        </div>
+      }
+
+      <!-- Empty State (before search) - No Results Found with white background -->
+      @if (!hasSearched() && !isLoadingSearch()) {
+        <div class="no-results-container" role="status" aria-live="polite">
+          <div class="no-results-icon" aria-hidden="true">
+            <mat-icon>info_outline</mat-icon>
+          </div>
+          <p class="no-results-title" role="heading" aria-level="2">No results found</p>
+          <p class="no-results-message">Select a contract and click RETRIEVE to view batches.</p>
+        </div>
+      }
+
+      <!-- 3-Section Layout (Side by Side) -->
+      @if (hasSearched() && !isLoadingSearch()) {
+        <div class="three-section-layout">
+
+            <!-- Section 1: Batches List -->
+            <div class="section section-batches">
+              <app-data-table
+                [config]="batchesTableConfig()"
+                [data]="batches()"
+                (rowClick)="onBatchRowClick($event)"
+                (sortChange)="onBatchSortChange($event)"
+                [highlightedRow]="selectedBatch()">
+              </app-data-table>
+            </div>
+
+            <!-- Section 2: Units for Selected Batch -->
+            <div class="section section-units">
+              @if (selectedBatch()) {
+                <div class="section-header">
+                  <div class="section-title-row">
+                    <h3>{{ selectedBatch()!.batchId }}</h3>
+                  </div>
+                </div>
+              }
+              <app-data-table
+                [config]="getUnitsTableConfigWithCount()"
+                [data]="selectedBatch()?.units || []"
+                (rowClick)="onUnitRowClick($event)"
+                (sortChange)="onUnitsSortChange($event)"
+                [highlightedRow]="selectedUnit()">
+              </app-data-table>
+            </div>
+
+            <!-- Section 3: Test Results for Selected Unit -->
+            <div class="section section-results">
+              <div class="section-header">
+                @if (selectedUnit()) {
+                  <div class="section-title-row">
+                    <h3>{{ selectedUnit()!.unitId }}</h3>
+                  </div>
+                  <div class="section-subtitle-row">
+                    <div class="section-stats-inline">
+                      <span>Un Scheduled <strong>{{ selectedUnit()!.testBaseCount }}</strong></span>
+                      <span>Holding Tests <strong>{{ selectedUnit()!.holdingTestCount }}</strong></span>
+                    </div>
+                  </div>
+                } @else {
+                  <div class="section-title-row">
+                    <h3>{{ selectedUnit() ? selectedUnit()!.unitId : 'Unit ID Data' }}</h3>
+                  </div>
+                }
+              </div>
+              <app-data-table
+                [config]="resultsTableConfig()"
+                [data]="selectedUnit() ? getTestResultsForUnit(selectedUnit()!) : []">
+              </app-data-table>
+            </div>
+
+        </div>
+      }
+    </div>
+
+    <!-- Bottom Action Buttons -->
+    @if (hasSearched() && batches().length > 0) {
+      <div class="batch-in-progress-query__bottom-actions">
+        <button type="button" mat-stroked-button (click)="onUnscheduledHoldingTests()" aria-label="View unscheduled and holding tests for selected unit">
+          UNSCHEDULED/HOLDING TESTS
+        </button>
+        <button type="button" mat-stroked-button (click)="onInterdictions()" aria-label="View interdictions for selected unit">
+          INTERDICTIONS
+        </button>
+        <button type="button" mat-stroked-button (click)="onTestResultsQuery()" [disabled]="isCrossChapterNavDisabled()" [attr.aria-label]="getTestResultsQueryAriaLabel()" [matTooltip]="getTestResultsQueryTooltip()">
+          TEST RESULTS QUERY
+        </button>
+        <button type="button" mat-stroked-button (click)="onNonExtractedBatchQuery()" aria-label="Navigate to Non-Extracted Batch Query with current contract">
+          NON EXTRACTED BATCH QUERY
+        </button>
+        <button type="button" mat-stroked-button (click)="onSamplesQuery()" [disabled]="isCrossChapterNavDisabled()" [attr.aria-label]="getSamplesQueryAriaLabel()" [matTooltip]="getSamplesQueryTooltip()">
+          SAMPLES QUERY
+        </button>
+      </div>
+    }
+
+    </div><!-- end scrollable-content -->
+
+  </main>
+
+  <!-- Chapter Filter Panel (Side Drawer) -->
+  <div class="side-panel-overlay" *ngIf="chapterFilterPanelOpen" (click)="closeChapterFilterPanel()"></div>
+  <div class="side-panel side-panel--chapter-filter" *ngIf="chapterFilterPanelOpen" role="dialog" aria-modal="true" aria-labelledby="chapter-filter-title">
+    <div class="side-panel__header">
+      <h2 id="chapter-filter-title">Filter by Chapter</h2>
+      <button mat-icon-button (click)="closeChapterFilterPanel()" aria-label="Close filter by chapter dialog">
+        <mat-icon aria-hidden="true">close</mat-icon>
+      </button>
+    </div>
+    <div class="side-panel__content">
+      <app-chapter-filter-dialog
+        [preselectedChapterIds]="preselectedChapterIds()"
+        (apply)="onChapterFilterApply($event)"
+        (close)="closeChapterFilterPanel()">
+      </app-chapter-filter-dialog>
+    </div>
+  </div>
+
+  <!-- Batch Filter Panel (Side Drawer) -->
+  <div class="side-panel-overlay" *ngIf="batchFilterPanelOpen" (click)="closeBatchFilterPanel()"></div>
+  <div class="side-panel side-panel--batch-filter" *ngIf="batchFilterPanelOpen" role="dialog" aria-modal="true" aria-labelledby="batch-filter-title">
+    <div class="side-panel__header">
+      <h2 id="batch-filter-title">Select Batches</h2>
+      <button mat-icon-button (click)="closeBatchFilterPanel()" aria-label="Close select batches dialog">
+        <mat-icon aria-hidden="true">close</mat-icon>
+      </button>
+    </div>
+    <div class="side-panel__content">
+      <app-select-batches-dialog
+        [contractId]="selectedContractForBatchFilter!"
+        [preselectedBatchIds]="preselectedBatchIds()"
+        (apply)="onBatchFilterApply($event)"
+        (close)="closeBatchFilterPanel()">
+      </app-select-batches-dialog>
+    </div>
+  </div>
+
+  <!-- Unscheduled/Holding Tests Panel (Side Drawer) -->
+  <div class="side-panel-overlay" *ngIf="unscheduledHoldingTestsPanelOpen" (click)="closeUnscheduledHoldingTestsPanel()"></div>
+  <div class="side-panel side-panel--unscheduled-tests" *ngIf="unscheduledHoldingTestsPanelOpen" role="dialog" aria-modal="true" aria-labelledby="unscheduled-tests-title">
+    <div class="side-panel__header">
+      <h2 id="unscheduled-tests-title">Unscheduled /Holding Tests</h2>
+      <button mat-icon-button (click)="closeUnscheduledHoldingTestsPanel()" aria-label="Close unscheduled and holding tests dialog">
+        <mat-icon aria-hidden="true">close</mat-icon>
+      </button>
+    </div>
+    <div class="side-panel__content">
+      <app-unscheduled-holding-tests-dialog
+        *ngIf="selectedUnit()"
+        [unitId]="selectedUnit()!.unitId"
+        [chapterId]="selectedUnit()!.chapterId"
+        [collDate]="selectedUnit()!.collDate"
+        (close)="closeUnscheduledHoldingTestsPanel()">
+      </app-unscheduled-holding-tests-dialog>
+    </div>
+  </div>
+
+  <!-- Unit Interdictions Panel (Side Drawer) -->
+  <div class="side-panel-overlay" *ngIf="unitInterdictionsPanelOpen" (click)="closeUnitInterdictionsPanel()"></div>
+  <div class="side-panel side-panel--interdictions" *ngIf="unitInterdictionsPanelOpen" role="dialog" aria-modal="true" aria-labelledby="interdictions-title">
+    <div class="side-panel__header">
+      <h2 id="interdictions-title">Unit Interdictions</h2>
+      <button mat-icon-button (click)="closeUnitInterdictionsPanel()" aria-label="Close unit interdictions dialog">
+        <mat-icon aria-hidden="true">close</mat-icon>
+      </button>
+    </div>
+    <div class="side-panel__content">
+      <app-unit-interdictions-dialog
+        *ngIf="selectedUnit()"
+        [unitId]="selectedUnit()!.unitId"
+        [chapterId]="selectedUnit()!.chapterId"
+        [collDate]="selectedUnit()!.collDate"
+        (close)="closeUnitInterdictionsPanel()">
+      </app-unit-interdictions-dialog>
+    </div>
+  </div>
+
+</div>

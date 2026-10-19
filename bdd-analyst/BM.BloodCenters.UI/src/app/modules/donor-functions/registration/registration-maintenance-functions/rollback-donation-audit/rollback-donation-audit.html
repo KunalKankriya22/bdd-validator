@@ -1,0 +1,310 @@
+<app-page-header-with-breadcrumb [config]="headerConfig" />
+
+<section class="rollback-audit-container" aria-labelledby="rollback-audit-title">
+  <h2 id="rollback-audit-title" class="sr-only">Rollback Donation Audit</h2>
+  <!-- Search Bar -->
+  <section class="search-bar" [formGroup]="searchForm" aria-label="Search filters">
+    <mat-form-field appearance="fill" class="type-field">
+      <mat-label>Donation/Deferral?</mat-label>
+      <mat-select formControlName="type">
+        <mat-option value="Deferral">Deferral</mat-option>
+        <mat-option value="Donation">Donation</mat-option>
+      </mat-select>
+      @if (f['type'].hasError('required') && f['type'].touched) {
+        <mat-error>Type is required</mat-error>
+      }
+    </mat-form-field>
+
+    <!-- Donation Mode: Use shared Unit ID field component -->
+    @if (isDonationMode()) {
+      <app-unit-id-field
+        [validateFfValue]="'N'"
+        [label]="'Unit ID'"
+        [placeholder]="'Scan or type Unit ID'"
+        [required]="true"
+        [showBarcodeIcon]="true"
+        (validated)="onUnitValidated($event)"
+        (cleared)="onUnitCleared()"
+        class="id-field">
+      </app-unit-id-field>
+    }
+
+    <!-- Deferral Mode: Use regular input with normalization -->
+    @if (isDeferralMode()) {
+      <mat-form-field appearance="fill" class="id-field">
+        <mat-label>Deferral ID</mat-label>
+        <input
+          matInput
+          type="text"
+          formControlName="id"
+          [maxlength]="idMaxLength()"
+          placeholder="C########C or ########"
+          [attr.aria-invalid]="f['id'].invalid && f['id'].touched">
+        <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+        @if (f['id'].hasError('serverError')) {
+          <mat-error>{{ f['id'].getError('serverError') }}</mat-error>
+        } @else if (f['id'].hasError('required') && f['id'].touched) {
+          <mat-error>Deferral ID is required</mat-error>
+        } @else if (f['id'].hasError('pattern') && f['id'].touched) {
+          <mat-error>Invalid Deferral ID</mat-error>
+        } @else if (f['id'].hasError('maxlength') && f['id'].touched) {
+          <mat-error>Deferral ID cannot exceed {{ idMaxLength() }} characters</mat-error>
+        }
+      </mat-form-field>
+    }
+
+    <!-- Collection Date: Readonly for single date, Dropdown for multiple dates -->
+    @if (hasMultipleCollectionDates()) {
+      <mat-form-field appearance="fill" class="collection-date-field">
+        <mat-label>Collection Date</mat-label>
+        <mat-select
+          [value]="collectionDate()"
+          (selectionChange)="onCollectionDateChange($event.value)"
+>
+          @for (dateOption of formattedCollectionDates(); track dateOption.value) {
+            <mat-option [value]="dateOption.value">
+              {{ dateOption.display }}
+            </mat-option>
+          }
+        </mat-select>
+        @if (!collectionDate()) {
+          <mat-error>Please select a collection date</mat-error>
+        }
+      </mat-form-field>
+    } @else {
+      <div class="collection-date-field" role="group" aria-labelledby="collection-date-label">
+        <span class="field-label" id="collection-date-label">Collection Date</span>
+        <span class="field-value">
+          @if (collectionDate()) {
+            {{ formattedCollectionDate() }}
+          } @else {
+            <span class="empty-value" aria-label="No collection date">—</span>
+          }
+        </span>
+      </div>
+    }
+
+    <button
+      mat-stroked-button
+      color="primary"
+      type="button"
+      (click)="onRetrieve()"
+      [disabled]="loading() || (isDonationMode() && !unitIdField?.isValid) || (isDeferralMode() && searchForm.invalid)"
+      class="retrieve-button"
+      aria-label="Retrieve audit information">
+      RETRIEVE
+    </button>
+  </section>
+
+  <!-- Error Message -->
+  @if (error()) {
+    <div class="error-container" role="alert" aria-live="assertive">
+      <mat-icon aria-hidden="true">error</mat-icon>
+      <p>{{ error() }}</p>
+    </div>
+  }
+
+  <!-- Loading State -->
+  @if (loading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading"></mat-spinner>
+      <span class="sr-only">Loading, please wait...</span>
+    </div>
+  }
+
+  <!-- Data Display -->
+  @if (isDataLoaded() && !loading()) {
+    <div class="data-container">
+      <!-- Two-column layout -->
+      <div class="columns-wrapper">
+        <!-- Left Column: Donor Profile -->
+        <section class="donor-profile" aria-labelledby="donor-profile-heading">
+          <h3 id="donor-profile-heading">Donor Profile</h3>
+          <div class="profile-content">
+            <div class="profile-header">
+              <span class="donor-name">{{ donorProfile()?.donorName }}</span>
+              <div class="donor-info-row">
+                <span class="donor-dob">{{ formattedDob() }}</span>
+                <span class="donor-separator" aria-hidden="true">|</span>
+                <span class="donor-gender" [class.gender-male]="donorProfile()?.gender?.toUpperCase() === 'M'" [class.gender-female]="donorProfile()?.gender?.toUpperCase() === 'F'">{{ formattedGender() }}</span>
+              </div>
+            </div>
+
+            <dl class="profile-fields">
+              <div class="field-row">
+                <dt class="field-label">Transaction ID</dt>
+                <dd class="field-value">{{ donorProfile()?.transactionId }}</dd>
+              </div>
+              <div class="field-row">
+                <dt class="field-label">Date</dt>
+                <dd class="field-value">{{ donorProfile()?.date }}</dd>
+              </div>
+              <div class="field-row">
+                <dt class="field-label">Audit User</dt>
+                <dd class="field-value">{{ donorProfile()?.auditUser }}</dd>
+              </div>
+              <div class="field-row">
+                <dt class="field-label">Donation Type</dt>
+                <dd class="field-value">{{ donorProfile()?.donationType }}</dd>
+              </div>
+              <div class="field-row">
+                <dt class="field-label">Procedure Code</dt>
+                <dd class="field-value">{{ donorProfile()?.procedureCode }}</dd>
+              </div>
+              <div class="field-row">
+                <dt class="field-label">Signature</dt>
+                <dd class="field-value">{{ donorProfile()?.signature }}</dd>
+              </div>
+            </dl>
+          </div>
+        </section>
+
+        <!-- Right Column: Health History -->
+        <section class="health-history" aria-labelledby="health-history-heading">
+          <div class="section-header">
+            <h3 id="health-history-heading">Health History</h3>
+          </div>
+
+          <div class="table-scroll-wrapper" tabindex="0" role="region" aria-label="Health history data">
+            <table mat-table [dataSource]="sortedHealthHistory()" multiTemplateDataRows matSort (matSortChange)="onHealthHistorySort($event)" class="health-history-table">
+              <!-- Expand Column -->
+              <ng-container matColumnDef="expand">
+                <th mat-header-cell *matHeaderCellDef>
+                  <button
+                    mat-icon-button
+                    class="expand-btn"
+                    (click)="toggleAllRows()"
+                    [attr.aria-label]="allRowsExpanded() ? 'Collapse all rows' : 'Expand all rows'"
+                    [attr.aria-expanded]="allRowsExpanded()">
+                    <mat-icon>{{ allRowsExpanded() ? 'expand_less' : 'expand_more' }}</mat-icon>
+                  </button>
+                </th>
+                <td mat-cell *matCellDef="let item; let i = dataIndex">
+                  <button
+                    mat-icon-button
+                    class="expand-btn"
+                    (click)="toggleRow(i)"
+                    [attr.aria-label]="(isRowExpanded(i) ? 'Collapse' : 'Expand') + ' question ' + item.question"
+                    [attr.aria-expanded]="isRowExpanded(i)">
+                    <mat-icon>{{ isRowExpanded(i) ? 'expand_less' : 'expand_more' }}</mat-icon>
+                  </button>
+                </td>
+              </ng-container>
+
+              <!-- Question Column -->
+              <ng-container matColumnDef="question">
+                <th mat-header-cell *matHeaderCellDef mat-sort-header>Question</th>
+                <td mat-cell *matCellDef="let item">{{ item.question }}</td>
+              </ng-container>
+
+              <!-- Response Column -->
+              <ng-container matColumnDef="response">
+                <th mat-header-cell *matHeaderCellDef>Response</th>
+                <td mat-cell *matCellDef="let item">{{ item.response }}</td>
+              </ng-container>
+
+              <!-- Answer Column -->
+              <ng-container matColumnDef="answer">
+                <th mat-header-cell *matHeaderCellDef>Answer</th>
+                <td mat-cell *matCellDef="let item">{{ item.answer }}</td>
+              </ng-container>
+
+              <!-- Description Column -->
+              <ng-container matColumnDef="description">
+                <th mat-header-cell *matHeaderCellDef>Description</th>
+                <td mat-cell *matCellDef="let item">
+                  <span class="description-cell"
+                    [matTooltip]="item.description"
+                    [matTooltipShowDelay]="300">{{ item.description }}</span>
+                </td>
+              </ng-container>
+
+              <!-- Interdiction Column -->
+              <ng-container matColumnDef="interdiction">
+                <th mat-header-cell *matHeaderCellDef>Interdiction</th>
+                <td mat-cell *matCellDef="let item">{{ item.interdiction }}</td>
+              </ng-container>
+
+              <!-- Incident Column -->
+              <ng-container matColumnDef="incident">
+                <th mat-header-cell *matHeaderCellDef>Incident</th>
+                <td mat-cell *matCellDef="let item">{{ item.incident }}</td>
+              </ng-container>
+
+              <!-- Deferred thru Column -->
+              <ng-container matColumnDef="deferredThru">
+                <th mat-header-cell *matHeaderCellDef>Deferred thru</th>
+                <td mat-cell *matCellDef="let item">{{ item.deferredThru }}</td>
+              </ng-container>
+
+              <tr mat-header-row *matHeaderRowDef="healthHistoryColumns; sticky: true"></tr>
+              <tr mat-row *matRowDef="let row; columns: healthHistoryColumns;"></tr>
+
+              <!-- Expanded Row: Comment -->
+              <ng-container matColumnDef="expandedDetail">
+                <td mat-cell *matCellDef="let item; let i = dataIndex" [attr.colspan]="healthHistoryColumns.length">
+                  @if (isRowExpanded(i)) {
+                    <div class="expanded-content">
+                      <div class="comment-section">
+                        <span class="comment-label">Comment</span>
+                        <span class="comment-value">{{ item.comment }}</span>
+                      </div>
+                    </div>
+                  }
+                </td>
+              </ng-container>
+
+              <tr mat-row *matRowDef="let row; let i = dataIndex; columns: ['expandedDetail']" class="expanded-row" [class.expanded-row--open]="isRowExpanded(i)"></tr>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- Physical Findings -->
+      <section class="physical-findings" aria-labelledby="physical-findings-heading">
+        <div class="section-header">
+          <h3 id="physical-findings-heading">Physical Findings</h3>
+          <div class="search-input-wrapper" [formGroup]="physicalFindingsSearchControl"
+               matTooltip="Search by code or description">
+            <mat-icon class="search-icon" aria-hidden="true">search</mat-icon>
+            <input
+              class="search-input"
+              formControlName="search"
+              placeholder="Search by code or description"
+              aria-label="Search physical findings">
+          </div>
+        </div>
+
+        <app-data-table
+          [config]="physicalFindingsTableConfig"
+          [data]="filteredPhysicalFindings()"
+          (sortChange)="onPhysicalFindingsTableSort($event)">
+        </app-data-table>
+      </section>
+
+    </div>
+  }
+
+  <!-- Action Bar -->
+  @if (isDataLoaded() && !loading()) {
+    <section class="action-bar" role="group" aria-label="Form actions">
+      <button
+        mat-button
+        type="button"
+        (click)="onCancel()"
+        aria-label="Cancel">
+        CANCEL
+      </button>
+      <button
+        mat-raised-button
+        color="primary"
+        type="button"
+        (click)="onRollback()"
+        [disabled]="loading()"
+        aria-label="Rollback audit">
+        ROLLBACK
+        <mat-icon iconPositionEnd aria-hidden="true">sync</mat-icon>
+      </button>
+    </section>
+  }
+</section>

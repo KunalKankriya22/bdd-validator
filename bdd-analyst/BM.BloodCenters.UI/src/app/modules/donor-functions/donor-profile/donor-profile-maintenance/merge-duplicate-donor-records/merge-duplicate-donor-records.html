@@ -1,0 +1,353 @@
+<div class="merge-duplicate-donors-container">
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- LOADING OVERLAY - Only shown during resolve/merge operations -->
+  @if (isProcessing) {
+    <div class="loading-overlay">
+      <div class="spinner-container">
+        <mat-spinner diameter="100"></mat-spinner>
+      </div>
+    </div>
+  }
+
+  <div class="content-wrapper">
+
+    <!-- SEARCH -->
+    <div class="search-section">
+      <div class="search-row">
+        <mat-form-field class="batch-field" appearance="fill" subscriptSizing="dynamic">
+          <mat-label>Batch ID <span class="required-marker"></span></mat-label>
+          <mat-select [formControl]="batchControl" (selectionChange)="onBatchSelected()">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="batchSearchControl"
+                placeholderLabel="Search batches...">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option *ngFor="let batch of filteredBatchOptions" [value]="batch.setId">
+              {{ batch.setId }}{{ batch.source ? ' — ' + batch.source : '' }}
+            </mat-option>
+          </mat-select>
+          <mat-error>Batch ID is required</mat-error>
+        </mat-form-field>
+
+        <div class="found-on-field">
+          <label>Found On</label>
+          <div class="found-on-value">{{ formatFoundOn(foundOn) }}</div>
+        </div>
+
+        <button mat-stroked-button class="retrieve-button"
+                (click)="onRetrieve()"
+                [disabled]="!batchControl.value || batchControl.invalid || isRetrieved">
+          RETRIEVE
+        </button>
+
+      </div>
+    </div>
+
+    <!-- Loading Spinner -->
+    @if (isLoading) {
+      <div class="retrieve-loading-overlay">
+        <mat-spinner diameter="40"></mat-spinner>
+      </div>
+    }
+
+    @if (hasSearched && !isLoading) {
+      <!-- 🔥 MAIN COMBINED SECTION (IMPORTANT FIX) -->
+      <div class="duplicates-and-cards-container">
+
+        <!-- LEFT: TABLE -->
+        <div class="duplicates-section">
+          <h3 class="section-title">Potential Duplicates</h3>
+
+          <app-data-table
+            [config]="potentialDuplicatesTableConfig"
+            [data]="getDisplayRows()"
+            [keepActiveRow]="true"
+            (rowClick)="onDuplicateRowClick($event)"
+            (rowAction)="onDuplicateRowAction($event)">
+          </app-data-table>
+        </div>
+
+        <!-- RIGHT: CARDS -->
+        <div class="donor-cards-section">
+
+          @if (isFalseDuplicateMode()) {
+            <!-- FALSE DUPLICATE MODE: Two False Donor Cards -->
+            <!-- False Donor 1 -->
+            <div class="donor-card false-donor-card">
+              <div class="card-header">False Donor</div>
+
+              <div class="card-content">
+                <div class="donor-field">
+                  <label>Donor ID</label>
+                  <div class="field-value">{{ displayValue(falseDonor1?.donorId) }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Donor Name</label>
+                  <div class="field-value">{{ displayValue(falseDonor1?.donorName) }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Date of Birth</label>
+                  <div class="field-value">{{ formatDate(falseDonor1?.dateOfBirth || '') }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Sex</label>
+                  <div class="field-value">{{ formatSex(falseDonor1?.sex || '') }}</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- False Donor 2 -->
+            <div class="donor-card false-donor-card">
+              <div class="card-header">False Donor</div>
+
+              <div class="card-content">
+                <div class="donor-field">
+                  <label>Donor ID</label>
+                  <div class="field-value">{{ displayValue(falseDonor2?.donorId) }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Donor Name</label>
+                  <div class="field-value">{{ displayValue(falseDonor2?.donorName) }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Date of Birth</label>
+                  <div class="field-value">{{ formatDate(falseDonor2?.dateOfBirth || '') }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Sex</label>
+                  <div class="field-value">{{ formatSex(falseDonor2?.sex || '') }}</div>
+                </div>
+              </div>
+            </div>
+          } @else {
+            <!-- PRIMARY/SECONDARY MODE: Three Cards with Controls -->
+            <div class="transfer-controls">
+              <button mat-icon-button class="swap-button">
+                <mat-icon>swap_horiz</mat-icon>
+              </button>
+            </div>
+
+            <!-- Primary -->
+            <div class="donor-card primary-card">
+              <div class="card-header">Primary Donor</div>
+
+              <div class="card-content">
+                <div class="donor-field">
+                  <label>Donor ID</label>
+                  <div class="field-value">{{ displayValue(primaryDonor?.donorId) }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Donor Name</label>
+                  <div class="field-value">{{ displayValue(primaryDonor?.donorName) }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Date of Birth</label>
+                  <div class="field-value">{{ formatDate(primaryDonor?.dateOfBirth || '') }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Sex</label>
+                  <div class="field-value">{{ formatSex(primaryDonor?.sex || '') }}</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Arrow Controls -->
+            <div class="transfer-controls">
+              <button mat-icon-button class="transfer-button">
+                <mat-icon>add</mat-icon>
+              </button>
+            </div>
+
+            <!-- Secondary -->
+            <div class="donor-card secondary-card">
+              <div class="card-header">Secondary Donor</div>
+
+              <div class="card-content">
+                <div class="donor-field">
+                  <label>Donor ID</label>
+                  <div class="field-value">{{ displayValue(secondaryDonor?.donorId) }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Donor Name</label>
+                  <div class="field-value">{{ displayValue(secondaryDonor?.donorName) }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Date of Birth</label>
+                  <div class="field-value" [class.mismatch]="isDobMismatch()">{{ formatDate(secondaryDonor?.dateOfBirth || '') }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Sex</label>
+                  <div class="field-value" [class.mismatch]="isSexMismatch()">{{ formatSex(secondaryDonor?.sex || '') }}</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Arrow -->
+            <div class="transfer-to-final">
+              <button mat-icon-button class="transfer-button">
+                <mat-icon>arrow_forward</mat-icon>
+              </button>
+            </div>
+
+            <!-- Final -->
+            <div class="donor-card final-preview-card">
+              <div class="card-header">Final Preview</div>
+
+              <div class="card-content">
+                <div class="donor-field">
+                  <label>Donor ID</label>
+                  <div class="field-value">{{ displayValue(finalPreviewDonor?.donorId) }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Donor Name</label>
+                  <div class="field-value">{{ displayValue(finalPreviewDonor?.donorName) }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Date of Birth</label>
+                  <div class="field-value">{{ formatDate(finalPreviewDonor?.dateOfBirth || '') }}</div>
+                </div>
+
+                <div class="donor-field">
+                  <label>Sex</label>
+                  <div class="field-value">{{ formatSex(finalPreviewDonor?.sex || '') }}</div>
+                </div>
+              </div>
+            </div>
+          }
+
+        </div>
+      </div>
+
+      @if (potentialDuplicates.length > 0) {
+        <!-- ACTION BUTTONS -->
+        <div class="action-buttons-section">
+
+        <!-- ALWAYS SHOW ACTION BUTTONS FOR BOTH MODES -->
+        <button mat-stroked-button class="action-button" (click)="openDemographics()">
+          DEMOGRAPHICS
+        </button>
+
+        <button mat-stroked-button class="action-button" (click)="navigateToFindDonor()">
+          FIND DONOR
+        </button>
+
+        <button mat-stroked-button class="action-button" (click)="openCommentsPanel()">
+          COMMENTS
+        </button>
+
+        <button mat-stroked-button class="action-button" (click)="openInterdictions()">
+          INTERDICTIONS
+        </button>
+
+        <button mat-stroked-button class="action-button" (click)="openDonations()">
+          DONATIONS
+        </button>
+
+        <!-- ALWAYS SHOW BOTH RESOLVE AND MERGE BUTTONS -->
+        <button mat-stroked-button class="resolve-button"
+                (click)="resolveDonors()"
+                [disabled]="isResolveButtonDisabled()"
+                [matTooltip]="getIncompleteChecksTooltip()">
+          RESOLVE DONORS
+        </button>
+
+        <button mat-raised-button class="merge-button"
+                (click)="mergeDonors()"
+                [disabled]="isMergeButtonDisabled()"
+                [matTooltip]="getIncompleteChecksTooltip()">
+          MERGE DUPLICATES
+        </button>
+      </div>
+
+        <!-- TABLES SECTION - Show for both Primary/Secondary and FALSE modes -->
+        <div class="tables-section">
+          <div class="table-section">
+            <h3 class="table-title">Interdictions/Attributes</h3>
+            <app-data-table [config]="interdictionsTableConfig" [data]="interdictions"></app-data-table>
+          </div>
+
+          <div class="table-section">
+            <h3 class="table-title">Unit to be checked</h3>
+            <app-data-table [config]="unitsTableConfig" [data]="unitsToBeChecked"></app-data-table>
+          </div>
+        </div>
+      }
+    }
+
+    <!-- EMPTY STATE - Before RETRIEVE is clicked -->
+    @if (!hasSearched && !isLoading) {
+      <div class="empty-state">
+        <mat-icon>search</mat-icon>
+        <p>Nothing to display</p>
+        <p>Please retrieve a Batch ID.</p>
+      </div>
+    }
+
+  </div>
+</div>
+
+<!-- Backdrop -->
+@if (sidePanelOpen()) {
+  <div class="panel-backdrop"></div>
+}
+
+<!-- Side Panel -->
+<div class="side-panel" [class.open]="sidePanelOpen()" [style.width]="sidePanelOpen() ? sidePanelWidth() : '0'">
+  @if (sidePanelOpen() && sidePanelDonorId()) {
+    @switch (currentSection()) {
+      @case ('demographics') {
+        <app-donor-demographics
+          [inputDonorId]="sidePanelDonorId()"
+          [inputReadOnly]="false"
+          [queryMode]="false"
+          (closePanelEvent)="onPanelClose()"
+          (panelWidthChange)="onPanelWidthChange($event)">
+        </app-donor-demographics>
+      }
+      @case ('comments') {
+        <app-comments-panel
+          [note]="mergeNote"
+          (saveNote)="onCommentsSave($event)"
+          (closePanel)="onPanelClose()">
+        </app-comments-panel>
+      }
+      @case ('interdictions') {
+        <div class="side-panel-container">
+          <div class="side-panel-header">
+            <h2 class="side-panel-title">Donor Interdictions</h2>
+            <button
+              type="button"
+              mat-icon-button
+              class="side-panel-close"
+              aria-label="Close panel"
+              (click)="onPanelClose()">
+              <mat-icon>close</mat-icon>
+            </button>
+          </div>
+          <div class="side-panel-content-wrapper">
+            <app-donor-interdictions-content
+              [donorId]="sidePanelDonorId()"
+              (closePanel)="onPanelClose()">
+            </app-donor-interdictions-content>
+          </div>
+        </div>
+      }
+    }
+  }
+</div>

@@ -1,0 +1,212 @@
+<div class="maintain-si main-content" role="main" aria-label="Maintain Special Instructions content">
+
+  <!-- ── Page Header ─────────────────────────────────────────── -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- ── Filter / Lookup Card ────────────────────────────────── -->
+  <div class="maintain-si__filter-card">
+    <div class="filter-row">
+
+      <!-- Special Instruction dropdown with search -->
+      <mat-form-field appearance="fill" class="instruction-field">
+        <mat-label>Special Instruction</mat-label>
+        <mat-select
+          [value]="selectedInstruction()"
+          (selectionChange)="onSelectionChange($event.value)"
+          aria-label="Special Instruction"
+          [disabled]="loadingDropdown()">
+          <!-- Trigger: show only the code in the closed state -->
+          <mat-select-trigger>
+            {{ selectedInstruction()?.specialInstruction || '' }}
+          </mat-select-trigger>
+          <!-- Search box -->
+          <mat-option>
+            <ngx-mat-select-search
+              [formControl]="searchControl"
+              placeholderLabel="Search..."
+              noEntriesFoundLabel="">
+            </ngx-mat-select-search>
+          </mat-option>
+          <!-- Options -->
+          @for (opt of filteredOptions(); track opt.specialInstruction) {
+            <mat-option [value]="opt">
+              <div class="si-option">
+                <span class="si-option__code">{{ opt.specialInstruction }}</span>
+                <span class="si-option__desc">{{ opt.description || '--' }}</span>
+              </div>
+            </mat-option>
+          }
+          <!-- No data fallback -->
+          @if (filteredOptions().length === 0) {
+            <mat-option disabled class="si-option--status">
+              No Data Available
+            </mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <!-- Description (read-only plain text) -->
+      <div class="description-block">
+        <span class="description-label">Description</span>
+        <span class="description-value">{{ getDescription() }}</span>
+      </div>
+
+      <!-- Action buttons group -->
+      <div class="action-buttons">
+        <button
+          mat-stroked-button
+          type="button"
+          class="retrieve-btn"
+          (click)="onRetrieve()"
+          [disabled]="!canRetrieve()"
+          aria-label="Retrieve special instructions">
+          RETRIEVE
+        </button>
+        <button
+          mat-button
+          type="button"
+          class="clear-all-link"
+          (click)="onClear()"
+          [disabled]="isClearDisabled()"
+          aria-label="Clear special instructions">
+          CLEAR
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Warning banner (outside content card) -->
+  @if (!loading() && hasRetrieved() && !alertDismissed()) {
+    <div class="alert-main-container">
+      <app-alert
+        type="warning"
+        [dismissible]="true"
+        (dismissed)="onDismissAlert()"
+        class="warning-banner">
+        The maximum characters per line are {{ maxLineChars }}. The Maximum lines permitted for a tie tag are {{ maxLines }}
+      </app-alert>
+    </div>
+  }
+
+  <!-- ── Content Card ─────────────────────────────────────────── -->
+  <div class="maintain-si__content-card">
+
+    <!-- Loading spinner (while API call is in progress) -->
+    @if (loading()) {
+      <div class="loading-wrapper" role="status" aria-label="Loading special instructions">
+        <mat-spinner diameter="48"></mat-spinner>
+      </div>
+    }
+
+    <!-- Empty state (before first retrieve) -->
+    @if (!loading() && !hasRetrieved()) {
+      <div class="empty-state" role="status">
+        <div class="empty-state__icon-wrapper">
+          <mat-icon class="empty-state__icon">search</mat-icon>
+        </div>
+        <p class="empty-state__title">No Results to Display</p>
+        <p class="empty-state__subtitle">Please enter search criteria to view results</p>
+      </div>
+    }
+
+    <!-- Table & actions (after retrieve) -->
+    @if (!loading() && hasRetrieved()) {
+
+      <!-- Table Header -->
+      <div class="table-header">
+        <div class="table-header__actions">
+          @if (!isEditMode()) {
+            <button type="button" mat-stroked-button class="add-edit-btn" (click)="enterEditMode()">
+              ADD ROW / EDIT TABLE
+            </button>
+          }
+          @if (isEditMode()) {
+            <div class="edit-mode-actions">
+              <button type="button" mat-stroked-button class="add-new-row-btn" (click)="onAddNew()" [disabled]="!canAddNew()">
+                <mat-icon>add</mat-icon> ADD NEW ROW
+              </button>
+              <span class="btn-divider"></span>
+              <button type="button" mat-stroked-button class="cancel-btn" [disabled]="saving()" (click)="cancelEdit()">
+                <mat-icon>close</mat-icon> CANCEL
+              </button>
+              <button type="button" mat-raised-button class="save-btn"
+                [disabled]="!hasChanges() || saving()"
+                (click)="onSave()">
+                <mat-icon>check</mat-icon> {{ saving() ? 'SAVING...' : 'SAVE' }}
+              </button>
+            </div>
+          }
+        </div>
+      </div>
+
+      <!-- Drag-and-drop table -->
+      <div class="instructions-table-wrapper" #tableWrapper>
+        <table class="instructions-table" aria-label="Special instruction lines">
+          <thead>
+            <tr>
+              <th class="col-drag" aria-hidden="true"></th>
+              <th class="col-seq">Sequence</th>
+              <th class="col-text">Line Text</th>
+              <th class="col-action" aria-label="Actions"></th>
+            </tr>
+          </thead>
+          <tbody
+            cdkDropList
+            (cdkDropListDropped)="onDrop($event)"
+            [cdkDropListData]="rows()"
+            [cdkDropListDisabled]="!isEditMode()">
+            @for (row of rows(); track row.lineNumber; let i = $index) {
+              <tr cdkDrag [cdkDragData]="row" [cdkDragDisabled]="!isEditMode()" class="table-row" [class.read-only-row]="!isEditMode()" [class.focused-row]="focusedRowIndex() === i">
+                <!-- Drag handle -->
+                <td class="col-drag">
+                  <mat-icon cdkDragHandle class="drag-handle" [class.drag-handle-disabled]="!isEditMode()" [attr.aria-label]="isEditMode() ? 'Drag to reorder' : null">
+                    drag_indicator
+                  </mat-icon>
+                </td>
+
+                <!-- Sequence -->
+                <td class="col-seq">{{ row.lineNumber }}</td>
+
+                <!-- Line text - editable only in edit mode -->
+                <td class="col-text">
+                  @if (isEditMode()) {
+                    <mat-form-field appearance="fill" class="line-text-field">
+                      <input
+                        matInput
+                        [value]="row.lineText"
+                        (input)="onLineTextChange(i, $any($event.target).value)"
+                        (focus)="onRowFocus(i)"
+                        (blur)="onRowBlur()"
+                        (keydown)="onLineTextKeydown(row, $event)"
+                        [attr.maxlength]="maxLineChars"
+                        autocomplete="off"
+                        [attr.aria-label]="'Line text for row ' + row.lineNumber" />
+                    </mat-form-field>
+                  } @else {
+                    <span class="line-text-display">{{ row.lineText }}</span>
+                  }
+                </td>
+
+                <!-- Delete -->
+                <td class="col-action">
+                  <button
+                    mat-icon-button
+                    class="delete-btn"
+                    [disabled]="!isEditMode()"
+                    (click)="onDeleteRow(i)"
+                    [attr.aria-label]="'Delete row ' + row.lineNumber">
+                    <mat-icon>delete</mat-icon>
+                  </button>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+
+    }
+
+  </div>
+
+</div>

@@ -1,0 +1,1284 @@
+CREATE OR REPLACE PACKAGE "NY_RSM_REPORT" IS
+  /*
+  Created By : Edwin
+  Created On : 02/20/2008
+  Purpose    : To populate the RSM table AND the RSM report will access the
+               data
+
+  Version    : 04 - (FOr ABO, ABOFWD should not take the RMAP test id
+		     to get the value FROM the master code: 03/27/08)
+  Version    : 05 - Test result interpretation-06/03/08
+  Version    : 06 - Report did not run for individual units, modIFied the unit
+	            cursor to include the rpt_parm_SELECT table: 08/25/08
+
+  Version    :07 - to include the contract id in the unit cursor
+
+  Version    :08 - [Rel:1.2.0] deleting the rsm_report_details table
+		   before populating records [02/11/2010]
+
+  ModIFied By: Edwin B
+
+  Version    :09 - Changed SQL statements to look only for the last
+		   six characters of the user name IF the user name
+		   has "OPS$" attached in the BEGINning.
+		   Modified by Kishore on 11/29/2010.
+
+  Version    :10 - Added "report_name" clause to all the SELECT statements
+		   used to retrieve the report parameters FROM
+		   RPT_PARM_SELECT table.
+		   Modified by Kishore on 04/07/2011.
+
+  Version    :11 - Replaced all occurrences of "user" with
+		   "LT_USER_SESSION.get_userid".
+		   Modified by Kishore on 05/16/2011.
+
+  Version    :12 - SCR 18938  -- Time zone changes applied.
+
+  Version    :13 - SCR 20196 - Created a new package based off of the RSM_REPORT package.
+                   The only difference is the addition of RECEIVED_DATE column in the
+                   NY_RSM_REPORT_DETAILS (copied from the RSM_REPORT_DETAILS table)
+                   and NY_RSM_REPORT_OTHERS (copied from the RSM_REPORT_DETAILS table)
+                   tables.
+                   Modified by Kishore on 06/27/2014.
+
+  Version   :14; 09/19/2016 -- valid_interdictions to valid_interdictions_lab table.
+  Version   :15; 05/03/2022 -- POP_RSM_TABLE parameter removed and instead using it from rpt_parm_select table.
+  Version   :16; 05/20/2022 -- RSM_REPORT_STAGE table seq. updated.
+  Version   :17; 02/09/2023 -- V17 (look for terminated tests as well from contract_tests table) -- MLT 5809
+  Version   :18; 03/30/2023 -- V18 (DENSE_RANK used instead of ROW_NUMBER) - subquery returns more number of rows issue. MLT-5856
+  Version   :19; 04/21/2023 -- V19 (MLT-5980)
+  Version   :20; 05/02/2023 -- V20 (MLT-5997)- do not pull another chapter tests (for same unit in multiple chapters)
+                                    (MLT-5998)
+  */
+
+    PROCEDURE pop_rsm_table (
+        pl_result_parm_id IN VARCHAR2,
+        pl_chapter_id     IN VARCHAR2,
+        pl_report_id      IN VARCHAR2
+    );
+
+END ny_rsm_report;
+
+/
+
+
+CREATE OR REPLACE PACKAGE BODY "NY_RSM_REPORT" IS
+
+    PROCEDURE pop_rsm_table (
+        pl_result_parm_id IN VARCHAR2,
+        pl_chapter_id     IN VARCHAR2,
+        pl_report_id      IN VARCHAR2
+    ) IS
+        lv_res_status   VARCHAR2(10);
+        szconid         VARCHAR2(10);
+        szbatch         VARCHAR2(20);
+        test_count      NUMBER := 0;
+        l_test_id       VARCHAR2(10);
+        a_test_id       VARCHAR2(10);
+        test_seq        NUMBER := 0;
+        result_code     VARCHAR2(10);
+        col_count       NUMBER := 0;
+        rcount          NUMBER := 0;
+        next_unit EXCEPTION;
+        vmaxseq         NUMBER := 0;
+        reac_flag       VARCHAR2(1);
+        nexist          NUMBER := 0;
+        v_os_unit       VARCHAR2(30);
+        original_result VARCHAR2(10);
+        test_id_1       VARCHAR2(10);
+        result_id_1     VARCHAR2(10);
+        test_id_2       VARCHAR2(10);
+        result_id_2     VARCHAR2(10);
+        test_id_3       VARCHAR2(10);
+        result_id_3     VARCHAR2(10);
+        test_id_4       VARCHAR2(10);
+        result_id_4     VARCHAR2(10);
+        test_id_5       VARCHAR2(10);
+        result_id_5     VARCHAR2(10);
+        test_id_6       VARCHAR2(10);
+        result_id_6     VARCHAR2(10);
+        test_id_7       VARCHAR2(10);
+        result_id_7     VARCHAR2(10);
+        test_id_8       VARCHAR2(10);
+        result_id_8     VARCHAR2(10);
+        test_id_9       VARCHAR2(10);
+        result_id_9     VARCHAR2(10);
+        test_id_10      VARCHAR2(10);
+        result_id_10    VARCHAR2(10);
+        test_id_11      VARCHAR2(10);
+        result_id_11    VARCHAR2(10);
+        test_id_12      VARCHAR2(10);
+        result_id_12    VARCHAR2(10);
+        test_id_13      VARCHAR2(10);
+        result_id_13    VARCHAR2(10);
+        test_id_14      VARCHAR2(10);
+        result_id_14    VARCHAR2(10);
+        test_id_15      VARCHAR2(10);
+        result_id_15    VARCHAR2(10);
+        v_coll_date     DATE;
+        v_received_date DATE; -- Added by Kishore on 06/27/2014. SCR 20196
+        v_chapter_id    VARCHAR2(5);
+        cbc_result_code VARCHAR2(10);
+        v_abs_val       VARCHAR2(20);
+        od_flag         VARCHAR2(1);
+        v_local_date    DATE := sysdate;
+
+        -- V16
+        /*
+        CURSOR contr_cur (
+            pl_contract IN VARCHAR2
+        ) IS
+        SELECT
+            test_id
+        FROM
+            contract_tests
+        WHERE
+                contract_id = pl_contract
+            AND
+			--SYSDATE between eff_date AND nvl(term_date,SYSDATE+1) AND                  ----  SCR 18938
+             v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+            AND test_id IN (
+                SELECT
+                    decode(parm_select, 'ALL', test_id, parm_select)
+                FROM
+                    rpt_parm_select
+                WHERE
+                        user_name = decode(substr(lt_user_session.get_userid, 1, 4), 'OPS$', substr(lt_user_session.get_userid, 5), lt_user_session.
+                        get_userid)
+                    AND parm_code = 'RTEST'
+                                  --AND report_name = 'RSMREPRT' -- Commented by Kishore on 06/27/2014. SCR 20196
+                    AND report_name = 'NYRSMRPT' -- Added by Kishore on 06/27/2014. SCR 20196
+                    AND parm_id = pl_report_id
+            )
+        ORDER BY
+            test_id;
+        */
+
+        CURSOR tests_cur IS
+        SELECT DISTINCT
+            test_id tst_id
+        FROM
+            utrs
+        WHERE
+            unit_id IN (
+                SELECT
+                    unit_id
+                FROM
+                    units
+                WHERE
+                    batch_id IN (
+                        SELECT
+                            batch_id
+                        FROM
+                            rgt_result_parms
+                        WHERE
+                                result_parm_id = pl_result_parm_id
+                            AND batch_id IN (
+                                SELECT
+                                    decode(parm_select, 'ALL', rgt_result_parms.batch_id, parm_select)
+                                FROM
+                                    rpt_parm_select
+                                WHERE
+                                        user_name = lt_user_session.get_userid
+                                    AND parm_code = 'RBAT'
+                                    AND report_name = 'NYRSMRPT'
+                                    AND parm_id = pl_report_id
+                            )
+                    )
+            )
+            AND chapter_id IN ( -- V20
+                SELECT
+                    chapter_id
+                FROM
+                    batch_inputs
+                WHERE
+                    batch_id IN (
+                        SELECT
+                            batch_id
+                        FROM
+                            rgt_result_parms
+                        WHERE
+                                result_parm_id = pl_result_parm_id
+                            AND batch_id IN (
+                                SELECT
+                                    decode(parm_select, 'ALL', rgt_result_parms.batch_id, parm_select)
+                                FROM
+                                    rpt_parm_select
+                                WHERE
+                                        user_name = lt_user_session.get_userid
+                                    AND parm_code = 'RBAT'
+                                    AND report_name = 'NYRSMRPT'
+                                    AND parm_id = pl_report_id
+                            )
+                    )
+            )           
+            AND test_id IN (
+                SELECT
+                    decode(parm_select, 'ALL', test_id, parm_select)
+                FROM
+                    rpt_parm_select
+                WHERE
+                        user_name = decode(substr(lt_user_session.get_userid, 1, 4), 'OPS$', substr(lt_user_session.get_userid, 5), lt_user_session.
+                        get_userid)
+                    AND parm_code = 'RTEST'
+                           --AND report_name = 'RSMREPRT' -- Commented by Kishore on 06/27/2014. SCR 20196
+                    AND report_name = 'NYRSMRPT' -- Added by Kishore on 06/27/2014. SCR 20196
+                    AND parm_id = pl_report_id
+            )
+            AND test_id IN (
+                SELECT
+                    test_id
+                FROM
+                    valid_tests
+                WHERE
+                    test_group NOT IN ( 'SUPP', 'CNFRM' )
+                           --AND SYSDATE between eff_date AND nvl(term_date,SYSDATE+1) -- SCR 18938
+                    AND v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+            )
+            AND cancel_flag IS NULL
+        ORDER BY
+            test_id;
+
+        CURSOR units_cur (
+            pl_contract_id IN VARCHAR2
+        ) IS
+        SELECT DISTINCT
+            unit_id unit_id
+        FROM
+            utrs
+        WHERE
+            extract_date IN (
+                SELECT
+                    insert_dats
+                FROM
+                    rgt_result_parms
+                WHERE
+                    result_parm_id = pl_result_parm_id
+            )
+            AND unit_id IN (
+                SELECT
+                    decode(parm_select, 'ALL', unit_id, parm_select)
+                FROM
+                    rpt_parm_select
+                WHERE
+                        user_name = decode(substr(lt_user_session.get_userid, 1, 4), 'OPS$', substr(lt_user_session.get_userid, 5), lt_user_session.
+                        get_userid)
+                    AND parm_code = 'RUNIT'
+                                   --AND report_name = 'RSMREPRT' -- Commented by Kishore on 06/27/2014. SCR 20196
+                    AND report_name = 'NYRSMRPT' -- Added by Kishore on 06/27/2014. SCR 20196
+                    AND parm_id = pl_report_id
+            )
+            AND unit_id IN (
+                SELECT
+                    unit_id
+                FROM
+                    units
+                WHERE
+                        contract_id = pl_contract_id
+                    AND batch_id IN (
+                            SELECT
+                                decode(parm_select, 'ALL', units.batch_id, parm_select)
+                            FROM
+                                rpt_parm_select
+                            WHERE
+                                    user_name = lt_user_session.get_userid
+                                AND parm_code = 'RBAT'
+                                AND report_name = 'NYRSMRPT'
+                                AND parm_id = pl_report_id
+                    )
+            );
+
+        CURSOR tests_cur_1 IS
+        SELECT
+            a.test_id       act_test_id,
+            b.test_short_id test_short,
+            a.test_sequence
+        FROM
+            rsm_report_stage a,
+            valid_tests      b
+        WHERE
+                report_id = pl_report_id
+            AND a.param_id = pl_result_parm_id
+            AND a.test_id = b.test_id
+            AND
+			--SYSDATE between b.eff_date AND nvl(b.term_date,SYSDATE+1) AND    SCR 18938
+             v_local_date BETWEEN b.eff_date AND nvl(b.term_date, sysdate + 10)
+            AND test_sequence <= (
+                SELECT
+                    to_number(code_desc)
+                FROM
+                    master_codes
+                WHERE
+                        code_type = 'RSMPR'
+                    AND code = 'NMCOL'
+                    AND
+						--SYSDATE between eff_date AND nvl(term_date,SYSDATE+1))      -- SCR 18938
+                     v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+            )
+        ORDER BY
+            a.test_sequence;
+
+		-- exclude the tests FROM the above cursor
+        CURSOR other_tests_cur IS
+        SELECT
+            a.test_id       act_test_id,
+            b.test_short_id test_short,
+            a.test_sequence
+        FROM
+            rsm_report_stage a,
+            valid_tests      b
+        WHERE
+                report_id = pl_report_id
+            AND a.param_id = pl_result_parm_id
+            AND a.test_id = b.test_id
+            AND
+			--SYSDATE between b.eff_date AND nvl(b.term_date,SYSDATE+1) AND       -- SCR 18938
+             v_local_date BETWEEN b.eff_date AND nvl(b.term_date, sysdate + 10)
+            AND a.test_id NOT IN (
+                SELECT
+                    a.test_id
+                FROM
+                    rsm_report_stage a, valid_tests      b
+                WHERE
+                        report_id = pl_report_id
+                    AND a.param_id = pl_result_parm_id
+                    AND a.test_id = b.test_id
+                    AND
+						--SYSDATE between b.eff_date AND nvl(b.term_date,SYSDATE+1) AND       -- SCr 18938
+                     v_local_date BETWEEN b.eff_date AND nvl(b.term_date, sysdate + 10)
+                    AND test_sequence <= (
+                        SELECT
+                            to_number(code_desc)
+                        FROM
+                            master_codes
+                        WHERE
+                                code_type = 'RSMPR'
+                            AND code = 'NMCOL'
+                            AND
+									--SYSDATE between eff_date AND nvl(term_date,SYSDATE+1)         SCR 18938
+                             v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+                    )
+            )
+        ORDER BY
+            a.test_sequence;
+
+        /* -- V16
+        CURSOR non_contr_cur (
+            pl_contract IN VARCHAR2
+        ) IS
+        SELECT
+            test_id
+        FROM
+            rsm_report_stage
+        WHERE
+                report_id = pl_report_id
+            AND param_id = pl_result_parm_id
+            AND test_id NOT IN (
+                SELECT
+                    test_id
+                FROM
+                    contract_tests
+                WHERE
+                        contract_id = pl_contract
+                    AND
+						--SYSDATE between eff_date AND nvl(term_date,SYSDATE+1))         -- SCr 18938
+                     v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+            )
+        ORDER BY
+            test_id;
+        */
+
+        PROCEDURE result_interpretation (
+            p_unit_id IN VARCHAR2,
+            p_test_id IN VARCHAR2,
+            p_result  OUT VARCHAR2
+        ) IS
+
+            nreares    NUMBER := 0;
+            nnonreares NUMBER := 0;
+            preares    VARCHAR2(10);
+            pnonreares VARCHAR2(10);
+            nntres     NUMBER := 0;
+        BEGIN
+			--get the reactive COUNTs
+            SELECT
+                nvl(COUNT(*), 0)
+            INTO nreares
+            FROM
+                utrs
+            WHERE
+                    unit_id = p_unit_id
+                AND test_id = p_test_id
+                AND cancel_flag IS NULL
+                AND extract_date IS NOT NULL
+                AND result_status_1 IN (
+                    SELECT
+                        code
+                    FROM
+                        master_codes
+                    WHERE
+                            code_type = 'REAC'
+                        AND
+							--SYSDATE between eff_date AND NVL(term_date,SYSDATE+1));     SCr 18938
+                         v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+                );
+			--get the reactive result code for the unit
+            IF nreares >= 1 THEN
+                BEGIN
+                    SELECT DISTINCT
+                        result_status_1
+                    INTO preares
+                    FROM
+                        utrs
+                    WHERE
+                            unit_id = p_unit_id
+                        AND test_id = p_test_id
+                        AND cancel_flag IS NULL
+                        AND extract_date IS NOT NULL
+                        AND result_status_1 IN (
+                            SELECT
+                                code
+                            FROM
+                                master_codes
+                            WHERE
+                                    code_type = 'REAC'
+                                AND
+									--SYSDATE between eff_date AND nvl(term_date,SYSDATE+1));       --  SCr 18938
+                                 v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+                        );
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        preares := 'IND';
+                END;
+
+            END IF;
+			--get the non reactive COUNTs
+            SELECT
+                nvl(COUNT(*), 0)
+            INTO nnonreares
+            FROM
+                utrs
+            WHERE
+                    unit_id = p_unit_id
+                AND test_id = p_test_id
+                AND cancel_flag IS NULL
+                AND result_status_1 != 'NT'
+                AND extract_date IS NOT NULL
+                AND result_status_1 NOT IN (
+                    SELECT
+                        code
+                    FROM
+                        master_codes
+                    WHERE
+                            code_type = 'REAC'
+                        AND
+							--SYSDATE between eff_date AND nvl(term_date,SYSDATE+1));        -- SCR 18938
+                         v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+                );
+
+            IF nnonreares >= 1 THEN
+                BEGIN
+                    SELECT DISTINCT
+                        result_status_1
+                    INTO pnonreares
+                    FROM
+                        utrs
+                    WHERE
+                            unit_id = p_unit_id
+                        AND test_id = p_test_id
+                        AND cancel_flag IS NULL
+                        AND result_status_1 NOT IN ( 'NT' )
+                        AND extract_date IS NOT NULL
+                        AND result_status_1 NOT IN (
+                            SELECT
+                                code
+                            FROM
+                                master_codes
+                            WHERE
+                                    code_type = 'REAC'
+                                AND
+									--SYSDATE between eff_date AND nvl(term_date,SYSDATE+1));        -- SCR 18938
+                                 v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+                        );
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        pnonreares := 'IND';
+                END;
+            END IF;
+
+            IF nreares > nnonreares THEN
+                p_result := preares;
+            ELSIF nreares < nnonreares THEN
+                p_result := pnonreares;
+            ELSIF nreares = nnonreares THEN
+			--check IF ther is a NT result present
+                SELECT
+                    nvl(COUNT(DISTINCT result_status_1), 0)
+                INTO nntres
+                FROM
+                    utrs
+                WHERE
+                        unit_id = p_unit_id
+                    AND test_id = p_test_id
+                    AND cancel_flag IS NULL
+                    AND result_status_1 = 'NT'
+                    AND extract_date IS NOT NULL;
+
+                IF nntres > 0 THEN
+                    p_result := preares;
+                ELSE
+                    p_result := 'IND';
+                END IF;
+
+            END IF;
+
+        END result_interpretation;
+
+	/*  Main BEGIN starts here */
+    BEGIN
+		--  SCR 18938   Timezone functionality added
+        IF lifetrack_timezone_convert.is_timezone_enabled THEN
+            lifetrack_timezone_convert.get_local_time(pl_chapter_id, sysdate, v_local_date);
+        END IF;
+
+		--  Get the contract ID AND batch_id
+        SELECT
+            contract_id,
+            batch_id
+        INTO
+            szconid,
+            szbatch
+        FROM
+            rgt_result_parms
+        WHERE
+                result_parm_id = pl_result_parm_id
+            AND ROWNUM = 1;
+		---Clean the tables [Rel:1.2.0]
+        DELETE FROM rsm_report_stage
+        WHERE
+            param_id = pl_result_parm_id;
+
+                /* -- Commenteded by Kishore on 06/27/2014. SCR 20196
+		DELETE FROM rsm_report_details
+		WHERE result_parm_id	=	pl_result_parm_id
+		;
+                -- End of commented section */
+
+                -- Added by Kishore on 06/27/2014. SCR 20196
+        DELETE FROM ny_rsm_report_details
+        WHERE
+            result_parm_id = pl_result_parm_id;
+                -- End of change
+
+                /* -- Commenteded by Kishore on 06/27/2014. SCR 20196
+		DELETE FROM rsm_report_OTHERS
+		WHERE result_parm_id = pl_result_parm_id
+		;
+                -- End of commented section */
+
+                -- Added by Kishore on 06/27/2014. SCR 20196
+        DELETE FROM ny_rsm_report_others
+        WHERE
+            result_parm_id = pl_result_parm_id;
+                -- End of change
+
+		--Get the OD flag
+        BEGIN
+            SELECT
+                nvl(od_reporting_method, ' ')
+            INTO od_flag
+            FROM
+                contracts
+            WHERE
+                    contract_id = szconid
+                AND
+				--SYSDATE between eff_date AND nvl(term_date,SYSDATE+1) AND rownum=1;     SCR 18938
+                 v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+                AND ROWNUM = 1;
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE;
+        END;
+
+        dbms_output.put_line('First pass');
+		-- get the list of tests FROM the batch ID
+        FOR z_tests IN tests_cur LOOP
+            INSERT INTO rsm_report_stage (
+                param_id,
+                test_id,
+                test_name,
+                test_sequence,
+                report_id
+            ) VALUES (
+                pl_result_parm_id,
+                z_tests.tst_id,
+                z_tests.tst_id,
+                0,
+                pl_report_id
+            );
+
+        END LOOP;
+
+        COMMIT;
+        dbms_output.put_line('second pass');
+	--Update the sequence NUMBER, all the profile should come first,non profile should be display after the profile
+	--take the correct order FROM the contract tests AND THEN update the sequnce one by one as follows:
+	--First update the contract sequnce
+
+    /* -- V16
+        FOR z_contr IN contr_cur(szconid) LOOP
+            test_count := test_count + 1;
+            UPDATE rsm_report_stage
+            SET
+                test_sequence = test_count
+            WHERE
+                    report_id = pl_report_id
+                AND param_id = pl_result_parm_id
+                AND test_id = z_contr.test_id;
+
+        END LOOP;
+    */
+
+
+    -- V16 (Add test sequesnce for contract tests)
+    UPDATE rsm_report_stage rs
+    SET
+        test_sequence = (
+            WITH rws AS (
+                    SELECT DISTINCT rsm.test_id, DENSE_RANK() OVER (ORDER BY rsm.test_id) seq
+                     FROM rsm_report_stage rsm, contract_tests ct 
+                    WHERE  ct.test_id = rsm.test_id
+                      and rsm.param_id = pl_result_parm_id
+                      and rsm.report_id = pl_report_id
+                      and ct.contract_id = szconid
+                       --AND v_local_date BETWEEN ct.eff_date AND NVL(term_date, SYSDATE + 10) -- V17
+                        AND ct.test_id IN (
+                            SELECT
+                                decode(parm_select, 'ALL', ct.test_id, parm_select)
+                            FROM
+                                rpt_parm_select
+                            WHERE
+                                    user_name = lt_user_session.get_userid
+                                AND parm_code = 'RTEST'
+                                AND report_name = 'NYRSMRPT'
+                                AND parm_id = pl_report_id
+                        )
+            )
+            SELECT
+                seq
+            FROM
+                rws
+            WHERE
+                rs.test_id = rws.test_id
+        )
+    WHERE
+        rs.param_id = pl_result_parm_id
+        AND rs.report_id = pl_report_id;      
+
+
+        COMMIT;
+		--Now update the non profile tests
+        dbms_output.put_line('Third pass');
+        SELECT
+            MAX(test_sequence)
+        INTO vmaxseq
+        FROM
+            rsm_report_stage
+        WHERE
+                report_id = pl_report_id
+            AND param_id = pl_result_parm_id;
+
+        -- test_count := vmaxseq; -- V19
+
+        /* -- V16
+        FOR z_non_contr IN non_contr_cur(szconid) LOOP
+            test_count := test_count + 1;
+            UPDATE rsm_report_stage
+            SET
+                test_sequence = test_count
+            WHERE
+                    report_id = pl_report_id
+                AND param_id = pl_result_parm_id
+                AND test_id = z_non_contr.test_id;
+
+        END LOOP;
+        */
+
+        -- V16 (add test sequence for not contract tests)
+        UPDATE rsm_report_stage rs
+        SET
+            test_sequence = (
+                WITH rws AS (
+                            SELECT
+                                rsm.test_id,
+                                vmaxseq + ROW_NUMBER()
+                                    OVER(
+                                    ORDER BY
+                                        rsm.test_id
+                                    ) seq
+                            FROM
+                                rsm_report_stage rsm
+                            WHERE
+                                    rsm.param_id = pl_result_parm_id
+                                AND rsm.report_id = pl_report_id   
+                                AND rsm.test_sequence IS NULL
+                )
+                SELECT
+                    seq
+                FROM
+                    rws
+                WHERE
+                    rs.test_id = rws.test_id
+            )
+        WHERE
+            rs.param_id = pl_result_parm_id
+            AND rs.report_id = pl_report_id
+            AND rs.test_sequence IS NULL;  
+
+        COMMIT;
+
+        -- V19
+         SELECT
+            MAX(test_sequence)
+        INTO test_count
+        FROM
+            rsm_report_stage
+        WHERE
+                report_id = pl_report_id
+            AND param_id = pl_result_parm_id;
+        -------------    
+
+        --dbms_output.put_line('before unit cursor');
+        --- Populate the RSM_REPORT_DETAILS  table
+        /*
+        dbms_output.put_line('contract ID='
+                             || szconid
+                             || ' user='
+                             || lt_user_session.get_userid);
+        */
+
+
+        FOR z_units IN units_cur(szconid) LOOP
+            BEGIN
+                dbms_output.put_line('units loop:' || z_units.unit_id);
+				-- IF any BIO interdictions are present THEN it is  considered as reactive units Get the collection date
+
+                                -- Get the collection date and received date
+                BEGIN
+                    SELECT
+                        coll_date,
+                        received_date, -- Added by Kishore on 06/27/2014. SCR 20196
+                        chapter_id,
+                        os_unit_id
+                    INTO
+                        v_coll_date,
+                        v_received_date, -- Added by Kishore on 06/27/2014. SCR 20196
+                        v_chapter_id,
+                        v_os_unit
+                    FROM
+                        units
+                    WHERE
+                        unit_id = z_units.unit_id
+                        and chapter_id = pl_chapter_id ; -- MLT 5998
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        NULL;
+                END;
+
+                SELECT
+                    nvl(COUNT(*), 0)
+                INTO rcount
+                FROM
+                    unit_interdictions      ui,
+                    valid_interdictions_lab vi
+                WHERE
+                        ui.unit_id = z_units.unit_id
+                    AND ui.coll_date = v_coll_date
+                    AND ui.chapter_id = v_chapter_id
+                    AND ui.source_test_id IN (
+                        SELECT
+                            test_id
+                        FROM
+                            valid_tests
+                        WHERE  --SYSDATE between eff_date AND	nvl(term_date,SYSDATE+10) AND      SCR 18938
+                            v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+                            AND test_short_id IN (
+                                SELECT
+                                    code
+                                FROM
+                                    master_codes
+                                WHERE
+                                        code_type = 'RSMRR'
+                                    AND
+											--SYSDATE between eff_date AND nvl(term_date,SYSDATE+1))        SCR 18938
+                                     v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+                            )
+                    )
+                    AND vi.inter_code = ui.inter_code
+                    AND vi.inter_type IN ( 'N', 'B' );
+
+                BEGIN
+                    SELECT
+                        parm_select INTO lv_res_status
+                    FROM
+                        rpt_parm_select
+                    WHERE
+                            user_name = lt_user_session.get_userid
+                        AND parm_code = 'REAC'
+                        AND report_name = 'NYRSMRPT'
+                        AND parm_id = pl_report_id;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        lv_res_status := NULL;
+                END;
+
+
+                IF lv_res_status = 'ALLR' THEN
+                    IF rcount > 0 THEN
+                        reac_flag := 'R';  -- populate
+                    ELSE
+                        RAISE next_unit;
+                    END IF;
+                ELSIF lv_res_status = 'ALLNR' THEN
+                    IF rcount > 0 THEN
+                        RAISE next_unit;
+                    ELSE
+                        reac_flag := 'N';
+                    END IF;
+                ELSE -- For All
+                    IF rcount > 0 THEN
+                        reac_flag := 'R';
+                    ELSE
+                        reac_flag := 'N';
+                    END IF;
+                END IF;
+				-------------------------
+                col_count := 0;
+                FOR z_tests_cur_1 IN tests_cur_1 LOOP
+                    dbms_output.put_line('Test cursor:' || z_tests_cur_1.act_test_id);
+                    col_count := col_count + 1;
+                    a_test_id := z_tests_cur_1.act_test_id;
+                    l_test_id := z_tests_cur_1.test_short;
+                    test_seq := z_tests_cur_1.test_sequence;
+				--get the result of the test for the unit
+                    result_code := NULL;
+                    v_abs_val := NULL;
+                    original_result := NULL;
+                    BEGIN
+                        SELECT
+                            result_status_1,
+                            coll_date,
+                            absorbance
+                        INTO
+                            result_code,
+                            v_coll_date,
+                            v_abs_val
+                        FROM
+                            utrs
+                        WHERE
+                                unit_id = z_units.unit_id
+                            AND test_id = a_test_id
+                            AND cancel_flag IS NULL
+                            AND extract_date IS NOT NULL;
+
+                    EXCEPTION
+                        WHEN too_many_rows THEN
+                            result_interpretation(z_units.unit_id, a_test_id, result_code);
+                        WHEN OTHERS THEN
+							--message('Unit:'||Z_UNITS.unit_id||'  '||sqlerrm);
+                            result_code := NULL;
+                    END;
+
+					--translate the value to the RMAP
+                    original_result := result_code;
+                    cbc_result_code := NULL;
+                    BEGIN
+                        SELECT
+                            nvl(cbc_result_status, 'XYZ')
+                        INTO cbc_result_code
+                        FROM
+                            rgt_results_matrix
+                        WHERE
+                                contract_id = szconid
+                            AND test_id = a_test_id
+                            AND chapter_id = pl_chapter_id
+                            AND result_status = result_code
+                            AND
+							--SYSDATE between	eff_date AND nvl(term_date,SYSDATE+1) AND       SCR 18938
+                             v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+                            AND ROWNUM = 1;
+
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            cbc_result_code := 'XYZ';
+                    END;
+
+                    IF cbc_result_code != 'XYZ' THEN
+                        result_code := cbc_result_code;
+                    END IF;
+					--For ABORH get the description IF the result
+                    IF a_test_id = 'ABORH' THEN
+                        BEGIN
+                            SELECT
+                                substr(code_desc, 1, 6)
+                            INTO result_code
+                            FROM
+                                master_codes
+                            WHERE
+                                    code_type = 'ABO'
+                                AND code = original_result
+                                AND ---result_code AND 03/27/08
+								--SYSDATE between eff_date AND nvl(term_date,SYSDATE+1)                   -------SCR 18938
+                                 v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+                                AND ROWNUM = 1;
+
+                        EXCEPTION
+                            WHEN OTHERS THEN
+                                result_code := original_result;
+                        END;
+                    END IF;
+
+					--For ABOFWD get the description IF the result
+                    IF a_test_id = 'ABOFWD' THEN
+                        BEGIN
+                            SELECT
+                                substr(code_desc, 1, 6)
+                            INTO result_code
+                            FROM
+                                master_codes
+                            WHERE
+                                    code_type = 'ABOFD'
+                                AND code = original_result
+                                AND  ---result_code AND 3/27/08
+								--SYSDATE between eff_date AND nvl(term_date,SYSDATE+1)             -----------SCR 18938
+                                 v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+                                AND ROWNUM = 1;
+
+                        EXCEPTION
+                            WHEN OTHERS THEN
+                                result_code := original_result;
+                        END;
+                    END IF;
+
+                    IF a_test_id = 'CHOL' THEN
+                        result_code := nvl(v_abs_val, result_code);
+                    END IF;
+
+					--Storing the values in the place holder
+
+                    IF test_seq = 1 THEN
+                        test_id_1 := l_test_id;
+                        result_id_1 := result_code;
+                    ELSIF test_seq = 2 THEN
+                        test_id_2 := l_test_id;
+                        result_id_2 := result_code;
+                    ELSIF test_seq = 3 THEN
+                        test_id_3 := l_test_id;
+                        result_id_3 := result_code;
+                    ELSIF test_seq = 4 THEN
+                        test_id_4 := l_test_id;
+                        result_id_4 := result_code;
+                    ELSIF test_seq = 5 THEN
+                        test_id_5 := l_test_id;
+                        result_id_5 := result_code;
+                    ELSIF test_seq = 6 THEN
+                        test_id_6 := l_test_id;
+                        result_id_6 := result_code;
+                    ELSIF test_seq = 7 THEN
+                        test_id_7 := l_test_id;
+                        result_id_7 := result_code;
+                    ELSIF test_seq = 8 THEN
+                        test_id_8 := l_test_id;
+                        result_id_8 := result_code;
+                    ELSIF test_seq = 9 THEN
+                        test_id_9 := l_test_id;
+                        result_id_9 := result_code;
+                    ELSIF test_seq = 10 THEN
+                        test_id_10 := l_test_id;
+                        result_id_10 := result_code;
+                    ELSIF test_seq = 11 THEN
+                        test_id_11 := l_test_id;
+                        result_id_11 := result_code;
+                    ELSIF test_seq = 12 THEN
+                        test_id_12 := l_test_id;
+                        result_id_12 := result_code;
+                    ELSIF test_seq = 13 THEN
+                        test_id_13 := l_test_id;
+                        result_id_13 := result_code;
+                    ELSIF test_seq = 14 THEN
+                        test_id_14 := l_test_id;
+                        result_id_14 := result_code;
+                    ELSIF test_seq = 15 THEN
+                        test_id_15 := l_test_id;
+                        result_id_15 := result_code;
+                    ELSE
+                        NULL;
+                    END IF;
+
+                END LOOP;
+				--Populate the ny_rsm_report_details table
+
+                BEGIN
+					--INSERT INTO RSM_REPORT_DETAILS -- Commented by Kishore on 06/27/2014. SCR 20196
+                    INSERT INTO ny_rsm_report_details -- Added by Kishore on 06/27/2014. SCR 20196
+                     (
+                        result_parm_id,
+                        report_id,
+                        user_id,
+                        client_unit_id,
+                        tested_unit_id,
+                        coll_date,
+                        received_date -- Added by Kishore on 06/27/2014. SCR 20196
+                        ,
+                        test_id_1,
+                        result_id_1,
+                        test_id_2,
+                        result_id_2,
+                        test_id_3,
+                        result_id_3,
+                        test_id_4,
+                        result_id_4,
+                        test_id_5,
+                        result_id_5,
+                        test_id_6,
+                        result_id_6,
+                        test_id_7,
+                        result_id_7,
+                        test_id_8,
+                        result_id_8,
+                        test_id_9,
+                        result_id_9,
+                        test_id_10,
+                        result_id_10,
+                        test_id_11,
+                        result_id_11,
+                        test_id_12,
+                        result_id_12,
+                        test_id_13,
+                        result_id_13,
+                        test_id_14,
+                        result_id_14,
+                        test_id_15,
+                        result_id_15,
+                        reactive_flag,
+                        insert_date
+                    ) VALUES (
+                        pl_result_parm_id,
+                        pl_report_id,
+                        lt_user_session.get_userid,
+                        v_os_unit,
+                        z_units.unit_id,
+                        v_coll_date,
+                        v_received_date -- Added by Kishore on 06/27/2014. SCR 20196
+                        ,
+                        test_id_1,
+                        result_id_1,
+                        test_id_2,
+                        result_id_2,
+                        test_id_3,
+                        result_id_3,
+                        test_id_4,
+                        result_id_4,
+                        test_id_5,
+                        result_id_5,
+                        test_id_6,
+                        result_id_6,
+                        test_id_7,
+                        result_id_7,
+                        test_id_8,
+                        result_id_8,
+                        test_id_9,
+                        result_id_9,
+                        test_id_10,
+                        result_id_10,
+                        test_id_11,
+                        result_id_11,
+                        test_id_12,
+                        result_id_12,
+                        test_id_13,
+                        result_id_13,
+                        test_id_14,
+                        result_id_14,
+                        test_id_15,
+                        result_id_15,
+                        reac_flag,
+                        sysdate
+                    );
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        NULL; ---message('Loc-->10'||sqlerrm);pause;
+                        dbms_output.put_line('Insert failed=' || sqlerrm);
+                END;
+
+            EXCEPTION
+                WHEN next_unit THEN
+                    NULL;
+            END;
+        END LOOP;
+
+        COMMIT;
+		--POPULATE THE RSM_REPORT_OTHERS table
+        IF test_count > col_count THEN
+            FOR z_units IN units_cur(szconid) LOOP
+                BEGIN
+                    SELECT
+                        coll_date,
+                        received_date, -- Added by Kishore on 06/27/2014. SCR 20196
+                        chapter_id,
+                        os_unit_id
+                    INTO
+                        v_coll_date,
+                        v_received_date, -- Added by Kishore on 06/27/2014. SCR 20196
+                        v_chapter_id,
+                        v_os_unit
+                    FROM
+                        units
+                    WHERE
+                        unit_id = z_units.unit_id;
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        NULL;
+                END;
+
+                FOR z_other_tests IN other_tests_cur LOOP
+                    l_test_id := z_other_tests.test_short;
+                    a_test_id := z_other_tests.act_test_id;
+					--get the result of the test for the unit
+                    result_code := NULL;
+                    v_abs_val := NULL;
+                    BEGIN
+                        SELECT
+                            result_status_1,
+                            coll_date,
+                            absorbance
+                        INTO
+                            result_code,
+                            v_coll_date,
+                            v_abs_val
+                        FROM
+                            utrs
+                        WHERE
+                                unit_id = z_units.unit_id
+                            AND test_id = a_test_id
+                            AND cancel_flag IS NULL
+                            AND extract_date IS NOT NULL;
+
+                    EXCEPTION
+                        WHEN too_many_rows THEN
+                            result_interpretation(z_units.unit_id, a_test_id, result_code);
+                        WHEN OTHERS THEN
+							--message('Unit:'||Z_UNITS.unit_id||'  '||sqlerrm);
+                            result_code := NULL;
+                    END;
+
+                    cbc_result_code := NULL;
+                    BEGIN
+                        SELECT
+                            nvl(cbc_result_status, 'XYZ')
+                        INTO cbc_result_code
+                        FROM
+                            rgt_results_matrix
+                        WHERE
+                                contract_id = szconid
+                            AND test_id = a_test_id
+                            AND chapter_id = pl_chapter_id
+                            AND result_status = result_code
+                            AND
+							--SYSDATE between eff_date AND nvl(term_date,SYSDATE+1) AND      ------------------SCR 18938
+                             v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+                            AND ROWNUM = 1;
+
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            cbc_result_code := 'XYZ';
+                    END;
+
+                    IF cbc_result_code != 'XYZ' THEN
+                        result_code := cbc_result_code;
+                    END IF;
+
+					--For ABOFWD get the description IF the result
+                    IF a_test_id = 'ABOFWD' THEN
+                        BEGIN
+                            SELECT
+                                substr(code_desc, 1, 6)
+                            INTO result_code
+                            FROM
+                                master_codes
+                            WHERE
+                                    code_type = 'ABOFD'
+                                AND code = result_code
+                                AND
+								--SYSDATE between eff_date AND nvl(term_date,SYSDATE+1)            --- SCR 18938
+                                 v_local_date BETWEEN eff_date AND nvl(term_date, sysdate + 10)
+                                AND ROWNUM = 1;
+
+                        EXCEPTION
+                            WHEN OTHERS THEN
+                                result_code := result_code;
+                        END;
+                    END IF;
+
+                    IF a_test_id = 'CHOL' THEN
+                        result_code := nvl(v_abs_val, result_code);
+                    END IF;
+                    SELECT
+                        nvl(COUNT(*), 0)
+                    INTO nexist
+					--FROM rsm_report_others -- Commented by Kishore on 06/27/2014. SCR 20196
+                    FROM
+                        ny_rsm_report_others -- Added by Kishore on 06/27/2014. SCR 20196
+                    WHERE
+                            report_id = pl_report_id
+                        AND result_parm_id = pl_result_parm_id
+                        AND client_unit_id = z_units.unit_id
+                        AND test_id = l_test_id;
+
+                    IF nexist = 0 THEN
+                        IF result_code IS NOT NULL THEN  --pop  only IF the result has values
+							--INSERT INTO rsm_report_others -- Commented by Kishore on 06/27/2014. SCR 20196
+                            INSERT INTO ny_rsm_report_others -- Added by Kishore on 06/27/2014. SCR 20196
+                             (
+                                result_parm_id,
+                                report_id,
+                                client_unit_id,
+                                tested_unit_id,
+                                coll_date,
+                                received_date -- Added by Kishore on 06/27/2014. SCR 20196
+                                ,
+                                test_id,
+                                result_code
+                            ) VALUES (
+                                pl_result_parm_id,
+                                pl_report_id,
+                                v_os_unit,
+                                z_units.unit_id,
+                                v_coll_date,
+                                v_received_date -- Added by Kishore on 06/27/2014. SCR 20196
+                                ,
+                                l_test_id,
+                                result_code
+                            );
+
+                        END IF;
+                    ELSE
+                        NULL;
+                    END IF;
+
+                END LOOP;
+
+            END LOOP;
+        END IF;
+
+        COMMIT;
+    END;
+
+END ny_rsm_report;
+
+/

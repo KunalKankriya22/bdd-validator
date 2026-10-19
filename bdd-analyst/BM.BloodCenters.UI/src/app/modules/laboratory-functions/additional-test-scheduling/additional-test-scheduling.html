@@ -1,0 +1,238 @@
+<app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+<div class="additional-test-scheduling-container" role="region" aria-label="Additional Test Scheduling">
+
+  <!-- Tests Selection Section -->
+  <section class="tests-selection-section" [attr.aria-labelledby]="elementId('tests-label')">
+    <mat-form-field appearance="fill" class="tests-field">
+      <mat-label [id]="elementId('tests-label')">
+        Tests <span class="required-marker">*</span>
+      </mat-label>
+
+      <!-- Selected Tests as Chips -->
+      <mat-chip-grid #chipsGrid [id]="elementId('tests-chips')" aria-label="Selected tests">
+        @for (test of selectedTests(); track test.testId) {
+          <mat-chip-row (removed)="removeTest(test.testId)" [matTooltip]="test.testDesc || ''">
+            {{ test.testId }}{{ test.testDesc ? ' – ' + test.testDesc : '' }}
+            <button matChipRemove [attr.aria-label]="'Remove ' + test.testId">
+              <mat-icon>cancel</mat-icon>
+            </button>
+          </mat-chip-row>
+        }
+        <input
+          readonly
+          [matChipInputFor]="chipsGrid"
+          placeholder="Select tests using LOOKUP button"
+          [attr.aria-describedby]="hasSelectedTests() ? null : elementId('tests-hint')"
+        />
+      </mat-chip-grid>
+
+      @if (!hasSelectedTests()) {
+        <mat-hint [id]="elementId('tests-hint')">Click LOOKUP to select tests</mat-hint>
+      }
+    </mat-form-field>
+
+    <button
+      mat-raised-button
+      color="primary"
+      type="button"
+      class="lookup-btn"
+      (click)="onLookupTests()"
+      [id]="elementId('lookup-btn')"
+      [matTooltip]="hasScannedUnits() ? 'Changing tests will reload results for the selected unit' : ''"
+      matTooltipPosition="above">
+      LOOKUP
+    </button>
+    <button
+      mat-button
+      type="button"
+      class="clear-all-btn"
+      (click)="onClearAllTests()"
+      [disabled]="!hasSelectedTests()"
+      [id]="elementId('clear-all-btn')">
+      CLEAR ALL
+    </button>
+  </section>
+
+  <!-- Main Content: Two Panels -->
+  <div class="main-content">
+    <!-- Left Panel: Unit ID -->
+    <div class="scan-units-panel">
+      <app-unit-id-field
+        #unitIdField
+        [required]="true"
+        [label]="'Unit ID'"
+        [placeholder]="'Scan or type Unit ID'"
+        [validateFfValue]="'N'"
+        [showBarcodeIcon]="true"
+        (postValidate)="onPostValidate($event)"
+        (cleared)="onUnitIdCleared()">
+      </app-unit-id-field>
+
+      <!-- Scanned Units Table -->
+      <app-data-table
+        [config]="scannedUnitsTableConfig"
+        [data]="scannedUnits()"
+        [loading]="false"
+        (rowClick)="onScannedUnitRowClick($event)"
+        (rowAction)="onScannedUnitRowAction($event)" />
+    </div>
+
+    <!-- Right Panel: Tests Performed -->
+    <div class="tests-performed-panel">
+        @if (hasSelectedUnit()) {
+          <!-- Panel Header Row -->
+          <div class="panel-header-row">
+            <span class="panel-title">Tests performed on unit {{ selectedUnitId() }}</span>
+            <app-search-bar
+              [config]="testSearchConfig"
+              (search)="onTestSearch($event)" />
+          </div>
+
+          <!-- All Tests Scheduled Banner -->
+          @if (!loadingTests() && unscheduledTests().length === 0 && filteredTests().length > 0) {
+            <div class="all-scheduled-banner" role="status" aria-live="polite">
+              <mat-icon aria-hidden="true">check_circle</mat-icon>
+              All selected tests have already been scheduled for this unit.
+            </div>
+          }
+
+          <!-- Schedule Button -->
+          <div class="schedule-button-container">
+            <button
+              mat-raised-button
+              color="primary"
+              (click)="onScheduleTests()"
+              [disabled]="!canScheduleTests()"
+              [id]="elementId('schedule-btn')">
+              @if (schedulingTests()) {
+                <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+                SCHEDULING...
+              } @else {
+                SCHEDULE ({{ unscheduledTestsCount() }})
+              }
+            </button>
+          </div>
+
+          <!-- Loading State -->
+          @if (loadingTests()) {
+            <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+              <mat-spinner diameter="40" aria-label="Loading unit tests"></mat-spinner>
+              <span class="sr-only">Loading unit tests, please wait...</span>
+            </div>
+          }
+
+          <!-- Tests Table -->
+          @if (!loadingTests()) {
+            <div class="tests-performed-table-container">
+              <table
+                mat-table
+                [dataSource]="filteredTests()"
+                [id]="elementId('tests-performed-table')"
+                aria-label="Tests performed on unit table"
+                class="tests-performed-table">
+
+                <!-- Checkbox Column -->
+                <ng-container matColumnDef="checkbox">
+                  <th mat-header-cell *matHeaderCellDef scope="col">
+                    <mat-checkbox
+                      [id]="elementId('select-all')"
+                      [checked]="isAllUnscheduledSelected()"
+                      [indeterminate]="isSomeUnscheduledSelected()"
+                      (change)="onToggleAllUnscheduled($event.checked)"
+                      [disabled]="filteredUnscheduledTests().length === 0"
+                      aria-label="Select all unscheduled tests">
+                    </mat-checkbox>
+                  </th>
+                  <td mat-cell *matCellDef="let test">
+                    <mat-checkbox
+                      [id]="elementId('test-' + test.testId)"
+                      [checked]="isTestSelectedForScheduling(test.testId)"
+                      [disabled]="test.isScheduled"
+                      (change)="onTestToggle(test.testId, test.isScheduled)"
+                      [attr.aria-label]="test.isScheduled ? 'Test already scheduled' : 'Select test ' + test.testId">
+                    </mat-checkbox>
+                  </td>
+                </ng-container>
+
+                <!-- Status Column -->
+                <ng-container matColumnDef="status">
+                  <th mat-header-cell *matHeaderCellDef scope="col">
+                    Status
+                    <button
+                      mat-icon-button
+                      class="sort-button"
+                      (click)="onSortByStatus()"
+                      [attr.aria-label]="statusSortDirection() === 'ASC' ? 'Sort descending' : statusSortDirection() === 'DESC' ? 'Clear sort' : 'Sort ascending'">
+                      <mat-icon aria-hidden="true">{{
+                        statusSortDirection() === 'ASC' ? 'arrow_downward' :
+                        statusSortDirection() === 'DESC' ? 'arrow_upward' :
+                        'unfold_more'
+                      }}</mat-icon>
+                    </button>
+                  </th>
+                  <td mat-cell *matCellDef="let test">
+                    <span class="status-badge" [class.scheduled]="test.status === 'Scheduled'" [class.unscheduled]="test.status === 'Unscheduled'">
+                      @if (test.status === 'Scheduled') {
+                        <mat-icon aria-hidden="true">check_circle</mat-icon>
+                      } @else {
+                        <mat-icon aria-hidden="true">cancel</mat-icon>
+                      }
+                      {{ test.status }}
+                    </span>
+                  </td>
+                </ng-container>
+
+                <!-- Test ID Column -->
+                <ng-container matColumnDef="testId">
+                  <th mat-header-cell *matHeaderCellDef scope="col">Test ID</th>
+                  <td mat-cell *matCellDef="let test">{{ test.testId }}</td>
+                </ng-container>
+
+                <!-- Test Description Column -->
+                <ng-container matColumnDef="testDesc">
+                  <th mat-header-cell *matHeaderCellDef scope="col">Description</th>
+                  <td mat-cell *matCellDef="let test">{{ test.testDesc || '' }}</td>
+                </ng-container>
+
+                <!-- Sequence Column -->
+                <ng-container matColumnDef="sequence">
+                  <th mat-header-cell *matHeaderCellDef scope="col">Sequence</th>
+                  <td mat-cell *matCellDef="let test">{{ test.testSeqNo || '' }}</td>
+                </ng-container>
+
+                <!-- Result Column -->
+                <ng-container matColumnDef="result">
+                  <th mat-header-cell *matHeaderCellDef scope="col">Result</th>
+                  <td mat-cell *matCellDef="let test">{{ test.result || (test.isScheduled ? '' : 'NR') }}</td>
+                </ng-container>
+
+                <!-- Test Batch ID Column -->
+                <ng-container matColumnDef="testBatchId">
+                  <th mat-header-cell *matHeaderCellDef scope="col">Test Batch ID</th>
+                  <td mat-cell *matCellDef="let test">{{ test.testBatchId || '' }}</td>
+                </ng-container>
+
+                <tr mat-header-row *matHeaderRowDef="testsPerformedColumns"></tr>
+                <tr mat-row *matRowDef="let row; columns: testsPerformedColumns;"></tr>
+              </table>
+
+              <!-- Empty State for Tests -->
+              @if (filteredTests().length === 0 && !loadingTests()) {
+                <div class="empty-state">
+                  <p>No tests to display</p>
+                </div>
+              }
+            </div>
+          }
+        } @else {
+          <!-- No Unit Selected State -->
+          <div class="no-selection-state">
+            <mat-icon aria-hidden="true">search</mat-icon>
+            <p class="no-results-text">No Results to Display</p>
+            <p class="helper-text">Scan or enter a Unit ID to begin.</p>
+          </div>
+        }
+    </div>
+  </div>
+</div>

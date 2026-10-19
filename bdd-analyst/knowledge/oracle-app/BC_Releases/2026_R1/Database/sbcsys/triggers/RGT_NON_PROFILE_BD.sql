@@ -1,0 +1,28 @@
+--------------------------------------------------------
+--  DDL for Trigger RGT_NON_PROFILE_BD
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "RGT_NON_PROFILE_BD" 
+BEFORE DELETE
+ON SBCSYS.RGT_NON_PROFILE
+REFERENCING NEW AS NEW OLD AS OLD
+FOR EACH ROW
+begin
+
+	insert into RGT_NON_PROFILE_AUDIT
+    (
+	CONTRACT_ID, CHAPTER_ID, TEST_ID,
+	EFF_DATE, TERM_DATE, LAST_MODIFIED_DATE,
+	LAST_MODIFIED_USER, TEST_GROUP, AUDIT_KEY,PROGRAM_ID,
+	AUDIT_INSERT_DATS, AUDIT_INSERT_USER
+    )
+    values
+    (
+	:old.CONTRACT_ID, :old.CHAPTER_ID, :old.TEST_ID,
+	:old.EFF_DATE, :old.TERM_DATE, :old.LAST_MODIFIED_DATE,
+	:old.LAST_MODIFIED_USER, :old.TEST_GROUP, :old.AUDIT_KEY, 'DELETE',
+	sysdate, lt_user_session.get_userid
+    );
+end;
+/
+ALTER TRIGGER "RGT_NON_PROFILE_BD" ENABLE;

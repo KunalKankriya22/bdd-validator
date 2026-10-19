@@ -1,0 +1,2106 @@
+CREATE OR REPLACE PACKAGE               "LT_PROCESS_STAGING" IS
+ /*-----------------------------------------------------------------------
+   ** VER   DATE   BY       COMMENTS
+   ** --------------------------------------------------------------------
+   ** 1.0  041111  ASHOK  Initial version
+   ** process_data_string - to decrypt data string and populate file name,
+   ** table name in staging tables.
+   **
+   ** populate_api_tables - to populate api table from staging table.
+   **
+   ** 2.0  052913 Ashok  DECRYPT_IMAGE Routine added (SCR 11942);
+   ** V03  072513 Ashok  Donor Consent Changes: reset counter.  search for V03;
+   ** V04  022618 Ashok  LT2015R2SP1 (start_process added, upload_id and laptop_id added as parameters, populate_api_tables logic modified)
+   ** V05  032118 Ashok  Logging messages modified - use 'LAP' instead of upload ID. And, add laptop ID to log messages.
+   **                    V05 is a sync of LT2015R2SP1 v4 and v5 to LT_MAIN project.
+   ** V06  06/17/2020 Ashok Added blob_to_file routine, insert_mobile_upload_files, start_script_upload, start_push_upload
+   ** V07  07/23/2020 Ashok no archiving required for SCRIPT process, cron job takes care of archiving files.
+   ** V08  07/21/2021 Enhancements - Use header file to fine tune upload process.
+   ** V09  08/10/2021 api table names cached as 'API_'<table_name> does not work for audit tables.
+   ** V10  01/24/2022 PUSH method changes. MLT 4827
+   ** V11  02/18/2022 PUSH method changes. Zip file processing added. start_time populated in mobile_upload_control table.
+   ** V12  03/07/2022 Job processing changes.
+   ** V13  09/30/2022 DONOR_CONSENTS_ADT table images upload to api table issue.
+           10/11/2022 (merged 2022 R3 V11)
+   ** V14  12/21/2022 Decrypt routines updated (added decrypt and removed decrypt_image)
+   ** V15  01/27/2023 Pipe symbol in address issue
+   ** V16  02/16/2023 PUSH method - mobile_upload_files query --V16
+   ** V17  02/20/2023 insert_log added; log_and_stop updated.
+   ** V18  03/15/2023 sqlstmt variable size updated.
+   **---------------------------------------------------------------------
+  */
+    PROCEDURE log_msg (
+        str IN VARCHAR2
+    );
+
+    PROCEDURE staging_to_api_table (
+        p_upload_id   IN   VARCHAR2,
+        p_session_id  IN   VARCHAR2,
+        p_status_yn   OUT  VARCHAR2,
+        p_status_msg  OUT  VARCHAR2
+    );
+
+    PROCEDURE process_data_string (
+        p_upload_id  IN   VARCHAR2,
+        p_status     OUT  VARCHAR2
+    );
+
+    PROCEDURE populate_api_tables (
+        p_laptop_id  IN   VARCHAR2,
+        p_upload_id  IN   VARCHAR2,
+        p_status     OUT  VARCHAR2
+    );
+
+    PROCEDURE add_error_log (
+        pl_data_src  IN  VARCHAR2,
+        pl_log_list  IN  dbms_utility.maxname_array,
+        pl_pgm_id    IN  VARCHAR2
+    );
+
+    PROCEDURE add_error_log (
+        pl_data_src  IN  VARCHAR2,
+        pl_log_msg   IN  VARCHAR2,
+        pl_pgm_id    IN  VARCHAR2
+    );
+
+    PROCEDURE decrypt_each_image (
+        tabname_in   IN   VARCHAR2,
+        colname_in   IN   VARCHAR2,
+        auditkey_in  IN   VARCHAR2,
+        status_out   OUT  VARCHAR2
+    );
+
+    PROCEDURE process_encrypted_images (
+        enc_image_list_in  IN   dbms_utility.maxname_array,
+        plstatus_out       OUT  VARCHAR2
+    );
+
+    --Writes the contents of a BLOB to a file.
+    PROCEDURE blob_to_file (
+        p_blob      IN   BLOB,
+        p_dir       IN   VARCHAR2,
+        p_filename  IN   VARCHAR2,
+        p_status    OUT  VARCHAR2
+    );
+
+    PROCEDURE insert_mobile_upload_files (
+        p_file_name IN VARCHAR2
+    );
+
+    PROCEDURE start_script_upload;
+
+    PROCEDURE start_push_upload (
+        p_upload_id  IN   VARCHAR2,
+        p_status     OUT  VARCHAR2
+    );
+
+    PROCEDURE process_upload_job_queue (
+        p_upload_id  IN   VARCHAR2,
+        p_status     OUT  VARCHAR2
+    );
+
+    g_output dbms_utility.maxname_array;
+    g_upload_id VARCHAR2(50);
+    g_laptop_id VARCHAR2(20);
+    gc_files_dir CONSTANT VARCHAR2(20) := 'MPCFILES';
+    gc_arch_dir CONSTANT VARCHAR2(20) := 'MPCARCH';
+    gc_logs_dir CONSTANT VARCHAR2(20) := 'MPCLOGS';
+    gc_pkg CONSTANT VARCHAR2(50) := 'LT_PROCESS_STAGING';
+END lt_process_staging;
+/
+
+
+CREATE OR REPLACE PACKAGE BODY                     "LT_PROCESS_STAGING"
+IS
+    gv_sysdate VARCHAR2(30);
+
+    TYPE api_rec_t IS RECORD(file_name VARCHAR2(200),
+                               table_name VARCHAR2(100),
+                               col_name VARCHAR2(100),
+                               audit_key  VARCHAR2(20),
+                               audit_col VARCHAR2(100),
+                               audit_date VARCHAR2(100)
+                               );
+
+    encryption_type    PLS_INTEGER := DBMS_CRYPTO.ENCRYPT_AES256
+                                 + DBMS_CRYPTO.CHAIN_CBC
+                                 + DBMS_CRYPTO.PAD_PKCS5;
+    encryption_key_string   VARCHAR2(32) := 'IDEMERAWIDEMERAWIDEMERAWIDEMERAW';
+    encryption_key          RAW (32) := UTL_RAW.cast_to_raw(encryption_key_string);
+
+     -- The encryption key should be 8 bytes or more for DES algorithm.
+     FUNCTION encrypt (p_plainText VARCHAR2) RETURN RAW DETERMINISTIC
+     IS
+        encrypted_raw      RAW (2000);
+     BEGIN
+        encrypted_raw := DBMS_CRYPTO.ENCRYPT
+        (
+           src => UTL_RAW.CAST_TO_RAW (p_plainText),
+           typ => encryption_type,
+           key => encryption_key
+        );
+       RETURN encrypted_raw;
+     END encrypt;
+
+     FUNCTION encrypt (p_blob BLOB) RETURN BLOB IS
+        temp_blob        BLOB := empty_blob;
+     BEGIN
+        IF p_blob IS NULL THEN
+            RETURN empty_blob();
+        END IF;
+
+        dbms_lob.createtemporary(temp_blob, true, dbms_lob.call);
+
+        dbms_crypto.encrypt(dst => temp_blob,
+                            src => p_blob,
+                            typ => encryption_type,
+                            key => encryption_key);
+
+        RETURN temp_blob;
+     END encrypt;
+
+     FUNCTION decrypt (p_encryptedText RAW) RETURN VARCHAR2 DETERMINISTIC
+     IS
+        decrypted_raw      RAW (2000);
+     BEGIN
+        decrypted_raw := DBMS_CRYPTO.DECRYPT
+        (
+            src => p_encryptedText,
+            typ => encryption_type,
+            key => encryption_key
+        );
+        RETURN (UTL_RAW.CAST_TO_VARCHAR2 (decrypted_raw));
+     END decrypt;
+
+     FUNCTION decrypt (p_blob BLOB) RETURN BLOB IS
+        temp_blob        BLOB := empty_blob;
+     BEGIN
+        IF p_blob IS NULL THEN
+            RETURN empty_blob();
+        END IF;
+
+        dbms_lob.createtemporary(temp_blob, true, dbms_lob.call);
+
+        dbms_crypto.decrypt(dst => temp_blob,
+                            src => p_blob,
+                            typ => encryption_type,
+                            key => encryption_key);
+
+        RETURN temp_blob;
+     END decrypt;
+
+    PROCEDURE write_to_file(dir_in IN VARCHAR2, file_in IN VARCHAR2, msg_output DBMS_UTILITY.maxname_array) IS
+    BEGIN
+        IF file_in IS NOT NULL THEN
+          -- Send output to the specified file.
+          DECLARE
+            fid UTL_FILE.file_type;
+          BEGIN
+            fid := UTL_FILE.fopen(dir_in, file_in, 'W');
+
+            FOR indx IN msg_output.FIRST .. msg_output.LAST LOOP
+              UTL_FILE.put_line(fid, msg_output(indx));
+            END LOOP;
+
+            UTL_FILE.fclose(fid);
+          EXCEPTION
+            WHEN OTHERS THEN
+              dbms_output.put_line('Failure to write output to ' || dir_in || '/' || file_in);
+              UTL_FILE.fclose(fid);
+          END;
+        END IF;
+    END write_to_file;
+
+
+  PROCEDURE dump_logs IS
+  BEGIN
+    /*
+     lt_process_staging.add_error_log(pl_data_src  => 'Upload',
+                                      pl_log_list  => g_output,
+                                      pl_pgm_id    => 'LT_PROCESS_STAGING');
+     */
+     write_to_file( gc_logs_dir,
+                    'API_UPLOAD-'|| NVL(g_upload_id, 'XX') || '-' || gv_sysdate || '.log',
+                    g_output);
+     lt_process_staging.g_output.DELETE;
+  END dump_logs;
+
+  PROCEDURE log_msg(str IN VARCHAR2) IS
+  BEGIN
+    lt_process_staging.g_output(NVL(lt_process_staging.g_output.LAST, 0) + 1) := str;
+  END log_msg;
+
+  PROCEDURE insert_msg_log(str_IN IN VARCHAR2) IS
+    PRAGMA AUTONOMOUS_TRANSACTION;
+    nSeq NUMBER;
+  BEGIN
+    SELECT max(log_seq) INTO nSeq
+      FROM mobile_upload_log
+     WHERE upload_id = NVL(g_upload_id, 'XX')
+      AND table_name = 'API_UPLOAD';
+
+
+    INSERT INTO mobile_upload_log (
+        upload_id,
+        table_name,
+        log_text,
+        log_seq,
+        status,
+        start_time,
+        end_time,
+        insert_date,
+        insert_user,
+        process_time
+    ) VALUES (
+        NVL(g_upload_id, 'XX'),
+        'API_UPLOAD',
+        str_IN,
+        NVL(nSeq,0) + 1,
+        'F',
+        NULL,
+        NULL,
+        SYSDATE,
+        'LT_PROCESS_STAGING',
+        NULL
+    );
+
+    COMMIT;
+  END insert_msg_log;
+
+  PROCEDURE log_and_stop(str IN VARCHAR2) IS
+  BEGIN
+    log_msg(str);
+    dump_logs;
+
+    insert_msg_log(str);
+
+    email_util.send_api_upload_status(g_upload_id);
+  END log_and_stop;
+
+   PROCEDURE log_error (app_info_in IN VARCHAR2)
+   IS
+      /* Cannot call this function directly in SQL */
+      c_code   CONSTANT INTEGER := SQLCODE;
+      error_output    DBMS_UTILITY.maxname_array;
+      PROCEDURE log_err(str IN VARCHAR2) IS
+      BEGIN
+        error_output(NVL(error_output.LAST, 0) + 1) := str;
+      END log_err;
+   BEGIN
+     log_err(c_code);
+     log_err(DBMS_UTILITY.format_call_stack);
+     log_err(DBMS_UTILITY.format_error_stack);
+     log_err(DBMS_UTILITY.format_error_backtrace);
+     log_err(app_info_in);
+     write_to_file( gc_logs_dir,
+                    'API_UPLOAD-'|| NVL(g_upload_id, 'XX') || '-' || gv_sysdate || '.err',
+                    error_output);
+     error_output.DELETE;
+   END log_error;
+
+   PROCEDURE staging_to_api_table( p_upload_id  IN VARCHAR2,
+                                   p_session_id IN VARCHAR2,
+                                   p_status_yn  OUT VARCHAR2,
+                                   p_status_msg OUT VARCHAR2) IS
+     l_status_yn VARCHAR2(1);
+     l_status_msg VARCHAR2(1000);
+     l_rec_cnt   NUMBER;
+     stop_process EXCEPTION;
+   BEGIN
+     l_status_yn := 'N';
+     log_msg('Data processing in staging table started');
+
+     -- Call package to process data string;
+     process_data_string(p_upload_id, l_status_msg);
+
+     IF l_status_msg <> 'OK' THEN
+       --clean laptop staging records based on laptop_id and chapter_id; (upload status to E in lt_laptop_staging).
+       UPDATE lt_laptop_staging
+          SET process_flag = 'E'
+        WHERE upload_id = p_upload_id
+         AND session_id = p_session_id;
+
+       COMMIT;
+
+       RAISE stop_process;
+     END IF;
+
+     ---------------------
+     SELECT COUNT(1)
+       INTO l_rec_cnt
+       FROM lt_laptop_staging
+      WHERE upload_id = p_upload_id
+        AND session_id = p_session_id
+        AND process_flag = 'P';
+
+     log_msg('Data processing in staging table completed - ' || l_rec_cnt || ' records');
+     -------------------------
+
+     -- Call package to populate api tables;
+     populate_api_tables(g_laptop_id, p_upload_id, l_status_msg);
+
+     -- V07
+     IF l_status_msg <> 'OK' THEN
+       --clean laptop staging records based on laptop_id and chapter_id;
+       UPDATE lt_laptop_staging
+          SET process_flag = 'E'
+        WHERE upload_id = p_upload_id
+          AND session_id = p_session_id;
+
+       COMMIT;
+
+       RAISE stop_process;
+     END IF;
+     ----------
+     p_status_yn := 'Y'; -- successful completion;
+   EXCEPTION
+     WHEN stop_process THEN
+       p_status_msg := l_status_msg;
+       p_status_yn := l_status_yn;
+   END staging_to_api_table;
+
+   PROCEDURE process_data_string(p_upload_id IN VARCHAR2,
+                                 p_status    OUT VARCHAR2) IS
+     l_decrypt_str VARCHAR2(4000) := NULL;
+     l_sep         valid_parameters.parameter_value%TYPE := NULL;
+     l_data_str VARCHAR2(4000);
+     lc_pgm_id  VARCHAR2(50) := 'PROCESS_DATA_STRING';
+
+     CURSOR data_string_cur IS
+       SELECT data_string, decrypt_data_string, decrypt_flag
+         FROM lt_laptop_staging
+        WHERE nvl(process_flag, 'N') not in ('P', 'C', 'E')
+          AND upload_id = p_upload_id
+          FOR UPDATE OF decrypt_data_string; -- 'P' : Processed; 'C' : Completed; 'E' : Error
+
+   BEGIN
+     p_status := 'OK';
+
+     -- Get Seperator Value
+     BEGIN
+       SELECT parameter_value
+         INTO l_sep
+         FROM valid_parameters
+        WHERE parameter_code = 'EXTDLT'
+          AND ROWNUM < 2;
+     EXCEPTION
+       WHEN no_data_found then
+         p_status := 'ERR: Parameter value is not found in valid parameters table for code - EXTDLT';
+         RETURN;
+       WHEN others then
+         p_status := SUBSTR(SQLERRM, 1, 1000);
+         RETURN;
+     END;
+
+     -- Get Data strings from lt_laptop_staging table
+     FOR Z1 in data_string_cur LOOP
+       BEGIN
+         IF nvl(Z1.decrypt_flag, 'X') NOT IN ('1', '0') THEN
+           p_status := 'ERR: Decrypt flag not found in data string';
+           RETURN;
+         END IF;
+
+        IF nvl(z1.decrypt_flag, 'X') = '1' THEN
+         l_decrypt_str := decrypt(Z1.data_string);
+        ELSE
+         l_decrypt_str := Z1.data_string;
+        END IF;
+
+
+        UPDATE lt_laptop_staging
+          SET decrypt_data_string = l_decrypt_str,
+              process_flag        = 'P'
+        WHERE CURRENT OF data_string_cur;
+
+       END;
+     END LOOP;
+     COMMIT;
+   EXCEPTION
+     WHEN others THEN
+        --p_status     := SUBSTR(SQLERRM, 1, 1000);
+        p_status     := DBMS_UTILITY.format_error_stack;
+        RETURN;
+   END process_data_string;
+
+   -------------------------------------------------------
+
+  PROCEDURE POPULATE_API_TABLES(p_laptop_id IN VARCHAR2, p_upload_id IN VARCHAR2, p_status OUT VARCHAR2) IS
+
+    CURSOR tbl_metadata_cur(p_table_name IN VARCHAR2) IS
+      SELECT column_id, table_name, column_name, data_type, data_length
+        FROM all_tab_columns
+       WHERE UPPER(table_name) = UPPER(p_table_name)
+       order by column_id asc;
+
+    CURSOR str_token_cur(l_string_in IN VARCHAR2) IS
+      WITH DATA AS
+       (SELECT TRIM(SUBSTR(txt,
+                           INSTR(txt, '|', 1, LEVEL) + 1,
+                           INSTR(txt, '|', 1, LEVEL + 1) -
+                           INSTR(txt, '|', 1, LEVEL) - 1)) AS str_token
+          FROM (SELECT '|' || l_string_in || '|' txt FROM DUAL)
+        CONNECT BY LEVEL <= LENGTH(l_string_in) -
+                   LENGTH(REPLACE(l_string_in, '|', '')) + 1)
+      SELECT str_token FROM DATA;
+
+    CURSOR laptop_tbl_cur IS
+      SELECT table_name, file_name, count(1) cnt
+        FROM lt_laptop_staging
+       WHERE NVL(process_flag, 'N') = 'P'
+         AND upload_id = p_upload_id
+       GROUP BY table_name, file_name;
+
+    CURSOR decrypt_str_cur(pl_tbl_name IN VARCHAR2) IS
+      SELECT decrypt_data_string, table_name, laptop_id, file_name, upload_id
+        FROM lt_laptop_staging
+       WHERE NVL(process_flag, 'N') = 'P'
+         AND upload_id = p_upload_id
+         AND table_name = pl_tbl_name
+         FOR UPDATE OF decrypt_data_string; -- Populate only Processed data into api_tables
+
+    TYPE arr_type IS TABLE OF VARCHAR2(500) INDEX BY BINARY_INTEGER;
+
+    TYPE dates_byCollID_aat IS TABLE OF BOOLEAN INDEX BY PLS_INTEGER;
+    dates_byCollID dates_byCollID_aat;
+
+    TABLE_DOES_NOT_EXIST exception;
+    pragma exception_init(TABLE_DOES_NOT_EXIST, -942);
+
+    COL_STR_MISMATCH exception;
+    pragma exception_init(COL_STR_MISMATCH, -6502);
+
+    exit_process EXCEPTION;
+
+    t_arr     ARR_TYPE;
+    l_col_names VARCHAR2(4000) := NULL;
+    l_values  VARCHAR2(4000) := NULL;
+    l_api_tbl VARCHAR2(30);
+    --l_msg VARCHAR2(1000);
+    i         NUMBER := 1;
+
+    l_col_idx  NUMBER;
+
+
+    l_row_cnt NUMBER;
+    lc_dt_fmt  VARCHAR2(20) := 'MM/DD/YYYY HH24MISS'; -- Date Format;
+
+    lc_pgm_id  VARCHAR2(30) := 'POPULATE_API_TABLES';
+
+    sqlStmt  VARCHAR2(10000);
+    lv_tbl_cols  VARCHAR2(1000);
+    lv_api_tbl_cols  VARCHAR2(1000);
+
+    -- cached audit table names that do not follow the api_<main-tablename> standard.
+    TYPE api_adt_tnames_t IS TABLE OF VARCHAR2(30) INDEX BY VARCHAR2(30);
+    api_adt_tnames      api_adt_tnames_t;
+    lv_api_tname    VARCHAR2(30);
+    lv_tname        VARCHAR2(30);
+
+    FUNCTION In_Quotes(char_in VARCHAR2) RETURN VARCHAR2 IS
+    BEGIN
+      RETURN '''' || char_in || '''';
+    END;
+
+    PROCEDURE table_mismatch(p_tbl IN VARCHAR2, p_api_tbl IN VARCHAR2, p_tbl_cols OUT VARCHAR2, p_api_tbl_cols OUT VARCHAR2) IS
+    BEGIN
+        SELECT LISTAGG(t1.column_name,','), LISTAGG(t2.column_name,',')
+          INTO p_tbl_cols, p_api_tbl_cols
+        FROM ( SELECT column_name
+                 FROM all_tab_columns
+                WHERE table_name = UPPER(p_tbl)
+             ) t1
+           FULL OUTER JOIN
+            (
+                SELECT column_name
+                FROM all_tab_columns
+                WHERE table_name = p_api_tbl
+                 AND column_name NOT IN (
+                                        'LAPTOP_ID',
+                                        'UPLOAD_ID',
+                                        'TRANSACTION_MODE',
+                                        'LT_UPLOAD_DATE',
+                                        'LT_UPLOAD_STATUS',
+                                        'LT_UPLOAD_ERROR',
+                                        'DATA_SOURCE'
+                                        )
+            ) t2 ON t1.column_name = t2.column_name
+        WHERE t2.column_name IS NULL
+            OR t1.column_name IS NULL;
+    EXCEPTION
+      WHEN OTHERS THEN
+        p_tbl_cols := NULL;
+        p_api_tbl_cols := NULL;
+    END table_mismatch;
+
+    PROCEDURE load_adt_tnames_mismatch IS
+    BEGIN
+        api_adt_tnames('DONATION_EQUIP_SUPPLY_DET_ADT') := 'API_DONATION_EQP_SUPLY_DET_ADT';
+        api_adt_tnames('MATERIAL_SHIPMENT_TUBES_ADT')   := 'API_MATERIAL_SHIPMNT_TUBES_ADT';
+        api_adt_tnames('MATERIAL_VERIFICATION_DET_ADT') := 'API_MATERIAL_VRFCTION_DET_ADT';
+    END load_adt_tnames_mismatch;
+
+  BEGIN
+    p_status := 'OK';
+
+    log_msg('Starting API Tables load');
+
+    load_adt_tnames_mismatch;
+
+    FOR rec IN (  SELECT DISTINCT table_name
+                    FROM lt_laptop_staging
+                   WHERE NVL(process_flag, 'N') = 'P'
+                     AND upload_id = p_upload_id
+                )
+    LOOP
+        lv_tname := UPPER(rec.table_name);
+        IF api_adt_tnames.EXISTS(lv_tname) THEN
+            lv_api_tname := api_adt_tnames(lv_tname);
+        ELSE
+            lv_api_tname := 'API_' || lv_tname;
+        END IF;
+
+        table_mismatch(lv_tname, lv_api_tname, lv_tbl_cols, lv_api_tbl_cols);
+        IF lv_tbl_cols IS NOT NULL THEN
+           p_status := lv_tbl_cols || ' missing in API table for ' || lv_tname;
+           EXIT;
+        END IF;
+        IF lv_api_tbl_cols IS NOT NULL THEN
+           p_status := lv_api_tbl_cols || ' missing in table ' || lv_tname;
+           EXIT;
+        END IF;
+    END LOOP;
+
+    IF p_status <> 'OK' THEN
+        RETURN;
+    END IF;
+
+    FOR laptop_tbl_rec IN laptop_tbl_cur LOOP
+        --l_msg := 'Processing ' || 'API_' || laptop_tbl_rec.table_name || '. Rows found: ' || laptop_tbl_rec.cnt;
+        --add_error_log(p_upload_id, p_laptop_id, 'POPULATE_API_TABLES', l_msg, 'LT_PROCESS_STAGING');
+        lv_tname := UPPER(laptop_tbl_rec.table_name);
+        IF api_adt_tnames.EXISTS(lv_tname) THEN
+            l_api_tbl := api_adt_tnames(lv_tname);
+        ELSE
+            l_api_tbl := 'API_' || lv_tname;
+        END IF;
+
+        log_msg('Processing API table: ' || l_api_tbl);
+
+        -- construct column names.
+        l_col_names := NULL;
+        dates_byCollID.DELETE;
+
+        FOR tbl_metadata_rec IN tbl_metadata_cur(laptop_tbl_rec.table_name) LOOP
+           -- Construct column names strings.
+           if l_col_names is null then
+             l_col_names := tbl_metadata_rec.column_name;
+           else
+             l_col_names := l_col_names || ', ' || tbl_metadata_rec.column_name;
+           end if;
+
+           -- List of column ids that are date dataypes.
+           if tbl_metadata_rec.data_type = 'DATE' then
+             dates_byCollID(tbl_metadata_rec.column_id) := TRUE;
+           end if;
+        END LOOP;
+        ------------------
+
+        IF l_col_names IS NULL THEN
+            p_status := 'ERR: error reading meta data for table - ' || laptop_tbl_rec.table_name;
+            raise exit_process;
+        END IF;
+
+        -- Add four additional columns not in the table.
+        l_col_names := l_col_names || ', transaction_mode, data_source, laptop_id, upload_id' ;
+
+       -- Before inserting, delete any existing records(for the laptop_id and chapter_id) -- V07
+        sqlStmt := 'DELETE FROM ' || l_api_tbl || ' WHERE upload_id = :uploadID';
+        EXECUTE IMMEDIATE sqlStmt USING p_upload_id;
+
+        l_row_cnt := 0;
+        FOR Z1 IN decrypt_str_cur(laptop_tbl_rec.table_name) LOOP
+          BEGIN
+            l_row_cnt := l_row_cnt + 1;
+            --dbms_output.put_line('api table ' || l_api_tbl);
+            -- Parse the string and load tokens into plsql table;
+            -- Clear the table for every string
+            t_arr.delete;
+            l_col_idx := 1;
+            i         := 1;
+            FOR str_rec IN str_token_cur(Z1.decrypt_data_string) LOOP
+              -- check for date columns.
+              if str_rec.str_token is not null then
+                if dates_byCollID.EXISTS(i) THEN
+                  t_arr(i) := 'to_date(' || In_Quotes(str_rec.str_token) || ',' || In_Quotes(lc_dt_fmt) || ') ';
+                else
+                    -- replaces single quote with 2 single quotes and '@#@#' with separator.
+                  t_arr(i) := In_Quotes(replace(replace(str_rec.str_token, '''', ''''''), '@#@#', '|'));  -- V15
+                end if;
+              else
+                t_arr(i) := In_Quotes(str_rec.str_token);
+              end if;
+              i := i + 1;
+            END LOOP;
+
+            --dbms_output.put_line('arr count ' || t_arr.COUNT);
+            IF t_arr.COUNT = 0 THEN
+              p_status := 'ERR: Empty Decrypt Data String in lt_laptop_staging table while processing row - ' || l_row_cnt;
+              raise exit_process;
+            End IF;
+            -----
+
+            -- Construct values string.
+            FOR i in 1 .. t_arr.COUNT loop
+              if i = 1 then
+                l_values := t_arr(1);
+              else
+                l_values := l_values || ', ' || t_arr(i);
+              end if;
+            end loop;
+             l_values := l_values || ', ' || In_Quotes(laptop_tbl_rec.file_name) || ', ' || In_Quotes(p_laptop_id) || ', ' || In_Quotes(p_upload_id);
+            ------
+
+            sqlStmt := 'INSERT INTO ' || l_api_tbl || '(' || l_col_names || ')' || ' VALUES (' || l_values || ')';
+            EXECUTE IMMEDIATE sqlStmt;
+
+            UPDATE lt_laptop_staging
+               SET process_flag = 'C'
+             WHERE CURRENT OF decrypt_str_cur;
+          EXCEPTION
+            WHEN exit_process THEN
+              raise;
+            WHEN TABLE_DOES_NOT_EXIST THEN
+              p_status := 'ERR: ' || 'API_' || Z1.table_name || ' table does not exist';
+              log_error(p_status);
+              raise exit_process;
+            WHEN COL_STR_MISMATCH THEN
+              p_status := 'ERR: ORA-6502: DB Columns and String Mismatch';
+              log_error(p_status);
+              raise exit_process;
+            WHEN others THEN
+              p_status := 'ERR: ' ||  SUBSTR(sqlerrm, 1, 900);
+              log_error(p_status);
+              raise exit_process;
+          END;
+        END LOOP;
+
+        log_msg(l_api_tbl ||' : Processed row(s) - ' || l_row_cnt || ' of ' || laptop_tbl_rec.cnt);
+    END LOOP;
+
+    COMMIT;
+    --dbms_output.put_line('after commit');
+  EXCEPTION
+    WHEN exit_process THEN
+        ROLLBACK;
+        p_status := l_api_tbl || ' - ' || p_status ;
+    WHEN others THEN
+        ROLLBACK;
+        p_status := l_api_tbl || ' - ' ||  SUBSTR(sqlerrm, 1, 900);
+  END populate_api_tables;
+
+  procedure add_error_log(pl_data_src  in varchar2,
+                          pl_log_list  in DBMS_UTILITY.maxname_array,
+                          pl_pgm_id    in varchar2) is
+  Begin
+    if pl_log_list.COUNT > 0 then
+      for i in 1 .. pl_log_list.COUNT loop
+        add_error_log(pl_data_src,
+                      pl_log_list(i),
+                      pl_pgm_id
+                     );
+      end loop;
+    end if;
+  Exception
+    when others then
+      raise_application_error('-20000', 'API Log Error');
+  END add_error_log;
+
+  procedure add_error_log(pl_data_src  in varchar2,
+                          pl_log_msg   in varchar2,
+                          pl_pgm_id    in varchar2) is
+    PRAGMA AUTONOMOUS_TRANSACTION;
+    l_max_seq NUMBER;
+    lv_laptop_id VARCHAR2(20);
+  Begin
+
+    IF g_upload_id IS NULL THEN
+        l_max_seq := 0;
+    ELSE
+        SELECT NVL(MAX(log_seq), 0)
+          INTO l_max_seq
+          FROM lt_donor_api_log
+         WHERE log_text LIKE g_upload_id || '%';
+    END IF;
+
+    insert into LT_DONOR_API_LOG
+      (laptop_id,
+       source_id,
+       data_source_name,
+       log_seq,
+       log_text,
+       insert_date,
+       program_id)
+    values
+      (g_laptop_id,
+       'LAP', -- pl_src_id, -- V05
+       pl_data_src,
+       l_max_seq + 1,
+       g_upload_id || ': ' || SUBSTR(pl_log_msg, 1, 1000), -- V05
+       SYSDATE,
+       pl_pgm_id);
+
+    COMMIT;
+  Exception
+    when others then
+      raise_application_error('-20000', 'API Log Error');
+  END add_error_log;
+
+  PROCEDURE decrypt_each_image(tabName_in  IN VARCHAR2,
+                               colName_in  IN VARCHAR2,
+                               auditKey_in IN VARCHAR2,
+                               status_out  OUT VARCHAR2) IS
+    query_str VARCHAR2(2000);
+    dml_str   VARCHAR2(2000);
+    TYPE cur_type IS REF CURSOR;
+    c        cur_type;
+    enc_blob BLOB;
+    dec_blob BLOB;
+    api_tblName VARCHAR2(200);
+  BEGIN
+    api_tblName := 'api_' || tabName_in;
+    status_out := 'OK';
+    query_str  := 'SELECT ' || colName_in || ' FROM ' || api_tblName ||
+                  ' WHERE audit_key = :ak_in';
+    OPEN c FOR query_str
+      USING auditKey_in;
+    FETCH c
+      INTO enc_blob;
+    CLOSE c;
+
+    dec_blob := decrypt(enc_blob);
+
+    dml_str := 'UPDATE ' || DBMS_ASSERT.SQL_OBJECT_NAME(api_tblName) || ' SET ' || DBMS_ASSERT.SIMPLE_SQL_NAME(colName_in) ||
+             ' = :pl_blob' || ' WHERE audit_key = :pl_auditKey';
+    EXECUTE IMMEDIATE dml_str
+    USING dec_blob, auditKey_in;
+  EXCEPTION
+    WHEN OTHERS THEN
+      status_out := 'Error in Decrypt_each_image - ' ||
+                    SUBSTR(SQLERRM, 1, 100);
+  END decrypt_each_image;
+
+  PROCEDURE process_encrypted_images(enc_image_list_in IN DBMS_UTILITY.maxname_array,
+                                     plstatus_out      OUT VARCHAR2) IS
+    CURSOR str_token_cur(l_string_in IN VARCHAR2, l_sep IN VARCHAR2) IS
+      WITH DATA AS
+       (SELECT TRIM(SUBSTR(txt,
+                           INSTR(txt, l_sep, 1, LEVEL) + 1,
+                           INSTR(txt, l_sep, 1, LEVEL + 1) -
+                           INSTR(txt, l_sep, 1, LEVEL) - 1)) AS str_token
+          FROM (SELECT l_sep || l_string_in || l_sep txt FROM DUAL)
+        CONNECT BY LEVEL <= LENGTH(l_string_in) -
+                   LENGTH(REPLACE(l_string_in, l_sep, '')) + 1)
+      SELECT str_token FROM DATA;
+    cntr        NUMBER := 0;
+    l_audit_key VARCHAR2(30);
+    l_tab_name  VARCHAR2(300);
+    l_col_name  VARCHAR2(300);
+  BEGIN
+    plstatus_out := 'OK';
+    IF enc_image_list_in.COUNT > 0 THEN
+      FOR i in enc_image_list_in.FIRST .. enc_image_list_in.LAST LOOP
+        cntr := 0; -- 07/25/2013; V03
+        FOR str_rec IN str_token_cur(enc_image_list_in(i), '-') LOOP
+          cntr := cntr + 1;
+          IF cntr = 1 THEN
+            l_audit_key := str_rec.str_token;
+          ELSIF cntr = 2 THEN
+            l_tab_name := str_rec.str_token;
+          ELSIF cntr = 3 THEN
+            l_col_name := str_rec.str_token;
+          END IF;
+        END LOOP;
+
+        decrypt_each_image(tabName_in  => l_tab_name,
+                           colName_in  => l_col_name,
+                           auditKey_in => l_audit_key,
+                           status_out  => plstatus_out);
+
+        IF plstatus_out <> 'OK' THEN
+          ROLLBACK;
+          EXIT;
+        END IF;
+      END LOOP;
+      -----
+      COMMIT;
+    END IF;
+  END process_encrypted_images;
+
+    -- Writes the contents of a BLOB to a file.
+    PROCEDURE blob_to_file (  p_blob      IN  BLOB,
+                              p_dir       IN  VARCHAR2,
+                              p_filename  IN  VARCHAR2,
+                              p_status    OUT VARCHAR2)
+    AS
+      l_file      UTL_FILE.FILE_TYPE;
+      l_buffer    RAW(32767);
+      l_amount    BINARY_INTEGER := 32767;
+      l_pos       INTEGER := 1;
+      l_blob_len  INTEGER;
+    BEGIN
+      p_status := 'OK';
+
+      l_blob_len := DBMS_LOB.getlength(p_blob);
+
+      -- Open the destination file.
+      l_file := UTL_FILE.fopen(p_dir, p_filename,'wb', 32767);
+
+      -- Read chunks of the BLOB and write them to the file until complete.
+      WHILE l_pos <= l_blob_len LOOP
+        DBMS_LOB.read(p_blob, l_amount, l_pos, l_buffer);
+        UTL_FILE.put_raw(l_file, l_buffer, TRUE);
+        l_pos := l_pos + l_amount;
+      END LOOP;
+
+      -- Close the file.
+      UTL_FILE.fclose(l_file);
+
+    EXCEPTION
+      WHEN OTHERS THEN
+        p_status := 'ERROR: BLOB to FILE conversion '|| SUBSTR(SQLERRM, 500);
+        -- Close the file if something goes wrong.
+        IF UTL_FILE.is_open(l_file) THEN
+          UTL_FILE.fclose(l_file);
+        END IF;
+    END blob_to_file;
+
+    PROCEDURE insert_staging_table( p_upload_id IN VARCHAR2,
+                                    p_session_id IN VARCHAR2,
+                                    p_file_name IN VARCHAR2,
+                                    p_user_id   IN VARCHAR2,
+                                    p_status    OUT VARCHAR2) IS
+        l_file         UTL_FILE.file_type;
+        l_text         VARCHAR2(32767);
+        l_exists       BOOLEAN;
+        l_file_length  NUMBER;
+        l_blocksize    NUMBER;
+        lv_data_string  VARCHAR2(32767);
+        lv_encrypt_flag VARCHAR2(1);
+        ln_line_counter NUMBER;
+        lv_bare_filename VARCHAR2(200);
+        lv_tableName VARCHAR2(100);
+        lv_laptopID VARCHAR2(10);
+        lv_file_ext VARCHAR2(10);
+    BEGIN
+        IF p_file_name IS NULL THEN
+            p_status := 'ERROR: Filename is required';
+            RETURN;
+        END IF;
+
+        IF p_user_id IS NULL THEN
+            p_status := 'ERROR: User ID is required';
+            RETURN;
+        END IF;
+
+        IF p_upload_id IS NULL THEN
+            p_status := 'ERROR: Upload ID is required';
+            RETURN;
+        END IF;
+
+        UTL_FILE.fgetattr(gc_files_dir, p_file_name, l_exists, l_file_length, l_blocksize);
+        p_status := 'OK';
+
+        IF NOT l_exists THEN
+          p_status := 'ERROR: File not found';
+          RETURN;
+        END IF;
+
+        lv_tableName := SUBSTR(p_file_name, 0, INSTR(p_file_name,'-')-1);
+        lv_laptopID := SUBSTR(p_upload_id, 0, INSTR(p_upload_id, '_')-1);
+        lv_file_ext := SUBSTR(p_file_name, -3);
+        IF lv_file_ext = 'dat' THEN
+            lv_encrypt_flag := '1';
+        ELSIF lv_file_ext = 'txt' THEN
+            lv_encrypt_flag := '0';
+        ELSIF lv_file_ext = 'hdr' THEN -- header file is not encrypted
+            lv_encrypt_flag := '0';
+        END IF;
+
+        -- Open file.
+        l_file := UTL_FILE.fopen(gc_files_dir, p_file_name, 'r', 32767);
+        ln_line_counter := 0;
+        -- Read through the file until we reach the last line.
+        BEGIN
+            LOOP
+                UTL_FILE.get_line(l_file, l_text, 32767);
+
+                IF l_text IS NOT NULL THEN
+
+                    l_text := REPLACE(REPLACE(l_text, CHR(13), ' '), CHR(10), ' ')  ;
+                    lv_data_string := TRIM(l_text);
+                    ln_line_counter := ln_line_counter + 1;
+
+                    IF lv_encrypt_flag NOT IN ('0', '1') THEN
+                        p_status := 'ERROR: Invalid data - Encryption flag not found';
+                        EXIT;
+                    END IF;
+
+                    INSERT INTO lt_laptop_staging (
+                        data_string,
+                        file_name,
+                        decrypt_flag,
+                        table_name,
+                        laptop_id,
+                        insert_date,
+                        insert_user,
+                        upload_id,
+                        session_id
+                    ) VALUES (
+                        lv_data_string,
+                        p_file_name,
+                        lv_encrypt_flag,
+                        lv_tablename,
+                        lv_laptopid,
+                        sysdate,
+                        p_user_id,
+                        p_upload_id,
+                        p_session_id
+                    );
+                END IF;
+            END LOOP;
+
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+              NULL;
+            WHEN OTHERS THEN
+              p_status := 'ERR: ' || p_file_name || ' - ' || SUBSTR(sqlerrm, 1, 900);
+              log_error(p_status);
+        END;
+        -- Close the file.
+        UTL_FILE.fclose(l_file);
+
+    END insert_staging_table;
+
+    PROCEDURE file_to_api_table (api_rec_in     IN api_rec_t,
+                                 status_out     OUT VARCHAR2) AS
+        -- +--------------------------------------------------------------------+
+        -- | This procedure takes image name in db file system files dir as input
+        -- | and uploads image file to the respective db table.  Image file name
+        -- | is in the format AuditKey_TableName    |
+        -- +--------------------------------------------------------------------+
+        dest_loc  BLOB;
+        src_loc   BFILE;
+        null_blob BLOB := empty_blob();
+        dml_str   VARCHAR2(2000);
+        no_file_found_err   EXCEPTION; -- Image not passed as parameter
+        no_table_found_err  EXCEPTION; -- Image is not in the proper format: AuditKey_TableName.tif
+        no_record_found_err EXCEPTION; -- Record not found in the image table ( audit_key is used as unique identifier for the record).
+        lv_err_suffix VARCHAR2(200) ;
+    BEGIN
+        status_out := 'OK';
+        lv_err_suffix := 'Err in file_to_api_table:' || api_rec_in.file_name || ': ';
+        -- +--------------------------------------------------------------------+
+        -- | Insert/Update INITIAL BLOB VALUE (an image file) INTO THE TABLE    |
+        -- +--------------------------------------------------------------------+
+        IF api_rec_in.file_name IS NOT NULL
+            AND api_rec_in.table_name IS NOT NULL
+            AND api_rec_in.col_name IS NOT NULL
+            AND api_rec_in.audit_key IS NOT NULL
+        THEN
+           IF UPPER(api_rec_in.table_name) = 'DONOR_CONSENTS_ADT' THEN -- V13 (added special case for donor_consents_adt table)
+              dml_str := 'UPDATE api_' || api_rec_in.table_name
+                        || ' SET ' || api_rec_in.col_name || ' = :pl_blob' ||
+                         ' WHERE audit_key = :pl_auditKey
+                            AND column_name = :pl_auditCol
+                            AND audit_insert_dats = :pl_auditDate
+                            AND upload_id = :pl_uploadId
+                          RETURNING ' || api_rec_in.col_name ||
+                         ' INTO :pl_dest_loc';
+
+              EXECUTE IMMEDIATE dml_str
+                USING null_blob, api_rec_in.audit_key, api_rec_in.audit_col, TO_DATE(api_rec_in.audit_date, 'MMDDYYHH24MISS'), g_upload_id, OUT dest_loc;
+
+           ELSE
+              dml_str := 'UPDATE api_' || api_rec_in.table_name || ' SET ' ||
+                         api_rec_in.col_name || ' = :pl_blob' ||
+                         ' WHERE audit_key = :pl_auditKey
+                             AND upload_id = :pl_uploadId
+                          RETURNING ' || api_rec_in.col_name ||
+                         ' INTO :pl_dest_loc';
+
+              EXECUTE IMMEDIATE dml_str
+                USING null_blob, api_rec_in.audit_key, g_upload_id, OUT dest_loc;
+
+           END IF;
+
+          IF SQL%ROWCOUNT = 0 THEN
+            RAISE no_record_found_err;
+          END IF;
+        ELSE
+          RAISE no_file_found_err;
+        END IF;
+
+        -- +--------------------------------------------------------------------+
+        -- |src_loc and dest_loc variables;                                     |
+        -- +--------------------------------------------------------------------+
+
+        src_loc := BFILENAME(gc_files_dir, api_rec_in.file_name);
+
+        -- +-------------------------------------------------------------+
+        -- | OPENING THE SOURCE BFILE IS MANDATORY                       |
+        -- +-------------------------------------------------------------+
+        DBMS_LOB.OPEN(src_loc, DBMS_LOB.LOB_READONLY);
+
+        -- +-------------------------------------------------------------+
+        -- | OPENING THE LOB IS OPTIONAL                                 |
+        -- +-------------------------------------------------------------+
+        DBMS_LOB.OPEN(dest_loc, DBMS_LOB.LOB_READWRITE);
+
+        -- +-------------------------------------------------------------+
+        -- | SIMPLY CALL "loadfromfile" TO LOAD FILES INTO A LOB COLUMN  |
+        -- +-------------------------------------------------------------+
+        DBMS_LOB.LOADFROMFILE(dest_lob => dest_loc,
+                              src_lob  => src_loc,
+                              amount   => DBMS_LOB.getLength(src_loc));
+
+        -- +-------------------------------------------------------------+
+        -- | CLOSING ANY LOB IS MANDATORY IF YOU HAVE OPENED IT          |
+        -- +-------------------------------------------------------------+
+        DBMS_LOB.CLOSE(dest_loc);
+        DBMS_LOB.CLOSE(src_loc);
+
+        COMMIT;
+
+    EXCEPTION
+        WHEN no_file_found_err THEN
+            status_out := lv_err_suffix || 'No File Found';
+            --do_log('Err: Image file name is not passed as parameter', FALSE);
+        WHEN no_table_found_err THEN
+            status_out := lv_err_suffix || 'Image file name not in proper format';
+            --do_log('Err: Image file name is not in proper format', FALSE);
+        WHEN no_record_found_err THEN
+            status_out := lv_err_suffix || 'Record not found';
+            --do_log('Err: Record to update image not found', FALSE);
+        WHEN others THEN
+            status_out := lv_err_suffix || SUBSTR(SQLERRM, 1, 900);
+    END file_to_api_table;
+
+
+    PROCEDURE image_to_api_table(image_file_In IN VARCHAR2, status_out OUT VARCHAR2) As
+
+        api_rec api_rec_t;
+
+        l_image_name VARCHAR2(100);
+        cntr         NUMBER := 0;
+
+        no_file_found_err   EXCEPTION; -- Image not passed as parameter
+        no_table_found_err  EXCEPTION; -- Image is not in the proper format: AuditKey_TableName.tif
+        no_record_found_err EXCEPTION; -- Record not found in the image table ( audit_key is used as unique identifier for the record).
+        lv_err_suffix VARCHAR2(200);
+        CURSOR str_token_cur(l_string_in IN VARCHAR2, l_sep IN VARCHAR2) IS
+          WITH DATA AS
+           (SELECT TRIM(SUBSTR(txt,
+                               INSTR(txt, l_sep, 1, LEVEL) + 1,
+                               INSTR(txt, l_sep, 1, LEVEL + 1) -
+                               INSTR(txt, l_sep, 1, LEVEL) - 1)) AS str_token
+              FROM (SELECT l_sep || l_string_in || l_sep txt FROM DUAL)
+            CONNECT BY LEVEL <= LENGTH(l_string_in) -
+                       LENGTH(REPLACE(l_string_in, l_sep, '')) + 1)
+          SELECT str_token FROM DATA;
+
+    BEGIN
+        status_out := 'OK';
+        lv_err_suffix := 'Err in file_to_api_table:' || image_file_In || ': ';
+
+
+        IF image_file_in IS NOT NULL THEN
+
+          l_image_name := SUBSTR(image_file_in,
+                                 0,
+                                 INSTR(image_file_in, '.') - 1); -- file name with out the extension.
+          -- 11/08/2013
+          cntr := 0;
+
+          api_rec.file_name := image_file_in;
+
+          FOR str_rec IN str_token_cur(l_image_name, '-') LOOP
+            cntr := cntr + 1;
+            IF cntr = 1 THEN
+              api_rec.audit_key := str_rec.str_token;
+            ELSIF cntr = 2 THEN
+              api_rec.table_name := str_rec.str_token;
+            ELSIF cntr = 3 THEN
+              api_rec.col_name := str_rec.str_token;
+            ELSIF cntr = 4 THEN
+              api_rec.audit_col := str_rec.str_token;
+            ELSIF cntr = 5 THEN
+              api_rec.audit_date := str_rec.str_token;
+            END IF;
+          END LOOP;
+        ELSE
+          RAISE no_file_found_err;
+        END IF;
+
+        IF api_rec.file_name IS NOT NULL
+            AND api_rec.table_name IS NOT NULL
+            AND api_rec.col_name IS NOT NULL
+            AND api_rec.audit_key IS NOT NULL
+        THEN
+          -- Load Images into api table (Can be enc or tif images - encrypted or normal images).
+          file_to_api_table(api_rec_in => api_rec, status_out => status_out);
+          IF status_out <> 'OK' THEN
+            RETURN;
+          END IF;
+        ELSE
+          RAISE no_table_found_err;
+        END IF;
+
+        -- For encrypted files - decrypt them and update;
+        IF lower(SUBSTR(image_file_in, -3)) = 'enc' THEN
+          dbms_output.put_line('Decryption of ' || image_file_in ||
+                               ' in api table begins');
+          DECLARE
+            enc_blob  BLOB; -- encrypted blob from api table.
+            dec_blob  BLOB; -- Decrypted BLOB;
+            pl_status VARCHAR2(2000);
+            query_str VARCHAR2(2000);
+            dml_str   VARCHAR2(2000);
+          BEGIN
+            IF UPPER(api_rec.table_name) = 'DONOR_CONSENTS_ADT' THEN
+                query_str := 'SELECT ' || api_rec.col_name
+                            || ' FROM api_' || api_rec.table_name
+                            || ' WHERE audit_key = :pl_auditKey'
+                            || '   AND column_name = :pl_auditCol'
+                            || '   AND audit_insert_dats = :pl_auditDate'
+                            || '   AND upload_id = :pl_uploadId';
+
+                EXECUTE IMMEDIATE query_str
+                  INTO enc_blob
+                  USING api_rec.audit_key,
+                        api_rec.audit_col,
+                        TO_DATE(api_rec.audit_date, 'MMDDYYHH24MISS'),
+                        g_upload_id;
+
+            ELSE
+                query_str := 'SELECT ' || api_rec.col_name
+                            || ' FROM api_' || api_rec.table_name
+                            || ' WHERE audit_key = :pl_auditKey'
+                            || ' AND upload_id = :pl_uploadId';
+
+                EXECUTE IMMEDIATE query_str
+                  INTO enc_blob
+                  USING api_rec.audit_key, g_upload_id;
+            END IF;
+
+            IF enc_blob IS NULL THEN
+              RAISE no_record_found_err;
+            END IF;
+
+            dec_blob := decrypt(enc_blob);
+
+            IF UPPER(api_rec.table_name) = 'DONOR_CONSENTS_ADT' THEN
+                dml_str := 'UPDATE api_' || api_rec.table_name
+                        || ' SET ' || api_rec.col_name || ' = :pl_blob'
+                        || ' WHERE audit_key = :pl_auditKey'
+                        || '   AND column_name = :pl_auditCol'
+                        || '   AND audit_insert_dats = :pl_auditDate'
+                        || '   AND upload_id = :pl_uploadId';
+                EXECUTE IMMEDIATE dml_str
+                    USING dec_blob,
+                          api_rec.audit_key,
+                          api_rec.audit_col,
+                          TO_DATE(api_rec.audit_date, 'MMDDYYHH24MISS'),
+                          g_upload_id;
+            ELSE
+                dml_str := 'UPDATE api_' || api_rec.table_name
+                        || ' SET ' || api_rec.col_name || ' = :pl_blob'
+                        || ' WHERE audit_key = :pl_auditKey'
+                        || ' AND upload_id = :pl_uploadId';
+                EXECUTE IMMEDIATE dml_str USING dec_blob, api_rec.audit_key, g_upload_id;
+            END IF;
+
+
+
+            IF SQL%ROWCOUNT = 0 THEN
+                RAISE no_record_found_err;
+            END IF;
+            COMMIT;
+
+          END;
+        END IF;
+
+    EXCEPTION
+        WHEN no_file_found_err THEN
+          status_out := lv_err_suffix || 'No File Found';
+          --do_log('Err: Image file name is not passed as parameter', FALSE);
+        WHEN no_table_found_err THEN
+          status_out := lv_err_suffix || 'Image file name not in proper format';
+          --do_log('Err: Image file name is not in proper format', FALSE);
+        WHEN no_record_found_err THEN
+          status_out := lv_err_suffix || 'Record not found';
+          --do_log('Err: Record to update image not found', FALSE);
+        WHEN others THEN
+            status_out := lv_err_suffix || SUBSTR(SQLERRM, 1, 900);
+    END image_to_api_table;
+
+
+    FUNCTION load_blob_From_File(p_dir_name VARCHAR2, p_file_name VARCHAR2) RETURN BLOB AS
+        dest_loc  BLOB := empty_blob();
+        src_loc   BFILE := BFILENAME(p_dir_name, p_file_name);
+    BEGIN
+        -- Open source binary file from OS
+        DBMS_LOB.OPEN(src_loc, DBMS_LOB.LOB_READONLY);
+
+        -- Create temporary LOB object
+        DBMS_LOB.CREATETEMPORARY(
+              lob_loc => dest_loc
+            , cache   => true
+            , dur     => dbms_lob.session
+        );
+
+        -- Open temporary lob
+        DBMS_LOB.OPEN(dest_loc, DBMS_LOB.LOB_READWRITE);
+
+        -- Load binary file into temporary LOB
+        DBMS_LOB.LOADFROMFILE(
+              dest_lob => dest_loc
+            , src_lob  => src_loc
+            , amount   => DBMS_LOB.getLength(src_loc));
+
+        -- Close lob objects
+        DBMS_LOB.CLOSE(dest_loc);
+        DBMS_LOB.CLOSE(src_loc);
+
+        -- Return temporary LOB object
+        RETURN dest_loc;
+    END load_blob_From_File;
+
+    PROCEDURE decrypt_file(p_file_name IN VARCHAR2, p_status OUT VARCHAR2) IS
+        enc_blob   BLOB := empty_blob();
+        new_file   VARCHAR2(100);
+    BEGIN
+        IF SUBSTR(p_file_name, -3) = 'bde' THEN -- bde is encrypted bdr
+            enc_blob := load_BLOB_From_File(gc_files_dir, p_file_name);
+            new_file := SUBSTR(p_file_name, 1, Length(p_file_name)-4) || '.' || 'bdr';
+
+            blob_to_file(p_blob      => decrypt(enc_blob),
+                         p_dir       => gc_files_dir,
+                         p_filename  => new_file,
+                         p_status    => p_status);
+        END IF;
+    END decrypt_file;
+
+    PROCEDURE init_vars(p_upload_id IN VARCHAR2) IS
+    BEGIN
+        g_upload_id := p_upload_id;
+        g_laptop_id := SUBSTR(p_upload_id, 0, INSTR(p_upload_id, '_')-1);
+    END init_vars;
+
+    PROCEDURE insert_mobile_upload_files(p_file_name IN VARCHAR2) IS
+        lv_bare_filename VARCHAR2(150);
+        lv_upload_id VARCHAR2(50);
+        ld_insert_date DATE;
+        null_blob BLOB := empty_blob();
+        ln_Count NUMBER;
+        lv_User  VARCHAR2(30) := 'DBUSER';
+
+    BEGIN
+        IF p_file_name IS NULL THEN
+            RETURN;
+        END IF;
+
+        IF SUBSTR(p_file_name, -3) NOT IN  ('tif', 'enc', 'hdr', 'txt', 'dat', 'bde') THEN
+            RETURN;
+        END IF;
+
+        -- Get the upload id from file name.
+        lv_bare_filename := SUBSTR(p_file_name, 0, INSTR(p_file_name, '.', -1)-1);
+        lv_upload_id :=SUBSTR(lv_bare_filename, INSTR(lv_bare_filename, '-', -1)+1);
+        --ld_insert_date := TO_DATE(SUBSTR(lv_upload_id, INSTR(lv_upload_id, '_')+1), 'MMDDYYHH24MI');
+        -- second token is datetime.
+        ld_insert_date := TO_DATE(regexp_substr(lv_upload_id, '[^_]+', 1, 2), 'MMDDYYHH24MISS');
+
+        -- Archive the file only the file has already been uploaded to API table (A) status.
+        -- Insert into mobile_upload_file (if file is not in the table)
+
+        DECLARE
+            lv_upload_status VARCHAR2(1);
+        BEGIN
+            SELECT
+                upload_status
+            INTO lv_upload_status
+            FROM
+                mobile_upload_files
+            WHERE
+                upload_id = lv_upload_id
+                AND file_name = p_file_name;
+
+            IF lv_upload_status = 'A' THEN
+                -- Archive the file as it is already succesfully uploaded.
+                UTL_FILE.FRENAME (  src_location  => gc_files_dir,
+                                    src_filename  => p_file_name,
+                                    dest_location => gc_arch_dir,
+                                    dest_filename => p_file_name,
+                                    overwrite     => TRUE);
+            ELSE
+                DELETE FROM mobile_upload_files
+                WHERE upload_id = lv_upload_id
+                 AND file_name = p_file_name;
+
+                INSERT INTO mobile_upload_files(upload_id, file_name, dump_file, insert_date, insert_user)
+                 VALUES (lv_upload_id, p_file_name, null_blob, ld_insert_date, lv_User);
+            END IF;
+
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                INSERT INTO mobile_upload_files(upload_id, file_name, dump_file, insert_date, insert_user)
+                 VALUES (lv_upload_id, p_file_name, null_blob, ld_insert_date, lv_User);
+            WHEN TOO_MANY_ROWS THEN
+                log_error('****ERROR**** IN insert_mobile_upload_files routine - Duplicate records found: ' || p_file_name);
+        END;
+
+        COMMIT;
+        init_vars(lv_upload_id); -- g_upload_id and laptop id are used in log_and_stop routines
+        -- log_and_stop('Inserted file in mobile_upload_files table :' || p_file_name); Creating a log file for every record.
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error('****ERROR**** IN insert_mobile_upload_files routine');
+    END insert_mobile_upload_files;
+
+    PROCEDURE PROCESS_UPLOAD_JOB_QUEUE(p_upload_id IN VARCHAR2, p_status OUT VARCHAR2) IS
+        hdr_rec       laptop_extracts%rowtype;
+        prev_hdr_rec  laptop_extracts%rowtype;
+        lncount       NUMBER;
+
+        -- Get header record for the upload
+        PROCEDURE get_header_rec (
+            upload_id_in    IN   VARCHAR2,
+            header_rec_out  OUT laptop_extracts%rowtype,
+            status_out      OUT  VARCHAR2
+        ) IS
+        BEGIN
+            status_out := 'OK';
+
+            -- Check if header file is in the table.
+            SELECT
+                UPLOAD_ID ,
+                DRIVE_ID ,
+                EXTRACT_SEQ ,
+                FILES_COUNT ,
+                INSERT_DATE ,
+                INSERT_USER
+            INTO header_rec_out
+            FROM
+                laptop_extracts
+            WHERE
+                upload_id = upload_id_in;
+
+        EXCEPTION
+            WHEN no_data_found THEN
+                -- header file not found.
+                status_out := 'Header Record not found';
+            WHEN too_many_rows THEN
+                status_out := 'Duplicate Rows found in laptop_extracts table for ' || upload_id_in;
+            WHEN OTHERS THEN
+                status_out := substr(sqlerrm, 1, 200);
+        END get_header_rec;
+
+        -- get previous header record for the laptop extract
+        PROCEDURE get_prev_header_rec (
+            header_rec_in   IN   laptop_extracts%rowtype,
+            header_rec_out  OUT  laptop_extracts%rowtype,
+            status_out      OUT  VARCHAR2
+        ) IS
+        BEGIN
+            status_out := 'OK';
+            SELECT
+                UPLOAD_ID ,
+                DRIVE_ID ,
+                EXTRACT_SEQ ,
+                FILES_COUNT ,
+                INSERT_DATE ,
+                INSERT_USER
+            INTO header_rec_out
+            FROM
+                laptop_extracts
+            WHERE
+                    drive_id = header_rec_in.drive_id
+                AND extract_seq = header_rec_in.extract_seq - 1;
+
+        EXCEPTION
+            WHEN no_data_found THEN
+                status_out := 'Previous header record not found';
+            WHEN too_many_rows THEN
+                status_out := 'Duplicates found for previous seq '
+                              || hdr_rec.drive_id
+                              || '-'
+                              || hdr_rec.extract_seq;
+            WHEN OTHERS THEN
+                status_out := substr(sqlerrm, 1, 200);
+        END get_prev_header_rec;
+
+        -- insert into mobile_upload_control
+        PROCEDURE insert_mobile_upload_control (
+            header_rec_in laptop_extracts%rowtype
+        ) IS
+            lnCount NUMBER;
+            muc_rec mobile_upload_control%rowtype;
+        BEGIN
+            SELECT
+                COUNT(1)
+            INTO lnCount
+            FROM
+                mobile_upload_control
+            WHERE
+                upload_id = header_rec_in.upload_id;
+
+            IF lnCount = 0 THEN
+                muc_rec.laptop_id   := regexp_substr(header_rec_in.upload_id, '[^_]+', 1, 1);
+                muc_rec.chapter_id  := regexp_substr(header_rec_in.upload_id, '[^_]+', 1, 3);
+                muc_rec.submit_time := TO_DATE(regexp_substr(header_rec_in.upload_id, '[^_]+', 1, 2), 'MMDDYYHH24MISS');
+                muc_rec.start_time  := SYSDATE;
+                muc_rec.end_time    := NULL;
+                muc_rec.proc_status := 'Q'; -- In Queue.
+                muc_rec.upload_id   := header_rec_in.upload_id;
+                muc_rec.drive_id    := header_rec_in.drive_id;
+                muc_rec.extract_seq := header_rec_in.extract_seq;
+                INSERT INTO mobile_upload_control VALUES muc_rec;
+
+            END IF;
+
+        END insert_mobile_upload_control;
+
+        -- delete job from laptop_extract table.
+        PROCEDURE delete_laptop_extract (
+            upload_id_in IN VARCHAR2
+        ) IS
+        BEGIN
+            DELETE FROM laptop_extracts
+            WHERE
+                upload_id = upload_id_in;
+
+        END delete_laptop_extract;
+
+    BEGIN
+        p_status := 'OK';
+
+        get_header_rec(p_upload_id, hdr_rec, p_status);
+        IF p_status <> 'OK' THEN
+            RETURN;
+        END IF;
+
+        IF hdr_rec.extract_seq = 0 THEN
+            p_status := 'Error: Extract Seq cannot be 0';
+            RETURN;
+        END IF;
+
+        IF hdr_rec.files_count = 0 THEN
+            p_status := 'Error: Files Count cannot be 0';
+            RETURN;
+        END IF;
+
+        -- Check if all the files are uploaded.
+        BEGIN
+            SELECT COUNT(1) INTO lnCount
+              FROM mobile_upload_files
+             WHERE upload_id = p_upload_id
+               AND upload_status = 'A'
+               AND SUBSTR(file_name,-4) NOT IN ('.log', '.bdr'); -- ignore even though they are uploaded to mobile_upload_files. -- V16
+
+            IF lnCount <> hdr_rec.files_count THEN
+                p_status := 'Warning: Files count do not match.';
+                RETURN;
+            END IF;
+        END;
+
+        -- Check for previous extract sequence jobs if available.
+        -- this check is again performed in mpc_master_upload script. -- V12
+        -- proceed with insert into mobile_upload_control table -- V12
+        IF hdr_rec.extract_seq > 1 THEN
+
+            -- Check if previous sequence is completed.
+            SELECT
+                COUNT(1)
+            INTO lncount
+            FROM
+                mobile_upload_completed
+            WHERE
+                drive_id = hdr_rec.drive_id
+                AND extract_seq = hdr_rec.extract_seq - 1;
+
+
+            IF lncount = 0 THEN
+                -- p_status := 'Previous job in progress OR not started'; -- V12
+                -- RETURN; -- V12
+                p_status := 'Upload job placed in queue, waiting for the previous job to complete'; -- V12
+            END IF;
+        END IF;
+
+        -- All checks are passed. Insert into job queue and delete from laptop extract table.
+        insert_mobile_upload_control(hdr_rec);
+        delete_laptop_extract(p_upload_id);
+        COMMIT;
+
+    END PROCESS_UPLOAD_JOB_QUEUE;
+
+    PROCEDURE start_files_upload(p_upload_id IN VARCHAR2, p_status OUT VARCHAR2) IS
+        lv_status     VARCHAR2(300);
+        lb_file_found   BOOLEAN := FALSE;
+        lv_status_yn  VARCHAR2(1);
+        lv_status_msg VARCHAR2(1000);
+        lv_guid VARCHAR2(50);
+        rollback_process EXCEPTION;
+
+        lnFilesCount NUMBER;
+
+        PROCEDURE set_files_upload_status(session_id_in IN VARCHAR2, status_in IN VARCHAR2, files_type IN VARCHAR2) IS
+        BEGIN
+            IF files_type = 'DATA' THEN
+                UPDATE mobile_upload_files
+                   SET upload_status = status_in
+                 WHERE session_Id = session_id_in
+                   AND SUBSTR(file_name, -3) IN ('txt', 'dat');
+            ELSIF files_type = 'IMG' THEN
+                UPDATE mobile_upload_files
+                   SET upload_status = status_in
+                 WHERE session_Id = session_id_in
+                   AND SUBSTR(file_name, -3) IN ('tif', 'enc');
+            ELSIF files_type = 'BDE' THEN
+                 UPDATE mobile_upload_files
+                   SET upload_status = status_in
+                 WHERE session_Id = session_id_in
+                   AND SUBSTR(file_name, -3) = 'bde';
+            ELSIF files_type = 'BDR' THEN -- V10
+                 UPDATE mobile_upload_files
+                   SET upload_status = status_in
+                 WHERE session_Id = session_id_in
+                   AND SUBSTR(file_name, -3) = 'bdr';
+            ELSIF files_type = 'HDR' THEN
+                 UPDATE mobile_upload_files
+                   SET upload_status = status_in
+                 WHERE session_Id = session_id_in
+                   AND SUBSTR(file_name, -3) = 'hdr';
+            END IF;
+            COMMIT;
+        END set_files_upload_status;
+
+        PROCEDURE cleanup_staging(upload_id IN VARCHAR2, session_id_in IN VARCHAR2) IS
+        BEGIN
+            DELETE FROM lt_laptop_staging
+              WHERE upload_id = upload_id
+                AND session_id = session_id_in;
+            COMMIT;
+        END cleanup_staging;
+
+        PROCEDURE archive_files(upload_id_in IN VARCHAR2, session_id_in IN VARCHAR2, files_type_in IN VARCHAR2) IS
+            files_refcursor SYS_REFCURSOR;
+            lv_fileTypes VARCHAR2(200);
+            lv_query VARCHAR2(2000);
+            lv_fileName VARCHAR2(500);
+        BEGIN
+
+            IF files_type_in = 'DATA' THEN
+                lv_fileTypes := '''dat'',''txt'',''hdr''';
+            ELSIF files_type_in = 'IMG' THEN
+               lv_fileTypes := '''enc'',''tif''';
+            ELSIF files_type_in = 'BDE' THEN
+               lv_fileTypes := '''bde''';
+            ELSE
+                RETURN;
+            END IF;
+
+            lv_query := 'SELECT file_name
+                        FROM mobile_upload_files
+                        WHERE upload_id = :id1
+                          AND session_id = :id2
+                          AND NVL(upload_status,''X'') = :id3
+                          AND substr(file_name, - 3) IN (' || lv_fileTypes ||')';
+
+            OPEN files_refcursor FOR lv_query USING upload_id_in, session_id_in, 'A';
+            LOOP
+                FETCH files_refcursor INTO lv_fileName;
+                EXIT WHEN files_refcursor%NOTFOUND;
+                log_msg('Archiving ' || lv_fileName);
+                UTL_FILE.FRENAME (  src_location  => gc_files_dir,
+                                    src_filename  => lv_fileName,
+                                    dest_location => gc_arch_dir,
+                                    dest_filename => lv_fileName,
+                                    overwrite     => TRUE);
+            END LOOP;
+            CLOSE files_refcursor;
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                log_error('ERR: Archiving ' || files_type_in ||' files - ' ||  SUBSTR(sqlerrm, 1, 900));
+        END archive_files;
+
+        PROCEDURE insert_laptop_extracts(
+                                        file_name_in IN VARCHAR2,
+                                        status_out   OUT VARCHAR2) IS
+            l_file         UTL_FILE.file_type;
+
+            lv_text         VARCHAR2(32767);
+            lv_data_string  VARCHAR2(32767);
+            lv_sep          VARCHAR2(10);
+            lv_row          laptop_extracts%ROWTYPE;
+        BEGIN
+            status_out := 'OK';
+            -- Open file.
+            l_file := UTL_FILE.fopen(gc_files_dir, file_name_in, 'r', 32767);
+            -- Read through the file until we reach the last line.
+            BEGIN
+                LOOP
+                    UTL_FILE.get_line(l_file, lv_text, 32767);
+
+                    IF lv_text IS NOT NULL THEN
+
+                        lv_text := REPLACE(REPLACE(lv_text, CHR(13), ' '), CHR(10), ' ')  ;
+                        lv_data_string := TRIM(lv_text);
+                        lv_sep := '[^|]+';
+
+                        select regexp_substr(lv_data_string, lv_sep, 1, 1) as val1,
+                               regexp_substr(lv_data_string, lv_sep, 1, 2) as val2,
+                               regexp_substr(lv_data_string, lv_sep, 1, 3) as val3,
+                               regexp_substr(lv_data_string, lv_sep, 1, 4) as val4,
+                               TO_DATE(regexp_substr(lv_data_string, lv_sep, 1, 5),'MM/DD/YYYY hh24miss') as val5,
+                               regexp_substr(lv_data_string, lv_sep, 1, 6) as val6
+                          into lv_row.upload_id,
+                               lv_row.drive_id,
+                               lv_row.extract_seq,
+                               lv_row.files_count,
+                               lv_row.insert_date,
+                               lv_row.insert_user
+                         from dual;
+
+                        INSERT INTO laptop_extracts VALUES lv_row;
+                    END IF;
+                END LOOP;
+
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                  NULL;
+                WHEN OTHERS THEN
+                  status_out := 'ERR: ' || file_name_in || ' - ' || SUBSTR(sqlerrm, 1, 900);
+                  log_error(p_status);
+            END;
+            -- Close the file.
+            UTL_FILE.fclose(l_file);
+
+        END insert_laptop_extracts;
+    BEGIN
+
+        gv_SYSDATE := TO_CHAR(SYSDATE, 'MMDDYYHH24MISS'); -- used for error file name
+
+        IF g_upload_id IS NULL THEN
+            p_status := 'ERROR: Upload ID is required';
+            RETURN;
+        END IF;
+
+        IF g_laptop_id IS NULL THEN
+            p_status := 'ERROR: Unable to extract Laptop ID';
+            RETURN;
+        END IF;
+
+        /* add a session id to the records being processed by this script */
+        -------
+        SELECT sys_guid() INTO lv_guid FROM DUAL;
+
+
+        UPDATE mobile_upload_files
+          SET session_id = lv_guid
+        WHERE NVL(upload_status,'X') NOT IN ('A','E')
+          AND upload_id = p_upload_id
+          AND session_id IS NULL;
+
+        lnFilesCount := SQL%ROWCOUNT;
+
+        log_msg('-----------------------------------------------------');
+        log_msg('Date Time  :' || TO_CHAR(SYSDATE, 'MM/DD/YYYY HH24:MI:SS'));
+        log_msg('Upload Id  :' || p_upload_id);
+        log_msg('Session    :' || lv_guid);
+        log_msg('Files Count:' || lnFilesCount);
+        log_msg('-----------------------------------------------------');
+
+        COMMIT;
+        ------------------
+        -- STEP0: Read hdr files and populate laptop_extracts table.
+        BEGIN
+            FOR rec IN (SELECT file_name
+                          FROM mobile_upload_files
+                         WHERE upload_id = p_upload_id
+                           AND session_id = lv_guid
+                           AND SUBSTR(file_name, -3) = 'hdr'
+                        )
+            LOOP
+                insert_laptop_extracts(rec.file_name, p_status);
+            END LOOP;
+
+            IF p_status <> 'OK' THEN
+                set_files_upload_status(lv_guid, 'E', 'HDR');
+            ELSE
+                set_files_upload_status(lv_guid, 'A', 'HDR');
+            END IF;
+        END;
+
+        -- STEP1: Read files and insert into staging table.
+        BEGIN
+            FOR rec IN (SELECT file_name, insert_user
+                          FROM mobile_upload_files
+                         WHERE upload_id = p_upload_id
+                           AND session_id = lv_guid
+                           AND SUBSTR(file_name, -3) IN ('txt', 'dat')
+                        )
+            LOOP
+                insert_staging_table( p_upload_id => p_upload_id,
+                                      p_session_id => lv_guid,
+                                      p_file_name => rec.file_name,
+                                      p_user_id   => rec.insert_user,
+                                      p_status    => lv_status);
+                IF lv_status <> 'OK' THEN
+                    p_status := 'ERROR: Inserting into staging table - ' || rec.file_name || ' : ' || lv_status;
+                    EXIT;
+                END IF;
+
+            END LOOP;
+
+            IF p_status <> 'OK' THEN
+                set_files_upload_status(lv_guid, 'E', 'DATA');
+                cleanup_staging(p_upload_id, lv_guid);
+                RETURN;
+            END IF;
+        END;
+
+        log_msg('insert into staging table completed');
+        -- STEP 2: Process data in staging table.
+        BEGIN
+            staging_to_api_table ( p_upload_id => p_upload_id,
+                                   p_session_id => lv_guid,
+                                   p_status_yn  => lv_status_yn,
+                                   p_status_msg => lv_status_msg);
+
+            IF lv_status_yn = 'N' THEN
+                set_files_upload_status(lv_guid, 'E', 'DATA');
+                p_status := lv_status_msg;
+                -- only staging cleanup is required.(API table data if inserted and errored will rollback)
+                cleanup_staging(p_upload_id, lv_guid);
+                RETURN;
+            END IF;
+
+            set_files_upload_status(lv_guid, 'A', 'DATA');
+            -- staging can be cleaned up as data is in the API tables.
+            cleanup_staging(p_upload_id, lv_guid);
+            -- archive uploaded files
+            archive_files(p_upload_id, lv_guid, 'DATA');
+        END;
+
+        log_msg('insert into api tables completed');
+
+        -- STEP 3: -- Process tif/enc images if any
+        BEGIN
+            lb_file_found := FALSE;
+            -- upload images to db table..
+            FOR rec IN (SELECT file_name
+                          FROM mobile_upload_files
+                         WHERE upload_id = p_upload_id
+                           AND session_id = lv_guid
+                           AND SUBSTR(file_name, -3) IN ('tif', 'enc')
+                        )
+            LOOP
+                lb_file_found := TRUE;
+                image_to_api_table(rec.file_name, p_status);
+                IF p_status <> 'OK' THEN
+                    EXIT;
+                END IF;
+            END LOOP;
+
+            IF p_status <> 'OK' THEN
+                set_files_upload_status(lv_guid, 'E', 'IMG');
+                p_status := 'API data load complete, but error in loading images: ' || p_status;
+                RETURN;
+            END IF;
+
+            set_files_upload_status(lv_guid, 'A', 'IMG');
+            archive_files(p_upload_id, lv_guid, 'IMG');
+        END;
+
+        IF lb_file_found THEN
+            log_msg('tif/enc image upload completed');
+        END IF;
+
+        -- STEP 4: -- Process bde files if any
+        BEGIN
+            lb_file_found := FALSE;
+            --
+            FOR rec IN (SELECT file_name
+                          FROM mobile_upload_files
+                         WHERE upload_id = p_upload_id
+                           AND session_id = lv_guid
+                           AND SUBSTR(file_name, -3) = 'bde'
+                        )
+            LOOP
+                lb_file_found := TRUE;
+                decrypt_file(rec.file_name, p_status);
+                IF p_status <> 'OK' THEN
+                    EXIT;
+                END IF;
+            END LOOP;
+
+            IF p_status <> 'OK' THEN
+                set_files_upload_status(lv_guid, 'E', 'BDE');
+                p_status := 'API data load complete, but error in loading bde files: ' || p_status;
+                RETURN;
+            END IF;
+
+            IF lb_file_found THEN
+                set_files_upload_status(lv_guid, 'A', 'BDE');
+                archive_files(p_upload_id, lv_guid, 'BDE');
+            END IF;
+        END;
+
+
+        -- STEP 4.1: -- Process bdr files if any. Just update the status and log the message. (no need to archive bdr file)
+        BEGIN
+            set_files_upload_status(lv_guid, 'A', 'BDR');
+            log_msg('bde/bdr files upload completed');
+        END;
+
+/*
+        -- STEP 5: Insert into mobile_upload_control table.
+        DECLARE
+            nCnt NUMBER;
+        BEGIN
+            SELECT COUNT(1) INTO nCnt
+              FROM mobile_upload_control
+             WHERE upload_id = p_upload_id;
+
+            IF nCnt = 0 THEN
+                INSERT INTO mobile_upload_control(laptop_id, chapter_id, submit_time, end_time, proc_status, upload_id)
+                  VALUES(g_laptop_id, 'ALL', SYSDATE, NULL, 'P', p_upload_id);
+            END IF;
+        END;
+*/
+    END start_files_upload;
+
+
+    FUNCTION db_dir_exists RETURN BOOLEAN IS
+        ln_count NUMBER;
+    BEGIN
+        SELECT COUNT(1) INTO ln_count
+          FROM all_directories
+         WHERE directory_name = gc_files_dir;
+
+        RETURN ln_count > 0;
+    END db_dir_exists;
+
+    PROCEDURE start_script_upload IS
+        lv_status VARCHAR2(500);
+    BEGIN
+        IF NOT db_dir_exists THEN
+            lv_status := 'ERROR: ' || gc_files_dir ||' Directory object is not available.';
+            log_and_stop('**Mobile PC Upload failed** in start_script_upload.' || ' Status: ' || lv_status);
+            log_error('****ERROR**** in start_script_upload.' || ' Status: ' || lv_status);
+            RETURN;
+        END IF;
+
+        -- Loops through each job. If any issue with one job, it moves to next upload job.
+        FOR rec IN (SELECT distinct upload_id, insert_date
+                     FROM mobile_upload_files
+                    WHERE NVL(upload_status,'X') NOT IN ('A','E')
+                      AND session_id IS NULL
+                     ORDER BY insert_date ASC)
+        LOOP
+            init_vars(rec.upload_id);
+            log_msg('**Starting Mobile Server API Upload**');
+            start_files_upload(rec.upload_id, lv_status);
+            COMMIT;
+            IF lv_status <> 'OK' THEN
+                log_and_stop('**Files Upload to API Tables failed** Status: ' || lv_status);
+                log_error('****ERROR****' || 'Mobile PC upload failed. Status:' || lv_status);
+            ELSE
+                log_msg('**Files Upload to API Tables completed**');
+
+                PROCESS_UPLOAD_JOB_QUEUE(rec.upload_id, lv_status);
+                IF lv_status <> 'OK' THEN
+                    log_and_stop('Upload Job Queue Status: ' || lv_status);
+                ELSE
+                    log_and_stop('Upload Job Queue Status: Ready for Upload.');
+                END IF;
+            END IF;
+
+        END LOOP;
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_and_stop('**Mobile PC Upload failed**' || 'start_script_upload');
+            log_error('****ERROR****' || 'start_script_upload');
+    END start_script_upload;
+
+    PROCEDURE process_zip_file (
+        p_upload_id_in IN VARCHAR2,
+        p_status_out     OUT VARCHAR2
+    ) IS
+        l_zipblob BLOB;
+        l_files   apex_zip.t_files;
+        l_fileblob    BLOB;
+        nCnt    NUMBER;
+    BEGIN
+        p_status_out := 'OK';
+
+        BEGIN
+            SELECT
+                dump_file
+            INTO l_zipblob
+            FROM
+                mobile_upload_files
+            WHERE
+                upload_id = p_upload_id_in
+            AND SUBSTR(file_name, -3) = 'zip';
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                p_status_out := 'Zip file not found in table';
+                RETURN;
+            WHEN TOO_MANY_ROWS THEN
+                p_status_out := 'Multiple zip files found with same upload id';
+                RETURN;
+            WHEN OTHERS THEN
+                p_status_out := SUBSTR(SQLERRM, 1, 500);
+                RETURN;
+        END;
+
+        -- Get the list of files.
+        l_files := apex_zip.get_files(p_zipped_blob => l_zipblob);
+
+        -- Loop through the files and list the names.
+        FOR i IN 1..l_files.count LOOP
+            l_fileblob := apex_zip.get_file_content(p_zipped_blob => l_zipblob, p_file_name => l_files(i));
+
+            SELECT COUNT(1) INTO nCnt
+              FROM mobile_upload_files
+             WHERE upload_id = p_upload_id_in
+               AND file_name = l_files(i);
+
+            dbms_output.put_line('File Name ' || l_files(i));
+
+            IF nCnt = 0 THEN
+                INSERT INTO mobile_upload_files (
+                    upload_id,
+                    file_name,
+                    dump_file,
+                    insert_date,
+                    insert_user,
+                    upload_status,
+                    session_id
+                ) VALUES (
+                    p_upload_id_in,
+                    l_files(i),
+                    l_fileblob,
+                    sysdate,
+                    'DBUSER',
+                    NULL,
+                    NULL
+                );
+            END IF;
+        END LOOP;
+
+        DELETE FROM mobile_upload_files
+          WHERE upload_id = p_upload_id_in
+            AND SUBSTR(file_name, -3) = 'zip';
+
+        COMMIT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_status_out := SUBSTR(SQLERRM, 1, 500);
+            RETURN;
+    END process_zip_file;
+
+    PROCEDURE start_push_upload (p_upload_id IN VARCHAR2,
+                            p_status    OUT VARCHAR2) IS
+      lb_file_found BOOLEAN := FALSE;
+      ln_count  NUMBER;
+    BEGIN
+        p_status := 'OK';
+
+        log_msg('**Starting Mobile PC Upload**');
+
+        IF NOT db_dir_exists THEN
+            p_status := 'ERROR: ' || gc_files_dir ||' Directory object is not available.';
+            log_and_stop(p_status);
+            RETURN;
+        END IF;
+
+        -- Required field checks
+        IF p_upload_id IS NULL THEN
+            p_status := 'ERROR: Upload ID is required.';
+            log_and_stop(p_status);
+            RETURN;
+        END IF;
+
+        init_vars(p_upload_id);
+
+        -- STEP0:
+        -- V11: for poc (unzip)
+        process_zip_file(p_upload_id, p_status);
+
+        IF p_status <> 'OK' THEN
+            log_and_stop(p_status);
+            RETURN;
+        END IF;
+
+        -- STEP1: blob to file conversion
+        -- V10: hdr, bde file extensions added.
+        FOR rec IN (SELECT dump_file, file_name
+                      FROM mobile_upload_files
+                     WHERE upload_id = g_upload_id
+                       AND SUBSTR(file_name, -3) IN ('txt', 'dat', 'tif', 'enc', 'bde', 'bdr', 'hdr')
+                    )
+        LOOP
+          lb_file_found := TRUE;
+          blob_to_file(p_blob     => rec.dump_file,
+                       p_dir      => gc_files_dir,
+                       p_filename => rec.file_name,
+                       p_status    => p_status);
+
+          IF p_status <> 'OK' THEN
+            EXIT;
+          END IF;
+        END LOOP;
+
+        IF p_status <> 'OK' THEN
+            log_and_stop(p_status);
+            log_error('****ERROR**** in start_push_upload.' || ' Status: ' || p_status);
+            RETURN;
+        END IF;
+
+        IF NOT lb_file_found THEN
+            p_status := 'ERROR: No files in mobile_upload_files table for processing.';
+            log_and_stop(p_status);
+            RETURN;
+        END IF;
+
+        log_msg('BLOB to File converstion completed');
+
+        -- STEP2: Start files upload
+        start_files_upload( p_upload_id => p_upload_id,
+                            p_status => p_status);
+        IF p_status <> 'OK' THEN
+            log_and_stop('**Files Upload to API Tables failed** Status: ' || p_status);
+            log_error('****ERROR****' || 'Mobile PC upload failed. Status:' || p_status);
+        ELSE
+            log_msg('**Files Upload to API Tables completed**');
+
+            PROCESS_UPLOAD_JOB_QUEUE(p_upload_id, p_status);
+            IF p_status <> 'OK' THEN
+                log_and_stop('Upload Job Queue Status: ' || p_status);
+            ELSE
+                log_and_stop('Upload Job Queue Status: Ready for Upload.');
+            END IF;
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_status := SUBSTR(SQLERRM, 1, 500);
+            log_and_stop('**Mobile PC Upload failed**' || 'start_push_upload' || ' Status:' || p_status);
+            log_error('****ERROR****' || 'start_push_upload');
+    END start_push_upload;
+
+
+END lt_process_staging;
+/

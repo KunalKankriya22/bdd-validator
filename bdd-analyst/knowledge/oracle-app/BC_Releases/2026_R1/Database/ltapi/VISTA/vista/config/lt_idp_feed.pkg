@@ -1,0 +1,2824 @@
+CREATE OR REPLACE PACKAGE lt_idp_feed IS
+--------------------------------------------------------------------------
+-- Package to build the extracts needed for converting LifeTrak data
+-- into the format used to populate HCLL through DPU, version 2.0
+--------------------------------------------------------------------------
+   PROCEDURE LOG_ERROR(p_trans_id in varchar2,
+                       p_msg_type in varchar2,
+					   p_status in varchar2,
+                       p_err_txt in varchar2);
+
+   FUNCTION build_vista_donors(p_txn_id VARCHAR2
+                               , p_chapter_id VARCHAR2 DEFAULT 'WAD'
+                               , p_file VARCHAR2 DEFAULT NULL
+                               , p_delim VARCHAR2 DEFAULT 'PIPE'
+                               , p_char_mark VARCHAR2 DEFAULT 'NONE')
+            RETURN VARCHAR2;
+
+   PROCEDURE process_vista_donors(p_delim VARCHAR2 DEFAULT 'PIPE'
+                               , p_char_mark VARCHAR2 DEFAULT 'NONE');
+
+   PROCEDURE load_vista_donation(p_file VARCHAR2 DEFAULT NULL
+                               , p_delim VARCHAR2 DEFAULT 'PIPE'
+                               , p_char_mark VARCHAR2 DEFAULT 'NONE'
+							   ,pTrans out VARCHAR2
+							   ,pUnitID out VARCHAR2);
+
+   PROCEDURE process_vista_donation(p_txn_id VARCHAR2
+                                    ,p_unit_id VARCHAR2
+                                   , pl_chapter_id VARCHAR2 DEFAULT 'WAD');
+
+   PROCEDURE populate_idp_target_change(P_TARGET_ID     VARCHAR2,
+                                           P_TARGET_TABLE  VARCHAR2,
+                                           P_TARGET_FIELD  VARCHAR2,
+                                           P_TARGET_VALUE  VARCHAR2,
+                                           P_TARGET_CHANGE_DATE DATE);
+
+
+
+END lt_idp_feed;
+/
+
+CREATE OR REPLACE PACKAGE BODY lt_idp_feed IS
+--------------------------------------------------------------------------
+/* -- Package to build the extracts needed for converting LifeTrak data
+    -- into the format used to populate HCLL through DPU, version 2.0
+    --Modified by Edwin 06/03/2010
+    --Ver: 02  (added the INFOR in the list)
+    --Ver: 03  (Added time zone and multip chapter  Edwin LT 2012
+    --Ver: 04  IM: 10288 (Remove the hard coded WAD chapter and change from HOLD to HOLDS) - 12/03/14
+
+    -- *******LT 2018 Implemenation resetting the version counter *********---
+
+   Ver: 01  Edwin 12/14/17
+   Ver: 02  Edwin 11/11/2020, MLT-3796
+   Ver: 03  Edwin 11/23/2020 , MLT-3829
+-------------------------------------------------------------------------------------------------
+
+*/
+
+
+
+   gv_loc   VARCHAR2(40) := '/u01/extracts';  -- default location for output files
+   gv_chapter_id   VARCHAR2(10) := 'WAD';  -- default chapter_id
+
+
+         --Procedure to populate the error log table
+   PROCEDURE LOG_ERROR(p_trans_id in varchar2,
+                       p_msg_type in varchar2,
+					   p_status in varchar2,
+                       p_err_txt in varchar2)
+   is
+
+      Begin
+	   -- Rollback the exixting transactions and insert the error record
+
+	   If p_status is not null then
+	     update online_status set IDP_PROC_STATUS=p_status where transaction_id=p_trans_id;
+	   End If;
+
+       INSERT INTO IDP_IERROR_LOG(TRANSACTION_ID,MESSAGE_TYPE,STATUS,ERROR_TEXT,INSERT_USER,INSERT_DATE)
+       VALUES (p_trans_id,p_msg_type,p_status,p_err_txt,'DONSYS',sysdate);
+
+      Exception when others then
+         dbms_output.put_line('Failure: error log'||sqlerrm);
+         RAISE_APPLICATION_ERROR(-20010, 'Unable to Insert into error log file.-'||sqlerrm);
+   End LOG_ERROR;
+
+   PROCEDURE populate_idp_target_change(P_TARGET_ID     VARCHAR2,
+                                           P_TARGET_TABLE  VARCHAR2,
+                                           P_TARGET_FIELD  VARCHAR2,
+                                           P_TARGET_VALUE  VARCHAR2,
+                                           P_TARGET_CHANGE_DATE DATE)
+      Is
+	  Begin
+
+             INSERT into IDP_TARGET_CHANGE(TARGET_CHANGE_ID,TARGET_SYSTEM,
+                                           TARGET_ID,TARGET_TABLE,TARGET_FIELD,
+                                           TARGET_VALUE,TARGET_CHANGE_DATE)
+			 VALUES (vista_seq.nextval,'LifeTrak',P_TARGET_ID,P_TARGET_TABLE,
+                                 P_TARGET_FIELD,P_TARGET_VALUE,P_TARGET_CHANGE_DATE);
+      EXCEPTION when others then
+            dbms_output.put_line('Failure: IDP TARGET:'||sqlerrm);
+			LOG_ERROR(P_TARGET_ID,'ERR','ER',sqlerrm);
+            RAISE_APPLICATION_ERROR(-20015, 'Unable to Insert into IDP_TARGET_CHANGE.-'||sqlerrm);
+      END populate_idp_target_change;
+
+
+
+   FUNCTION build_vista_donors(p_txn_id VARCHAR2
+                               , p_chapter_id VARCHAR2 DEFAULT 'WAD'
+                               , p_file VARCHAR2 DEFAULT NULL
+                               , p_delim VARCHAR2 DEFAULT 'PIPE'
+                               , p_char_mark VARCHAR2 DEFAULT 'NONE')
+            RETURN VARCHAR2
+   IS
+      file_id        UTL_FILE.FILE_TYPE;
+      v_dir          VARCHAR2(60); -- := '/tmp';
+      v_file         VARCHAR2(40);
+      v_line         VARCHAR2(1023);
+      v_delim        VARCHAR2(3) := ',';    -- character used to separate fields
+      v_cm           VARCHAR2(3) := '"';   -- character used to demark a string
+      v_recd_ct      NUMBER := 0;
+      v_ct           NUMBER := 0;
+      CURSOR cr IS
+         SELECT * FROM vista_donor
+            where donation_id = p_txn_id
+			  AND STATUS = 'W';
+   BEGIN
+      IF UPPER(p_delim) = 'COMMA' THEN
+         v_delim := ',';
+      ELSIF UPPER(p_delim) = 'TAB' THEN
+         v_delim := '/t';
+      ELSIF UPPER(p_delim) = 'TILDE' THEN
+         v_delim := '~';
+      ELSIF UPPER(p_delim) = 'ASTERISK' THEN
+         v_delim := '*';
+      ELSIF UPPER(p_delim) = 'PIPE' THEN
+         v_delim := '|';
+      ELSE
+         v_delim := p_delim;
+      END IF;
+      IF UPPER(p_char_mark) = 'DOUBLE' THEN
+         v_cm := '"';
+      ELSIF UPPER(p_char_mark) = 'SINGLE' THEN
+         v_cm := '''';
+      ELSIF UPPER(p_char_mark) = 'NONE' THEN
+         v_cm := '';
+      ELSE
+         v_cm := p_char_mark;
+      END IF;
+
+      IF p_file IS NOT NULL THEN
+         v_file := p_file;
+      ELSE
+--         SELECT value INTO v_dir FROM sys.v$parameter where name = 'utl_file_dir';
+         v_file := 'donor_'||LOWER(p_txn_id)||TO_CHAR(sysdate,'SSSSS')||'.DNR';
+      END IF;
+
+	  begin
+	  	  select description into v_dir from valid_master_codes where code_type='IDPDR' and
+	      code ='IDPPR' and sysdate between eff_date and nvl(term_date,sysdate+1);
+	  exception when others then
+	   v_dir:='/tmp';
+	  end;
+
+
+      file_id := utl_file.fopen(v_dir, v_file, 'w' );
+      FOR rr IN cr LOOP
+         v_recd_ct := v_recd_ct + 1;
+         v_line := v_cm||rr.donation_id||v_cm||v_delim
+                   ||v_cm||rr.donor_id||v_cm||v_delim
+                   ||v_cm||rr.last_name||v_cm||v_delim
+                   ||v_cm||rr.spouse_name||v_cm||v_delim
+                   ||v_cm||rr.first_name||v_cm||v_delim
+                   ||v_cm||rr.middle_name||v_cm||v_delim
+                   ||v_cm||rr.location_code||v_cm||v_delim
+                   ||v_cm||rr.unit_id||v_cm||v_delim
+                   ||v_cm||rr.donation_type||v_cm||v_delim
+                   ||v_cm||rr.procedure_code||v_cm||v_delim
+                   ||v_cm||TO_CHAR(rr.visit_date, 'MM/DD/YYYY')||v_cm||v_delim
+                   ||v_cm||rr.visit_time||v_cm||v_delim
+                   ||v_cm||rr.gender||v_cm||v_delim
+                   ||v_cm||rr.blood_type||v_cm||v_delim
+                   ||v_cm||rr.platelet_count||v_cm||v_delim
+                   ||v_cm||rr.cmv||v_cm||v_delim
+                   ||v_cm||rr.hla||v_cm||v_delim
+                   ||v_cm||rr.hematocrit||v_cm||v_delim
+                   ||v_cm||rr.hemoglobin||v_cm||v_delim
+                   ||v_cm||rr.cuso4||v_cm||v_delim
+                   ||v_cm||rr.height||v_cm||v_delim
+                   ||v_cm||rr.weight||v_cm||v_delim
+                   ||v_cm||rr.platelet_eligible||v_cm||v_delim
+                   ||v_cm||rr.plasma_eligible||v_cm||v_delim
+                   ||v_cm||rr.rbc_eligible||v_cm||v_delim
+                   ||v_cm||rr.whole_blood_eligible||v_cm||v_delim
+                   ||v_cm||rr.national_id||v_cm||v_delim
+                   ||v_cm||rr.ethnic_origin||v_cm||v_delim
+                   ||v_cm||TO_CHAR(rr.date_of_birth, 'MM/DD/YYYY')||v_cm||v_delim
+                   ||v_cm||rr.address1||v_cm||v_delim
+                   ||v_cm||rr.address2||v_cm||v_delim
+                   ||v_cm||rr.city||v_cm||v_delim
+                   ||v_cm||rr.donor_state||v_cm||v_delim
+                   ||v_cm||rr.postal_code||v_cm||v_delim
+                   ||v_cm||rr.email||v_cm||v_delim
+                   ||v_cm||rr.day_phone||v_cm||v_delim
+                   ||v_cm||rr.night_phone||v_cm||v_delim
+                   ||v_cm||rr.temperature||v_cm||v_delim
+                   ||v_cm||rr.bp_systolic||v_cm||v_delim
+                   ||v_cm||rr.bp_diastolic||v_cm||v_delim
+                   ||v_cm||rr.pulse||v_cm||v_delim
+                   ;
+         utl_file.put_line(file_id, v_line);
+      END LOOP;
+      utl_file.fclose(file_id);
+
+      RETURN 'build_vista_donors succeeded: '||to_char(v_recd_ct)||' records processed.';
+   EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+         utl_file.fclose(file_id);
+         RETURN sqlerrm;
+      WHEN utl_file.INVALID_PATH THEN
+         RAISE_APPLICATION_ERROR(-20010,'Error in obtaining file path for '||v_file);
+         return 'Failure 1';
+      WHEN utl_file.INVALID_OPERATION THEN
+         RAISE_APPLICATION_ERROR(-20010, 'Error in opening the file requested in '||v_file);
+         return 'Failure 2';
+      WHEN utl_file.READ_ERROR THEN
+         RAISE_APPLICATION_ERROR(-20010, 'Error in reading a file '||v_file);
+         return 'Failure 3';
+      WHEN utl_file.WRITE_ERROR THEN
+         RAISE_APPLICATION_ERROR(-20010, 'Error in writing to the file '||v_file);
+         return 'Failure 4';
+      WHEN utl_file.INTERNAL_ERROR THEN
+         RAISE_APPLICATION_ERROR(-20010, 'Unspecified Internal Error in Util_File usage.');
+         return 'Failure 5';
+      WHEN utl_file.INVALID_MODE THEN
+         RAISE_APPLICATION_ERROR(-20010, 'Invalid string for Util_File usages.');
+         return 'Failure 6';
+      WHEN OTHERS THEN
+         RAISE_APPLICATION_ERROR(-20010, 'Undefined Error occurred while building file: '||SQLERRM);
+         utl_file.fclose(file_id);
+         return 'Failure 7';
+
+   END build_vista_donors;
+
+   PROCEDURE process_vista_donors(p_delim VARCHAR2 DEFAULT 'PIPE'
+                               , p_char_mark VARCHAR2 DEFAULT 'NONE')
+   IS
+       CURSOR c_pending IS
+	      select donation_id from vista_donor
+		   WHERE status = 'P';
+       TYPE don_id_tabtype IS
+	      TABLE OF vista_donor.donation_id%TYPE
+		  INDEX BY BINARY_INTEGER;
+	   don_id_tab  don_id_tabtype;
+	   row_nbr     BINARY_INTEGER := 0;
+       v_result    VARCHAR2(200);
+       v_sts       VARCHAR2(2);
+   BEGIN
+      FOR rp IN c_pending LOOP
+	     row_nbr := row_nbr + 1;
+		 don_id_tab(row_nbr) := rp.donation_id;
+	  END LOOP;
+
+      -- SET RECORDS TO WORKING STATUS TO AVOID OVERRUNS
+	  FOR i IN 1 .. row_nbr LOOP
+         UPDATE ONLINE_STATUS
+		    SET idp_proc_status = 'W'
+		  WHERE transaction_id = don_id_tab(i);
+	  END LOOP;
+      COMMIT;
+
+	  FOR i IN 1 .. row_nbr LOOP
+         v_result := build_vista_donors(don_id_tab(i), gv_chapter_id, null, p_delim, p_char_mark);
+         IF INSTR(UPPER(v_result), 'ERROR') > 0 THEN
+            v_sts := 'E';
+		 ELSE
+            v_sts := 'S';
+		 END IF;
+         UPDATE ONLINE_STATUS
+		    SET idp_proc_status = v_sts
+                , idp_proc_status_dats = sysdate
+		  WHERE transaction_id = don_id_tab(i);
+         COMMIT;
+	  END LOOP;
+   END process_vista_donors;
+
+   PROCEDURE load_vista_donation(p_file VARCHAR2 DEFAULT NULL
+                                 , p_delim VARCHAR2 DEFAULT 'PIPE'
+                                 , p_char_mark VARCHAR2 DEFAULT 'NONE'
+								 ,pTrans out VARCHAR2
+								 ,pUnitID out VARCHAR2)
+   IS
+      file_id        UTL_FILE.FILE_TYPE;
+      v_dir          VARCHAR2(60); -- := '/tmp';
+      v_file         VARCHAR2(40);
+      v_line         VARCHAR2(1023);
+      v_delim        VARCHAR2(3) := ',';    -- character used to separate fields
+      v_cm           VARCHAR2(3) := '"';   -- character used to demark a string
+      v_ct           NUMBER := 0;
+      v_recd_ct      NUMBER := 0;
+      v_currdate     DATE := sysdate;
+
+      v_vis_recd     vis_donation%ROWTYPE;
+      v_start        NUMBER := 1;
+      v_end          NUMBER;
+   BEGIN
+      IF UPPER(p_delim) = 'COMMA' THEN
+         v_delim := ',';
+      ELSIF UPPER(p_delim) = 'TAB' THEN
+         v_delim := '/t';
+      ELSIF UPPER(p_delim) = 'TILDE' THEN
+         v_delim := '~';
+      ELSIF UPPER(p_delim) = 'ASTERISK' THEN
+         v_delim := '*';
+      ELSIF UPPER(p_delim) = 'PIPE' THEN
+         v_delim := '|';
+      ELSE
+         v_delim := p_delim;
+      END IF;
+      IF UPPER(p_char_mark) = 'DOUBLE' THEN
+         v_cm := '"';
+      ELSIF UPPER(p_char_mark) = 'SINGLE' THEN
+         v_cm := '''';
+      ELSIF UPPER(p_char_mark) = 'NONE' THEN
+         v_cm := '';
+      ELSE
+         v_cm := p_char_mark;
+      END IF;
+
+      v_file := p_file;
+
+	  --get the directory name
+	  begin
+	    select description into v_dir from valid_master_codes where code_type='IDPDR' and
+		code='IDPPR' and sysdate between eff_date and nvl(term_date,sysdate+1);
+	  exception when others then
+          lt_idp_feed.LOG_ERROR('NA','ERR',null,'Log directory was not defined');
+  		  commit;
+		  return;
+	  end;
+
+      file_id := utl_file.fopen(v_dir, v_file, 'r');
+     LOOP
+         utl_file.get_line(file_id, v_line);
+
+         v_ct := 0;               -- FIELD 1
+         v_start := 1;
+         v_end := INSTR(v_line, v_delim,1) - 1;
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.transaction_id := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 2
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.is_solicited_flag := SUBSTR(v_line, v_start, 1);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 3
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.unit_number := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 4
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.donor_id := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 5
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.visit_date := TO_DATE(SUBSTR(v_line, v_start, v_end), 'MM/DD/YYYY');
+         END IF;
+
+         dbms_output.put_line('Edwin 1');
+
+         v_ct := v_ct + 1;        -- FIELD 6
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.location_code := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 7
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.donor_rejected := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 8
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.donor_height := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 9
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.donor_weight := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 10
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.donor_tbv := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+		          dbms_output.put_line('Edwin 2');
+
+         v_ct := v_ct + 1;        -- FIELD 11
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.pre_hematocrit := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+		 		          dbms_output.put_line('Edwin 2a');
+
+         v_ct := v_ct + 1;        -- FIELD 12
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.pre_hemoglobin := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+		 		          dbms_output.put_line('Edwin 2b');
+
+         v_ct := v_ct + 1;        -- FIELD 13
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.pre_platelet := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+		 		          dbms_output.put_line('Edwin 2c');
+
+         v_ct := v_ct + 1;        -- FIELD 14
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.pre_bp_systolic := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+		 		          dbms_output.put_line('Edwin 2d');
+
+         v_ct := v_ct + 1;        -- FIELD 15
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.pre_bp_diastolic := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+		   dbms_output.put_line('Edwin 2e');
+
+         v_ct := v_ct + 1;        -- FIELD 16
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.pre_temperature := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+		   dbms_output.put_line('Edwin 2f');
+
+         v_ct := v_ct + 1;        -- FIELD 17
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.pre_pulse := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+		 dbms_output.put_line('Data='||substr(v_line,v_start,v_end));
+
+         v_ct := v_ct + 1;        -- FIELD 18
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.procedure_code:= SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+		   dbms_output.put_line('Edwin 2h');
+
+         v_ct := v_ct + 1;        -- FIELD 19
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.platelet_prod_code := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+		          dbms_output.put_line('Edwin 3');
+
+         v_ct := v_ct + 1;        -- FIELD 20
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.platelet_yield := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 21
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.platelet_bag_vol := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 22
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.platelet_plasma_vol := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 23
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.platelet_ac_vol := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 24
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.count_plt_prod_flag := SUBSTR(v_line, v_start, 1);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 25
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.plt_yield_verify_flag := SUBSTR(v_line, v_start, 1);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 26
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.plt_vol_verify_flag := SUBSTR(v_line, v_start, 1);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 27
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.plt_concen_verify_flag := SUBSTR(v_line, v_start, 1);
+         END IF;
+
+		          dbms_output.put_line('Edwin 4-0');
+
+         v_ct := v_ct + 1;        -- FIELD 28
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+		 dbms_output.put_line(SUBSTR(v_line, v_start, 1));    --debug line
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.plasma_product_code := SUBSTR(v_line, v_start, 1);
+         END IF;
+
+		 dbms_output.put_line('Edwin 4a');
+
+         v_ct := v_ct + 1;        -- FIELD 29
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.plasma_bag_vol := TO_NUMBER(SUBSTR(v_line, v_start, 1));
+         END IF;
+
+		 dbms_output.put_line('Edwin 4b');
+
+         v_ct := v_ct + 1;        -- FIELD 30
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.plasma_product_vol := TO_NUMBER(SUBSTR(v_line, v_start, 1));
+         END IF;
+
+		 dbms_output.put_line('Edwin 4c');
+
+         v_ct := v_ct + 1;        -- FIELD 31
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.plasma_ac_vol := TO_NUMBER(SUBSTR(v_line, v_start, 1));
+         END IF;
+
+		 dbms_output.put_line('Edwin 4d');
+
+         v_ct := v_ct + 1;        -- FIELD 32
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.plasma_vol_verify_flag := SUBSTR(v_line, v_start, 1);
+         END IF;
+
+		 dbms_output.put_line('Edwin 4e');
+
+         v_ct := v_ct + 1;        -- FIELD 33
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.count_plasma_prod_flag := SUBSTR(v_line, v_start, 1);
+         END IF;
+
+		 dbms_output.put_line('Edwin 4f');
+
+         v_ct := v_ct + 1;        -- FIELD 34
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.rbc_product_code := SUBSTR(v_line, v_start, 1);
+         END IF;
+
+		 dbms_output.put_line('Edwin 4g');
+
+         v_ct := v_ct + 1;        -- FIELD 35
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+           v_vis_recd.rbc_product_vol := TO_NUMBER(SUBSTR(v_line, v_start, 1));
+         END IF;
+		          dbms_output.put_line('Edwin 5');
+         v_ct := v_ct + 1;        -- FIELD 36
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.rbc_packed_vol := TO_NUMBER(SUBSTR(v_line, v_start, 1));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 37
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.rbc_ac_vol := TO_NUMBER(SUBSTR(v_line, v_start, 1));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 38
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.rbc_vol_verify_flag := SUBSTR(v_line, v_start, 1);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 39
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.rbc_collect_hematocrit := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 40
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.replacement_fluid_used := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 41
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.rinseback_flag := SUBSTR(v_line, v_start, 1);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 42
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.plasma_tubing_residual := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 43
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.rbc_tubing_residual := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 44
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.misc_plasma_loss := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+		          dbms_output.put_line('Edwin 6');
+         v_ct := v_ct + 1;        -- FIELD 45
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.misc_rbc_loss := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+
+         END IF;
+         v_ct := v_ct + 1;        -- FIELD 46
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.plasma_sampling_loss := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 47
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.rbc_sampling_loss := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 48
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.blood_vol_processed := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 49
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.total_vol_donated := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 50
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.total_blood_loss := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 51
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.total_plasma_loss := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 52
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.total_rbc_loss := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 53
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.ac_vol_used := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 54
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.ac_infusion := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 55
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.ac_ratio := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 56
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.ac_vol_to_donor := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 57
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.access_location := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 58
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.return_location := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 59
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.post_hematocrit := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 60
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.post_hemoglobin := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         dbms_output.put_line('Edwin 7');
+         v_ct := v_ct + 1;        -- FIELD 61
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.post_platelet := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 62
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd. post_bp_systolic:= TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 63
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.post_bp_diastolic := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 64
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.post_pulse := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 65
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.donor_connect_time := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 66
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.donor_connect_date := TO_DATE(SUBSTR(v_line, v_start, v_end), 'MM/DD/YYYY');
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 68
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.proc_end_time := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 67
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.proc_end_date := TO_DATE(SUBSTR(v_line, v_start, v_end), 'MM/DD/YYYY');
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 69
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.length_of_run := TO_NUMBER(SUBSTR(v_line, v_start, v_end));
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 70
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.machine_id := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 71
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.machine_type := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 72
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         -- take only last 12 characters of the serial number
+--         IF v_end > 12 THEN
+--            v_start := v_start + (v_end - 12);
+--		 END IF;
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.machine_serial_nbr := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 73
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.tubing_set_manuf := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 74
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.tubing_set_catalog_nbr := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 75
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.tubing_set_lot_nbr := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 76
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.oper1_badge_id := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 77
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.oper2_badge_id := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+		          dbms_output.put_line('Edwin 8');
+         v_ct := v_ct + 1;        -- FIELD 78
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.oper3_badge_id := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+	     dbms_output.put_line('Edwin 9');
+
+         v_ct := v_ct + 1;        -- FIELD 79
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.oper4_badge_id := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+		 dbms_output.put_line('Edwin 10');
+
+         v_ct := v_ct + 1;        -- FIELD 80
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.observ_code1 := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+		 dbms_output.put_line('Edwin 11');
+         v_ct := v_ct + 1;        -- FIELD 81
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.observ_code2 := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 82
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.observ_code3 := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 83
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.observ_code4 := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 84
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.observ_code5 := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+    	 dbms_output.put_line('Edwin 11');
+         v_ct := v_ct + 1;        -- FIELD 85
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.observ_code6 := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 86
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.observ_code7 := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 87
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.observ_code8 := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+   		 dbms_output.put_line('Edwin 12');
+	     v_ct := v_ct + 1;        -- FIELD 88
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.observ_code9 := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 89
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.observ_code10 := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 90
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.aborted_run_code := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 91
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.incomplete_proc_flag := SUBSTR(v_line, v_start, 1);
+         END IF;
+
+         v_ct := v_ct + 1;        -- FIELD 92
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.reason_code := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+		 dbms_output.put_line('Edwin 13');
+         v_ct := v_ct + 1;        -- FIELD 93
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.container_type_code := SUBSTR(v_line, v_start, v_end);
+         END IF;
+
+		 dbms_output.put_line('Edwin 14');
+
+         v_ct := v_ct + 1;        -- FIELD 94
+         v_start := INSTR(v_line, v_delim, 1, v_ct) + 1;
+         v_end := (INSTR(v_line, v_delim,1, (v_ct + 1)) - 1)- INSTR(v_line, v_delim, 1, v_ct);
+         IF SUBSTR(v_line, v_start, 1) <> v_delim THEN
+            v_vis_recd.comments := SUBSTR(v_line, v_start, v_end);
+         END IF;
+		 dbms_output.put_line('Edwin 15');
+
+		 --Added by Edwin - just to keep one entry for each transaction.
+
+		 DELETE from vis_donation where transaction_id=v_vis_recd.transaction_id;
+
+		 --Then insert into the vista donations table -
+
+         INSERT INTO vis_donation
+         (transaction_id          ,is_solicited_flag      ,unit_number
+          ,donor_id               ,visit_date             ,location_code
+          ,donor_rejected         ,donor_height           ,donor_weight
+          ,donor_tbv              ,pre_hematocrit         ,pre_hemoglobin
+          ,pre_platelet           ,pre_bp_systolic        ,pre_bp_diastolic
+          ,pre_temperature        ,pre_pulse              ,procedure_code
+          ,platelet_prod_code     ,platelet_yield         ,platelet_bag_vol
+          ,platelet_plasma_vol    ,platelet_ac_vol        ,count_plt_prod_flag
+          ,plt_yield_verify_flag  ,plt_vol_verify_flag    ,plt_concen_verify_flag
+          ,plasma_product_code    ,plasma_bag_vol         ,plasma_product_vol
+          ,plasma_ac_vol          ,plasma_vol_verify_flag ,count_plasma_prod_flag
+          ,rbc_product_code       ,rbc_product_vol        ,rbc_packed_vol
+          ,rbc_ac_vol             ,rbc_vol_verify_flag    ,rbc_collect_hematocrit
+          ,replacement_fluid_used ,rinseback_flag         ,plasma_tubing_residual
+          ,rbc_tubing_residual    ,misc_plasma_loss       ,misc_rbc_loss
+          ,plasma_sampling_loss   ,rbc_sampling_loss      ,blood_vol_processed
+          ,total_vol_donated      ,total_blood_loss       ,total_plasma_loss
+          ,total_rbc_loss         ,ac_vol_used            ,ac_infusion
+          ,ac_ratio               ,ac_vol_to_donor        ,access_location
+          ,return_location        ,post_hematocrit        ,post_hemoglobin
+          ,post_platelet          ,post_bp_systolic       ,post_bp_diastolic
+          ,post_pulse             ,donor_connect_date     ,donor_connect_time
+          ,proc_end_date          ,proc_end_time          ,length_of_run
+          ,machine_id             ,machine_type           ,machine_serial_nbr
+          ,tubing_set_manuf       ,tubing_set_catalog_nbr ,tubing_set_lot_nbr
+          ,oper1_badge_id         ,oper2_badge_id         ,oper3_badge_id
+          ,oper4_badge_id         ,observ_code1           ,observ_code2
+          ,observ_code3           ,observ_code4           ,observ_code5
+          ,observ_code6           ,observ_code7           ,observ_code8
+          ,observ_code9           ,observ_code10          ,aborted_run_code
+          ,incomplete_proc_flag   ,reason_code            ,container_type_code
+          ,comments               ,status                 ,status_date
+          ,file_name
+          )
+               VALUES
+         (v_vis_recd.transaction_id          ,v_vis_recd.is_solicited_flag      ,v_vis_recd.unit_number
+          ,v_vis_recd.donor_id               ,v_vis_recd.visit_date             ,v_vis_recd.location_code
+          ,v_vis_recd.donor_rejected         ,v_vis_recd.donor_height           ,v_vis_recd.donor_weight
+          ,v_vis_recd.donor_tbv              ,v_vis_recd.pre_hematocrit         ,v_vis_recd.pre_hemoglobin
+          ,v_vis_recd.pre_platelet           ,v_vis_recd.pre_bp_systolic        ,v_vis_recd.pre_bp_diastolic
+          ,v_vis_recd.pre_temperature        ,v_vis_recd.pre_pulse              ,v_vis_recd.procedure_code
+          ,v_vis_recd.platelet_prod_code     ,v_vis_recd.platelet_yield         ,v_vis_recd.platelet_bag_vol
+          ,v_vis_recd.platelet_plasma_vol    ,v_vis_recd.platelet_ac_vol        ,v_vis_recd.count_plt_prod_flag
+          ,v_vis_recd.plt_yield_verify_flag  ,v_vis_recd.plt_vol_verify_flag    ,v_vis_recd.plt_concen_verify_flag
+          ,v_vis_recd.plasma_product_code    ,v_vis_recd.plasma_bag_vol         ,v_vis_recd.plasma_product_vol
+          ,v_vis_recd.plasma_ac_vol          ,v_vis_recd.plasma_vol_verify_flag ,v_vis_recd.count_plasma_prod_flag
+          ,v_vis_recd.rbc_product_code       ,v_vis_recd.rbc_product_vol        ,v_vis_recd.rbc_packed_vol
+          ,v_vis_recd.rbc_ac_vol             ,v_vis_recd.rbc_vol_verify_flag    ,v_vis_recd.rbc_collect_hematocrit
+          ,v_vis_recd.replacement_fluid_used ,v_vis_recd.rinseback_flag         ,v_vis_recd.plasma_tubing_residual
+          ,v_vis_recd.rbc_tubing_residual    ,v_vis_recd.misc_plasma_loss       ,v_vis_recd.misc_rbc_loss
+          ,v_vis_recd.plasma_sampling_loss   ,v_vis_recd.rbc_sampling_loss      ,v_vis_recd.blood_vol_processed
+          ,v_vis_recd.total_vol_donated      ,v_vis_recd.total_blood_loss       ,v_vis_recd.total_plasma_loss
+          ,v_vis_recd.total_rbc_loss         ,v_vis_recd.ac_vol_used            ,v_vis_recd.ac_infusion
+          ,v_vis_recd.ac_ratio               ,v_vis_recd.ac_vol_to_donor        ,v_vis_recd.access_location
+          ,v_vis_recd.return_location        ,v_vis_recd.post_hematocrit        ,v_vis_recd.post_hemoglobin
+          ,v_vis_recd.post_platelet          ,v_vis_recd.post_bp_systolic       ,v_vis_recd.post_bp_diastolic
+          ,v_vis_recd.post_pulse             ,v_vis_recd.donor_connect_date     ,v_vis_recd.donor_connect_time
+          ,v_vis_recd.proc_end_date          ,v_vis_recd.proc_end_time          ,v_vis_recd.length_of_run
+          ,v_vis_recd.machine_id             ,v_vis_recd.machine_type           ,v_vis_recd.machine_serial_nbr
+          ,v_vis_recd.tubing_set_manuf       ,v_vis_recd.tubing_set_catalog_nbr ,v_vis_recd.tubing_set_lot_nbr
+          ,v_vis_recd.oper1_badge_id         ,v_vis_recd.oper2_badge_id         ,v_vis_recd.oper3_badge_id
+          ,v_vis_recd.oper4_badge_id         ,v_vis_recd.observ_code1           ,v_vis_recd.observ_code2
+          ,v_vis_recd.observ_code3           ,v_vis_recd.observ_code4           ,v_vis_recd.observ_code5
+          ,v_vis_recd.observ_code6           ,v_vis_recd.observ_code7           ,v_vis_recd.observ_code8
+          ,v_vis_recd.observ_code9           ,v_vis_recd.observ_code10          ,v_vis_recd.aborted_run_code
+          ,v_vis_recd.incomplete_proc_flag   ,v_vis_recd.reason_code            ,v_vis_recd.container_type_code
+          ,v_vis_recd.comments               ,'RCV'                             ,sysdate
+          ,v_vis_recd.file_name
+          );
+
+      END LOOP;
+
+--         utl_file.get_line(file_id, v_line);
+      commit;
+     pTrans:=v_vis_recd.transaction_id;
+	 pUnitID:=v_vis_recd.unit_number;
+	 dbms_output.put_line('Successfully loaded into the vista donations table..Unit #'||pUnitID);
+      utl_file.fclose(file_id);
+     -- dbms_output.put_line('File '||p_file||' successfully processed into donation '||v_vis_recd.transaction_id);
+	 -- LT_IDP_FEED.PROCESS_VISTA_DONATION(v_vis_recd.transaction_id,'WAD');
+
+
+   EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+         commit;
+ 	     pTrans:=v_vis_recd.transaction_id;
+	 	 pUnitID:=v_vis_recd.unit_number;
+         utl_file.fclose(file_id);
+        dbms_output.put_line('File '||p_file||' successfully processed into donation '||
+		                      v_vis_recd.transaction_id||' Unit#'||pUnitID);
+      WHEN utl_file.INVALID_PATH THEN
+	     pTrans:='FAIL';
+         dbms_output.put_line('Failure: utl_file.INVALID_PATH');
+		 lt_idp_feed.LOG_ERROR('NA','ERR','ER','Error in obtaining file path for '||v_file);
+  		  commit;
+      WHEN utl_file.INVALID_OPERATION THEN
+   	     pTrans:='FAIL';
+         dbms_output.put_line('Failure: utl_file.INVALID_OPERATION');
+		 lt_idp_feed.LOG_ERROR('NA','ERR','ER','Error in opening the file requested in '||v_file);
+  		  commit;
+          --RAISE_APPLICATION_ERROR(-20010, 'Error in opening the file requested in '||v_file);
+      WHEN utl_file.READ_ERROR THEN
+   	     pTrans:='FAIL';
+         dbms_output.put_line('Failure: utl_file.READ_ERROR');
+		 lt_idp_feed.LOG_ERROR('NA','ERR','ER','Error in reading a file '||v_file);
+  		  commit;
+      WHEN utl_file.WRITE_ERROR THEN
+   	     pTrans:='FAIL';
+         dbms_output.put_line('Failure: WRITE ERROR');
+		 lt_idp_feed.LOG_ERROR('NA','ERR','ER','Error in writing to the file '||v_file);
+  		  commit;
+      WHEN utl_file.INTERNAL_ERROR THEN
+   	     pTrans:='FAIL';
+         dbms_output.put_line('Failure: INTERNAL ERROR');
+		 lt_idp_feed.LOG_ERROR('NA','ERR','ER','Unspecified Internal Error in Util_File usage.');
+  		 commit;
+      WHEN utl_file.INVALID_MODE THEN
+ 	     pTrans:='FAIL';
+         dbms_output.put_line('Failure: INVALID_MODE');
+		 lt_idp_feed.LOG_ERROR('NA','ERR','ER','Invalid string for Util_File usages.');
+		 commit;
+      WHEN OTHERS THEN
+ 	     pTrans:='FAIL';
+         utl_file.fclose(file_id);
+         dbms_output.put_line('Failure: Other:'||sqlerrm);
+ 		 lt_idp_feed.LOG_ERROR(nvl(v_vis_recd.transaction_id,'NA'),'ERR','ER','VIS_DONATION-'||sqlerrm);
+		 commit;
+   END load_vista_donation;
+
+
+   PROCEDURE PROCESS_VISTA_DONATION(p_txn_id VARCHAR2 ,p_unit_id in VARCHAR2, pl_chapter_id VARCHAR2 DEFAULT 'WAD')
+   IS
+         v_recd       vis_donation%ROWTYPE;
+         v_code       idp_conv_ref_values%ROWTYPE;
+         v_reject     idp_conv_ref_values%ROWTYPE;
+         v_result     VARCHAR2(80);
+         appl_excp    EXCEPTION;
+	  v_count      NUMBER:=0;
+	  p_status     VARCHAR2(200);
+          sztransID    VARCHAR2(10);
+	  szDonorID    VARCHAR2(10);
+	  szOriProc    VARCHAR2(10);
+	  szOriDon     VARCHAR2(10);
+	  szCollDate   DATE;
+          szEligStatus VARCHAR2(200);
+	  szDeferDate  DATE;
+	  szInterType  VARCHAR2(20);
+	  szDeferReason  VARCHAR2(200);
+	  szUnitID       VARCHAR2(20);
+          szInsert_User  varchar2(10);
+          loc_chapter_id   varchar2(4);
+	  rbcInter       VARCHAR2(10);
+	  p_vista_hemat  VARCHAR2(20);
+	  p_vista_hemog  VARCHAR2(20);
+	  p_vista_platelet VARCHAR2(20);
+	  p_vista_rbc      VARCHAR2(20);
+	  p_phy_inter      VARCHAR2(10);
+	  p_phy_status     VARCHAR2(200);
+	  p_msg            VARCHAR2(520);
+          p_chapter_id     varchar2(5);
+          s_end_time_l    VARCHAR2(40);
+          end_time_l      DATE;
+	  s_end_time_r    VARCHAR2(40);
+	  end_time_r      DATE;
+ 	  s_start_time_l1    VARCHAR2(40);
+          start_time_l1   DATE;
+	  start_time_r1   DATE;
+  	  s_start_time_r1    VARCHAR2(40);
+          start_phleb_l1  VARCHAR2(30);
+	  start_phleb_r1  VARCHAR2(30);
+          end_phleb_l   VARCHAR2(30);
+          end_phleb_r   VARCHAR2(30);
+	  plasma_loss   NUMBER:=0;
+          equip_ref     VARCHAR2(30);
+          plt_count     NUMBER:=0;
+	  rbc_loss      NUMBER:=0;
+	  szEquip_ref   VARCHAR2(50);
+	  p_inter_type  VARCHAR2(10);
+	  nProcCount    NUMBER:=0;
+	  sz_no_staff_hold VARCHAR2(10);
+	  sz_illogical_hold VARCHAR2(10);
+	  sz_illogical_flag VARCHAR2(1);
+	  sz_arm_used       VARCHAR2(1);
+	  exCode            VARCHAR2(5);
+	  exActionCode      NUMBER:=0;
+	  szExpHours        VARCHAR2(5);
+	  szCompStatus      VARCHAR2(1);
+	  szEqpID          VARCHAR2(10);
+	  szEqpTy          VARCHAR2(10);
+	  szEqpSl          VARCHAR2(15);
+	  szConvMsg        VARCHAR2(200);
+	  szConvType       VARCHAR2(10);
+          szEquipType      VARCHAR2(5);
+          nValidProc       NUMBER:=0;
+          g_multi_chapter_flag   varchar2(1);
+          g_donor_gender        varchar2(1);
+          nPFCount           NUMBER:=0;
+          g_local_time       date;
+        
+
+      --Procedure to insert into the donation_attributes or donation or donor interdictions table
+      Procedure place_inter_attrib (p_chapter_id in varchar2,
+	                                p_donor_id   in varchar2,
+	                                p_trans_id   in varchar2,
+					p_unit_id    in varchar2,
+					p_originated in varchar2,
+					p_reason     in varchar2,
+                                        p_table_name in varchar2,
+					p_type       in varchar2,
+                                        p_int_attr   in varchar2,
+					p_coll_date  in DATE,
+					p_out out varchar2)
+		is
+	     szInter      VARCHAR2(10);
+		 szType       VARCHAR2(10);
+		 szOwner      VARCHAR2(10);
+		 szStatus     VARCHAR2(200);
+		 szTerm_date  DATE;
+         	 usr_excp     EXCEPTION;
+          multi_chapter_flag  varchar(4);
+          l_chapter_id        varchar2(4);
+       BEGIN
+
+         p_out:='OK';
+
+         Begin
+           select nvl(multi_chapter,'N') into multi_chapter_flag from lt_application_config
+           where rownum=1;
+
+          Exception when others then 
+           multi_chapter_flag:='N';
+         End;
+
+           If multi_chapter_flag='Y' then 
+              l_chapter_id:='ALL';
+           Else
+             l_chapter_id:=p_chapter_id;
+           End if;
+
+           
+      If p_type in ('INTER','HOLD','HOLDS','INFOR') then
+		 --Find if the interdiction is valid.
+
+		 Begin
+		    select inter_code,inter_type,inter_owner into szInter,szType,szOwner
+			 from VALID_INTERDICTIONS where inter_code=p_int_attr and
+			sysdate between eff_date and nvl(term_date,sysdate+1) and rownum =1;
+		 Exception when others then
+		   p_out:='Invalid Interdiction code';
+		   raise usr_excp;
+		 End;
+                 dbms_output.put_line('intercode='||szInter||'Chapter='||l_chapter_id);
+
+		   szTerm_date:=null;
+		   If szOwner='D' then        /* place inter on donor */
+                      
+                   --dbms_output.put_line('Before calling the pacakge');
+
+               begin
+                DON_INTER.INTER_UPGRADE_PLACE(p_donor_id,l_chapter_id,
+                                              p_unit_id,p_trans_id,
+                                              p_int_attr,
+                                              substr(p_originated,1,10),
+                                              substr(p_reason,1,5),
+					      szInsert_user,null,null,
+                                              'IDPVISTA',
+                                              trunc(p_coll_date),
+                                              szTerm_date,null,
+                                              szStatus); 
+               exception when others then 
+                dbms_output.put_line('Inter package='||sqlerrm);
+                szStatus:=sqlerrm;
+               end;
+
+
+                dbms_output.put_line('Donor='||szStatus);
+                if szStatus !='OK' then
+                   p_out:='Donor: '||szStatus;
+				   raise usr_excp;
+				else
+				     populate_idp_target_change(p_txn_id,'DONOR_INTERDICTIONS','Interdiction',p_int_attr,sysdate);
+                end if;
+
+           Elsif szOwner='U' then       /* place inter on donation */
+
+                     DON_INTER.PLACE_INTER_UNIT(p_unit_id,null,p_coll_date,
+                                                p_chapter_id,
+                                                p_trans_id,
+                                                p_int_attr,
+					        substr(p_originated,1,10),
+                                                substr(p_reason,1,5),
+                                                null,szInsert_user,null,
+						null,'IDPVISTA',
+                                                null,null,szStatus);
+
+                 dbms_output.put_line('Donation='||szStatus);
+                 If szStatus !='OK' then
+                   p_out:='Unit: '||szStatus;
+				   raise usr_excp;
+				 Else
+				   populate_idp_target_change(p_txn_id,'DONATION_INTERDICTIONS','Interdiction',p_int_attr,sysdate);
+                End if;
+
+           Else                                 /* place inter on both */
+                  DON_INTER.INTER_UPGRADE_PLACE(p_donor_id,l_chapter_id,
+                                                p_unit_id,p_trans_id,
+                                                p_int_attr,
+                                                substr(p_originated,1,10),
+                                                substr(p_reason,1,5),
+                                                szInsert_user,null,
+                                                 null,'IDPVISTA',
+                                                 trunc(p_coll_date),
+                                szTerm_date,null,szStatus);
+
+ 			      dbms_output.put_line('B-Donor='||szStatus);
+
+                 If szStatus !='OK' then
+                   p_out:='Donor: '||szStatus;
+				   raise usr_excp;
+				 Else
+     				   populate_idp_target_change(p_txn_id,'DONOR_INTERDICTIONS','Interdiction',p_int_attr,sysdate);
+                 End if;
+
+		         DON_INTER.PLACE_INTER_UNIT(p_unit_id,null,
+                                                    p_coll_date,p_chapter_id,
+                                                    p_trans_id,p_int_attr,
+				                    substr(p_originated,1,10),
+                                                    substr(p_reason,1,5),null,szInsert_user,null,null,
+						   'IDPVISTA',null,null,szStatus);
+
+ 			      dbms_output.put_line('B-Donation='||szStatus);
+
+                 If szStatus !='OK' then
+                   p_out:='Unit: '||szStatus;
+				   raise usr_excp;
+                 End if;
+          End if;
+ 
+	  ELSE     -- if p-Type != INTER or HOLD
+     	  Begin
+		     dbms_output.put_line('p_type='||p_type||' p_int_attr='||p_int_attr||' '||p_chapter_id);
+                INSERT INTO donation_attributes
+                         (chapter_id, transaction_id
+                          , attrib_code, attrib_value, program_id, insert_date, insert_user)
+                 VALUES  (p_chapter_id, p_trans_id, p_type, p_int_attr,'IDPVISTA', sysdate, szInsert_user);
+
+  	        populate_idp_target_change(p_txn_id,'DONATION_ATTRIBUTES',p_type,p_int_attr,sysdate);
+
+           Exception when others then
+               p_out:='Unable create interdiction in DONATION ATTRIBUTES table '||sqlerrm;
+             end;
+	  END IF;
+
+	  Exception when usr_excp then
+	      p_out:=p_out;
+      End place_inter_attrib;
+
+      --Function to check if the physical findings are acceptable or not
+
+      PROCEDURE IS_PHY_ACCEPT(p_phy_code in varchar2, p_phy_value in number,p_don_type in varchar2,
+                              p_proc_code in varchar2,p_donor_gender in varchar2,
+                              p_inter out varchar2,p_status out varchar2 )
+      IS
+
+           CURSOR phy_cur is select physical_code,
+                  item_operator, item_value,item_value_max,inter_code
+                  from valid_physical_rules where donation_type=p_don_type and procedure_code=p_proc_code and 
+                  physical_code=p_phy_code and gender=p_donor_gender and data_type in ('D','N'); -- and 
+                  --equipment_type=p_equip_type;
+
+         szItemVal  varchar2(20);
+         szMaxVal   varchar2(20);
+         szInterCode  VARCHAR2(10);
+         nCount NUMBER:=0;
+
+      BEGIN
+
+	    p_inter:=null;
+            p_status:='OK';
+
+       FOR Z in phy_cur loop
+
+             select nvl(count(*),0) into nCount from valid_physical_rules where donation_type=p_don_type
+             and procedure_code=p_proc_code and physical_code=p_phy_code and data_type in ('N','D')
+             and item_operator='BETWEEN' and gender=p_donor_gender and sysdate between eff_date and nvl(term_date, sysdate+1);
+
+           IF Z.item_operator ='BETWEEN' then
+
+         
+               If nCount =1 then   -- just one rule defined for that opertor 
+                     If p_phy_value between to_number(Z.item_value) and to_number(Z.item_value_max) then 
+                        p_status:='OK';
+                     Else
+                        p_inter:=Z.inter_code; 
+                     End If;
+               Elsif nCount > 1 then 
+
+                   If p_phy_value between to_number(Z.item_value) and to_number(Z.item_value_max) then 
+                      
+                       if Z.inter_code is not null then 
+                           p_inter:=Z.inter_code;
+                       else
+                           p_status:='OK';
+                      end if;
+                  End If;
+              End If;
+
+           ELSIF Z.item_operator ='MORE' then 
+              If p_phy_value > to_number(Z.item_value) then 
+                 if Z.inter_code is not null then 
+                    p_inter:=Z.inter_code;
+                 end if;
+              End If;
+           ELSIF Z.item_operator ='LESS' then 
+              If p_phy_value < to_number(Z.item_value) then
+                
+                 if Z.inter_code is not null then 
+                    p_inter:=Z.inter_code;
+                 end if;
+              End If;
+         
+           ElsIf Z.item_operator ='INRANGE' then 
+              If p_phy_value  between to_number(Z.item_value) and to_number(Z.item_value_max) then
+                 p_status:='OK';
+                 if Z.inter_code is not null then 
+                    p_inter:=Z.inter_code;
+                 end if;
+              End If;
+         End If;
+
+       END LOOP;
+
+
+
+        
+        /*
+          select inter_code ,item_value,item_value_max into szInterCode, szItemVal, szMaxVal from valid_physical_rules where
+          donation_type=p_don_type and procedure_code=p_proc_code and physical_code=p_phy_code and sysdate between
+          eff_date and nvl(term_date,sysdate+1) and rownum <2 and (gender=p_donor_gender or gender='A') and data_type='N';
+
+          If p_phy_value not between to_number(szItemVal) and to_number(szMaxVal) then
+            p_inter:=szInterCode;
+          Else
+            p_status:='OK';
+          End If;
+      */
+
+
+      Exception when others then
+          p_status:=sqlerrm||'-Could not validate the Physical Rule table:'||p_don_type||' '||p_proc_code||'-'||p_phy_code;
+      End IS_PHY_ACCEPT;
+
+	   FUNCTION check_employee(p_emp_code in varchar2) return boolean is
+	   eCount NUMBER:=0;
+	  begin
+        select nvl(count(*),0) into eCount from employees where staff_no=p_emp_code and
+		sysdate between eff_date and nvl(term_date,sysdate+1);
+
+		If eCount > 0 then
+		  return (TRUE);
+		Else
+		  return (FALSE);
+		End if;
+      End check_employee;
+
+     Procedure Check_conv_values (p_src_value in varchar2, p_src_type in varchar2,
+	                              p_tar_value out varchar2,p_tar_type out varchar2,
+								  p_err_msg out varchar2) IS
+  	  p_err_flg varchar2(1);
+          p_chap_date  DATE;
+
+	 Begin
+
+            p_chap_date:=Lifetrack_timezone_convert.get_local_time(p_chapter_id,SYSDATE);
+	    p_err_msg:=null;
+            SELECT target_value,target_code_type  INTO p_tar_value,p_tar_type FROM idp_conv_ref_values
+             WHERE UPPER(source_id) = 'VISTA' AND UPPER(target_id) = 'LFTRK'
+               AND source_value = p_src_value AND source_code_type = p_src_type and
+			   p_chap_date between eff_date and nvl(term_date,p_chap_date+1);
+
+         Exception
+            WHEN NO_DATA_FOUND then
+			    p_err_msg:=p_src_value||'  and '||p_src_type||' is not defined in the Conversion table';
+			WHEN OTHERS then
+   			    p_err_msg:=sqlerrm;
+    End;
+
+
+
+
+	  /*-----------------------------------------------------
+	          MAIN Procedure STARTS here here
+
+                  note: The incoming chapter id not being used
+                  instead the p_chapter_id is taken from the 
+                  donations table below.
+	  ------------------------------------------------------ */
+
+   BEGIN
+
+
+     --If the send status is pending for a long time , then automatically change the status to NR .
+
+	        Begin
+		       select parameter_value into szExpHours from valid_parameters where
+		       parameter_code='IDPNR' and sysdate between eff_date and nvl(term_date,sysdate+1);
+
+			   UPDATE online_status set IDP_PROC_STATUS='NR' where IDP_PROC_STATUS='S' and
+			   (sysdate - IDP_PROC_STATUS_DATS) * 24 > to_number(szExpHours);
+		    Exception when others then
+		       null;
+		    End;
+
+
+	  --Get all the values from the vista_donation table
+
+	  dbms_output.put_line('Transaction='||p_txn_id||'  Unit='||p_unit_id);
+        
+
+
+      SELECT *
+        INTO v_recd
+        FROM vis_donation
+       WHERE transaction_id = p_txn_id and unit_number=p_unit_id;
+
+	   --If the donation is already completed ,do not do anything- just log the error and reject the file
+
+	     Begin
+	         select IDP_PROC_STATUS into szCompStatus from online_status where
+                 transaction_id = p_txn_id;
+
+		      If szCompStatus='C' then
+		          ROLLBACK;
+  	              LOG_ERROR(v_recd.transaction_id,'ERR','ER','Already Uploaded. File Rejected');
+		          raise appl_excp;
+		      End If;
+             Exception when others then
+		   null;
+	     End ;
+
+             -- Check if the return procedure is a vista procedure (Added in LT2012 (05/01/12) Edwin
+
+             Begin
+               select nvl(count(*),0) into nValidProc from valid_master_codes where code_type='IDPPC' and
+               code=v_recd.procedure_code and sysdate between eff_date and nvl(term_date,sysdate+10);
+
+               If nValidProc > 0 then 
+                  null;
+               Else
+                 ROLLBACK;
+                 LOG_ERROR(v_recd.transaction_id,'ERR','ER','Non Vista procedure code was received. File Rejected');
+                 raise appl_excp;
+               End If;
+             End;
+
+
+
+	   --Get all the master values from the donations table for the later use or comparision
+           
+	   Begin
+              select transaction_id,donor_id,procedure_code,donation_type,
+              coll_date,unit_id,insert_user, equip_type, chapter_id into
+		 sztransID,szDonorID, szOriProc,szOriDon,szCollDate,szUnitID,szInsert_user,
+                 szEquipType, p_chapter_id from  donations where transaction_id=v_recd.transaction_id;
+ 
+                 ---and unit_id=p_unit_id and chapter_id=p_chapter_id;
+           Exception when others then
+	      ROLLBACK;
+	      LOG_ERROR(v_recd.transaction_id,'ERR','ER','Master donation record does not exist in this Chapter');
+		 raise appl_excp;
+	   End;
+
+         g_local_time:=Lifetrack_timezone_convert.get_local_time(p_chapter_id,SYSDATE);
+	
+       dbms_output.put_line('Step 2');
+	   
+	   If szDonorID!=nvl(v_recd.donor_id,' ') then 
+	     ROLLBACK;
+		 LOG_ERROR(v_recd.transaction_id,'ERR','ER','Donor ID does not match');
+		 raise appl_excp;
+	  Else
+	     null;
+	  End If;
+
+
+          --- Get the donor Gender   Added by Edwin on 12/15/17 to deal with gender in the PF
+             Begin 
+                select gender into g_donor_gender from DONORS where donor_id=v_recd.donor_id;
+             Exception when others then 
+                  ROLLBACK;
+		 LOG_ERROR(v_recd.transaction_id,'ERR','ER','Donor gender cannot be determined');
+		 raise appl_excp;
+            End;
+
+
+
+          Begin
+           select nvl(multi_chapter,'N') into g_multi_chapter_flag from lt_application_config
+           where rownum=1;
+
+          Exception when others then 
+           g_multi_chapter_flag:='N';
+         End;
+
+           If g_multi_chapter_flag='Y' then 
+              loc_chapter_id:='ALL';
+           Else
+             loc_chapter_id:=p_chapter_id;
+           End if;
+	  	 	 
+
+      -- If ABORTED_RUN_CODE is not null, resend donor record, then exit
+
+       IF v_recd.aborted_run_code IS NOT NULL THEN
+           update online_status set IDP_PROC_STATUS='P' where transaction_id=v_recd.transaction_id;
+           LOG_ERROR(v_recd.transaction_id,'MSG','P','Aborted the run- Resending the file');
+          --v_result := lt_idp_feed.build_vista_donors(p_txn_id, p_chapter_id);  the cron job will pick up next time
+          raise appl_excp;
+      END IF;
+
+
+       dbms_output.put_line('Step 3');
+
+	  -- If the returned unit id is not matching with the original unit id, abort the process
+
+	   IF nvl(v_recd.unit_number,' ')<> szUnitID then
+	      ROLLBACK;
+	      LOG_ERROR(v_recd.transaction_id,'ERR','ER','Unit ID mismatch');
+          raise appl_excp;
+	   END IF;
+
+
+      --------------------------------------------------------------------
+      -- Update Donation record for Bleed times, phlebotomists, RBC and
+      -- plasma loss, equpment ID
+      --------------------------------------------------------------------
+	   dbms_output.put_line('Donor Rej='||v_recd.donor_rejected);
+
+      IF v_recd.donor_rejected = '0' THEN
+
+         --Update the donation information
+
+          dbms_output.put_line('Step 3a');
+
+         If  v_recd.access_location =1 then
+
+		      s_start_time_l1:=TO_CHAR(TRUNC(v_recd.donor_connect_date),'MM-DD-YYYY')||' '||v_recd.donor_connect_time;
+			  start_time_l1:=to_date(s_start_time_l1,'MM-DD-YYYY HH24:MI');
+
+		      s_end_time_l:=TO_CHAR(TRUNC(v_recd.proc_end_date),'MM-DD-YYYY')||' '||v_recd.proc_end_time;
+			  end_time_l:=to_date(s_end_time_l,'MM-DD-YYYY HH24:MI');
+			  sz_arm_used:='L';
+
+			  If check_employee(v_recd.oper1_badge_id) then
+  			      start_phleb_l1:=v_recd.oper1_badge_id;
+			  Else
+			     start_phleb_l1:='99';
+			  End If;
+
+			  If check_employee(v_recd.oper2_badge_id) then
+     			  end_phleb_l:=v_recd.oper2_badge_id;
+			  Else
+  			    end_phleb_l:='99';
+			  End If;
+
+		   Else
+   		      s_start_time_r1:=TO_CHAR(TRUNC(v_recd.donor_connect_date),'MM-DD-YYYY')||' '||v_recd.donor_connect_time;
+			  start_time_r1:=to_date(s_start_time_r1,'MM-DD-YYYY HH24:MI');
+
+		      s_end_time_r:=TO_CHAR(TRUNC(v_recd.proc_end_date),'MM-DD-YYYY')||' '||v_recd.proc_end_time;
+			  end_time_r:=to_date(s_end_time_r,'MM-DD-YYYY HH24:MI');
+
+			  sz_arm_used:='R';
+
+			  If check_employee(v_recd.oper1_badge_id) then
+  			      start_phleb_r1:=v_recd.oper1_badge_id;
+			  Else
+			     start_phleb_r1:='99';
+			  End If;
+
+
+                          If check_employee(v_recd.oper2_badge_id) then
+  			      end_phleb_r:=v_recd.oper2_badge_id;
+			  Else
+			     end_phleb_r:='99';
+			  End If;
+
+		  End if;
+
+		   dbms_output.put_line('Step 3a.1');
+
+		  -- If staff value is 99 in any one of the Phelobotomy codes, the place a hold
+
+		  If  start_phleb_l1='99' OR  end_phleb_l='99' OR start_phleb_r1='99' OR end_phleb_r='99' Then
+		   Begin
+                     select nvl(inter_code,' ') into sz_no_staff_hold from VALID_REGINT_REASONS
+                      where inter_reason = 'NOPHLEBO'  and sysdate between eff_date and nvl(term_date,sysdate+1);
+         	  Exception
+       	            when no_data_found then
+                       sz_no_staff_hold:='NODAT';
+                    when others then
+	                sz_no_staff_hold:='NODAT';
+	          End;
+
+	           dbms_output.put_line('Step 3a.2');
+
+			  begin
+			     select inter_type into p_inter_type from valid_interdictions where inter_code=sz_no_staff_hold and
+				 sysdate between eff_date and nvl(term_date,sysdate+1);
+			  exception when no_data_found then
+			  	ROLLBACK;
+                            LOG_ERROR(v_recd.transaction_id,'ERR','ER',sz_no_staff_hold||'  '||'is not defined in the interdiction table');
+                            raise appl_excp;
+                          end;
+
+			  dbms_output.put_line('Step 3a.3');
+
+			   PLACE_INTER_ATTRIB(p_chapter_id,
+	                               v_recd.donor_id,
+	                               v_recd.transaction_id,
+  				       v_recd.unit_number,
+				       sz_no_staff_hold,
+			               v_recd.procedure_code,
+                                       null,
+				       p_inter_type,
+                                       sz_no_staff_hold,
+				       szCollDate,
+				       p_status);
+
+                             If p_status!='OK' then
+				ROLLBACK;
+                                LOG_ERROR(p_txn_id,'ERR','ER',p_status);
+                               raise appl_excp;
+                            End if;
+
+	       End If;
+
+		   --- Place a hold for illogical bleed time as per the registration rules
+
+		  dbms_output.put_line('Step 3a.4');
+
+	         sz_illogical_flag:='N';
+		     If  v_recd.access_location =1 then
+
+		        If (start_time_l1 > end_time_l) then
+				   sz_illogical_flag:='Y';
+				End If;
+
+		     Else
+
+		   	     If (start_time_l1 > end_time_l) then
+ 				   sz_illogical_flag:='Y';
+			     End If;
+
+		     End if;
+
+
+			 If sz_illogical_flag='Y' then
+
+			    Begin
+                 select nvl(inter_code,' ') into sz_illogical_hold from VALID_REGINT_REASONS
+                 where inter_reason = 'ILIGLBLEED' and sysdate between eff_date and nvl(term_date,sysdate+1);
+         	  Exception
+       	         when no_data_found then
+                     sz_illogical_hold:='NODAT';
+                 when others then
+	                 sz_illogical_hold:='NODAT';
+	          End;
+
+			  begin
+			     select inter_type into p_inter_type from valid_interdictions where inter_code=sz_illogical_hold and
+				 sysdate between eff_date and nvl(term_date,sysdate+1);
+			  exception when no_data_found then
+			  	ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER',sz_illogical_hold||'  '||'is not defined in the interdiction table');
+                raise appl_excp;
+              end;
+
+
+  			  dbms_output.put_line('Step 3a.5');
+
+			   PLACE_INTER_ATTRIB(p_chapter_id,
+	                               v_recd.donor_id,
+	                               v_recd.transaction_id,
+  				       v_recd.unit_number,
+				       sz_illogical_hold,
+			               v_recd.procedure_code,
+                                       null,
+				       p_inter_type,
+                                       sz_no_staff_hold,
+				       szCollDate,
+				        p_status);
+
+                             If p_status!='OK' then
+		                ROLLBACK;
+                                LOG_ERROR(p_txn_id,'ERR','ER',p_status);
+                                raise appl_excp;
+                            End if;
+
+			 End If;
+
+
+
+
+           dbms_output.put_line('Step 3b');
+
+			rbc_loss:=v_recd.total_rbc_loss;
+			plasma_loss:= NVL(v_recd.total_plasma_loss, 0);
+            equip_ref:= v_recd.machine_id;
+            plt_count:= v_recd.post_platelet;
+
+   	       dbms_output.put_line('Step 4');
+
+
+		 	--Verify the return procedure code is valid . If the procedure is in the excluded list then
+			--ignore the procedure validation
+
+			Begin
+			  select nvl(count(*),0) into nProcCount from valid_proc_codes where procedure_code=v_recd.procedure_code
+			  and sysdate between eff_date and nvl(term_date,sysdate+1);
+			  If nProcCount > 0 then
+			     null;
+			  Else
+			       --Check if the procedure code is in the excluded list.
+				   begin
+				      exCode:=null;
+					  exActionCode:=0;
+					      select code,sort_sequence_1 into exCode,exActionCode from valid_master_codes
+					      where code_type='IDPEX' and code=v_recd.procedure_code and sysdate between
+					      eff_date and nvl(term_date,sysdate+1);
+
+  					      If exActionCode=1 then
+					           UPDATE donations set unit_id=null where transaction_id=v_recd.transaction_id;
+						  End If;
+					          UPDATE online_status set IDP_PROC_STATUS='C',status_flag='C' where transaction_id=p_txn_id;
+							  LOG_ERROR(p_txn_id,'MSG','C','No Procedure collected- No further processing');
+						      raise appl_excp;
+				   exception
+				       when no_data_found then
+					      LOG_ERROR(v_recd.transaction_id,'ERR','ER','Invalid Procedure received');
+		                  raise appl_excp;
+
+					   when others then
+				      	   null;
+   		                  raise appl_excp;
+				   end;
+
+			  End if;
+
+			End;
+
+            dbms_output.put_line('Step 4.b');
+
+		    --Get the correct equipment information. If the procedure needs an equipment , then it will check for the
+			--valid equipment table.
+
+			nProcCount:=0;
+
+			SELECT nvl(count(*),0) into nProcCount from valid_master_codes where code_type='IDPEP' and
+			code=v_recd.procedure_code and sysdate between eff_date and nvl(term_date,sysdate+1);
+
+			If nProcCount > 0 then
+			   --Get the machine ID translation value
+			     szConvMsg:=null;
+			     Check_conv_values (v_recd.machine_id,'EQPID',szEqpID,szConvType, szConvMsg);
+				 If szConvMsg is not null then
+  	               LOG_ERROR(v_recd.transaction_id,'ERR','ER',szConvMsg);
+		           raise appl_excp;
+			     End If;
+
+				 --Get the machine type
+ 			     szConvMsg:=null;
+				 Check_conv_values (v_recd.machine_type,'EQPTY',szEqpTy,szConvType, szConvMsg);
+				 If szConvMsg is not null then
+  	               LOG_ERROR(v_recd.transaction_id,'ERR','ER',szConvMsg);
+		           raise appl_excp;
+			     End If;
+
+				 --Get the Serial Number
+ 			     szConvMsg:=null;
+				 Check_conv_values (v_recd.machine_serial_nbr,'EQPSL',szEqpSl,szConvType, szConvMsg);
+				 If szConvMsg is not null then
+  	               LOG_ERROR(v_recd.transaction_id,'ERR','ER',szConvMsg);
+		           raise appl_excp;
+			     End If;
+
+		       --Get the reference value from the equipment table
+ 			    Begin
+                    select equip_reference into szEquip_ref from equipment
+                    where equip_type=upper(szEqpTy) and equip_id= upper(szEqpId) and serial_number=upper(szEqpSl) and
+                    status ='IN' and chapter_id=p_chapter_id and rownum <2 ;
+                Exception when others then
+			        dbms_output.put_line('Type='||v_recd.machine_type||' Serial='||v_recd.machine_serial_nbr );
+  	                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Equipment table do not have information for '||v_recd.machine_serial_nbr);
+		            raise appl_excp;
+                End;
+
+		   End If;
+
+			 dbms_output.put_line('Step 4a:'||'E-ID:'||szEqpId||' E-TY:'||szEqpTy||' E-Sl:'||szEqpSl||' Ref:'||szEquip_ref);
+
+
+			 --Update the donations table values
+          Begin
+          
+           
+            
+             UPDATE donations
+               SET procedure_code = v_recd.procedure_code  -- Change based on actual procedure done
+                   , bleed_start_time_l1 = LIFETRACK_TIMEZONE_CONVERT.get_gmt_time(p_chapter_id,start_time_l1)
+                   , bleed_end_time_l     = LIFETRACK_TIMEZONE_CONVERT.get_gmt_time(p_chapter_id,end_time_l)
+                   , bleed_start_time_r1  = LIFETRACK_TIMEZONE_CONVERT.get_gmt_time(p_chapter_id,start_time_r1)
+                   , bleed_end_time_r     = LIFETRACK_TIMEZONE_CONVERT.get_gmt_time(p_chapter_id,end_time_r)
+                   , bleed_start_phleb_l1 = start_phleb_l1
+                   , bleed_end_phleb_l   =end_phleb_l
+                   , bleed_start_phleb_r1 = start_phleb_r1
+                   , bleed_end_phleb_r = end_phleb_r
+                   , actual_rbc_loss = v_recd.total_rbc_loss
+                   , actual_plasma_loss = v_recd.total_plasma_loss
+                   , equip_reference = szEquip_ref
+                   , plt_post_count = v_recd.post_platelet
+                   , arm_used=sz_arm_used
+                   WHERE chapter_id = p_chapter_id AND transaction_id = p_txn_id;
+	  Exception when others then
+               ROLLBACK;
+               LOG_ERROR(v_recd.transaction_id,'ERR','ER','Loc:-0 '||sqlerrm);
+               raise appl_excp;
+	  End;
+
+			   /* Populate the uploaded data into the table */
+		   	   dbms_output.put_line('Step 5');
+
+			Begin
+
+
+			   If start_time_l1 is not null then
+			           populate_idp_target_change(p_txn_id,'DONATIONS','Bleed Start Time (L)',to_char(start_time_l1,'mm-dd-yyyy hh24:mi'),sysdate);
+			   End if;
+			   If end_time_l is not null then
+  			     populate_idp_target_change(p_txn_id,'DONATIONS','Bleed Start Time (L)',to_char(end_time_l,'mm-dd-yyyy hh24:mi'),sysdate);
+			   End if;
+
+  			   If start_time_r1 is not null then
+  			     populate_idp_target_change(p_txn_id,'DONATIONS','BLeed Start Time(R)',to_char(start_time_r1,'mm-dd-yyyy hh24:mi'),sysdate);
+ 		       End if;
+
+  			   If end_time_r is not null then
+    			     populate_idp_target_change(p_txn_id,'DONATIONS','Bleed End Time(R)',to_char(end_time_r,'mm-dd-yyyy hh24:mi'),sysdate);
+			   End if;
+
+			   If start_phleb_l1 is not null then
+			       populate_idp_target_change(p_txn_id,'DONATIONS','Start User ID (L)',start_phleb_l1,sysdate);
+			   End If;
+
+  			   If end_phleb_l is not null then
+		           populate_idp_target_change(p_txn_id,'DONATIONS','End User ID (L)',end_phleb_l,sysdate);
+			   End If;
+
+  			   If start_phleb_r1 is not null then
+		           populate_idp_target_change(p_txn_id,'DONATIONS','Start User ID(R)',start_phleb_r1,sysdate);
+			   End If;
+
+  			   If end_phleb_r is not null then
+   		           populate_idp_target_change(p_txn_id,'DONATIONS','End User ID (R)',end_phleb_r,sysdate);
+			   End If;
+
+			   If rbc_loss is not null then
+   		           populate_idp_target_change(p_txn_id,'DONATIONS','RB Loss',rbc_loss,sysdate);
+			   End If;
+
+  			   If plasma_loss is not null then
+			        populate_idp_target_change(p_txn_id,'DONATIONS','Plasma Loss',plasma_loss,sysdate);
+			   End If;
+
+           	   dbms_output.put_line('Step 6');
+  			   If equip_ref is not null then
+ 			     populate_idp_target_change(p_txn_id,'DONATIONS','Equipment Reference',equip_ref,sysdate);
+			   End If;
+
+   			   If plt_count is not null then
+   			        populate_idp_target_change(p_txn_id,'DONATIONS','Platelet Count',plt_count,sysdate);
+			   End If;
+
+			   If sz_arm_used is not null then
+			        populate_idp_target_change(p_txn_id,'DONATIONS','Arm Used',sz_arm_used,sysdate);
+			   End If;
+
+ 		       If v_recd.procedure_code is not null then
+		          populate_idp_target_change(p_txn_id,'DONATIONS','Procedure Code',v_recd.procedure_code,sysdate);
+			  End if;
+
+         Exception
+            WHEN OTHERS THEN
+               ROLLBACK;
+               LOG_ERROR(v_recd.transaction_id,'ERR','ER','Loc:-1 '||sqlerrm);
+               raise appl_excp;
+         End;
+
+      --Verify the procedure code and recheck the eligibility if the the procedure code is different.
+      Begin
+
+       If ltrim(v_recd.procedure_code)!=ltrim(szOriproc) then
+
+	           /* don_core.check_eligibility(v_recd.donor_id,
+                                         v_recd.procedure_code,
+                                         szOridon,
+                                         szCollDate,
+                                         szEligStatus,
+                                         szDeferDate,
+                                         szInterType,
+                                         szDeferReason); */
+				Begin
+   				   select status into szEligStatus from vis_eligibility_det
+				   where transaction_id=v_recd.transaction_id and procedure_code=v_recd.procedure_code and
+				   rownum <2;
+				Exception when no_data_found then
+				   szEligStatus:='N';
+				End;
+
+
+                If szEligStatus ='Y' then
+                       null;
+                Else
+                        select nvl(count(*),0) into v_count from donation_interdictions where
+                        transaction_id=v_recd.transaction_id and inter_code='DNELG' and
+                        unit_id=v_recd.unit_number and release_date is null and release_user is null;
+
+			select inter_type into p_inter_type from valid_interdictions where inter_code='DNELG' and sysdate
+			between eff_date and nvl(term_date,sysdate+1) and rownum <2;
+
+                         If v_count = 0 then
+				      	        PLACE_INTER_ATTRIB(p_chapter_id,
+	                                               v_recd.donor_id,
+	                                               v_recd.transaction_id,
+  						       v_recd.unit_number,
+						       'ELIG',
+							v_recd.procedure_code,
+                                                        null,
+							p_inter_type,
+                                                       'DNELG',
+							szCollDate,
+							p_status);
+
+                             If p_status!='OK' then
+							   ROLLBACK;
+                               LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+                               raise appl_excp;
+                            End if;
+                      End if;
+		        End if;
+        Else
+            Null;
+        End If;
+		null;
+      Exception when others then
+  	     ROLLBACK;
+         LOG_ERROR(v_recd.transaction_id,'ERR','ER','Loc:-2: '||sqlerrm);
+         raise appl_excp;
+      End;
+
+
+      /* ------------------------------------------------------------------
+       If any observations codes are populated, create the appropriate
+       records in either donation_attributes or donation_interdiction,
+       based on values in the idp_conv_ref_values
+      -------------------------------------------------------------------- */
+	   dbms_output.put_line('Step 7');
+
+   IF v_recd.observ_code1 IS NOT NULL THEN
+        Begin
+            SELECT *  INTO v_code FROM idp_conv_ref_values
+             WHERE UPPER(source_id) = 'VISTA' AND UPPER(target_id) = 'LFTRK'
+               AND source_value = v_recd.observ_code1 AND source_code_type = 'OBS' and
+			   sysdate between eff_date and nvl(term_date,sysdate+1);
+         Exception
+            WHEN NO_DATA_FOUND then
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Observation Code 1: '||v_recd.observ_code1 ||' is not defined in the Conversion table');
+               raise appl_excp;
+			WHEN OTHERS then
+			   ROLLBACK;
+		       LOG_ERROR(v_recd.transaction_id,'ERR','ER','Loc:-3: '||sqlerrm);
+               raise appl_excp;
+         End;
+
+			PLACE_INTER_ATTRIB(p_chapter_id,
+	                           v_recd.donor_id,
+	                           v_recd.transaction_id,
+				   v_recd.unit_number,
+				   v_recd.observ_code1,
+				   v_code.target_value,
+                                  null,
+				  v_code.target_code_type,  --This will be either 'INTER, or VENI  or REAC.
+                                 v_code.target_value,      --This will be like NODON, 102D (Inter codes) or 02(Veni code), MI (for reaction code)
+				szCollDate,
+				p_status);
+
+               If p_status!='OK' then
+			     ROLLBACK;
+                 LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+                 raise appl_excp;
+               End if;
+      END IF;
+
+      IF v_recd.observ_code2 IS NOT NULL THEN
+         Begin
+            SELECT *  INTO v_code FROM idp_conv_ref_values
+             WHERE UPPER(source_id) = 'VISTA' AND UPPER(target_id) = 'LFTRK'
+               AND source_value = v_recd.observ_code2 AND source_code_type = 'OBS' and
+			   sysdate between eff_date and nvl(term_date,sysdate+1);
+         Exception
+		     WHEN NO_DATA_FOUND then
+			    ROLLBACK;
+               LOG_ERROR(v_recd.transaction_id,'ERR','ER','Observation Code 2: '||v_recd.observ_code2 ||' is not defined in the Conversion table');
+               raise appl_excp;
+            WHEN OTHERS THEN
+		    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR:','ER','Loc:-4: '||sqlerrm);
+               raise appl_excp;
+         End;
+ 		 PLACE_INTER_ATTRIB(p_chapter_id,
+	                           v_recd.donor_id,
+	                           v_recd.transaction_id,
+				   v_recd.unit_number,
+				   v_recd.observ_code2,
+				   v_code.target_value,
+                                   null,
+		 		   v_code.target_code_type,  --This will be either 'INTER, or VENI  or REAC.
+                                   v_code.target_value,      --This will be like NODON, 102D (Inter codes) or 02(Veni code), MI (for reaction code)
+				   szCollDate,
+				   p_status);
+
+		      dbms_output.put_line('B-Donation='||p_status);
+
+             If p_status!='OK' then
+			     ROLLBACK;
+                 LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+                 raise appl_excp;
+             End if;
+
+      END IF;
+
+      IF v_recd.observ_code3 IS NOT NULL THEN
+          Begin
+            SELECT *  INTO v_code FROM idp_conv_ref_values
+             WHERE UPPER(source_id) = 'VISTA' AND UPPER(target_id) = 'LFTRK'
+               AND source_value = v_recd.observ_code3 AND  source_code_type = 'OBS'
+			   and sysdate between eff_date and nvl(term_date,sysdate+1);
+         Exception
+            WHEN NO_DATA_FOUND then
+ 		       ROLLBACK;
+               LOG_ERROR(v_recd.transaction_id,'ERR','ER','Observation Code 3: '||v_recd.observ_code3 ||' is not defined in the Conversion table');
+               raise appl_excp;
+            WHEN OTHERS THEN
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Loc-5: '||sqlerrm);
+               raise appl_excp;
+         End;
+
+			PLACE_INTER_ATTRIB(p_chapter_id,
+	                           v_recd.donor_id,
+	                           v_recd.transaction_id,
+				   v_recd.unit_number,
+				   v_recd.observ_code3,
+				   v_code.target_value,
+                                  null,
+				 v_code.target_code_type,  --This will be either 'INTER, or VENI  or REAC.
+                                v_code.target_value,      --This will be like NODON, 102D (Inter codes) or 02(Veni code), MI (for reaction code)
+				szCollDate,
+				p_status);
+
+            If p_status!='OK' then
+			   ROLLBACK;
+               LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+               raise appl_excp;
+            End if;
+      END IF;
+
+      IF v_recd.observ_code4 IS NOT NULL THEN
+        Begin
+            SELECT *  INTO v_code FROM idp_conv_ref_values
+             WHERE UPPER(source_id) = 'VISTA' AND UPPER(target_id) = 'LFTRK'
+               AND source_value = v_recd.observ_code4 AND  source_code_type = 'OBS' and
+			   sysdate between eff_date and nvl(term_date,sysdate+1);
+         Exception
+		     WHEN NO_DATA_FOUND then
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Observation Code 4: '||v_recd.observ_code4 ||' is not defined in the Conversion table');
+                raise appl_excp;
+            WHEN OTHERS THEN
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Loc-6a: '||sqlerrm);
+               raise appl_excp;
+         End;
+			PLACE_INTER_ATTRIB(p_chapter_id,
+	                           v_recd.donor_id,
+	                           v_recd.transaction_id,
+				   v_recd.unit_number,
+				   v_recd.observ_code4,
+				   v_code.target_value,
+                                null,
+								v_code.target_code_type,  --This will be either 'INTER, or VENI  or REAC.
+                                v_code.target_value,      --This will be like NODON, 102D (Inter codes) or 02(Veni code), MI (for reaction code)
+				szCollDate,
+				p_status);
+
+            If p_status!='OK' then
+			   ROLLBACK;
+              LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+              raise appl_excp;
+           End if;
+      END IF;
+
+      IF v_recd.observ_code5 IS NOT NULL THEN
+         Begin
+            SELECT *  INTO v_code FROM idp_conv_ref_values
+             WHERE UPPER(source_id) = 'VISTA' AND UPPER(target_id) = 'LFTRK'
+               AND source_value = v_recd.observ_code5 AND source_code_type = 'OBS' and
+			   sysdate between eff_date and nvl(term_date,sysdate+1);
+         Exception
+		     WHEN NO_DATA_FOUND then
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Observation Code 5: '||v_recd.observ_code5 ||' is not defined in the Conversion table');
+                raise appl_excp;
+            WHEN OTHERS THEN
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Loc-7: '||sqlerrm);
+               raise appl_excp;
+         End;
+
+		 PLACE_INTER_ATTRIB(p_chapter_id,
+	                          v_recd.donor_id,
+	                           v_recd.transaction_id,
+				   v_recd.unit_number,
+				   v_recd.observ_code5,
+				   v_code.target_value,
+                                   null,
+		                  v_code.target_code_type,  --This will be either 'INTER, or VENI  or REAC.
+                                  v_code.target_value,      --This will be like NODON, 102D (Inter codes) or 02(Veni code), MI (for reaction code)
+				 szCollDate,
+				p_status);
+
+            If p_status!='OK' then
+			   ROLLBACK;
+               LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+               raise appl_excp;
+            End if;
+      END IF;
+
+      IF v_recd.observ_code6 IS NOT NULL THEN
+          Begin
+            SELECT *  INTO v_code FROM idp_conv_ref_values
+             WHERE UPPER(source_id) = 'VISTA' AND UPPER(target_id) = 'LFTRK'
+               AND source_value = v_recd.observ_code6 AND  source_code_type = 'OBS' and
+			   sysdate between eff_date and nvl(term_date,sysdate+1);
+         Exception
+		     WHEN NO_DATA_FOUND then
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Observation Code 6: '||v_recd.observ_code6 ||' is not defined in the Conversion table');
+                raise appl_excp;
+            WHEN OTHERS THEN
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Loc-8: '||sqlerrm);
+               raise appl_excp;
+         End;
+
+			PLACE_INTER_ATTRIB(p_chapter_id,
+	                           v_recd.donor_id,
+	                           v_recd.transaction_id,
+				   v_recd.unit_number,
+				   v_recd.observ_code6,
+				   v_code.target_value,
+                                   null,
+				  v_code.target_code_type,  --This will be either 'INTER, or VENI  or REAC.
+                                  v_code.target_value,      --This will be like NODON, 102D (Inter codes) or 02(Veni code), MI (for reaction code)
+				  szCollDate,
+				p_status);
+
+            If p_status!='OK' then
+			   ROLLBACK;
+               LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+               raise appl_excp;
+            End if;
+      END IF;
+
+      IF v_recd.observ_code7 IS NOT NULL THEN
+         Begin
+            SELECT *  INTO v_code FROM idp_conv_ref_values
+             WHERE UPPER(source_id) = 'VISTA' AND UPPER(target_id) = 'LFTRK'
+               AND source_value = v_recd.observ_code7 AND  source_code_type = 'OBS' and
+			   sysdate between eff_date and nvl(term_date,sysdate+1);
+         Exception
+		     WHEN NO_DATA_FOUND then
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Observation Code 7: '||v_recd.observ_code7 ||' is not defined in the Conversion table');
+                raise appl_excp;
+            WHEN OTHERS THEN
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Loc-9: '||sqlerrm);
+               raise appl_excp;
+         End;
+			PLACE_INTER_ATTRIB(p_chapter_id,
+	                           v_recd.donor_id,
+	                           v_recd.transaction_id,
+				   v_recd.unit_number,
+				   v_recd.observ_code7,
+				   v_code.target_value,
+                                   null,
+				  v_code.target_code_type,  --This will be either 'INTER, or VENI  or REAC.
+                                 v_code.target_value,      --This will be like NODON, 102D (Inter codes) or 02(Veni code), MI (for reaction code)
+				 szCollDate,
+				p_status);
+
+            If p_status!='OK' then
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+                raise appl_excp;
+            End if;
+      END IF;
+
+      IF v_recd.observ_code8 IS NOT NULL THEN
+         Begin
+            SELECT *  INTO v_code FROM idp_conv_ref_values
+             WHERE UPPER(source_id) = 'VISTA' AND UPPER(target_id) = 'LFTRK'
+              AND source_value = v_recd.observ_code8 AND  source_code_type = 'OBS' and
+			   sysdate between eff_date and nvl(term_date,sysdate+1);
+         Exception
+		     WHEN NO_DATA_FOUND then
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Observation Code 8: '||v_recd.observ_code8 ||' is not defined in the Conversion table');
+                raise appl_excp;
+            WHEN OTHERS THEN
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Loc-10: '||sqlerrm);
+               raise appl_excp;
+         End;
+
+			PLACE_INTER_ATTRIB(p_chapter_id,
+	                           v_recd.donor_id,
+	                           v_recd.transaction_id,
+				   v_recd.unit_number,
+				   v_recd.observ_code8,
+				   v_code.target_value,
+                                   null,
+				  v_code.target_code_type,  --This will be either 'INTER, or VENI  or REAC.
+                                  v_code.target_value,      --This will be like NODON, 102D (Inter codes) or 02(Veni code), MI (for reaction code)
+				 szCollDate,
+				 p_status);
+
+            If p_status!='OK' then
+			   ROLLBACK;
+               LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+               raise appl_excp;
+            End if;
+      END IF;
+
+      IF v_recd.observ_code9 IS NOT NULL THEN
+	   Begin
+            SELECT *  INTO v_code FROM idp_conv_ref_values
+             WHERE UPPER(source_id) = 'VISTA' AND UPPER(target_id) = 'LFTRK'
+               AND source_value = v_recd.observ_code9 AND  source_code_type = 'OBS' and
+			   sysdate between eff_date and nvl(term_date,sysdate+1);
+         Exception
+		     WHEN NO_DATA_FOUND then
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Observation Code 9: '||v_recd.observ_code9 ||' is not defined in the Conversion table');
+                raise appl_excp;
+            WHEN OTHERS THEN
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Loc-11: '||sqlerrm);
+               raise appl_excp;
+         End;
+
+			PLACE_INTER_ATTRIB(p_chapter_id,
+	                           v_recd.donor_id,
+	                           v_recd.transaction_id,
+				   v_recd.unit_number,
+				   v_recd.observ_code9,
+			           v_code.target_value,
+                                   null,
+				  v_code.target_code_type,  --This will be either 'INTER, or VENI  or REAC.
+                                  v_code.target_value,      --This will be like NODON, 102D (Inter codes) or 02(Veni code), MI (for reaction code)
+				  szCollDate,
+				 p_status);
+
+
+               If p_status!='OK' then
+			     ROLLBACK;
+                 LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+                 raise appl_excp;
+               End if;
+      END IF;
+
+      IF v_recd.observ_code10 IS NOT NULL THEN
+         Begin
+             SELECT *  INTO v_code FROM idp_conv_ref_values
+             WHERE UPPER(source_id) = 'VISTA' AND UPPER(target_id) = 'LFTRK'
+             AND source_value = v_recd.observ_code10 AND  source_code_type = 'OBS' and
+             sysdate between eff_date and nvl(term_date,sysdate+1);
+		Exception
+	     WHEN NO_DATA_FOUND then
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Observation Code 10: '||v_recd.observ_code10 ||' is not defined in the Conversion table');
+                raise appl_excp;
+        WHEN OTHERS THEN
+			    ROLLBACK;
+                LOG_ERROR(v_recd.transaction_id,'ERR','ER','Loc-12: '||sqlerrm);
+               raise appl_excp;
+         End;
+
+			PLACE_INTER_ATTRIB(p_chapter_id,
+	                           v_recd.donor_id,
+	                           v_recd.transaction_id,
+				   v_recd.unit_number,
+				   v_recd.observ_code10,
+				   v_code.target_value,
+                                   null,
+				   v_code.target_code_type,  --This will be either 'INTER, or VENI  or REAC.
+                                   v_code.target_value,      --This will be like NODON, 102D (Inter codes) or 02(Veni code), MI (for reaction code)
+				  szCollDate,
+				 p_status);
+
+               If p_status!='OK' then
+			     ROLLBACK;
+                 LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+                 raise appl_excp;
+               End if;
+      END IF;
+
+      --Get vista physical findings for Pre-procedure Hematocrit
+
+	  --Check for Hemotocrit
+	   dbms_output.put_line('Step 8');
+
+        --- Added as part of MLT 3829
+
+       --- Get the paramerter 
+       
+        select nvl(count(*),0) into nPFCount from valid_parameters
+        where parameter_code='VPFRECHK' and parameter_value='Y' and 
+        g_local_time between eff_date and nvl(term_date, g_local_time+10);
+ 
+    IF nPFCount > 0 then 
+
+	  BEGIN
+
+         Begin
+            Select parameter_value into p_vista_hemat from valid_parameters where
+            parameter_code='VHEMAT' and sysdate between eff_date and nvl(term_date,sysdate+1);
+	     Exception when others then
+             p_msg:='HEMATOCRIT was not defined in the SYSPARM table '||sqlerrm;
+		     ROLLBACK;
+             LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_msg);
+             raise appl_excp;
+         End;
+
+         begin
+
+           IS_PHY_ACCEPT(p_vista_hemat,v_recd.pre_hematocrit,szOridon,v_recd.procedure_code,g_donor_gender,
+                         p_phy_inter,p_phy_status);
+	     exception when others then
+	       null;
+	     end;
+
+	   If p_phy_status!='OK' then
+	      ROLLBACK;
+              LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_phy_status);
+              raise appl_excp;
+          End if;
+
+         If p_phy_inter is not null then
+     			PLACE_INTER_ATTRIB(p_chapter_id,
+	                           v_recd.donor_id,
+	                           v_recd.transaction_id,
+				   v_recd.unit_number,
+				   p_vista_hemat,
+				   v_recd.pre_hematocrit,
+                                   null,
+				  'INTER',
+                                  p_phy_inter,      --This will be like NODON, 102D (Inter codes) or 02(Veni code), MI (for reaction code)
+				  szCollDate,
+				  p_status);
+
+				 If p_status!='OK' then
+				     ROLLBACK;
+                                    LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+                                   raise appl_excp;
+  	                        End if;
+        End if;
+      /*EXCEPTION when others then
+           p_msg:='Problem in placing the HEMATOCRIT related interdiction '||sqlerrm;
+		   ROLLBACK;
+           LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_msg);
+           raise appl_excp;
+		   */
+      END;
+
+      --Get vista physical findings for Pre-procedure Hemoglobin
+	   dbms_output.put_line('Step 9');
+
+	  BEGIN
+
+         Begin
+           Select parameter_value into p_vista_hemog from valid_parameters where
+           parameter_code='VHEMOG' and sysdate between eff_date and nvl(term_date,sysdate+1);
+        Exception when others then
+           p_msg:='HEMOGLOBIN was not defined in the SYSPARM table '||sqlerrm;
+		   ROLLBACK;
+           LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_msg);
+           raise appl_excp;
+         End;
+
+
+  	   begin
+         IS_PHY_ACCEPT(p_vista_hemog,v_recd.pre_hemoglobin,szOridon,v_recd.procedure_code,g_donor_gender,
+                       p_phy_inter,p_phy_status);
+	   exception when others then
+	    null;
+	   end;
+        dbms_output.put_line('Step 10-'||p_phy_status);
+		
+	   If p_phy_status!='OK' then
+	      ROLLBACK;
+          LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_phy_status);
+          raise appl_excp;
+       End if;
+       If p_phy_inter is not null then
+             	PLACE_INTER_ATTRIB(p_chapter_id,
+	                               v_recd.donor_id,
+	                               v_recd.transaction_id,
+				       v_recd.unit_number,
+				       p_vista_hemog,
+				       v_recd.pre_hemoglobin,
+                                       null,
+				      'INTER',
+                                      p_phy_inter,
+				      szCollDate,
+				     p_status);
+
+                  If p_status!='OK' then
+                     LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+                     raise appl_excp;
+                  End if;
+       End If;
+
+    /*  EXCEPTION when others then
+           p_msg:='Problem in placing the HEMOGLOBIN related interdiction '||sqlerrm;
+		   ROLLBACK;
+           LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_msg);
+           raise appl_excp;
+	*/
+      END;
+
+	   dbms_output.put_line('Step 11');
+      --Get vista physical findings for Pre-platelet count
+	  BEGIN
+         Begin
+              Select parameter_value into p_vista_platelet from valid_parameters where
+              parameter_code='VPLATE' and sysdate between eff_date and nvl(term_date,sysdate+1);
+		 Exception when others then
+             p_msg:='PLATELET was not defined in the SYSPARM table '||sqlerrm;
+		     ROLLBACK;
+             LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_msg);
+             raise appl_excp;
+		  End;
+
+		 begin
+           IS_PHY_ACCEPT(p_vista_platelet,v_recd.post_platelet,szOridon,v_recd.procedure_code,g_donor_gender,p_phy_inter,p_phy_status);
+		 exception when others then
+		   null;
+		 end;
+
+		 If p_phy_status!='OK' then
+	       ROLLBACK;
+           LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_phy_status);
+           raise appl_excp;
+        End if;
+
+		 dbms_output.put_line('Step 12');
+		 
+         If p_phy_inter is not null then
+             	PLACE_INTER_ATTRIB(p_chapter_id,
+	                               v_recd.donor_id,
+	                               v_recd.transaction_id,
+				       v_recd.unit_number,
+				       p_vista_platelet,
+				       v_recd.post_platelet,
+                                       null,
+				       'INTER',
+                                       p_phy_inter,
+				       szCollDate,
+				       p_status);
+
+                  If p_status!='OK' then
+				     ROLLBACK;
+                     LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+                     raise appl_excp;
+                  End if;
+          End if;
+
+          --Update the physical findings table with the post platelet count value SCR# 2020 (3.3.0) release 
+		  UPDATE DONATIONS set plt_post_count=v_recd.post_platelet where
+		  transaction_id=v_recd.transaction_id;   
+		  
+		 dbms_output.put_line('Step 13');
+      END;
+    END IF;    ---- For nPFCount > 0 then 
+	  
+	  BEGIN
+	     Begin
+              Select parameter_value into p_vista_rbc from valid_parameters where
+              parameter_code='VRBCRT' and sysdate between eff_date and nvl(term_date,sysdate+1);
+		 Exception when others then
+             p_msg:='RBC is not defined in the SYSPARM table for VRBC'||sqlerrm;
+		     ROLLBACK;
+             LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_msg);
+             raise appl_excp;
+		  End;
+
+	     If nvl(v_recd.rinseback_flag,'0')='1' then 
+		    null;
+		 Else
+		    Begin
+			   select inter_code into rbcInter from valid_physical_rules where
+			   donation_type=szOridon and procedure_code=v_recd.procedure_code and
+			   physical_code=p_vista_rbc and data_type='C' and item_value='NO' and
+			   sysdate between eff_date and nvl(term_date,sysdate+1);
+			Exception when others then 
+			  p_msg:='No interdiction is defined for '||p_vista_rbc||'-'||sqlerrm;
+		      ROLLBACK;
+              LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_msg);
+			  raise appl_excp;
+			End;
+			
+			PLACE_INTER_ATTRIB(p_chapter_id,
+	                               v_recd.donor_id,
+	                               v_recd.transaction_id,
+				       v_recd.unit_number,
+				       p_vista_rbc,
+				       'NORET',
+                                       null,
+				      'INTER',
+                                      rbcInter,
+				     szCollDate,
+				     p_status);
+
+                  If p_status!='OK' then
+				     ROLLBACK;
+                     LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+                     raise appl_excp;
+                  End if;
+			End if;     
+  END;  	   			     
+   dbms_output.put_line('Step 14');					 
+              
+END IF;  -- If the donor is rejected (reject flag=0 ) 
+
+IF v_recd.donor_rejected='1' or v_recd.incomplete_proc_flag='1' then
+
+    dbms_output.put_line('Donor Rejected='||v_recd.donor_rejected);
+    If v_recd.reason_code IS NOT NULL THEN
+         --If the reason code is not null, then the donor is rejected for some reason
+		 --get the LT equvalent value from the conversion table and apply the interdiction
+
+		Begin
+   		    SELECT *  INTO v_reject FROM idp_conv_ref_values
+             WHERE UPPER(source_id) = 'VISTA' AND UPPER(target_id) = 'LFTRK'
+             AND source_value = v_recd.reason_code AND  source_code_type = 'REASN' and
+             sysdate between eff_date and nvl(term_date,sysdate+1);
+ 		Exception
+	        WHEN NO_DATA_FOUND then
+			      ROLLBACK;
+                  LOG_ERROR(v_recd.transaction_id,'ERR','ER','Reason Code '||v_recd.reason_code||' is not defined in the Conversion table');
+                  raise appl_excp;
+            WHEN OTHERS THEN
+			      ROLLBACK;
+                  LOG_ERROR(v_recd.transaction_id,'ERR','ER','Loc-20: '||sqlerrm);
+                  raise appl_excp;
+        End;
+
+		       place_inter_attrib (p_chapter_id,
+	                                v_recd.donor_id ,
+	                                v_recd.transaction_id,
+					v_recd.unit_number,
+					'VISTA',
+					nvl(v_recd.reason_code,v_recd.aborted_run_code),
+                                       null,
+					v_reject.target_code_type,
+                                         v_reject.target_value,
+					szCollDate,
+					p_status );
+
+ 			  If p_status!='OK' then
+			     ROLLBACK;
+                 LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_status);
+                 raise appl_excp;
+             End if;
+     Else
+            --If the reason code is null,
+             Begin
+               INSERT INTO donor_interdictions (donor_id,chapter_id,inter_code,eff_date,inter_type,program_id,
+			   insert_date,insert_user,audit_key)
+               VALUES(v_recd.donor_id,loc_chapter_id,'VHOLD',TRUNC(LIFETRACK_TIMEZONE_CONVERT.get_local_time(p_chapter_id,sysdate)),
+                       'HOLDS','IDPVISTA',trunc(sysdate),'VISTA',
+			   audit_seq.nextval);
+             Exception WHEN  others then
+                  p_msg:='Unable to create interdiction in the DONOR INTERDICTIONS table '||sqlerrm;
+				  ROLLBACK;
+                  LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_msg);
+                  raise appl_excp;
+             end;
+     End If;
+
+END IF; -- For donor reject flag statement
+
+  -- IF everything is fine, Successfull upload.
+  LOG_ERROR(v_recd.transaction_id,'MSG','C','Uploaded Successfully');
+
+  update online_status set IDP_PROC_STATUS='C',status_flag='C',
+  PHELOB_START= NVL(LIFETRACK_TIMEZONE_CONVERT.get_gmt_time(p_chapter_id,start_time_l1), LIFETRACK_TIMEZONE_CONVERT.get_gmt_time(p_chapter_id,start_time_r1)),
+  PHELOB_END  = NVL(LIFETRACK_TIMEZONE_CONVERT.get_gmt_time(p_chapter_id,end_time_l), LIFETRACK_TIMEZONE_CONVERT.get_gmt_time(p_chapter_id,end_time_r))
+ where transaction_id=v_recd.transaction_id;
+
+  COMMIT;
+EXCEPTION
+ WHEN appl_excp THEN
+       COMMIT; --THis commit is to commit the log file
+  WHEN OTHERS THEN
+      ROLLBACK;
+      LOG_ERROR(v_recd.transaction_id,'ERR','ER',p_msg);
+	  commit; --THis commit is to commit the log file
+END process_vista_donation;
+
+/*
+   connect util/util@tdon3
+   drop public synonym vis_donation;
+   drop public synonym vis_donor;
+   create public synonym vis_donor for vista.vis_donor;
+   create public synonym vis_donation for vista.vis_donation;
+   grant select, insert, update, delete on vis_donor to lt_donor, ops$donsys;
+   grant select, insert, update, delete on vis_donation to lt_donor, ops$donsys;
+
+   connect ops$donsys/donsys@tdon3
+   start u:\data_architecture\idp\lt_idp_feed.sql
+   select lt_idp_feed.build_vista_donors('donor_DN0000982.DNR','WAD', null, 'ASTERISK') from dual;
+   execute lt_idp_feed.load_vista_donation('vista_FC80125.PRO', 'ASTERISK');
+*/
+
+END lt_idp_feed;
+/
+
+--Create or replace Public Synonym lt_idp_feed for lt_idp_feed;
+
+--Grant execute on lt_idp_feed to public;
+

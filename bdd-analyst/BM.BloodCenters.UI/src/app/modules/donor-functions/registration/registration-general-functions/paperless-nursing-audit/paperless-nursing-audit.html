@@ -1,0 +1,308 @@
+<div class="layout-wrapper">
+  <main class="paperless-nursing-audit" role="main" aria-label="Paperless Nursing Audit">
+
+    <app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+    <!-- Filter Bar -->
+    <div class="paperless-nursing-audit__filter-bar" [formGroup]="filterForm">
+      <div class="paperless-nursing-audit__filter-fields">
+
+        <mat-form-field appearance="fill" class="filter-field filter-field--option">
+          <mat-label>Option <span class="required-marker"></span></mat-label>
+          <mat-select formControlName="idType" aria-label="Audit option type" required>
+            @for (option of auditOptions; track option.description) {
+              <mat-option [value]="option.description">{{ option.description }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="filter-field filter-field--date">
+          <mat-label>From Collection Date <span class="required-marker"></span></mat-label>
+          <input matInput [matDatepicker]="fromPicker" formControlName="fromDate"
+                 aria-label="From Collection Date" required #fromDateInput
+                 [max]="maxDate"
+                 [errorStateMatcher]="fromDateErrorMatcher"
+                 (keydown.enter)="$event.target.blur()">
+          <mat-datepicker-toggle matIconSuffix [for]="fromPicker"
+                                aria-label="Open from date calendar"></mat-datepicker-toggle>
+          <mat-datepicker #fromPicker></mat-datepicker>
+          <mat-error *ngIf="getFromDateError()">{{ getFromDateError() }}</mat-error>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="filter-field filter-field--date">
+          <mat-label>To Collection Date <span class="required-marker"></span></mat-label>
+          <input matInput [matDatepicker]="toPicker" formControlName="toDate"
+                 aria-label="To Collection Date" required #toDateInput
+                 [max]="maxDate"
+                 [errorStateMatcher]="toDateErrorMatcher"
+                 (keydown.enter)="$event.target.blur()">
+          <mat-datepicker-toggle matIconSuffix [for]="toPicker"
+                                aria-label="Open to date calendar"></mat-datepicker-toggle>
+          <mat-datepicker #toPicker></mat-datepicker>
+          <mat-error *ngIf="getToDateError()">{{ getToDateError() }}</mat-error>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="filter-field filter-field--drive-id">
+          <mat-label>Drive ID</mat-label>
+          <mat-select formControlName="driveId" aria-label="Drive ID">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="driveIdSearchControl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="">
+              </ngx-mat-select-search>
+            </mat-option>
+            <mat-option value="">All</mat-option>
+            @for (id of filteredDriveIdOptions; track id) {
+              <mat-option [value]="id">{{ id }}</mat-option>
+            }
+            @if (driveIdOptions.length > 0 && filteredDriveIdOptions.length === 0) {
+              <mat-option disabled>No matching drive IDs</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <button mat-stroked-button class="retrieve-btn"
+                [disabled]="isRetrieveDisabled"
+                (click)="onRetrieve()"
+                aria-label="Retrieve audit records">
+          RETRIEVE
+        </button>
+      </div>
+
+      <button mat-raised-button color="primary" class="commit-btn"
+              [disabled]="isCommitDisabled"
+              (click)="onCommit()"
+              aria-label="Commit audit">
+        COMMIT
+      </button>
+    </div>
+
+    <!-- Data Card -->
+    @if (hasData) {
+      <div class="paperless-nursing-audit__data-card">
+
+        <!-- Toolbar + Filter Panel Wrapper -->
+        <div class="paperless-nursing-audit__toolbar-wrapper">
+          <div class="paperless-nursing-audit__toolbar">
+            <div class="paperless-nursing-audit__controls-left">
+              <button mat-button class="filter-toggle-btn" (click)="onToggleFilterPanel()"
+                      aria-label="Toggle filter panel">
+                <mat-icon aria-hidden="true">filter_list</mat-icon>
+                FILTER
+              </button>
+
+              @if (filterChips.length > 0) {
+                <app-filter-chips
+                  [chips]="filterChips"
+                  (removeChip)="onRemoveChip($event)"
+                  (clearAll)="onClearAllChips()">
+                </app-filter-chips>
+              }
+            </div>
+
+            <div class="paperless-nursing-audit__toolbar-right">
+              <app-search-bar
+                [config]="searchConfig"
+                (search)="onSearch($event)">
+              </app-search-bar>
+            </div>
+          </div>
+
+          <!-- Filter Panel (overlay) -->
+          @if (filterPanelOpen) {
+            <div class="paperless-nursing-audit__filter-panel-container">
+              <app-filter-panel-base
+                title="Filters"
+                [width]="280"
+                (apply)="onFilterApply()"
+                (clear)="onFilterClear()"
+                (close)="onFilterClose()">
+                <mat-form-field appearance="fill" class="filter-panel-field" subscriptSizing="dynamic">
+                  <mat-label>Status</mat-label>
+                  <mat-select [(value)]="filterStatusValue" aria-label="Filter by status">
+                    <mat-option [value]="'OK'">OK</mat-option>
+                    <mat-option [value]="'HOLD'">HOLD</mat-option>
+                  </mat-select>
+                </mat-form-field>
+              </app-filter-panel-base>
+            </div>
+          }
+        </div>
+
+        <!-- Table -->
+        <div class="paperless-nursing-audit__table-container">
+          <div class="table-responsive" [class.table-loading]="isLoading">
+
+            @if (isLoading) {
+              <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+                <app-loading-spinner [size]="'medium'" [message]="'Loading audit records...'" [color]="'#228189'"></app-loading-spinner>
+              </div>
+            }
+
+            @if (!isLoading) {
+              <table mat-table [dataSource]="dataSource" matSort (matSortChange)="onSortChange($event)"
+                     class="audit-table" aria-label="Nursing audit records">
+
+                <!-- Include/Exclude Column -->
+                <ng-container matColumnDef="includeExclude">
+                  <th mat-header-cell *matHeaderCellDef class="col-include-exclude">
+                    <span>Include/Exclude</span>
+                    <button mat-icon-button class="info-icon-btn" (click)="onOpenInfoDialog()"
+                            aria-label="Include/Exclude information" matTooltip="Include/Exclude Info">
+                      <mat-icon aria-hidden="true" class="info-icon">info_outline</mat-icon>
+                    </button>
+                  </th>
+                  <td mat-cell *matCellDef="let record" class="col-include-exclude">
+                    <div class="include-exclude-cell">
+                      @if (record.status === 'HOLD') {
+                        <mat-icon aria-hidden="true" class="row-info-icon">info_outline</mat-icon>
+                      } @else {
+                        <span class="row-info-icon-spacer"></span>
+                      }
+                      <mat-form-field appearance="fill" class="include-exclude-select" subscriptSizing="dynamic">
+                        <mat-select [value]="getIncludeExcludeValue(record)"
+                                    (selectionChange)="onIncludeExcludeChange(record, $event.value)"
+                                    [attr.aria-label]="'Include or exclude record ' + (record.displayIdValue || '')"
+                                    panelWidth="auto">
+                          <mat-option value="exclude">Exclude from Commit</mat-option>
+                          <mat-option value="include">Include in Commit</mat-option>
+                        </mat-select>
+                      </mat-form-field>
+                    </div>
+                  </td>
+                </ng-container>
+
+                <!-- Unit ID / Deferral ID Column -->
+                <ng-container matColumnDef="unitId">
+                  <th mat-header-cell *matHeaderCellDef>{{ idColumnLabel }}</th>
+                  <td mat-cell *matCellDef="let record">{{ record.displayIdValue || record.idValue || '' }}</td>
+                </ng-container>
+
+                <!-- Collection Date Column -->
+                <ng-container matColumnDef="collectionDate">
+                  <th mat-header-cell *matHeaderCellDef>Collection Date</th>
+                  <td mat-cell *matCellDef="let record">{{ formatDate(record.collDate) }}</td>
+                </ng-container>
+
+                <!-- Donor ID Column -->
+                <ng-container matColumnDef="donorId">
+                  <th mat-header-cell *matHeaderCellDef>Donor ID</th>
+                  <td mat-cell *matCellDef="let record">{{ record.donorId || '' }}</td>
+                </ng-container>
+
+                <!-- Drive ID Column -->
+                <ng-container matColumnDef="driveId">
+                  <th mat-header-cell *matHeaderCellDef>Drive ID</th>
+                  <td mat-cell *matCellDef="let record">{{ record.driveId || '' }}</td>
+                </ng-container>
+
+                <!-- Status Column (Sortable) -->
+                <ng-container matColumnDef="status">
+                  <th mat-header-cell *matHeaderCellDef mat-sort-header>Status</th>
+                  <td mat-cell *matCellDef="let record">{{ record.status || '' }}</td>
+                </ng-container>
+
+                <!-- Reason Column -->
+                <ng-container matColumnDef="reason">
+                  <th mat-header-cell *matHeaderCellDef>Reason</th>
+                  <td mat-cell *matCellDef="let record" class="col-reason">
+                    <span class="reason-text" [matTooltip]="record.reason || ''"
+                          matTooltipPosition="above">
+                      {{ record.reason || '' }}
+                    </span>
+                  </td>
+                </ng-container>
+
+                <!-- Actions Column -->
+                <ng-container matColumnDef="actions">
+                  <th mat-header-cell *matHeaderCellDef class="col-actions"></th>
+                  <td mat-cell *matCellDef="let record" class="col-actions">
+                    <button mat-icon-button (click)="onViewDetails(record)"
+                            [attr.aria-label]="'View details for ' + (record.displayIdValue || '')"
+                            matTooltip="View Details">
+                      <mat-icon aria-hidden="true">visibility</mat-icon>
+                    </button>
+                    <button mat-icon-button
+                            (click)="onAuditDetail(record)"
+                            [attr.aria-label]="'Audit record ' + (record.displayIdValue || '')"
+                            [matTooltip]="filterForm.get('idType')?.value?.toUpperCase() === 'DEFERRAL' ? 'Update Deferral' : 'Update Donation'">
+                      <svg class="audit-detail-icon" width="22" height="22" viewBox="0 0 30 30" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <path d="M2.93359 20.4004V27.0664H9.59961V29.5996H3.33301C2.52341 29.5995 1.84 29.3166 1.26172 28.7383C0.683434 28.16 0.400466 27.4766 0.400391 26.667V20.4004H2.93359ZM29.5996 20.4004V26.667C29.5995 27.4766 29.3166 28.16 28.7383 28.7383C28.16 29.3166 27.4766 29.5995 26.667 29.5996H20.4004V27.0664H27.0664V20.4004H29.5996ZM13.75 7.06641C15.6178 7.06641 17.1895 7.71292 18.4883 9.01172C19.7871 10.3105 20.4336 11.8822 20.4336 13.75C20.4336 14.3506 20.3481 14.9456 20.1777 15.5352C20.0084 16.1212 19.7548 16.6754 19.415 17.1982L19.2383 17.4707L23.5977 21.8301L21.7939 23.6035L17.6992 19.5088L17.4707 19.2793L17.1982 19.4561C16.6773 19.7947 16.1261 20.0418 15.543 20.1973C14.9512 20.3551 14.3537 20.4336 13.75 20.4336C11.8822 20.4336 10.3105 19.7871 9.01172 18.4883C7.71292 17.1895 7.06641 15.6178 7.06641 13.75C7.06641 11.8822 7.71292 10.3105 9.01172 9.01172C10.3105 7.71292 11.8822 7.06641 13.75 7.06641ZM13.75 9.59961C12.5923 9.59961 11.6008 10.0008 10.8008 10.8008C10.0008 11.6008 9.59961 12.5923 9.59961 13.75C9.59961 14.9077 10.0008 15.8992 10.8008 16.6992C11.6008 17.4992 12.5923 17.9004 13.75 17.9004C14.9077 17.9004 15.8992 17.4992 16.6992 16.6992C17.4992 15.8992 17.9004 14.9077 17.9004 13.75C17.9004 12.5923 17.4992 11.6008 16.6992 10.8008C15.8992 10.0008 14.9077 9.59961 13.75 9.59961ZM26.667 0.400391C27.4766 0.400466 28.16 0.683434 28.7383 1.26172C29.3166 1.84 29.5995 2.52341 29.5996 3.33301V9.59961H27.0664V2.93359H20.4004V0.400391H26.667ZM3.33301 0.400391H9.59961V2.93359H2.93359V9.59961H0.400391V3.33301C0.400467 2.52341 0.683435 1.84 1.26172 1.26172C1.84 0.683435 2.52341 0.400467 3.33301 0.400391Z" fill="#3D5463" stroke="white" stroke-width="0.8"/>
+                      </svg>
+                    </button>
+                  </td>
+                </ng-container>
+
+                <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+                <tr mat-row *matRowDef="let row; columns: displayedColumns;"
+                    [class.row-hold]="row.status === 'HOLD'"></tr>
+                <tr class="mat-row" *matNoDataRow>
+                  <td class="mat-cell no-data-cell" [attr.colspan]="displayedColumns.length">
+                    <div class="no-data-content">
+                      <mat-icon class="no-data-icon" aria-hidden="true">search</mat-icon>
+                      <p class="no-data-text">No Results Found</p>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+
+            }
+          </div>
+        </div>
+
+        <!-- Pagination -->
+        <div class="paperless-nursing-audit__pagination">
+          <mat-paginator
+            [length]="totalFilteredRecords"
+            [pageSize]="pageSize"
+            [pageIndex]="pageIndex"
+            [pageSizeOptions]="pageSizeOptions"
+            (page)="onPageChange($event)"
+            showFirstLastButtons
+            aria-label="Audit records pagination">
+          </mat-paginator>
+        </div>
+
+        <!-- Summary Footer -->
+        <div class="paperless-nursing-audit__summary" role="region" aria-label="Audit summary">
+          <div class="summary-item">
+            <span class="summary-label">Total for Commit</span>
+            <span class="summary-value">{{ summary.totalCount }}</span>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">Total HOLD Status</span>
+            <span class="summary-value summary-value--hold">{{ summary.holdCount }}</span>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">Total OK Status</span>
+            <span class="summary-value summary-value--ok">{{ summary.okCount }}</span>
+          </div>
+        </div>
+      </div>
+    }
+
+    <!-- First Load Spinner -->
+    @if (isLoading && !hasData) {
+      <div class="paperless-nursing-audit__empty-state-card">
+        <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+          <app-loading-spinner [size]="'medium'" [message]="'Loading audit records...'" [color]="'#228189'"></app-loading-spinner>
+        </div>
+      </div>
+    }
+
+    <!-- Empty State -->
+    @if (!hasData && !isLoading) {
+      <div class="paperless-nursing-audit__empty-state-card">
+        <div class="empty-state-content" role="status">
+          <div class="empty-state-icon-wrapper">
+            <mat-icon aria-hidden="true">search</mat-icon>
+          </div>
+          <p class="empty-state-title">No Results to Display</p>
+          <p class="empty-state-subtitle">Please enter search criteria to view Results</p>
+        </div>
+      </div>
+    }
+
+  </main>
+</div>

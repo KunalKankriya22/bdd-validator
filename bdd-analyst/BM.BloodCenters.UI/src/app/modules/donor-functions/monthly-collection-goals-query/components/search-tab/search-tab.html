@@ -1,0 +1,199 @@
+<div class="search-tab-container">
+  <!-- Filter Section -->
+  <div class="filter-section" role="search" aria-label="Goal search filters">
+    <form [formGroup]="filterForm" class="filter-form">
+      <!-- Goal Type -->
+      <mat-form-field appearance="fill" class="filter-field">
+        <mat-label>Goal Type</mat-label>
+        <mat-select formControlName="goalType"
+                    aria-label="Select goal type"
+                    id="goal-type-select">
+          @for (type of goalTypes(); track type.code) {
+            <mat-option [value]="type.code">{{ type.code }}</mat-option>
+          }
+        </mat-select>
+        @if (filterForm.get('goalType')?.hasError('required') && filterForm.get('goalType')?.touched) {
+          <mat-error>Goal Type is required</mat-error>
+        }
+      </mat-form-field>
+
+      <!-- Goals For (Custodian) -->
+      <mat-form-field appearance="fill" class="filter-field goals-for-field">
+        <mat-label>Goals For</mat-label>
+        <mat-select formControlName="custodianId"
+                    aria-label="Select goals for"
+                    id="goals-for-select"
+                    [disabled]="isCustodiansDisabled()">
+          @for (custodian of custodians(); track custodian.custodianId) {
+            <mat-option [value]="custodian.custodianId">{{ custodian.custodianName }}</mat-option>
+          }
+        </mat-select>
+        @if (isLoadingCustodians()) {
+          <mat-hint>Loading...</mat-hint>
+        }
+        @if (filterForm.get('custodianId')?.hasError('noCustodians')) {
+          <mat-error>No Goals For available. Please select another Goal Type</mat-error>
+        }
+        @if (filterForm.get('custodianId')?.hasError('required') && filterForm.get('custodianId')?.touched && !filterForm.get('custodianId')?.hasError('noCustodians')) {
+          <mat-error>Goals For is required</mat-error>
+        }
+      </mat-form-field>
+
+      <!-- Year -->
+      <mat-form-field appearance="fill" class="filter-field year-field">
+        <mat-label>Year</mat-label>
+        <mat-select formControlName="year"
+                    aria-label="Select year"
+                    id="year-select">
+          @for (year of yearOptions; track year) {
+            <mat-option [value]="year">{{ year }}</mat-option>
+          }
+        </mat-select>
+        @if (filterForm.get('year')?.hasError('required') && filterForm.get('year')?.touched) {
+          <mat-error>Year is required</mat-error>
+        }
+      </mat-form-field>
+
+      <!-- Retrieve Button -->
+      <button mat-stroked-button
+              type="button"
+              class="retrieve-button"
+              (click)="retrieve()"
+              [disabled]="isLoading()"
+              aria-label="Retrieve goals">
+        RETRIEVE
+      </button>
+    </form>
+  </div>
+
+  <!-- Results Section - Master-Detail Layout -->
+  @if (isLoading()) {
+    <div class="loading-container" role="status" aria-live="polite">
+      <mat-spinner diameter="40"></mat-spinner>
+      <span class="loading-text">Loading goals...</span>
+    </div>
+  } @else if (hasSearched() && hasResults()) {
+    <div class="results-container">
+      <!-- Left Panel - Month List -->
+      <div class="left-panel" role="region" aria-label="Monthly summary">
+        <!-- Header -->
+        <div class="panel-header">
+          <span class="custodian-name">{{ custodianName() }}</span>
+          <span class="custodian-info">{{ goalTypeDescription() }} | {{ selectedYear() }}</span>
+        </div>
+
+        <!-- Month List Table -->
+        <div class="month-list-container">
+          <table class="month-table" role="grid" aria-label="Monthly goal totals">
+            <thead>
+              <tr>
+                <th scope="col" class="month-header">Month</th>
+                <th scope="col" class="total-header">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (month of monthlySummary(); track month.month) {
+                <tr class="month-row"
+                    [class.selected]="isMonthSelected(month)"
+                    [class.has-data]="month.goalCount > 0"
+                    (click)="selectMonth(month)"
+                    (keydown.enter)="selectMonth(month)"
+                    (keydown.space)="selectMonth(month); $event.preventDefault()"
+                    [tabindex]="0"
+                    role="row"
+                    [attr.aria-selected]="isMonthSelected(month)"
+                    [attr.aria-label]="getMonthAriaLabel(month)">
+                  <td class="month-name">{{ month.month }}</td>
+                  <td class="month-total">{{ formatTotal(month.goalCount) }}</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Right Panel - Month Details -->
+      <div class="right-panel" role="region" aria-label="Month details">
+        @if (selectedMonth()) {
+          <!-- Month Name Header -->
+          <div class="detail-header">
+            <h3 class="month-title">{{ selectedMonthName() }}</h3>
+            <!-- Search Bar -->
+            <div class="search-bar">
+              <mat-icon class="search-icon">search</mat-icon>
+              <input type="text"
+                     class="search-input"
+                     placeholder="Search by Donation Type or Procedure Code"
+                     [value]="searchText()"
+                     (input)="onSearchDetails($event)"
+                     aria-label="Search goal details">
+            </div>
+          </div>
+
+          <!-- Details Table -->
+          @if (isLoadingDetails()) {
+            <div class="loading-details" role="status">
+              <mat-spinner diameter="30"></mat-spinner>
+              <span>Loading details...</span>
+            </div>
+          } @else {
+            <div class="detail-table-container">
+              <table class="detail-table" role="grid" aria-label="Goal details table">
+                <thead>
+                  <tr>
+                    <th scope="col">Donation Type</th>
+                    <th scope="col"
+                        class="sortable"
+                        (click)="toggleSort('donationTypeDescription')"
+                        (keydown.enter)="toggleSort('donationTypeDescription')"
+                        (keydown.space)="toggleSort('donationTypeDescription'); $event.preventDefault()"
+                        [tabindex]="0"
+                        [attr.aria-sort]="sortColumn() === 'donationTypeDescription' ? (sortDirection() === 'asc' ? 'ascending' : sortDirection() === 'desc' ? 'descending' : 'none') : 'none'"
+                        [attr.aria-label]="getSortAriaLabel('donationTypeDescription')">
+                      <div class="header-content">
+                        <span>Donation Type Description</span>
+                        <mat-icon class="sort-icon">{{ getSortIcon('donationTypeDescription') }}</mat-icon>
+                      </div>
+                    </th>
+                    <th scope="col">Procedure Code</th>
+                    <th scope="col">Procedure Code Description</th>
+                    <th scope="col">ABO Type</th>
+                    <th scope="col">ABO Type Description</th>
+                    <th scope="col">Goal Count</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (row of sortedDetails(); track row.donationType + row.procedureCode + row.bloodType) {
+                    <tr class="data-row">
+                      <td>{{ row.donationType }}</td>
+                      <td>{{ row.donationTypeDescription }}</td>
+                      <td>{{ row.procedureCode }}</td>
+                      <td>{{ row.procedureCodeDescription }}</td>
+                      <td>{{ row.bloodType }}</td>
+                      <td>{{ row.bloodTypeDescription }}</td>
+                      <td>{{ row.goalCount }}</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+
+              @if (filteredDetails().length === 0) {
+                <div class="empty-state" role="status">
+                  <span>No goal details found for this month.</span>
+                </div>
+              }
+            </div>
+          }
+        } @else {
+          <div class="no-selection-state">
+            <span>Select a month from the left panel to view details.</span>
+          </div>
+        }
+      </div>
+    </div>
+  } @else if (hasSearched() && !hasResults()) {
+    <div class="empty-state-container" role="status">
+      <span>No goals found for the selected criteria.</span>
+    </div>
+  }
+</div>

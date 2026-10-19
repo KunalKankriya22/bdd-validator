@@ -1,0 +1,2032 @@
+CREATE OR REPLACE PACKAGE don_enlist IS
+/*
+** this is the donor enlistment package. most of the functionality
+** required is stored in this package and i have tried to modularize
+** the code as much as possible, but then this is going to take some time.
+**
+** Ver   Date   By    Comments
+** -----------------------------------------------------------------------
+** 1.0  081297  RAJ  Initial version
+** 2.0  041511  Hus  replace user by lt_sesseion_user.get_userid
+** 3.0  020712  Edwin fixing the chapter issue.
+** 4.0  030512 Edwin -fixing the NEXT_LIST_ID function to include the timezone
+*/
+
+   -- this procedure will initialize some variables, PLSQL table etc to start
+   -- working.
+   PROCEDURE init_enlist (p_chapter_id varchar2) ;
+
+   -- use this procedure to interrupt the list
+   procedure InterruptList(p_list_id VARCHAR2);
+
+   procedure RUN_NEXT_LIST( p_status out varchar2);
+
+   procedure add_log_entry(p_log_type varchar2,
+                           p_log_text varchar2);
+   procedure randomize_list( p_list_id varchar2,
+                            p_max_donors number,
+                            p_total_donors out number);
+
+   PROCEDURE check_list_eligibility (szListID    IN  VARCHAR2,  -- List id
+                                     szSource    IN  VARCHAR2,
+                                     bIncTemp    IN  BOOLEAN,   -- SPOOL/DONLIST
+                                     nAllDonors  OUT NUMBER,
+                                     nEligCount  OUT NUMBER);
+
+   PROCEDURE check_list_eligibility (szListID    IN  VARCHAR2,  -- List id
+                                     szSource    IN  VARCHAR2,  -- SPOOL/DONLIST
+                                     bIncTemp    IN  BOOLEAN,
+                                     szProcCode  IN  VARCHAR2,  -- proc code
+                                     szDonType   IN  VARCHAR2,  -- don type
+                                     nAllDonors  OUT NUMBER,
+                                     nEligCount  OUT NUMBER);
+
+   PROCEDURE check_list_eligibility (szListID    IN  VARCHAR2,  -- List id
+                                     szSource    IN  VARCHAR2,  -- SPOOL/DONLIST
+                                     bIncTemp    IN  BOOLEAN,
+                                     szProcCode  IN  VARCHAR2,  -- proc code
+                                     szDonType   IN  VARCHAR2,  -- don type
+                                     szCollDate  IN  DATE,      -- target date
+                                     nAllDonors  OUT NUMBER,
+                                     nEligCount  OUT NUMBER);
+
+END DON_ENLIST;
+/
+
+
+CREATE OR REPLACE PACKAGE BODY               don_enlist IS
+
+TYPE donor_rec     is  RECORD(list_id    varchar2(10),
+                              donor_id   varchar2(10),
+						      bSelection Boolean);
+
+TYPE randomize_rec is RECORD (alpha_id     varchar2(2),
+                              weight       number,
+							  bStatus      Boolean,
+							  donors_reqd  number,
+							  donors_avail nuMber);
+
+-- this table will hold donors for randomization
+TYPE DONOR_TABLE_TYPE is TABLE of donor_rec index by BINARY_INTEGER;
+DONOR_TABLE  DONOR_TABLE_TYPE;
+-- this table will hold randomization information
+TYPE RANDOM_TABLE_TYPE is TABLE of randomize_rec index by BINARY_INTEGER;
+RANDOM_TABLE  RANDOM_TABLE_TYPE;
+-- randomization information
+bDebugMessages   Boolean := TRUE;
+Rand_num    number;
+date_seed date;
+logfile UTL_FILE.FILE_TYPE;
+filename varchar2(20);
+logseq number := 0;
+nActualCount   number := 0;
+bListComplete  Boolean := TRUE;
+m    constant number:=100000000;
+m1   constant number:=10000;
+nGrandtotal   number :=0;
+ENLISTMENT_LOCK    CONSTANT number := 650796573;
+szChapterID         varchar2(4) := null;
+szStandardCriteria  varchar2(10);
+szDefCollectionDate DATE  := SYSDATE-1;
+-- default collection date
+szDefProcedureCode  VARCHAR2(5) := NULL;
+-- default procedure code
+szDefDonationType   VARCHAR2(5) := NULL;
+-- Default donation type
+nAllDonorCount      NUMBER := 0;
+-- total donors to process
+nEligDonCount       NUMBER := 0;
+-- elig donors count
+bDefValuesSet       BOOLEAN:= FALSE;
+-- this is set to true then
+-- default values are set
+bNoTempDefs         BOOLEAN := TRUE;
+-- set this to FALSE to
+-- include temp deferrals
+
+TYPE criterion_rec is       RECORD(list_id        varchar2(10),
+                              criterion_name varchar2(32),
+			   criterion_op   varchar2(10),
+			   criterion_datatype varchar2(1),
+			   v_table_name       varchar2(32),
+			   v_column_name      varchar2(32),
+			   where_clause       varchar2(800),
+         		   pass_seq           number,
+			   table_join         varchar2(1),
+			   value_string       varchar2(240),
+			   execution_status   boolean);
+
+-- PLSQL Tables to be used
+-- this table will hold criteria information
+
+TYPE CRITERIA_TABLE_TYPE is TABLE of criterion_rec index by BINARY_INTEGER;
+     CRITERIA_TABLE  CRITERIA_TABLE_TYPE;
+-- criteria information table
+-- This table acts like donor spool
+-- Package constants
+cSeperator        CONSTANT char(1):= '^';
+-- delimiter FOR
+-- seperating tokens
+--  in a string
+SERVER_ENTRY      CONSTANT varchar2(10):= 'SERVER';
+-- server log messages
+USER_ENTRY        CONSTANT varchar2(10):= 'USER';
+-- user log messages
+SQL_ENTRY         CONSTANT varchar2(10):= 'SQL';
+-- for storing
+-- generated SQLs
+PROC_STAT_ENTRY   CONSTANT varchar2(10):= 'STAT';
+-- procedures call seq
+cCRITERIA_TABLE   CONSTANT varchar2(20):= 'CRITERIA_TABLE';
+szCurrentRunningList  varchar2(10) := null;
+-- list id of currently
+-- running list.
+bInterruptList   Boolean := FALSE;
+-- interrupt flag
+nIndex           number := 0;
+nGlobalRowCount  number := 0;
+szEnlistmentType varchar2(10);
+
+FUNCTION in_quotes(p_in_str varchar2) return varchar2 is
+-- will return a given string in quotes
+BEGIN
+      return '''' || p_in_str || '''';
+END;
+
+PROCEDURE add_log_entry(p_log_type varchar2,p_log_text varchar2) is
+-- this procedure will add new entry into the log table,
+-- string needs to be passed
+BEGIN
+     UTL_FILE.putf(logfile,'%s : %s\n',p_log_type, p_log_text);
+	 UTL_FILE.fflush(logfile);
+	 if szCurrentRunningList is not null then
+	 logseq:=logseq+1;
+	 --     if p_log_type = USER_ENTRY then
+	 insert into  donor_list_log   ( list_id, CHAPTER_ID, LOG_TYPE,
+                                         LOG_DATE, LOG_TEXT, LOG_SEQ)
+	        values (szCurrentRunningList, nvl(szChapterID,'WAD'),
+                        p_log_type, sysdate, p_log_text, logseq);
+			commit;
+			end if;
+	 --    end if;
+END;
+
+
+PROCEDURE AbortList(p_list_id varchar2) is
+BEGIN
+ ADD_LOG_ENTRY (USER_ENTRY, 'Aborting list (SYSTEM ERROR)');
+ begin
+  update donor_list_header set list_status='ABORTED' where list_id=p_list_id;
+   --and chapter_id = szChapterID;
+  commit;
+  --    set transaction use rollback segment big_rbs;
+  delete from donor_spool where list_id=p_list_id;
+  commit;
+  --    set transaction use rollback segment big_rbs;
+  delete from donor_lists where list_id=p_list_id;
+  commit;
+  raise_application_error(to_char(sqlcode),'List Aborted (SYSTEM ERROR)');
+  exception when others then
+  add_log_entry(SERVER_ENTRY,'Error in Aborting');
+ end;
+END;
+
+FUNCTION IsListCancelled (p_list_id  varchar2) return Boolean is
+-- this function will return true IF there the list is cancelled by user
+p_list_status varchar2(10);
+BEGIN
+   ADD_LOG_ENTRY (PROC_STAT_ENTRY, 'IsListCancelled');
+   begin
+    select list_status into p_list_status  from donor_list_header  where
+     list_id=p_list_id; -- and chapter_id = szChapterID;
+    exception when others then
+    ADD_LOG_ENTRY (PROC_STAT_ENTRY, 'IsListCancelled ERROR');
+	abortlist(p_list_id);
+  end;
+ IF p_list_status = 'CANCELLED'
+   THEN
+       ADD_LOG_ENTRY (USER_ENTRY, 'List cancelled by user');
+	   return TRUE;
+   ELSE
+       return FALSE;
+ END IF;
+END;
+
+PROCEDURE init_pkg_vars is
+-- initializes variables used in the package
+BEGIN
+     ADD_LOG_ENTRY ( PROC_STAT_ENTRY, 'init_pkg_vars');
+	 nIndex := 0;
+END;
+
+PROCEDURE clean_spool_table (p_list_id varchar2, p_seq_no number)is
+-- this procedure will dump plsql table to the actual database table.
+szListID donor_spool.list_id%type;
+nCursorHandle   Integer;
+nReturnValue    integer;
+szSQLInsert     varchar2(200);
+BEGIN
+ ADD_LOG_ENTRY (SERVER_ENTRY,'Delete: Donor Spool cleanup started.');
+ commit;
+ --    set transaction use rollback segment big_rbs;
+ if p_seq_no = -1 then
+ -- delete all rows
+    delete from donor_spool where list_id=p_list_id;
+ else
+ -- delete donors for specified pass only
+   delete from donor_spool where list_id=p_list_id and pass_seq=p_seq_no;
+ end if;
+ commit;
+ if IsListCancelled(p_list_id)
+  then
+      commit;
+	  raise_application_error(-20013,'User cancelled-1');
+ end if;
+ ADD_LOG_ENTRY (SERVER_ENTRY, 'Delete: Donor Spool cleaned ' ||'for pass ' || to_char(p_seq_no) || '.');
+ Exception when others THEN
+ ADD_LOG_ENTRY (SERVER_ENTRY,'Delete: Donor Spool cleanup abruptly halted.');
+ ADD_LOG_ENTRY(SERVER_ENTRY,to_char(sqlcode)||' '||sqlerrm);
+END;
+
+PROCEDURE pass_seq_details (p_list_id in varchar2,p_first_pass out number,p_last_pass  out number) is
+-- this procedure will return first execution pass number and
+-- last execution pass number FOR current list. This is important
+ nFirstPass number := 0;
+ nLastPass  number := 0;
+BEGIN
+ ADD_LOG_ENTRY (PROC_STAT_ENTRY, 'Pass_seq_details for #'|| p_list_id);
+ begin
+    select min(vco.pass_seq), max(vco.pass_seq)  into nFirstPass, nLastPass
+	from   donor_list_criteria dlc,valid_criterion_ops vco
+	where dlc.list_id in (p_list_id,szStandardCriteria)
+	  and dlc.criterion_name != 'ELIGIBLE DATE'
+	  and vco.criterion_name = dlc.criterion_name
+	  and vco.criterion_op   = dlc.operator_value;
+   p_first_pass := nFirstPass;
+   p_last_pass  := nLastPass;
+   ADD_LOG_ENTRY (SERVER_ENTRY,'List SQL Passes: First Pass <' ||to_char(nFirstPass)
+                  || '> and Last Pass <' ||to_char(nLastPass) || '>');
+   exception when others then
+   ADD_LOG_ENTRY (PROC_STAT_ENTRY, 'Pass Seq Details: '|| p_list_id);
+ end;
+END;
+
+FUNCTION check_pass_seq (p_list_id  varchar2,p_pass_seq number) return Boolean is
+-- this function will return true IF there exists at-least one criterion
+-- FOR specIFied pass number
+nCriterionCount     number  := 0;
+BEGIN
+    ADD_LOG_ENTRY (PROC_STAT_ENTRY, 'check_pass_seq');
+	begin
+	     select count(dlc.criterion_name) into nCriterionCount
+		  from donor_list_criteria dlc,
+		       valid_criterion_ops vco
+		  where dlc.list_id in ( p_list_id,szStandardCriteria)
+		    and dlc.criterion_name != 'ELIGIBLE DATE'
+			and dlc.criterion_name = vco.criterion_name
+			and dlc.operator_value = vco.criterion_op
+			and vco.pass_seq       = p_pass_seq;
+           exception when no_data_found then
+		    nCriterionCount := 0;
+	end;
+	ADD_LOG_ENTRY (SERVER_ENTRY,'Pass <' || to_char(p_pass_seq) ||'> Criterion Count: ' || to_char(nCriterionCount));
+	IF nCriterionCount > 0 THEN
+	   return TRUE;
+     ELSE
+	   return FALSE;
+    END IF;
+END;
+
+PROCEDURE load_search_criteria (p_list_id varchar2) is
+-- this procedure will load search criteria FOR given list id into
+-- plsql table, the information retrieved is sorted by sort sequence and
+-- requirement of a table join
+cursor cur_crit_info is select
+         dlc.list_id,dlc.criterion_name,dlc.operator_value,
+         dlc.criterion_value,vsc.criterion_datatype,
+	 vsc.v_table_name,vsc.v_column_name,vco.where_clause,
+	 vco.pass_seq,vco.table_join
+	 from donor_list_criteria dlc,
+	     valid_search_criterion vsc,
+	     valid_criterion_ops vco
+             where dlc.list_id in ( p_list_id,szStandardCriteria)
+				   and dlc.criterion_name != 'ELIGIBLE DATE'
+				   and vsc.criterion_name = dlc.criterion_name
+				   and vsc.enlistment_type = szenlistmentType
+				   and vco.criterion_name = dlc.criterion_name
+				   and vco.criterion_op   = dlc.operator_value
+				  order by vco.pass_seq;
+curr_rec  criterion_rec;
+nTableIndex  number := 0;
+BEGIN
+ADD_LOG_ENTRY (PROC_STAT_ENTRY, 'load_search_criteria');
+-- start with initializing the criteria table          CRITERIA_TABLE.DELETE;
+-- now open the cursor and start loading information into plsql table
+ADD_LOG_ENTRY (SERVER_ENTRY,'Load: Search criteria for list #' || p_list_id || ' in PLSQL table.');
+open cur_crit_info;
+-- we need a FOR LOOP to load information into plsql table
+LOOP
+   fetch cur_crit_info into curr_rec.list_id,
+                        curr_rec.criterion_name,
+			curr_rec.criterion_op,
+			curr_rec.value_string,
+			curr_rec.criterion_dataType,
+			curr_rec.V_Table_Name,
+			curr_rec.V_Column_Name,
+			curr_rec.Where_Clause,
+			curr_rec.Pass_Seq,
+			curr_rec.Table_Join;
+exit when cur_crit_info%NOTFOUND;
+nTableIndex := cur_crit_info%ROWCOUNT;
+--         curr_rec.list_id  := p_list_id;
+curr_rec.execution_status    := FALSE;
+CRITERIA_TABLE(nTableIndex) := curr_rec;
+END LOOP;
+-- close the cursor
+IF cur_crit_info%ISOPEN THEN
+   close cur_crit_info;
+END IF;
+ADD_LOG_ENTRY (SERVER_ENTRY, 'Load: Search criteria...' ||' Loaded ' || to_number(nTableIndex) || ' COMPLETE!');
+END;
+
+
+
+PROCEDURE decode_and_form_where_clause (p_list_id varchar2,
+                                        p_table_index number,
+										noopwhereclause out varchar2,
+										p_where_clause out varchar2)
+									is
+-- this procedure will accept the table index FOR criteria table and
+-- FORm where clause and return it using the out parameter
+curr_criteria_rec criterion_rec;
+nTableIndex   number := p_table_index;
+szWhereClause varchar2(3000) := null;
+standwhereclause   long := null;
+szToken       varchar2(20)  := null;
+szValue1      varchar2(20)  := null;
+szvalue2      varchar2(20)  := null;
+szvalue3      varchar2(20)  := null;
+tmpoper       varchar2(10)  := null;
+tmp_counter   number := 1;
+cursor op_value is select  crit_value_1  from list_criteria_values
+                    where  list_id =curr_criteria_rec.list_id
+		  ---and  chapter_id=szChapterId
+		  and  criterion_name=curr_criteria_rec.criterion_name
+		  and  operator_value = curr_criteria_rec.criterion_op;
+BEGIN
+ADD_LOG_ENTRY (PROC_STAT_ENTRY,'decode_and_form_where_clause');
+-- first we should know is which operator is being used
+-- THEN accordingly we need to parse and seperate the tokens
+-- and THEN FORm the RHS of the clause
+-- load inFORmtion in the record
+curr_criteria_rec  := CRITERIA_TABLE(nTABLEIndex);
+ADD_LOG_ENTRY (SERVER_ENTRY, 'Criteria: '||curr_criteria_rec.criterion_name ||
+                 ' Operator: ' || curr_criteria_rec.criterion_op ||
+		 ' Value String: '|| curr_criteria_rec.value_string);
+szWhereClause := null;
+IF curr_criteria_rec.criterion_op in ('EQ', 'NE', 'LT', 'GT', 'LE', 'GE') THEN
+-- these operator need a single value, so we use just the first token
+-- and discard rest
+ begin
+      select  crit_value_1 into szValue1 from list_criteria_values
+	   where  list_id=curr_criteria_rec.list_id
+	    --- and  chapter_id=szChapterId
+		 and  criterion_name=curr_criteria_rec.criterion_name
+		 and  operator_value = curr_criteria_rec.criterion_op;
+		 end;
+	IF curr_criteria_rec.criterion_datatype = 'V'
+	   THEN
+	       szWhereClause := in_quotes(szValue1) ;
+       ELSIF curr_criteria_rec.criterion_datatype = 'N'
+	   THEN
+	         szWhereClause := 'to_number(' ||in_quotes(szValue1) || ')';
+       ELSIF curr_criteria_rec.criterion_datatype = 'D' THEN
+--            szWhereClause := 'to_date(' ||
+--            in_quotes(szValue1) || ', '||
+--           in_quotes('MM-DD-YY') || ')';
+            szWhereClause := 'to_date(' || in_quotes(szValue1) || ', '|| in_quotes('MM-DD-RR') || ')';
+    END IF;
+ELSIF curr_criteria_rec.criterion_op = 'BETWEEN' THEN
+-- this operator needs two values, so we need two parameters
+-- and discard rest
+begin
+   select  crit_value_1, crit_value_2 into szValue1, szValue2 from list_criteria_values
+    where  list_id=curr_criteria_rec.list_id
+	 -- and  chapter_id=szChapterId
+	  and  criterion_name=curr_criteria_rec.criterion_name
+	  and  operator_value = curr_criteria_rec.criterion_op;
+end;
+IF curr_criteria_rec.criterion_datatype = 'V' THEN
+   szWhereClause := 'to_char(' || in_quotes(szValue1) || ') and ' ||
+                    'to_char(' || in_quotes(szValue2) || ')';
+ELSIF curr_criteria_rec.criterion_datatype = 'N'
+  THEN
+      szWhereClause := 'to_number(' || in_quotes(szValue1) || ') and ' ||
+	                   'to_number(' || in_quotes(szValue2) || ')';
+ELSIF curr_criteria_rec.criterion_datatype = 'D' THEN
+--  szWhereClause := 'to_date(' || in_quotes(szValue1) || ', ' ||
+-- in_quotes('MM-DD-YY') || ') and to_date(' ||
+-- in_quotes(szValue2) || ', ' ||
+-- in_quotes('MM-DD-YY') || ')';
+szWhereClause := 'to_date(' || in_quotes(szValue1) || ', ' ||
+                               in_quotes('MM-DD-RR') || ') and to_date(' ||
+							   in_quotes(szValue2) || ', ' ||
+							   in_quotes('MM-DD-RR') || ')';
+END IF;
+ELSIF curr_criteria_rec.criterion_op in ('ANY OF', 'NOT IN') THEN
+-- these operators are used IF multiple selections are used
+-- in which case we must retrieve all tokens and format the string
+szWhereClause := '(';
+open op_value;
+loop
+    fetch op_value into sztoken;
+	exit when op_value%NOTFOUND;
+	if szWhereClause = '(' then
+	   szWhereClause := szWhereClause || in_quotes(sztoken);
+	else
+	   szWhereClause := szWhereClause || ', ' || in_quotes(sztoken);
+   end if;
+end loop;
+close op_value;
+szWhereClause := szWhereClause || ')';
+ELSIF curr_criteria_rec.criterion_op = 'ALL OF' THEN
+-- these operators are used IF multiple selections are used
+-- in which case we must retrieve all tokens and format the string
+standWhereClause := replace( curr_criteria_rec.where_clause ,':CHAPTER', in_quotes(szChapterId));
+open op_value;
+loop
+     fetch op_value into sztoken;
+	 exit when op_value%NOTFOUND;
+	 if szWhereClause is not null
+	 then
+	    szWhereClause := szWhereClause|| ' AND ' ||replace(standwhereclause, ':NOOP_VAL', in_quotes(sztoken));
+     else
+	    szWhereClause := replace(standwhereclause,':NOOP_VAL', in_quotes(sztoken));
+     end if;
+end loop;
+close op_value;
+ELSIF curr_criteria_rec.criterion_op in ('COUNT LE','COUNT GT','COUNT EQ', 'COUNT LT', 'COUNT GE')
+THEN
+    begin
+	   select  crit_value_1, crit_value_2,crit_value_3 into szValue1,
+            szValue2, szValue3 from  list_criteria_values
+           where  list_id=curr_criteria_rec.list_id
+	    --and  chapter_id=szChapterId
+       	    and  criterion_name=curr_criteria_rec.criterion_name
+           and  operator_value = curr_criteria_rec.criterion_op;
+    end;
+SzWhereClause := replace( curr_criteria_rec.where_clause ,':CHAPTER', in_quotes(szChapterId));
+begin
+     szWhereClause := replace(sZWhereClause,':NUMCNT', szValue1);
+--   szWhereClause := replace(szWhereClause,
+--  ':FRDATE', 'to_date(' || in_quotes(szvalue2) || ', ' ||
+--   in_quotes('MM-DD-YY') || ')' );
+szWhereClause := replace(szWhereClause,':FRDATE', 'to_date(' || in_quotes(szvalue2)
+                                         || ', ' ||in_quotes('MM-DD-RR') || ')' );
+-- szWhereClause := replace(szWhereClause,
+-- ':TODATE', 'to_date(' || in_quotes(szvalue3) || ', ' ||
+--  in_quotes('MM-DD-YY') || ')') ;
+szWhereClause := replace(szWhereClause,':TODATE', 'to_date(' || in_quotes(szvalue3) || ', ' ||
+                                        in_quotes('MM-DD-RR') || ')') ;
+exception when others
+          then
+		  add_log_entry(USER_ENTRY, 'Insufficient values for COUNT');
+          abortlist(p_list_id);
+end;
+END IF;
+select decode(curr_criteria_rec.criterion_op,'EQ','=', 'NE','<>','LE',
+                                             '<=','GE', '>=', 'LT','<',
+					 'GT','>', 'ANY OF', 'IN',
+					 'ALL OF',null, 'COUNT GE',
+					  null, 'COUNT GT', null,
+				         'COUNT LE', null,
+					 'COUNT LT', null, 'COUNT EQ',
+											 null,curr_criteria_rec.criterion_op)
+into tmpoper from dual;
+noopwhereclause :=  szWhereClause;
+p_where_clause :=  tmpoper || ' ' || szWhereClause;
+END;
+
+
+PROCEDURE execute_current_query(p_list_id varchar2,p_pass_seq number, p_sql_stmt varchar2) is
+-- this procedure will take an sql tatement and execute the query
+-- it will also take care of necessary operations for DONOR_SPOOL table
+nFirstCursorHandle   Integer;
+nSecondCursorHandle  Integer;
+nReturnValue         Integer;
+szDonorID            varchar2(10);
+szDonorAlpha         varchar2(2);
+BEGIN
+ ADD_LOG_ENTRY (PROC_STAT_ENTRY, 'execute_current_query.' ||
+                                 ' Pass Seq ' || to_char(p_pass_seq));
+-- create a cursor FOR dynamic sql
+-- ADD_LOG_ENTRY (SERVER_ENTRY, p_sql_stmt);
+nindex:=0;
+--    set transaction use rollback segment big_rbs;
+nFirstCursorHandle := dbms_sql.open_cursor;
+-- now we construct the dml statement and bind it
+dbms_sql.parse(nFirstCurSorHandle, p_sql_stmt, DBMS_SQL.V7);
+dbms_sql.bind_variable(nFirstCursorHandle, ':p_list_id', p_list_id);
+dbms_sql.bind_variable(nFirstCursorHandle, ':pass_seq', p_pass_seq);
+dbms_sql.bind_variable(nFirstCursorHandle, ':szChapterId', szChapterID);
+ADD_LOG_ENTRY (SERVER_ENTRY, 'DYN SQL: Cursor parsed.');
+--  dbms_sql.define_column(nFirstCursorHandle, 1, szDonorID, 10);
+--  dbms_sql.define_column(nFirstCursorHandle, 2, szDonorAlpha, 2);
+--  set transaction use rollback segment big_rbs;
+nReturnValue := dbms_sql.execute(nFirstCursorHandle);
+commit;
+ADD_LOG_ENTRY (SERVER_ENTRY, 'DYN SQL: Cursor executed.');
+begin
+    clean_spool_table(p_list_id, p_pass_seq-1);
+    commit;
+	exception when others
+	then
+	 ADD_LOG_ENTRY (USER_ENTRY,'Error in inserting into Spool table.');
+	 ADD_LOG_ENTRY(SERVER_ENTRY,to_char(sqlcode)||' '||sqlerrm);
+	 abortlist(p_list_id);
+end;
+--         end if;
+--      end loop;
+dbms_sql.close_cursor(nFirstCursorHandle);
+ADD_LOG_ENTRY (SERVER_ENTRY, 'DYN SQL: Cursor closed.');
+Exception          when others
+THEN
+    ADD_LOG_ENTRY (SERVER_ENTRY,to_char(sqlcode)|| ' '||sqlerrm);
+	dbms_sql.close_cursor(nFirstCursorHandle);
+	ADD_LOG_ENTRY (SERVER_ENTRY,'DYN SQL: Cursor abnormaly closed.');
+	abortlist(p_list_id);
+ end;
+
+PROCEDURE process_sql_pass (p_list_id varchar2,p_pass_seq number,p_donor_table Boolean) is
+ -- this procedure will accept a pass number, will collect all criterion
+ -- qualifying for this pass, form the where clauses and form the SQL
+nCursorHandle      integer;
+-- holds the dynamic cursor handle
+szSelectClause     long := null;
+-- holds the select clause
+szFromClause       varchar2(400) := null;
+-- holds the from clause
+szWhereClause      long := null;
+-- holds the where clause
+bUseDonorTable     Boolean := FALSE;
+ -- do we need to use Donors table
+ nLastRow           number;
+ -- FOR LOOPing
+ szTmpFrom          long := null;
+ -- temp string
+ szTmpWhere         long := null;
+ -- temp string
+ NoopWhere         long := null;
+ -- temp string
+ szSQLStmt          long:= null;
+ prwhere           varchar2(1024);
+BEGIN
+ADD_LOG_ENTRY (PROC_STAT_ENTRY, 'process_sql_pass');
+-- first we should find IF this is for the first time we are executing
+IF p_donor_table
+THEN
+  bUseDonorTable := TRUE;
+  szSelectClause := 'INSERT INTO donor_spool (list_id,pass_seq,donor_id, chapter_id,donor_alpha )'||
+                    'SELECT distinct :p_list_id, :pass_Seq,DONORS.DONOR_ID, :szChapterId, substr(DONORS.LAST_NAME,1,2) ';
+  szFromClause   := 'DONORS ';
+  szWhereClause  := null;
+ELSE
+ bUseDonorTable := FALSE;
+ szSelectClause := 'INSERT INTO donor_spool (list_id,pass_seq,donor_id, chapter_id,donor_alpha )'||
+                   'SELECT distinct :p_list_id, :pass_Seq, DONOR_SPOOL.DONOR_ID, :szChapterId, DONOR_SPOOL.donor_alpha ';
+ szFromClause   := 'DONOR_SPOOL';
+ szWhereClause  := 'DONOR_SPOOL.PASS_SEQ = ' || to_char(p_pass_seq -1);
+END IF;
+nLastRow := CRITERIA_TABLE.last;
+FOR i in 1 .. nLastRow
+ LOOP
+  IF      criteria_table(i).pass_seq = p_pass_seq
+     and  criteria_table(i).execution_status = FALSE
+  THEN
+          decode_and_form_where_clause (p_list_id, i,noopWhere, szTmpWhere);
+          IF criteria_table(i).table_join = 'Y' THEN
+-- before we append table name in from clause we must check
+-- that this table is not included yet
+-- NOTE: this is tricky, if a tablename is part of another
+-- tablename then i have no way to figure out things.
+   if instr(szfromClause, criteria_table(i).v_table_name) = 0 AND
+      criteria_table(i).v_table_name != 'DONOR_SPOOL'
+    then
+-- not yet included
+    szFromClause := szFromClause || ', ' || criteria_table(i).v_table_name;
+   end if;
+ADD_LOG_ENTRY (SERVER_ENTRY, 'Criterion #' || to_char(i) || ' Criteria ' ||
+                              criteria_table(i).criterion_name ||
+							  ': table join was required.');
+ELSE
+ADD_LOG_ENTRY (SERVER_ENTRY, 'Criterion #' ||to_char(i) || ' Criteria ' ||
+                              criteria_table(i).criterion_name ||
+							  ': table join was not required.');
+END IF;
+IF szTmpWhere is not null
+THEN
+    if criteria_table(i).criterion_op not in ( 'ALL OF', 'COUNT LE',
+	                                           'COUNT GT','COUNT EQ',
+											   'COUNT LT','COUNT GE')
+   THEN
+       szWhereClause := szWhereClause || ' AND ' ||
+	                    replace(criteria_table(i).where_clause,
+						':OP_VAL', szTmpWhere);
+       szWhereClause := replace(szwhereclause,
+	                           ':CHAPTER', in_quotes(szChapterId));
+       szWhereClause := replace(szwhereclause,
+	                           ':NOOP_VAL', NoopWhere);
+   else
+       szWhereClause := szWhereClause || ' AND ' || szTmpWhere;
+  end if;
+ELSE
+    ADD_LOG_ENTRY (SERVER_ENTRY, 'Criterion #' ||
+	                             to_char(i) || ' Criteria ' ||
+								 criteria_table(i).criterion_name ||
+								 ' returned null where clause.');
+END IF;
+criteria_table(i).execution_status := TRUE;
+END IF;
+END LOOP;
+if substr(szWhereClause, 1, 5) = ' AND '
+then
+   szWhereClause := substr(szWhereClause, 6);
+end if;
+add_log_entry(USER_ENTRY,'Completed 1');
+add_log_entry(USER_ENTRY,'Completed 2');
+prwhere:=substr(szWhereClause,1,1000);
+if prwhere is not null
+then
+  add_log_entry(USER_ENTRY,prwhere);
+end if;
+prwhere:=substr(szWhereClause,1001,1000);
+if prwhere is not null
+then
+   add_log_entry(USER_ENTRY,prwhere);
+end if;
+prwhere:=substr(szWhereClause,2001,1000);
+if prwhere is not null
+then
+   add_log_entry(USER_ENTRY,prwhere);
+end if;
+prwhere:=substr(szWhereClause,30001,1000);
+if prwhere is not null
+then
+    add_log_entry(USER_ENTRY,prwhere);
+end if;
+add_log_entry(USER_ENTRY,'Completed where_clause');
+add_log_entry(USER_ENTRY,'Completed where_clause');
+--      add_log_entry(SERVER_ENTRY,szWhereClause);
+add_log_entry(USER_ENTRY,'Completed print');
+--      ADD_LOG_ENTRY (SQL_ENTRY, 'Pass <' || to_char(p_pass_seq) ||
+--     '>: ' || szSelectClause || ' FROM ' ||
+--     szFromClause || ' WHERE ' || szWhereClause);
+szSQLStmt := szSelectClause || ' FROM ' || szFromClause ||' WHERE ' || szWhereClause;
+execute_current_query(p_list_id, p_pass_seq, szSQLStmt);
+END;
+
+PROCEDURE process_criteria (p_list_id varchar2) is
+-- this procedure will be called once we are ready to start
+-- forming queries, first we check with pass 1, and THEN move on.
+nFirstPass            number := 0;
+nLastPass             number := 0;
+BEGIN
+ADD_LOG_ENTRY (PROC_STAT_ENTRY, 'Process_criteria for #' ||p_list_id);
+-- to start with, get first pass seq number, last pass seq number
+-- FOR given list id
+ pass_seq_details (p_list_id, nFirstPass, nLastPass);
+-- now we run a LOOP and process one pass at a time
+FOR i in nFirstPass .. nLastPass       LOOP
+-- check IF there exists at-least one criteria FOR current pass number
+IF check_pass_seq(p_list_id, i) THEN
+-- execute current pass
+IF i = nFirstPass THEN
+-- when selecting donors in the first pass,
+-- we must select from donors
+process_sql_pass(p_list_id, i, TRUE);
+ELSE
+-- if we have already done through first pass,
+-- then we should select from donor_spool table,
+-- which holds the intermediate results
+process_sql_pass(p_list_id, i, FALSE);
+END IF;
+ELSE
+ADD_LOG_ENTRY (SERVER_ENTRY, 'No Criteria for list ' || p_list_id || ' and pass <' ||to_char(i) || '>');
+END IF;
+end LOOP;
+END;
+
+PROCEDURE dump_donor_table_to_db (p_list_id varchar2) is
+-- this procedure will dump plsql table to the actual database table.
+nReturnValue    integer;
+BEGIN
+ADD_LOG_ENTRY (PROC_STAT_ENTRY, 'dump_donor_table_to_db');
+ADD_LOG_ENTRY (SERVER_ENTRY, 'Insert: PLSQL Spool to Donor '||'Spool table started.');
+Insert into donor_lists(list_id, donor_id, call_code, chapter_id)
+                        select list_id, donor_id, 'NEW' ,'ALL'  --szChapterId
+			 from  donor_spool
+			 where list_id = p_list_id and pass_seq = 99;
+nreturnValue:=SQL%ROWCOUNT;
+commit;
+ADD_LOG_ENTRY (SERVER_ENTRY, 'Insert: PLSQL Spool to Donor '||'Spool table, completed for ' ||to_char(nreturnValue) || ' Donors.');
+Exception   when others
+THEN
+ADD_LOG_ENTRY (SERVER_ENTRY, 'Insert into DONOR_LISTS abruptly halted.');
+abortlist(p_list_id);
+END;
+
+procedure ListEligibility (p_list_id varchar2,p_eligibility varchar2) is
+nDonorCount Number := 0;
+nEligCount  number := 0;
+begin
+   if p_eligibility != 'N'
+   then
+     ADD_LOG_ENTRY (USER_ENTRY,' Calling Eligibility Server. ' ||to_char(sysdate, 'MM-DD-YYYY HH24:MI:SS'));
+	 if p_eligibility = 'E'
+	 then
+	    ADD_LOG_ENTRY (USER_ENTRY, 'Elig: Exclude all deferrals.');
+		CHECK_LIST_ELIGIBILITY(p_list_id,'SPOOL',TRUE,nDonorCount,nEligCount);
+     elsif p_eligibility = 'T'
+	 then
+	     ADD_LOG_ENTRY (USER_ENTRY, 'Elig: Include Temp deferrals.');
+		 CHECK_LIST_ELIGIBILITY(p_list_id,'SPOOL',FALSE,nDonorCount,nEligCount);
+    end if;
+ADD_LOG_ENTRY (USER_ENTRY,' Eligibility Server Closed. ' ||to_char(sysdate, 'MM-DD-YYYY HH24:MI:SS'));
+ADD_LOG_ENTRY (USER_ENTRY,'Eligibility Server: Total Donors - ' ||to_char(nDonorCount) || ', Eligible - ' ||to_char(nEligCount));
+else
+ADD_LOG_ENTRY (USER_ENTRY,'Elig: Eligibility Check Not Required.');
+end if;
+end;
+
+PROCEDURE ListOverRide (p_list_id varchar2) is
+
+-- this procedurew will decide on overrides.
+
+szListID        donor_spool.list_id%type;
+nCursorHandle   Integer;
+nReturnValue    integer;
+szSQLStmt       long;
+BEGIN
+ADD_LOG_ENTRY (PROC_STAT_ENTRY, 'ListOverRide');
+ADD_LOG_ENTRY (SERVER_ENTRY,'Checking Override status of the list.');
+
+--    set transaction use rollback segment big_rbs;
+delete from donor_spool where list_id = p_list_id and
+exists (select 'x' from donor_lists dl where donor_id=donor_spool.donor_id);
+commit;
+if IsListCancelled(p_list_id)
+then
+ commit;
+ raise_application_error(-20013,'User cancelled-2');
+ end if;
+ ADD_LOG_ENTRY (SERVER_ENTRY, 'Donor override check finished.');
+ Exception when others
+ THEN
+ ADD_LOG_ENTRY (SERVER_ENTRY, 'Donor Override check ' ||'abruptly halted.');
+ abortlist(p_list_id);
+ END;
+
+procedure InterruptList(p_list_id varchar2) is
+
+-- this procedure is used to interrupt a running list.
+-- when this procedure is called, it cleans up everything
+-- all the information about current list is discarded.
+BEGIN
+if szCurrentrunningList = p_list_id
+then
+ bInterruptList := TRUE;
+ ADD_LOG_ENTRY (USER_ENTRY,'List Interrupt signal received.');
+end if;
+END;
+
+procedure mark_list_scheduled (p_list_id varchar2) is
+begin
+update donor_list_header   set list_status = 'EXECUTING',list_start_time = sysdate
+where list_id = p_list_id;
+exception
+when others
+then
+ null;
+end;
+
+procedure mark_list_ready (p_list_id varchar2) is
+begin
+update donor_list_header set list_status = 'ACTIVE',list_end_time = sysdate,
+                             list_gen_date = sysdate,actual_size=nActualcount
+					   where list_id = p_list_id;
+exception
+when others
+then
+null;
+end;
+
+procedure mark_pre_elig_count (p_list_id varchar) is
+nDonors number;
+begin
+    begin
+	     select count(*) into nDonors  from donor_spool
+		 where list_id = p_list_id;
+         exception when no_data_found
+		 then
+		    nDonors := 0;
+	end ;
+    begin
+	     update donor_list_header set pre_elig = nDonors
+		  where list_id = p_list_id;
+          commit;
+		  if IsListCancelled(p_list_id)
+		  then
+		     commit;
+             raise_application_error(-20013,'User cancelled-3');
+        end if;
+    end;
+end;
+
+procedure mark_pre_rand_count (p_list_id varchar2) is
+nDonors number;
+begin
+    begin
+	     select count(*) into nDonors  from donor_spool
+		 where  list_id = p_list_id;
+		 exception when no_data_found
+		 then
+		    nDonors := 0;
+	end;
+    begin
+	    update donor_list_header set pre_rand = ndonors
+		where list_id = p_list_id;
+		commit;
+		if IsListCancelled(p_list_id)
+		then
+		    commit;
+			raise_application_error(-20013,'User cancelled-5');
+	    end if;
+        exception   when others
+		then
+		null;
+     end;
+end;
+
+procedure init_enlist_vars(p_list_id   out varchar2,
+                           p_override  out varchar2,
+			   p_elig      out varchar2,
+			   p_max       out number,
+			   p_enlist    out varchar2) is
+begin
+    select dlh.list_id,nvl(dlh.donor_override,'N'),
+	       dlh.list_elig_check,dlh.list_max_users,
+		   dlh.enlistment_type,'STAND'||dlh.enlistment_type
+      into p_list_id, p_override, p_elig, p_max, p_enlist,szStandardCriteria
+      from donor_list_header dlh
+	 where list_status = 'NEXT';
+     exception when too_many_rows
+	 then
+	   ADD_LOG_ENTRY (PROC_STAT_ENTRY, 'Too many lists open');
+end;
+
+
+
+PROCEDURE init_enlist (p_chapter_id varchar2) is
+-- this procedure should be the first one to be called FOR enlistment server
+-- basically it will allow us to set or reset whatever we need to do FOR
+-- initialization.
+bRtnValue      Boolean;
+initial_rand   number:=0;
+nRandError     number:=0;
+szOverRide     varchar2(1);
+szEligibility  varchar2(1);
+nMaxDonors     number;
+szListID       varchar2(10);
+BEGIN
+-- initialize the log table and set row by row log to false
+szChapterId := p_chapter_id;
+init_enlist_vars(szListId, szOverride,szeligibility, nMaxDonors, szEnlistmentType) ;
+ADD_LOG_ENTRY (PROC_STAT_ENTRY, 'initialize_enlistment');
+-- initialize all variables and flags
+init_pkg_vars;
+mark_list_scheduled(szListId);
+commit;
+if IsListCancelled(szListID)
+then
+  commit;
+  raise_application_error(-20013,'User cancelled-6');
+end if;
+load_search_criteria (szListId);
+process_criteria(szListId);
+commit;
+if IsListCancelled(szListID)
+then
+   commit;
+   raise_application_error(-20013,'User cancelled-7');
+end if;
+-- check the override status
+if szOverride='N'
+then
+   ListOverride(szListId );
+end if;
+mark_pre_rand_count(szListID);
+ADD_LOG_ENTRY (USER_ENTRY, 'Initial Randomization Start ' ||to_char(sysdate, 'MM-DD-YYYY HH24:MI:SS'));
+initial_rand:=nMaxDonors*2;
+randomize_list(szListId, initial_rand, nActualcount);
+ADD_LOG_ENTRY (USER_ENTRY, 'Initial Randomization End ' ||to_char(sysdate, 'MM-DD-YYYY HH24:MI:SS'));
+nRandError := round(((nMaxDonors - nActualCount)/nMaxDonors) * 100, 3);
+commit;
+--    set transaction use rollback segment big_rbs;
+begin
+  delete from donor_spool where list_id=szlistID and pass_seq<99;
+  exception when others
+  then
+  ADD_LOG_ENTRY (USER_ENTRY, 'Inital Random Exception: ' || SQLERRM);
+  abortlist(szlistID);
+end;
+commit;
+--    set transaction use rollback segment big_rbs;
+begin
+   update donor_spool set pass_seq=null
+   where list_id=szlistID
+     and pass_seq=99;
+   exception when others
+   then
+      ADD_LOG_ENTRY (USER_ENTRY, 'Inital Random Exception 1: ' || SQLERRM);
+	  abortlist(szlistID);
+end;
+-- check eligibility requirements
+mark_pre_elig_count(szListID);
+ListEligibility(szListId, szEligibility);
+
+-- put list for randomization
+mark_pre_rand_count(szListID);
+ADD_LOG_ENTRY (USER_ENTRY, 'Randomization Start ' ||to_char(sysdate, 'MM-DD-YYYY HH24:MI:SS'));
+randomize_list(szListId, nMaxDonors, nActualcount);
+ADD_LOG_ENTRY (USER_ENTRY, 'Randomization End ' ||to_char(sysdate, 'MM-DD-YYYY HH24:MI:SS'));
+nRandError := round(((nMaxDonors - nActualCount)/nMaxDonors) * 100, 3);
+ADD_LOG_ENTRY (USER_ENTRY, 'Randomization: ' ||'Donors Count - ' || to_char(nActualCount) ||
+                           ', Rounding error is ' || to_char(nRandError, '0.999')|| '%');
+dump_donor_table_to_db(szListId);
+clean_spool_table (szListId, -1);
+mark_list_ready(szListId);
+commit;
+if IsListCancelled(szListID)
+then
+  commit;
+  raise_application_error(-20013,'User cancelled-8');
+end if;
+init_pkg_vars;
+exception  when others
+then
+   ADD_LOG_ENTRY (USER_ENTRY, 'Exception: ' || SQLERRM);
+   abortlist(szlistID);
+END;
+
+
+
+/* ** Procedure - SET_DEF_PROC_CODE **
+Desc - following local procedure sets values for default
+**     proc codes and default donation type ** */
+
+PROCEDURE set_def_proc_code (p_list_id varchar2) IS
+UNIT_NAME      varchar2(32) := null;
+BEGIN
+UNIT_NAME   := 'set_def_proc_code';
+-- get default procedure code / donation type
+begin
+select vlt.def_proc_code, vlt.def_don_type  into szDefProcedureCode, szDefDonationType
+  from donor_list_header dlh, valid_list_types vlt
+ where dlh.list_id    = p_list_id
+   and vlt.list_type  = dlh.list_type
+   and sysdate between vlt.eff_date
+   and nvl(vlt.term_date,sysdate)
+   and vlt.enlistment_type=dlh.enlistment_type;
+exception when no_data_found
+then
+  szDefProcedureCode := 'WB';
+  szDefDonationType := 'AL';
+end;
+
+-- get specified target date for eligibility
+begin
+--             select to_date(crit_value_1, 'MM-DD-YY')
+select to_date(crit_value_1, 'MM-DD-RR')  into szDefCollectionDate from list_criteria_values
+where  list_id in ( p_list_id,szStandardCriteria)
+  and  criterion_name = 'ELIGIBLE DATE';
+exception when no_datA_found
+then
+  szDefCollectionDate := sysdate -1;
+end;
+END;
+
+/*
+** Function - CHECK_DONOR_ELIGIBILITY
+**     Desc - this function actually calls 'check_eligibility' and
+**    interprete the returned values.
+**   all these overloaded functions call this function internally
+**  and return the value which is returned by this function. **
+*/
+
+FUNCTION check_donor_eligibility  (szDonorID  VARCHAR2, szProcCode VARCHAR2,
+                                   szDonType  VARCHAR2, szCollDate VARCHAR2) RETURN VARCHAR2 IS
+UNIT_NAME       varchar2(32) := null;
+szEligStatus    VARCHAR2(100) := NULL;
+szInterType     VARCHAR2(100) := NULL;
+szReason        VARCHAR2(100) := NULL;
+szDeferDate     DATE          := NULL;
+szReturnStatus  VARCHAR2(5)   := NULL;
+BEGIN
+UNIT_NAME   := 'check_donor_eligibility';
+
+-- well we just call the eligibility routine now
+-- we need to capture the inter type returned by this
+-- routine. This value is used to determine the donor
+-- overrides if specified by user.
+don_core.check_eligibility(szDonorID,szProcCode,szDonType,szCollDate,null,szEligStatus,szDeferDate,szInterType,szReason);
+if szEligStatus = 'Y'
+then
+   szReturnStatus := 'ELIG';
+else
+  szReturnStatus := szInterType;
+
+  -- TEMPD/PERMD/HOLDS
+  end if;
+return szReturnStatus;
+END;
+
+/*
+** Procedure - VALIDATE_SPOOL_LIST
+**      Desc - this is the procedure that will be called most of the time
+**     list id is passed and this procedure will select each donor
+**     from that list and if not eligible, will delete from the list.
+**    eligible donors are not touched, and left in the list. **
+*/
+
+PROCEDURE validate_spool_list(p_list_id   varchar2,p_proc_code varchar2,p_don_type  varchar2, p_coll_date date) is
+
+-- here we need to declare a record to retrieve the row.
+-- operation sequence is as follows
+-- Get a list and validate it
+-- open the cursor and start fetch
+--    for each record, check eligibility
+--    if donor is NOT eligible
+--   delete current donor from list in spool table
+--   else go to next donor
+-- stop when all donors are exhausted
+-- All eligible donors are in the table
+UNIT_NAME       varchar2(32) := null;
+donor_rec       donor_spool%rowtype;
+ndonorCount     number := 0;
+nEligCount      number := 0;
+szEligStatus    VARCHAR2(5) := NULL;
+cursor don_spool_cur (szListID varchar2) RETURN donor_spool%rowtype is
+       select * from donor_spool where list_id = szListID for UPDATE;
+BEGIN
+UNIT_NAME   := 'validate_spool_list';
+add_log_entry('1', 'Checking eligibility for ' || p_list_id);
+
+-- set default values for proc code and don type
+if not bDefValuesSet
+then
+set_def_proc_code(p_list_id);
+end if;
+begin
+
+-- get the donor count in the list
+select count(*) into nDonorCount  from donor_spool
+where list_id = p_list_id;
+exception   when others
+then
+    null;
+end;
+
+nAllDonorCount := nDonorCount;
+add_log_entry('1', 'Number of Donor to check: ' || to_char(nDonorcount));
+if nDonorCount > 0
+then
+  begin
+   commit;
+
+--    set transaction use rollback segment big_rbs;
+open don_spool_cur (p_list_id);
+loop
+fetch don_spool_cur  into donor_rec;
+Exit when don_spool_cur%NOTFOUND;
+szEligStatus := check_donor_eligibility (donor_rec.donor_id,p_proc_code,p_don_type,p_coll_date);
+if szEligStatus != 'ELIG'
+then
+   if szEligStatus = 'TEMPD'
+   then
+      if bNoTempDefs
+	  then
+
+	  -- donor is not eligible so delete the donor from
+	  -- the table and temp deferrals must be excluded
+	    delete from donor_spool  where current of don_spool_cur;
+	  else
+	    nEligCount := nEligCount + 1;
+      end if;
+   else
+   -- delete the donor if PERMD/HOLDS etc
+     delete from donor_spool where current of don_spool_cur;
+   end if;
+else
+-- keep the donor and increase the count
+nEligCount := nEligCount + 1;
+end if;
+end loop;
+exception when others
+then ADD_LOG_ENTRY (USER_ENTRY,'Error in inserting into Spool table.');
+ADD_LOG_ENTRY(SERVER_ENTRY,to_char(sqlcode)||' '||sqlerrm);
+abortlist(p_list_id);
+end;
+if don_spool_cur%isopen
+then
+   close don_spool_cur;
+end if;
+nEligDonCount := nEligCount;
+commit;
+if IsListCancelled(p_list_id)
+then
+ commit;
+ raise_application_error(-20013,'User cancelled-9');
+ end if;
+end if;
+END;
+
+/*
+** Procedure - VALIDATE_CURRENT_LIST
+**      Desc - this is the procedure that will be called most of the time
+**      list id is passed and this procedure will select each donor
+**     from that list and if not eligible, will be flagged and
+**     eligible donors are not touched, and left in the list.
+ **
+ */
+
+ PROCEDURE validate_current_list(p_list_id   varchar2,  p_proc_code varchar2,  p_don_type  varchar2,   p_coll_date date) is
+
+ -- here we need to declare a record to retrieve the row.
+ -- operation sequence is as follows
+ -- Get a list and validate it
+ -- open the cursor and start fetch
+ --    for each record, check eligibility
+  --       if donor is NOT eligible
+  --          flag donor as not eligible
+  --       else go to next donor
+  -- stop when all donors are exhausted
+   UNIT_NAME       varchar2(32) := null;
+   donor_rec       donor_lists%rowtype;
+   ndonorCount     number := 0;
+   nEligCount      number := 0;
+   szEligStatus    VARCHAR2(5) := NULL;
+   cursor donor_cur (szListID varchar2) RETURN donor_lists%rowtype is
+          select *  from donor_lists
+		  where list_id = szListID for UPDATE;
+BEGIN
+UNIT_NAME   := 'validate_current_list';
+-- set default values for proc code and don type
+if not bDefValuesSet
+then
+    set_def_proc_code(p_list_id);
+end if;
+open donor_cur (p_list_id);
+loop
+fetch donor_cur   into donor_rec;
+Exit when donor_cur%NOTFOUND;
+szEligStatus := check_donor_eligibility (donor_rec.donor_id,p_proc_code,p_don_type,p_coll_date);
+if szEligStatus != 'ELIG'
+then
+   if bNoTempDefs and szEligStatus = 'TEMPD'
+    then
+	-- donor is not eligible so delete the donor from
+	-- the table and temp deferrals must be excluded
+	update donor_lists     set call_code = 'NOELG'  where current of donor_cur;
+	end if;
+else
+nEligCount := nEligCount + 1;
+end if;
+nAllDonorCount := donor_cur%rowcount;
+end loop;
+if donor_cur%isopen then
+ close donor_cur;
+ end if;
+ nEligDonCount := nEligCount;
+ commit;
+ if IsListCancelled(p_list_id) then
+ commit;
+ raise_application_error(-20013,'User cancelled-10');
+ end if;
+END;
+
+/*
+** Procedure - CHECK_LIST_ELIGIBILITY
+**      Desc - Pass only donor id, rest all values default as follows
+**      proc code defaults to Whole Blood
+**     Don Type  defaults to Allogenic
+**    coll date defaults to sysdate **
+*/
+
+PROCEDURE check_list_eligibility (szListID    IN  VARCHAR2, szSource    IN  VARCHAR2,
+                                  bIncTemp    IN  BOOLEAN,nAllDonors  OUT NUMBER,nEligCount  OUT NUMBER) IS
+
+UNIT_NAME      varchar2(32) := null;
+BEGIN
+UNIT_NAME   := 'check_eligibility[NO INFO]';
+-- no other parameter is passed, so use package variables with
+-- default values to call the eligibility routine
+if bIncTemp
+then
+  bNoTempDefs := TRUE;
+ else
+ bNoTempDefs := FALSE;
+ end if;
+if szSource = 'SPOOL'
+ then
+   validate_spool_list(szListID, szDefProcedureCode,szDefDonationType, szDefCollectionDate);
+ else
+   validate_current_list(szListID, szDefProcedureCode,szDefDonationType, szDefCollectionDate);
+  end if;
+ nAllDonors := nAllDonorCount;
+ nEligCount := nEligDonCount;
+END;
+
+/*
+** Procedure - CHECK_LIST_ELIGIBILITY
+**      Desc - This overloaded fuction will be called when calling
+**      function passes don_type, proc_code and no target dt **
+*/
+
+PROCEDURE check_list_eligibility (szListID    IN  VARCHAR2,
+                                  szSource    IN  VARCHAR2,
+                                  bIncTemp    IN  BOOLEAN,
+                                  szProcCode  IN  VARCHAR2,
+				  szDonType   IN  VARCHAR2,
+                                  nAllDonors  OUT NUMBER,
+                                  nEligCount  OUT NUMBER) IS
+UNIT_NAME      varchar2(32) := null;
+BEGIN
+UNIT_NAME   := 'check_eligibility[NO DATE]';
+-- no other parameter is passed, so use package variables with
+-- default values to call the eligibility routine
+if bIncTemp
+then
+bNoTempDefs := TRUE;
+else
+ bNoTempDefs := FALSE;
+end if;
+if szSource = 'SPOOL'
+ then
+      validate_spool_list(szListID, szProcCode,szDonType,
+      szDefCollectionDate);
+ else
+     validate_current_list(szListID, szProcCode, szDonType,
+     szDefCollectionDate);
+ end if;
+ nAllDonors := nAllDonorCount;
+ nEligCount := nEligDonCount;
+END;
+
+/*
+** Procedure - CHECK_LIST_ELIGIBILITY
+**      Desc - This overloaded fuction will be called when calling
+**     function passes don_type, proc_code and target dt **
+*/
+
+
+ PROCEDURE check_list_eligibility (szListID    IN  VARCHAR2,
+                                   szSource    IN  VARCHAR2,
+                                   bIncTemp    IN  BOOLEAN,
+                                   szProcCode  IN  VARCHAR2,
+				   szDonType   IN  VARCHAR2,
+                                   szCollDate  IN  DATE,
+				   nAllDonors  OUT NUMBER,
+                                   nEligCount  OUT NUMBER) IS
+
+UNIT_NAME      varchar2(32) := null;
+BEGIN       UNIT_NAME   := 'check_eligibility[ALL INFO]';
+-- no other parameter is passed, so use package variables with
+-- default values to call the eligibility routine
+ if bIncTemp
+ then
+  bNoTempDefs := TRUE;
+  else
+   bNoTempDefs := FALSE;
+   end if;
+    if szSource = 'SPOOL'
+	then
+	validate_spool_list(szListID, szProcCode, szDonType, szCollDate);
+    else
+        validate_current_list(szListID, szProcCode, szDonType, szCollDate);
+    end if;
+	nAllDonors := nAllDonorCount;
+	 nEligCount := nEligDonCount;
+END;
+
+/*
+** Function - CHECK_LIST_HOLD
+ **     Desc - This function occassionally checks if application
+ **    administrator has put a HOLD on all list generation.
+ **            This functions returns TRUE. if HOLD is in effect, and
+ **            FALSE if things are all right.
+ */
+  FUNCTION CHECK_LIST_HOLD return Boolean is    szReturnValue  varchar2(10);
+      BEGIN
+	     begin
+		      select parameter_value  into szReturnValue
+                       from valid_parameters
+			  where   --chapter_id     = szchapterid
+			  parameter_type = 'ALL'
+			  and parameter_code = 'HOLD_ENLST'
+			  and sysdate between eff_date
+                          and nvl(term_date, sysdate+1);
+			  exception when no_data_found
+			  then
+			  szReturnValue := 'FALSE';
+			  end ;
+     if szReturnValue = 'TRUE' then
+	  return TRUE;
+    else
+       return FALSE;
+   end if;
+
+ END CHECK_LIST_HOLD;
+
+ /*
+ ** FUNCTION - IS_ENLIST_SERVER_FREE
+ **     Desc - This function checks to see if enlistment server is
+ **            currently running or generating a list. This function
+ **            checks for ENLISTMENT_LOCK id. If it could get the lock,
+ **            that means, enlistment server was *not* running and is
+ **            now ready to generate a list. In which case this function
+ **            will return TRUE.
+ **            If enlistment server were executing when we run this function,
+ **            an error code will be returned and this function will return
+ **            FALSE. This indicates that enlistment server is busy. *
+ *
+ */
+
+   FUNCTION IS_ENLIST_SERVER_FREE return Boolean is    nRtnValue number;
+    BEGIN
+	-- Try to request a lock with id, ENLISTMENT_LOCK
+	-- if returned value is 0, then we have secured a lock
+	-- and are ready to execute a list and return TRUE
+	-- else return FALSE
+	nRtnValue := DBMS_LOCK.REQUEST( ENLISTMENT_LOCK,  -- lock id
+	                               DBMS_LOCK.x_mode,  -- exclusive
+                                       5,                 -- timeout
+                                       FALSE);
+  -- explicit release
+  if nRtnValue = 0 then
+       -- we got a lock, so list is ready to run
+      -- add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') ||
+       -- ' LIST: Enlist Lock was requested successfully.');
+     add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYYYY HH24:MI') ||
+       ' LIST: Enlist Lock was requested successfully.');
+    return TRUE;
+  else
+     -- for all other returned values return FALSE
+     --add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') ||
+     --' LIST: Enlist Lock could not be requested.');
+    add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYYYY HH24:MI') ||
+    ' LIST: Enlist Lock could not be requested.');
+    return FALSE;
+  end if;
+
+ END IS_ENLIST_SERVER_FREE;
+
+  /*
+  ** Function - GET_NEXT_LIST
+  **     Desc - This function returns next list to be generated
+  **     If there is no list pending, it returns NULL
+  **
+  */
+
+  FUNCTION GET_NEXT_LIST return varchar2 is       szReturnValue varchar2(10);
+   cursor c_next_list is     select list_id from donor_list_header
+                             where  list_id like 'LIST%'
+			  and  list_status  = 'SCHEDULED' and
+list_schedule_time<lifetrack_timezone_convert.get_local_time(chapter_id,sysdate)
+			  order by list_priority desc,list_schedule_time,
+                          list_seq;
+BEGIN
+szReturnValue := null;
+open c_next_list;
+if c_next_list%notfound
+then
+close c_next_list;
+else
+fetch c_next_list into szReturnValue;
+end if;
+if c_next_list%isopen
+then
+close c_next_list;
+end if;
+-- originally commented, not for Y2K
+--      add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') || ' LIST: Next List ID ' || szReturnValue);
+return szReturnValue;
+END GET_NEXT_LIST;
+
+/* ** Function - RELEASE_ENLIST_LOCK
+**
+*/
+
+Function RELEASE_ENLIST_LOCK return varchar2 is       nRtnValue number;
+
+begin
+
+-- Try to release lock with id, ENLISTMENT_LOCK
+-- if returned value is 0, then we have released the
+-- lock, and return 'OK'
+nRtnValue := DBMS_LOCK.RELEASE(ENLISTMENT_LOCK);
+-- lock id
+if nRtnValue = 0 then
+-- we release the lock successfully
+-- add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') || ' LIST: Enlist Lock was released successfully.');
+add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYYYY HH24:MI') || ' LIST: Enlist Lock was released successfully.');
+return 'OK';
+else
+-- for all other returned values return FALSE
+-- add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') || ' LIST: Enlist Lock was not released - ' || to_char(nRtnValue));
+add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYYYY HH24:MI') || ' LIST: Enlist Lock was not released - ' || to_char(nRtnValue));
+return 'ERROR';
+ end if;
+end RELEASE_ENLIST_LOCK;
+
+/*
+** Function - SCHEDULE_LIST **
+*/
+
+ Function SCHEDULE_LIST (p_list_id varchar2) return varchar2 is
+ bOk       Boolean := FALSE;
+  begin
+  begin
+   begin
+    update donor_list_header
+	  set list_status = 'NEXT'
+	  where list_id=p_list_id;
+	  bOk := TRUE;
+	 commit;
+	 if IsListCancelled(p_list_id)
+	  then
+	    commit;
+	    raise_application_error(-20013,'User cancelled-11');
+	 end if;
+	exception when others
+	 then
+	 --         add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') || ' LIST: Could not mark next list.' || SQLERRM);
+	add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYYYY HH24:MI') || ' LIST: Could not mark next list.' || SQLERRM);
+  end;
+  if bOk then
+  don_enlist.init_enlist(szChapterId);
+  return 'OK';
+  else
+  --  add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') || ' LIST: Could not mark next list.' || SQLERRM);
+     add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYYYY HH24:MI') || ' LIST: Could not mark next list.' || SQLERRM);
+	  end if;
+	  exception  when others
+	  then
+	  -- add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') || ' LIST: Schedule failed. ' || SQLERRM);
+	  add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYYYY HH24:MI') || ' LIST: Schedule failed. ' || SQLERRM);
+	  return 'ERROR';
+	  end;
+	  end SCHEDULE_LIST;
+
+	  /*
+	  ** Procedure - RUN_NEXT_LIST
+	  **      Desc - This procedure will retrieve next list to be executed
+	  **             as specified by priority and executes the list. **
+	  **    Output - SERV_HOLD  -> Enlistment lists are on hold
+	  **             SERV_BUSY  -> Enlistment Server is busy.
+	  **             RLS_FAIL   -> Enlistment Lock could not be released.
+	  **             SCHD_FAIL  -> List could not be scheduled
+	  */
+
+PROCEDURE RUN_NEXT_LIST ( p_status out varchar2 ) is
+ szNextListID     varchar2(10);
+ szRtnStatus      varchar2(10);
+ LogDir           varchar2(50);
+ BEGIN
+ -- first check if lists are on hold, if hold is specified by
+ -- application administrator, do not process next lists;
+ -- originally commented, not for Y2K
+ --      add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') || ' LIST: Entered..... ');
+ begin
+ /*  select chapter_id into szchapterid from system_users
+      where user_id=LT_USER_SESSION.get_userid;
+  */
+  szchapterid:='ALL';  --the block was commented by Edwin 020912 for
+                       --chapter id cannot use
+ exception when others then
+    -- add_log_entry (USER_ENTRY, 'Invalid Chapter_id ');
+    raise_application_error(-20015,'Invalid chapter');
+ end;
+
+ If not CHECK_LIST_HOLD then
+    -- originally commented, not for Y2K
+    -- add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') ||
+    --  ' LIST: No list on hold. ');
+    -- next list -- originally commented, not for Y2K
+    --  add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') ||
+    --  ' LIST: No list is running. ');
+    szNextListID := GET_NEXT_LIST;
+    szCurrentRunningList := szNextListID;
+
+   If szNextListID is not null then
+     -- here we go and submit a new list;
+     -- first we check if enlistment server is free
+
+    begin
+      select parameter_value into LogDir from valid_parameters
+      where parameter_code='SLOG';
+    exception   when utl_file.invalid_path then
+       dbms_output.put_line('Invalid path or filename');
+       raise;
+   when others then
+     dbms_output.put_line('Error in prepare_log_filename');
+     raise;
+   end;
+
+   logfile:=UTL_FILE.fopen(LogDir,szNextListID, 'w');
+   UTL_FILE.putf(logfile,'%s\n','Log File Opened');
+
+   If IS_ENLIST_SERVER_FREE then
+     -- we have secured a lock for running the list
+     -- so run the list
+     szRtnStatus := SCHEDULE_LIST(szNextListID);
+     if szRtnStatus != 'OK' then
+       -- we have trouble, come back after some time
+       szRtnStatus := RELEASE_ENLIST_LOCK;
+       if szRtnStatus != 'OK' then
+         -- we have trouble, come back after some time
+          p_status := 'RLS_FAIL';
+       end if;
+       p_status := 'SCHD_FAIL';
+      end if;
+   Else
+      -- nothing to run....
+      -- originally commented, not for Y2K
+      --  add_log_entry(USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') ||
+      --   ' LIST: Nothing to run...');
+        raise_application_error(-20014,'Nothing to run ');
+   End if;
+   end if;
+   else
+      p_status := 'SERV_HOLD';
+      -- originally commented, not for Y2K
+      --  add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') ||
+      --  ' LIST: Lists are on hold..... ');
+   end if;
+      -- originally commented, not for Y2K
+      --  add_log_entry (USER_ENTRY, to_char(sysdate, 'MMDDYY HH24:MI') ||
+      --  ' LIST: Exiting.... ');
+ END RUN_NEXT_LIST;
+
+
+
+   /*     ** MULT - Utility function    */
+
+	function mult(p in number, q in number) return number is
+	p1 number;
+	p0 number;
+	q1 number;
+	q0 number;
+	begin
+	p1:=trunc(p/m1);
+	p0:=mod(p,m1);
+	q1:=trunc(q/m1);
+	q0:=mod(q,m1);
+	return(mod((mod(p0*q1+p1*q0,m1)*m1+p0*q0),m));
+	end;
+
+	/*    ** getrandom - Returns random number between [0,nLimit-1]    */
+
+	function get_random(nLimit in number) return number is
+	b    constant number:=31415821;
+	begin
+	Rand_num:=mod(mult(Rand_num,b)+1,m);
+	return(trunc((trunc(Rand_num/m1)*nLimit)/m1));
+	end;
+
+
+	procedure print_random_table is
+	 szStatus varchar2(5);
+	 begin
+	 add_log_entry (SERVER_ENTRY, 'Random: ------------------------- Table ------------------------ ');
+	 add_log_entry (SERVER_ENTRY, 'Random: Alph ' || chr(9) || chr(9) ||' Stat ' || chr(9) || chr(9) ||
+	                              ' Avil ' || chr(9) || chr(9) ||' Wght ' || chr(9) || chr(9) ||' Reqd ' );
+	for i in random_table.first .. random_table.last       loop
+	if random_table(i).bStatus
+	then
+	szStatus := 'TRUE';
+	else
+	szStatus := 'FALSE';
+	end if;
+	add_log_entry (SERVER_ENTRY, 'Random: ' ||random_table(i).alpha_id || chr(9) || chr(9) ||
+	                              szStatus || chr(9) || chr(9) ||to_char(random_table(i).donors_avail)
+								  || chr(9) || chr(9) ||to_char(random_table(i).weight) || chr(9)
+								  || chr(9) || to_char(random_table(i).donors_reqd));
+  end loop;
+  add_log_entry (SERVER_ENTRY, 'Random: ------------------------- Table ------------------------ ');
+  end;
+
+FUNCTION get_next_index return number is
+
+-- this function scans thru the randomize table and returns
+-- the next index to alphabet to process. These alphabets are returned
+-- in the order of increasing donors required.
+nCurrIndex   number := 0;
+nTmpCount    number := 100000;
+szNextAlpha  varchar2(2);
+begin
+for i in 1 .. RANDOM_TABLE.LAST
+loop
+if nTmpCount > random_table(i).donors_reqd
+  and random_table(i).bStatus = FALSE
+  then
+  nTmpCount := random_table(i).donors_reqd;
+  nCurrIndex := i;
+  end if;
+  end loop;
+  -- add_log_entry(SERVER_ENTRY, 'Next Index - ' || to_char(ncurrIndex));
+  return ncurrIndex;
+end;
+
+PROCEDURE distribute_weight(p_weight number) is
+nCurrTotal           number := 0;
+nTotalAlpha          number := 0;
+nDistWeight          number;
+begin
+for i in random_table.first .. random_table.last       loop
+if random_table(i).donors_avail > 0 AND  random_table(i).bStatus = FALSE
+then
+nTotalAlpha := ntotalAlpha + 1;
+end if;
+end loop;
+-- now we have to distribute the collected weight among
+-- remaining alpha codes
+nCurrTotal := 0;
+nDistWeight := p_weight/ntotalAlpha;
+add_log_entry(SERVER_ENTRY, 'Random: Distributing - ' || to_char(nDistWeight));
+for i in random_table.first .. random_table.last       loop
+if random_table(i).donors_avail > 0 AND random_table(i).bStatus = FALSE
+then
+/*  random_Table(i).weight := round(random_table(i).weight + nDistWeight, 4); */
+random_Table(i).weight := trunc(random_table(i).weight + nDistWeight, 4);
+-- random_table(i).donors_reqd := round((random_table(i).weight *
+-- nGrandtotal)/100);
+random_table(i).donors_reqd := round((random_table(i).weight *nGrandtotal));
+ if random_table(i).donors_reqd = 0
+ then
+ random_table(i).donors_reqd := 1 ;
+ end if;
+end if;
+nCurrTotal := nCurrtotal + 1;
+end loop;
+end;
+
+PROCEDURE prepare_for_randomization(p_list_id varchar2) is
+
+-- This procedure takes in an list id and loads the
+-- local plsql table for randomization,
+cursor cur_random (p_list_id varchar2,tot_donor number) is
+select substr(donor_alpha,1,1), count(*)/tot_donor, count(*),  round((count(*)/tot_donor)*nGrandtotal)
+ from  donor_spool
+ where list_id  = p_list_id
+ group by substr(donor_alpha,1,1)
+ order by 2;
+
+ --      cursor cur_count (p_list_id varchar2, p_alpha_code varchar2) is
+ --     select count(ds.donor_id)
+ --     from donor_spool ds
+ --    where ds.list_id  = p_list_id and
+ --    ds.donor_alpha like p_alpha_code || '%';
+ nReturnValue         Integer;
+ szDonorid            varchar2(10);
+ nCurrTotal           number := 0;
+ nTotalSpool           number := 0;
+ nDistWeight          number;
+ rand_rec             randomize_rec;
+ BEGIN
+ -- create a cursor FOR dynamic sql       random_table.delete;
+ begin
+ select count(*) into nTotalSpool from donor_spool
+ where list_id=p_list_id;
+ end;
+ open cur_random(p_list_id,nTotalSpool);       loop
+ fetch cur_random  into rand_rec.alpha_id,rand_rec.weight, rand_rec.donors_avail,rand_rec.donors_reqd ;
+ exit when cur_random%notfound;
+ rand_rec.bStatus     := FALSE;
+ random_table(cur_random%rowcount) := rand_rec;
+ end loop;
+ close cur_random;
+ --      for i in 1 .. random_table.last
+ --      loop
+ --     open cur_count(p_list_id, random_table(i).alpha_id);
+ --     fetch cur_count
+ --       into random_table(i).donors_avail;
+ --     if cur_count%notfound then
+ --     random_table(i).donors_avail := 0;
+ --         end if;
+ --         if cur_count%isopen then
+ --            close cur_count;
+ --         end if;
+ --         random_table(i).donors_reqd := round((random_table(i).weight *
+ --         nGrandtotal)/100);
+ --         if random_table(i).donors_reqd = 0 then
+ --         random_table(i).donors_reqd := 1 ;
+ --         end if;
+ --         nCurrTotal := nCurrtotal + random_table(i).donors_reqd;
+ --      end loop;
+  print_random_table;
+  -- now we will find all alpha's with zero available donors and
+  -- redistribute its weight evenly among other alpha codes.
+  nDistWeight := 0;
+  for i in random_table.first .. random_table.last       loop
+  if random_table(i).donors_avail = 0 and
+     random_table(i).bStatus = FALSE
+	 then
+	 nDistWeight := ndistWeight + random_Table(i).weight;
+	 random_table(i).bStatus := TRUE;
+	 end if;
+	 end loop;
+	 distribute_weight(nDistWeight/nGrandTotal);
+	 end;
+
+	  PROCEDURE select_donor_from_list(p_list_id varchar2,p_alpha_code varchar2,   p_donor_id   varchar2) is
+
+	  -- This procedure takes in an list id and loads the
+	  -- local plsql table for randomization,
+	  nReturnValue         Integer;
+	  BEGIN
+	  -- create a cursor FOR dynamic sql
+	  UPDATE donor_spool set pass_seq = 99
+	  where list_id = p_list_id and donor_id = p_donor_id ;
+	  --and chapter_id = szchapterid;
+	  nreturnValue:=SQL%ROWCOUNT;
+	  Exception    when others
+	  THEN       add_log_entry(SERVER_ENTRY,'Error in updating donor_spool');
+	  abortlist(p_list_id);
+	   end;
+
+procedure select_all_donors (p_list_id in varchar2,  p_total_actuals out number) is
+
+-- this procedure will select all donors from donor_spool
+-- table and mark then as selected.
+nCursorHandle        Integer;
+nReturnValue         Integer;
+szDMLStatement       varchar2(1000);    BEGIN
+/*       -- create a cursor FOR dynamic sql
+nCursorHandle := dbms_sql.open_cursor;
+-- prepare the DML statement       szDMLStatement := 'UPDATE donor_spool set pass_seq = 99 ' ||
+' where list_id = :p_list_id ';
+-- now we construct the dml statement and bind it
+dbms_sql.parse(nCurSorHandle, szDMLStatement, DBMS_SQL.V7);
+dbms_sql.bind_variable(nCursorHandle, ':p_list_id', p_list_id);
+nReturnValue := dbms_sql.execute(nCursorHandle);       d
+bms_sql.close_cursor(nCursorHandle);
+p_total_actuals := nReturnValue;
+*/
+commit;
+--    set transaction use rollback segment big_rbs;
+UPDATE donor_spool set pass_seq = 99  where list_id = p_list_id ;
+p_total_actuals:=SQL%ROWCOUNT;
+Exception          when others
+THEN
+add_log_entry(SERVER_ENTRY,'Error in updating donor_spool');
+ abortlist(p_list_id);
+ end;
+
+ procedure process_alpha (p_list_id      in varchar2, p_alpha_code   in varchar2,
+                          p_donors_reqd  in number, p_actual out number) is
+
+ -- this procedure will take a alpha code as input, load all
+ -- records with this alpha code into a plsql table. This procedure
+ -- will then try to select specified number of records using random
+   -- indexes into plsql table.
+   szListID              varchar2(10);
+   szDonorID             varchar2(10);
+   nPassSeq              number;
+    bAllDonorsUsed        Boolean := TRUE;
+	--      szString              varchar2(1000);
+	nActual               number;
+	nSetRandom            number;
+	cursor cur_spool (p_list_id varchar2, alpha_code varchar2) is
+	select ds.list_id, ds.donor_id, ds.pass_seq   from donor_spool ds
+	where ds.list_id   = p_list_id
+	and ds.donor_alpha  like alpha_code || '%';
+
+
+function is_curr_list_done return Boolean is
+begin
+bAllDonorsUsed := TRUE;
+for i in donor_table.first .. donor_table.last          loop
+if donor_table(i).bSelection = FALSE
+then
+bAllDonorsUsed := FALSE;
+exit;
+end if;
+end loop;
+RETURN bAllDonorsUsed;
+end;
+function get_next_random_index return number is
+nRtnIndex number ;
+begin
+nRtnIndex := get_random(donor_table.last);          loop
+if nRtnIndex > 0 and nRtnIndex <= donor_table.last
+then
+if donor_table(nRtnIndex).bSelection = FALSE
+then
+exit;
+end if;
+end if;
+nRtnIndex := get_random(donor_table.last);
+end loop;
+add_log_entry(SERVER_ENTRY, 'Random - "' || to_char(nRtnIndex) || '" ');
+ return nRtnIndex;
+ end;
+ begin
+
+  -- start with initializing the table
+  donor_table.delete;
+  -- now load all the records from donor_spool table with last_names
+  -- starting with given alpha character into plsql table.
+  open cur_spool(p_list_id, p_alpha_code);       loop
+   fetch cur_spool           into szListID, szDonorID, nPassSeq;
+   exit when cur_spool%NOTFOUND;
+   nIndex := nvl(DONOR_TABLE.last, 0);
+   DONOR_TABLE(nIndex + 1).list_id      := szListID;
+   DONOR_TABLE(nIndex + 1).donor_id     := szDonorID;
+   DONOR_TABLE(nIndex + 1).bSelection   := FALSE;
+   end loop;
+   close cur_spool;
+   if bDebugMessages then
+   add_log_entry(SERVER_ENTRY, 'Alpha - "' || p_alpha_code || '" ' || 'Avail Donors - ' ||
+                               to_char(donor_table.last)   ||  ' Reqd Donors - ' ||
+                               to_char(p_donors_reqd));
+   end if;
+
+   -- at this stage we have all the donor ids in the plsql table for
+   -- given alpha code. Now we should generate random numbers same
+   -- as number of donors required. Then use these random numbers
+   -- as indexes to plsql table, use that donor and update the
+   -- record for that donor in plsql table.
+   -- start generating random numbers
+   nactual := 0;
+   nSetRandom := donor_table.last;
+   --      szString := 'Alpha - "' || p_alpha_code || '" ';
+   if donor_table.last <= p_donors_reqd
+   then
+    for i in donor_table.first .. donor_table.last          loop
+	 if not is_curr_list_done
+	 then
+	 -- now generate a random number
+	 nIndex := i;
+	 -- use this index, and select the donor
+	 --   szString := szString || lpad(to_char(nIndex), 4);
+	 select_donor_from_list(p_list_id,p_alpha_code, donor_table(nIndex).donor_id);
+	 donor_table(nIndex).bselection := TRUE;
+	 nActual := nActual + 1;
+	 if nActual = p_donors_reqd
+	 then
+	  exit;
+	   end if;
+	   else
+	   exit;
+	   end if;
+	   end loop;
+	   else
+	   loop
+	    if not is_curr_list_done
+		then
+		-- now generate a random number
+		nIndex := get_next_random_index;
+		-- use this index, and select the donor
+		--  szString := szString || lpad(to_char(nIndex), 4);
+		select_donor_from_list(p_list_id, p_alpha_code,donor_table(nIndex).donor_id);
+		donor_table(nIndex).bselection := TRUE;
+		nActual := nActual + 1;
+		if nActual = p_donors_reqd
+		then
+		exit;
+		end if;
+		 else
+		 exit;
+		 end if;
+		 end loop;
+		 end if;
+		 --      if bDebugMessages then
+		 --         add_log_entry(SERVER_ENTRY, 'String : ' || szString);
+		 --      end if;
+		   p_actual := nActual;
+		    end;
+
+function is_list_done return Boolean is
+
+begin       add_log_entry(SERVER_ENTRY, 'Random: Checking if list is done ....');
+for i in random_table.first .. random_table.last       loop
+ if random_table(i).bStatus = FALSE
+ then             bListComplete := FALSE;
+ exit;
+  end if;
+  end loop;
+  RETURN bListComplete;
+  end;
+
+procedure randomize_list ( p_list_id  in varchar2, p_max_donors    in number,p_total_donors out number) is
+nNextindex         number;
+nActual            number;
+nReqd              number;
+nAvail             number;
+szAlphaCode        varchar2(2);
+nFinishedAlpha     number;
+nBalanceWeight     number;
+nTotalActuals      number;
+nAddnlWt           number;
+nListTotal         number;
+days number;
+secs number;
+begin
+begin
+date_seed:=sysdate;
+days:=to_number(to_char(date_seed,'J'));
+secs:=to_number(to_char(date_seed,'SSSSS'));
+Rand_num:=days*24*3600*secs;
+exception
+when others
+then
+add_log_entry(USER_ENTRY, 'Random: Exception..' || SQLERRM);
+end;
+ select count(*)   into nListTotal  from donor_spool
+ where list_id = p_list_id;
+ if nListTotal > 0
+ then
+ begin
+ add_log_entry(USER_ENTRY, 'Random: Randomizing ....'|| p_list_id);
+ nGrandtotal := p_max_donors;
+ add_log_entry(USER_ENTRY, 'Random: Randomizing ....for '|| to_char(p_max_donors)|| ' donors.');
+ nFinishedAlpha := 0;
+ nBalanceWeight := 0;
+  nTotalActuals  := 0;
+   -- if availabel donors are less than requested then
+   -- select all donors
+    if nListtotal <= p_max_donors
+	then
+	 -- call the routine
+	  add_log_entry (USER_ENTRY, 'Random: List - ' || to_char(nListtotal) ||  ' Max - ' || to_char(p_max_donors));
+	  add_log_entry (USER_ENTRY, 'Random: Selecting all donors...');
+	  select_all_donors(p_list_id, nTotalActuals);
+	  commit;
+	  if IsListCancelled(p_list_id)
+	   then
+	    commit;
+		 raise_application_error(-20013,'User cancelled-13');
+		 end if;
+		 else
+		 prepare_for_randomization(p_list_id);
+		  print_random_table;
+		  add_log_entry(USER_ENTRY, 'Random: Processing ....alpha');
+		  for i in 1 .. 26          loop
+		   nBalanceWeight := 0;
+		    nNextIndex := get_next_index;
+			 if nNextIndex = 0 then
+			 -- add_log_entry(SERVER_ENTRY, 'Random: Next index is zero');
+			  exit;
+			  else
+			  szAlphaCode := random_table(nNextIndex).alpha_id;
+			  nReqd := random_table(nNextIndex).donors_reqd;
+			  nAvail := random_table(nNextIndex).donors_avail;
+			   if bDebugMessages
+			   then
+			   add_log_entry(SERVER_ENTRY, 'Random: Processing ....'|| szAlphacode);
+			    end if;
+				process_alpha(p_list_id, szAlphaCode, nReqd,nActual);
+				add_log_entry(SERVER_ENTRY, 'Random: Processed...'|| szAlphacode ||  ' Reqd: ' || to_char(nReqd)
+				                             ||  ' Actl: ' || to_char(nActual));
+				random_table(nNextIndex).bStatus := TRUE;
+				ntotalActuals := ntotalActuals + nActual;
+				nFinishedAlpha := nFinishedAlpha + 1;
+				if nReqd > nActual
+				then
+				nBalanceWeight := (nReqd - nActual)/nGrandTotal;
+				-- now we have to distribute the collected weight among
+				-- remaining alpha codes
+				distribute_weight(nBalanceWeight);
+				end if;
+				  end if;
+				  commit;
+				  if IsListCancelled(p_list_id)
+				  then
+				  commit;
+				  raise_application_error(20013,'User cancelled-14');
+				   end if;
+				   if is_list_done
+				   then
+				    add_log_entry(USER_ENTRY, 'Random: List randomization is complete ....');
+					exit;
+					end if;
+					--          print_random_table;
+					end loop;
+					 end if;
+					   p_total_donors := ntotalActuals;
+					   end;
+					    end if;
+						end;
+						END don_enlist;
+/
+

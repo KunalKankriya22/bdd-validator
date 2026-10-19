@@ -1,0 +1,210 @@
+<!-- Unit ID Cell Template -->
+<ng-template #unitIdCellTemplate let-row>
+  <span>
+    {{ row.checkDigit ? row.unitId + row.checkDigit : row.unitId }}
+  </span>
+</ng-template>
+
+<div class="reconcile-transport-batch-container">
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Main Content -->
+  <div class="content-wrapper" role="region" aria-labelledby="page-title">
+    <!-- Search Section -->
+    <section class="search-section" [attr.aria-labelledby]="elementId('search-section-title')">
+      <h2 [id]="elementId('search-section-title')" class="sr-only">Search Batch</h2>
+
+      <form [formGroup]="searchForm" class="search-form" [id]="elementId('search-form')">
+        <div class="search-row">
+          <!-- Batch ID Input + Dropdown -->
+          <mat-form-field appearance="fill" class="batch-field">
+            <mat-label [id]="labelId('batchId')">Batch ID</mat-label>
+            <input
+              matInput
+              [id]="elementId('batchId')"
+              formControlName="batchId"
+              [matAutocomplete]="batchAutocomplete"
+              (input)="onBatchInput($event)"
+              (blur)="onBatchBlur()"
+              placeholder="Enter or select batch"
+              [attr.aria-invalid]="f['batchId'].invalid && f['batchId'].touched"
+              [attr.aria-describedby]="
+                f['batchId'].invalid && f['batchId'].touched ? errorId('batchId') : null
+              "
+              [attr.aria-required]="true"
+              maxlength="10">
+            <mat-icon matSuffix class="dropdown-icon">arrow_drop_down</mat-icon>
+            <mat-autocomplete
+              #batchAutocomplete="matAutocomplete"
+              (optionSelected)="onBatchSelected($event)">
+              @for (batch of filteredBatches(); track batch.batchId) {
+                <mat-option [value]="batch.batchId">
+                  {{ batch.batchId }}
+                </mat-option>
+              }
+              @if (filteredBatches().length === 0 && batches().length > 0) {
+                <mat-option disabled>No matching batches found</mat-option>
+              }
+            </mat-autocomplete>
+            @if (f['batchId'].invalid && f['batchId'].touched) {
+              <mat-error [id]="errorId('batchId')">
+                @if (f['batchId'].errors?.['required']) {
+                  Batch ID is required
+                }
+              </mat-error>
+            }
+          </mat-form-field>
+
+          <!-- Created On (Read-only) -->
+          <div class="read-only-field">
+            <span class="read-only-field__label" [id]="elementId('createdOn-label')">Created On</span>
+            <div class="read-only-field__value"
+                 [attr.aria-labelledby]="elementId('createdOn-label')">{{ createdOn() }}</div>
+          </div>
+
+          <!-- Sent To (Read-only) -->
+          <div class="read-only-field">
+            <span class="read-only-field__label" [id]="elementId('sentTo-label')">Sent To</span>
+            <div class="read-only-field__value"
+                 [attr.aria-labelledby]="elementId('sentTo-label')">{{ sentTo() }}</div>
+          </div>
+
+          <!-- CLEAR Button -->
+          <button
+            mat-button
+            type="button"
+            class="clear-btn"
+            (click)="clearAll()"
+            [id]="elementId('clear-btn')"
+            aria-label="Clear all fields and reset form">
+            CLEAR
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Data Section -->
+    @if (showTable()) {
+      <section
+        class="data-section"
+        [attr.aria-labelledby]="elementId('data-section-title')"
+        role="region">
+        <h2 [id]="elementId('data-section-title')" class="sr-only">Batch Units</h2>
+
+        <!-- Warehouse Info + Action Buttons Row -->
+        <div class="toolbar-row" role="group" [attr.aria-label]="'Actions for batch ' + (searchForm.get('batchId')?.value || '')">
+          <!-- Warehouse Transfer Info (Left) -->
+          <div class="warehouse-transfer-info">
+            <mat-icon aria-hidden="true">storage</mat-icon>
+            <span>{{ warehouseTransfer() }}</span>
+          </div>
+
+          <!-- Action Buttons (Right) -->
+          <div class="action-buttons">
+            @if (hasSelectedRows()) {
+              <button
+                mat-stroked-button
+                color="primary"
+                type="button"
+                class="add-reconciliation-btn"
+                (click)="openAddReconciliationDialog()"
+                [id]="elementId('add-reconciliation-btn')"
+                [attr.aria-label]="
+                  'Add reconciliation code to ' + selectedRowCount() + ' selected units'
+                ">
+                ADD RECONCILIATION CODE ({{ selectedRowCount() }})
+              </button>
+            }
+
+            <button
+              mat-button
+              type="button"
+              class="clear-all-btn"
+              [disabled]="!hasAnyReasonAssigned() && !hasSelectedRows()"
+              (click)="clearAllReasons()"
+              [id]="elementId('clear-all-btn')"
+              aria-label="Clear all reconciliation reasons">
+              CLEAR ALL
+            </button>
+
+            <button
+              mat-raised-button
+              color="primary"
+              type="button"
+              class="save-btn"
+              (click)="onSave()"
+              [disabled]="!canSave() || saving()"
+              [id]="elementId('save-btn')"
+              aria-label="Save reconciliation">
+              @if (saving()) {
+                <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+                <span class="sr-only">Saving...</span>
+              } @else {
+                SAVE
+              }
+            </button>
+          </div>
+        </div>
+
+        <!-- Data Table -->
+        <div class="table-container">
+          <app-data-table
+            [config]="tableConfig"
+            [data]="tableData()"
+            [loading]="loading()"
+            (selectionChange)="onSelectionChange($event)"
+            (sortChange)="onSortChange($event)"
+            (rowAction)="onRowAction($event)">
+          </app-data-table>
+
+          <!-- Pagination -->
+          @if (tableData().length > 0) {
+            <nav aria-label="Batch units pagination">
+              <mat-paginator
+                [length]="tableData().length"
+                [pageSize]="pageSize()"
+                [pageSizeOptions]="pageSizeOptions"
+                [pageIndex]="currentPage()"
+                (page)="
+                  pageSize.set($event.pageSize);
+                  currentPage.set($event.pageIndex)
+                "
+                showFirstLastButtons
+                aria-label="Select page of batch units">
+              </mat-paginator>
+            </nav>
+          }
+        </div>
+      </section>
+    }
+
+    <!-- Empty State -->
+    @if (showEmptyState()) {
+      <div
+        class="empty-state"
+        role="status"
+        aria-live="polite"
+        [attr.aria-labelledby]="elementId('empty-state-title')">
+        <mat-icon aria-hidden="true" class="empty-state-icon">search</mat-icon>
+        <h3 [id]="elementId('empty-state-title')" class="empty-state-title">
+          No Results to Display
+        </h3>
+        <p class="empty-state-message">Enter a Batch ID to begin.</p>
+      </div>
+    }
+
+    <!-- Loading State -->
+    @if (loading()) {
+      <div
+        class="loading-container"
+        role="status"
+        aria-live="polite"
+        aria-busy="true"
+        [attr.aria-labelledby]="elementId('loading-label')">
+        <mat-spinner diameter="40" aria-label="Loading batch details"></mat-spinner>
+        <span [id]="elementId('loading-label')" class="sr-only">Loading, please wait...</span>
+      </div>
+    }
+  </div>
+</div>

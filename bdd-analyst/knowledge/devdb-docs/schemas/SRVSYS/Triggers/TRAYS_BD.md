@@ -1,0 +1,60 @@
+---
+tags:
+  - trigger
+  - SRVSYS
+---
+# TRAYS_BD
+
+**Schema**: [[schemas/SRVSYS/SRVSYS|SRVSYS]]
+**Table**: [[schemas/SRVSYS/Tables/TRAYS|TRAYS]]
+**Type**: BEFORE EACH ROW
+**Event**: DELETE
+**Status**: ENABLED
+
+## Trigger Body
+
+```plsql
+begin
+  insert into TRAYS_AUDIT
+  (	CHAPTER_ID,
+	WAREHOUSE_ID,
+	DEVICE_TYPE,
+	DEVICE_NUMBER,
+	RACK_NUMBER,
+	SHELF_NUMBER,
+	TRAY_NUMBER,
+	TRAY_DESCRIPTION,
+	PRODUCT_TYPE,
+	BLOOD_TYPE,
+	ITEM_COUNT,
+	TRAY_STATUS,
+	EFFECTIVE_DATE,
+	LAST_MODIFIED_DATE,
+	TERM_DATE,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  (	:old.CHAPTER_ID,
+	:old.WAREHOUSE_ID,
+	:old.DEVICE_TYPE,
+	:old.DEVICE_NUMBER,
+	:old.RACK_NUMBER,
+	:old.SHELF_NUMBER,
+	:old.TRAY_NUMBER,
+	:old.TRAY_DESCRIPTION,
+	:old.PRODUCT_TYPE,
+	:old.BLOOD_TYPE,
+	:old.ITEM_COUNT,
+	:old.TRAY_STATUS,
+	:old.EFFECTIVE_DATE,
+	:old.LAST_MODIFIED_DATE,
+	:old.TERM_DATE,
+	:old.AUDIT_KEY,
+	'DELETE',LT_USER_SESSION.GET_USERID,
+	sysdate
+  ) ;
+  end ;
+```

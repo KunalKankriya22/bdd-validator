@@ -1,0 +1,237 @@
+<div class="test-lookup-dialog">
+  <!-- Dialog Header -->
+  <h2 mat-dialog-title [id]="elementId('title')">
+    Select Tests
+  </h2>
+
+  <!-- Dialog Content -->
+  <mat-dialog-content>
+    <!-- Filters Section -->
+    <form [formGroup]="filterForm" class="filter-section">
+      <div class="filter-row">
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label [id]="labelId('testGroup')">Test Group</mat-label>
+          <mat-select
+            [id]="elementId('testGroup')"
+            formControlName="testGroup"
+            (selectionChange)="onTestGroupChange()"
+            [attr.aria-labelledby]="labelId('testGroup')">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="testGroupSearchCtrl"
+                placeholderLabel="Search groups..."
+                noEntriesFoundLabel="No groups found" />
+            </mat-option>
+            <mat-option [value]="null">All Groups</mat-option>
+            @for (group of filteredTestGroups(); track group.testGroup) {
+              <mat-option [value]="group.testGroup">
+                {{ group.testGroup }} - {{ group.description }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label [id]="labelId('sampleType')">Sample Type</mat-label>
+          <mat-select
+            [id]="elementId('sampleType')"
+            formControlName="sampleType"
+            (selectionChange)="onSampleTypeChange()"
+            [attr.aria-labelledby]="labelId('sampleType')">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="sampleTypeSearchCtrl"
+                placeholderLabel="Search types..."
+                noEntriesFoundLabel="No types found" />
+            </mat-option>
+            <mat-option [value]="null">All Types</mat-option>
+            @for (type of filteredSampleTypes(); track type.sampleType) {
+              <mat-option [value]="type.sampleType">
+                {{ type.sampleType }}{{ type.description ? ' - ' + type.description : '' }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="filter-field search-field">
+          <mat-label [id]="labelId('search')">Search</mat-label>
+          <input
+            matInput
+            [id]="elementId('search')"
+            formControlName="searchKeyword"
+            placeholder="Search by Test ID or Description">
+          <mat-icon matSuffix aria-hidden="true">search</mat-icon>
+        </mat-form-field>
+
+        <button
+          mat-button
+          type="button"
+          (click)="onClearFilters()"
+          [id]="elementId('clear-btn')"
+          class="clear-filters-btn">
+          CLEAR FILTERS
+        </button>
+      </div>
+    </form>
+
+    <!-- Selected Count -->
+    @if (hasSelection()) {
+      <div class="selection-info" role="status" aria-live="polite">
+        <mat-icon aria-hidden="true">check_circle</mat-icon>
+        <span>{{ selectionCount() }} test(s) selected</span>
+      </div>
+    }
+
+    <!-- Loading State -->
+    @if (loading()) {
+      <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+        <mat-spinner diameter="40" aria-label="Loading tests"></mat-spinner>
+        <span class="sr-only">Loading tests, please wait...</span>
+      </div>
+    }
+
+    <!-- Error State -->
+    @if (error()) {
+      <div class="error-container" role="alert" aria-live="assertive">
+        <mat-icon aria-hidden="true">error</mat-icon>
+        <p>{{ error() }}</p>
+        <button mat-button color="primary" (click)="loadTests()">
+          Retry
+        </button>
+      </div>
+    }
+
+    <!-- Table -->
+    @if (!loading() && !error()) {
+      <!-- Empty State -->
+      @if (isEmpty()) {
+        <div class="empty-state">
+          <mat-icon aria-hidden="true">search_off</mat-icon>
+          <p>No tests found matching the selected criteria.</p>
+          <button mat-button color="primary" (click)="onClearFilters()">
+            Clear Filters
+          </button>
+        </div>
+      } @else {
+        <!-- Data Table -->
+        <div class="table-container">
+          <table
+            mat-table
+            [dataSource]="tests()"
+            [id]="elementId('tests-table')"
+            aria-label="Available tests table">
+
+            <!-- Checkbox Column -->
+            <ng-container matColumnDef="select">
+              <th mat-header-cell *matHeaderCellDef scope="col">
+                <mat-checkbox
+                  [id]="elementId('select-all')"
+                  [checked]="isAllSelected()"
+                  [indeterminate]="isSomeSelected()"
+                  (change)="onMasterToggle()"
+                  [attr.aria-label]="isAllSelected() ? 'Deselect all tests' : 'Select all tests'">
+                </mat-checkbox>
+              </th>
+              <td mat-cell *matCellDef="let test">
+                <mat-checkbox
+                  [id]="elementId('select-' + test.testId)"
+                  [checked]="isTestSelected(test.testId)"
+                  [disabled]="!test.isActive"
+                  (change)="onTestToggle(test.testId)"
+                  [attr.aria-label]="!test.isActive ? 'Test ' + test.testId + ' is inactive' : 'Select test ' + test.testId">
+                </mat-checkbox>
+              </td>
+            </ng-container>
+
+            <!-- Test ID Column -->
+            <ng-container matColumnDef="testId">
+              <th mat-header-cell *matHeaderCellDef scope="col">
+                Test ID
+                <button mat-icon-button class="sort-btn" (click)="onSort('testId')"
+                  [attr.aria-label]="sortColumn() === 'testId' && sortOrder() === 'ASC' ? 'Sort Test ID descending' : sortColumn() === 'testId' && sortOrder() === 'DESC' ? 'Clear Test ID sort' : 'Sort Test ID ascending'">
+                  <mat-icon aria-hidden="true">{{ sortIcon('testId') }}</mat-icon>
+                </button>
+              </th>
+              <td mat-cell *matCellDef="let test">
+                {{ test.testId }}
+                @if (!test.isActive) {
+                  <span class="inactive-badge">Inactive</span>
+                }
+              </td>
+            </ng-container>
+
+            <!-- Test Description Column -->
+            <ng-container matColumnDef="testDesc">
+              <th mat-header-cell *matHeaderCellDef scope="col">
+                Description
+                <button mat-icon-button class="sort-btn" (click)="onSort('testDesc')"
+                  [attr.aria-label]="sortColumn() === 'testDesc' && sortOrder() === 'ASC' ? 'Sort Description descending' : sortColumn() === 'testDesc' && sortOrder() === 'DESC' ? 'Clear Description sort' : 'Sort Description ascending'">
+                  <mat-icon aria-hidden="true">{{ sortIcon('testDesc') }}</mat-icon>
+                </button>
+              </th>
+              <td mat-cell *matCellDef="let test">{{ test.testDesc }}</td>
+            </ng-container>
+
+            <!-- Test Group Column -->
+            <ng-container matColumnDef="testGroup">
+              <th mat-header-cell *matHeaderCellDef scope="col">Test Group</th>
+              <td mat-cell *matCellDef="let test">
+                @if (test.testGroup) {
+                  {{ test.testGroup }}{{ test.testGroupDesc ? ' – ' + test.testGroupDesc : '' }}
+                } @else {
+                  N/A
+                }
+              </td>
+            </ng-container>
+
+            <!-- Effective Date Column -->
+            <ng-container matColumnDef="effDate">
+              <th mat-header-cell *matHeaderCellDef scope="col">Eff Date</th>
+              <td mat-cell *matCellDef="let test">{{ formatDate(test.effDate) }}</td>
+            </ng-container>
+
+            <!-- Termination Date Column -->
+            <ng-container matColumnDef="termDate">
+              <th mat-header-cell *matHeaderCellDef scope="col">Term Date</th>
+              <td mat-cell *matCellDef="let test">{{ formatDate(test.termDate) || '—' }}</td>
+            </ng-container>
+
+            <tr mat-header-row *matHeaderRowDef="displayedColumns"></tr>
+            <tr mat-row *matRowDef="let row; columns: displayedColumns;" [class.inactive-row]="!row.isActive"></tr>
+          </table>
+
+          <!-- Paginator -->
+          <mat-paginator
+            [length]="totalCount()"
+            [pageSize]="pageSize()"
+            [pageIndex]="pageIndex()"
+            [pageSizeOptions]="[10, 25, 50]"
+            (page)="onPageChange($event)"
+            [attr.aria-label]="'Pagination for tests table'"
+            showFirstLastButtons>
+          </mat-paginator>
+        </div>
+      }
+    }
+  </mat-dialog-content>
+
+  <!-- Dialog Actions -->
+  <mat-dialog-actions align="end">
+    <button
+      mat-button
+      type="button"
+      (click)="onCancel()"
+      [id]="elementId('cancel-btn')">
+      CANCEL
+    </button>
+    <button
+      mat-raised-button
+      color="primary"
+      type="button"
+      (click)="onConfirm()"
+      [disabled]="!hasSelection()"
+      [id]="elementId('confirm-btn')">
+      SELECT ({{ selectionCount() }})
+    </button>
+  </mat-dialog-actions>
+</div>

@@ -1,0 +1,477 @@
+create or replace package CNFREXTR is
+
+  -- Author  : ASHOKV
+  -- Created : 10/7/2018 12:06:03 PM
+  -- Purpose : To extract confirmatory test series/test results for units that have been designated suitable for customer release.
+  -- Version : 01 (initial version)
+  --         : 02 (MLT 967 - after time scenario added for gen_series_report)
+  --         : 03 (MLT 1031 - External transfer in time portion in coll.date issue)
+  -- Public type declarations
+  --type <TypeName> is <Datatype>;
+  
+  -- Public constant declarations
+  --<ConstantName> constant <Datatype> := <Value>;
+
+  -- Public variable declarations
+  --<VariableName> <Datatype>;
+
+  -- Public function and procedure declarations
+  --function <FunctionName>(<Parameter> <Datatype>) return <Datatype>;
+
+ procedure gen_extract_units(user_in IN VARCHAR2, chp_in IN VARCHAR2, prog_in IN VARCHAR2, 
+                              session_id_out OUT VARCHAR2, status_out OUT VARCHAR2);
+ procedure commit_proc(session_id_in IN VARCHAR2, extract_id_out OUT VARCHAR2, status_out OUT VARCHAR2); 
+ 
+ procedure clean_up_tables(session_id_in IN VARCHAR2, status_out OUT VARCHAR2);
+
+ procedure gen_series_report(extract_id_in IN VARCHAR2, user_in IN VARCHAR2, chp_in IN VARCHAR2, start_time_in IN DATE, status_out OUT VARCHAR2);
+  
+end CNFREXTR;
+/
+create or replace package body CNFREXTR is
+
+  -- Private type declarations
+  --type <TypeName> is <Datatype>;
+  
+  -- Private constant declarations
+  --<ConstantName> constant <Datatype> := <Value>;
+
+  -- Private variable declarations
+  --<VariableName> <Datatype>;
+  
+  function get_extract_id(session_id_in IN VARCHAR2) RETURN VARCHAR2 is
+    ln_cur_seq NUMBER;
+    lv_extract_id VARCHAR2(20);    
+    ln_max_seq NUMBER;
+    ln_cnt NUMBER;
+    lc_num_type VARCHAR2(20):= 'EXTRACT_ID';
+    lv_chapter VARCHAR2(4);
+    ld_sysdate DATE;
+  begin
+    begin
+      select chapter_id into lv_chapter
+        from cnf_extract
+       where extract_id = session_id_in
+        and rownum =1;  
+    end;
+    
+    ld_sysdate := lifetrack_timezone_convert.get_local_time(lv_chapter, SYSDATE);
+    
+    begin
+      ln_cur_seq := 0; -- default;
+      select max_number into ln_cur_seq
+        from number_generation
+       where chapter_id = lv_chapter
+         and number_type = lc_num_type ;
+    exception
+      when no_data_found then
+        insert into number_generation(chapter_id, number_type, max_number, last_reset_date)
+              values( lv_chapter, lc_num_type, ln_cur_seq, TRUNC(SYSDATE));
+    end; 
+    
+    ln_cur_seq := ln_cur_seq + 1;
+    lv_extract_id := 'C' || TO_CHAR(ld_sysdate, 'MMDDYY') || '-' || lv_chapter || LPAD(TO_CHAR(ln_cur_seq),4,'0');
+
+
+    select count(1) into ln_cnt
+     from cnf_extract
+    where extract_id = lv_extract_id
+      and chapter_id = lv_chapter;
+    
+    if ln_cnt <> 0 then  
+      select MAX(TO_NUMBER(SUBSTR(extract_id,12)))
+       into ln_max_seq
+       from cnf_extract
+      where extract_id like 'C' || TO_CHAR(ld_sysdate, 'MMDDYY') || '-' || lv_chapter || '%'
+        and chapter_id = lv_chapter;   
+
+      ln_cur_seq := ln_max_seq + 1;
+      lv_extract_id := 'C' || TO_CHAR(ld_sysdate, 'MMDDYY') || '-' || lv_chapter || LPAD(TO_CHAR(ln_cur_seq),4,'0'); 
+    end if;
+    
+    
+    update number_generation
+      set max_number = ln_cur_seq
+    where number_type = lc_num_type
+      and chapter_id = lv_chapter;
+    
+    return lv_extract_id;  
+  end get_extract_id;
+  
+
+  -- Function and procedure implementations
+  procedure gen_extract_units(user_in IN VARCHAR2, chp_in IN VARCHAR2, prog_in IN VARCHAR2, 
+                              session_id_out OUT VARCHAR2, status_out OUT VARCHAR2) is
+    nRowCnt NUMBER;
+    lv_session_id VARCHAR2(20); 
+    ld_sysdate DATE;
+  begin
+    --- validate inputs
+    if user_in is null then
+      null;
+    end if;
+    
+    if chp_in is null then
+      null;
+    end if;
+    
+    if prog_in is null then
+      null;
+    end if;
+    
+    -- validate user;
+    
+    
+    -- validate chapter;
+    
+    
+    lv_session_id := TO_CHAR(SYSDATE,'YYYYMMDDHH24MISSSS');
+    
+    -- insert into parent table with a null extract flag.
+    INSERT INTO cnf_extract
+    (extract_id, chapter_id, unit_count, under_extract_flag, re_extract_flag, program_id, insert_user)
+    VALUES
+    (lv_session_id, chp_in, null, NULL, NULL, prog_in, user_in);
+    
+    ld_sysdate := lifetrack_timezone_convert.get_local_time(NVL(chp_in, lt_user_session.get_chapter_id), SYSDATE);
+    
+    -- insert into child table.
+    INSERT INTO CNF_EXTRACT_UNITS
+      (extract_id,
+       unit_id,
+       coll_date,
+       chapter_id,
+       batch_id,
+       contract_id,
+       os_unit_id,
+       qc_date,
+       qc_user,
+       received_Date,
+       test_series_id,
+       test_id,
+       program_id,
+       insert_user,
+       select_flag)
+      select lv_session_id, -- first select is to get units by test series id.
+             ut.unit_id,
+             ut.coll_date,
+             ut.chapter_id,
+             u.batch_id,
+             u.contract_id,
+             u.os_unit_id,
+             ut.qc_test_date,
+             ut.qc_test_user,
+             u.insert_dats,
+             MAX(test_series_id) test_series_id,
+             NULL test_id,
+             prog_in,
+             user_in,
+             'X'
+        from utrs ut, units u
+       where ut.unit_id = u.unit_id
+         and ut.chapter_id = u.chapter_id
+         and TRUNC(ut.coll_date) = TRUNC(u.coll_date) -- V03 (MLT 1031)
+         --and ut.unit_id IN ('W110418092102', 'W110418092103', 'W804018100110') --='W110418092915'
+         and ut.cancel_flag is null
+         and ut.qc_test_date is not null
+         and ut.extract_date is null
+         and ut.test_series_id is not null
+         and ut.test_id in
+             (select test_id
+                from valid_tests
+               where test_group in --('CNFRM', 'SUPP')
+                                 ( SELECT mc.code
+                                      FROM master_codes mc
+                                     WHERE mc.code_type = 'TSTGP'
+                                       AND ld_sysdate between mc.eff_date and nvl(mc.term_date, ld_sysdate+1)
+                                  )                  
+               )
+         and not exists (select 'x'
+                from cnf_extract ce, cnf_extract_units ceu
+               where ce.extract_id = ceu.extract_id
+                 and NVL(ce.under_extract_Flag, 'N') IN ('X', 'Y')
+                 and ceu.unit_id = ut.unit_id
+                 and ceu.test_series_id = ut.test_series_id
+                 and ceu.test_id is null)
+         and not exists (select 'x'
+                from rgt_confirm_skip_samples rcss
+               where rcss.unit_id = ut.unit_id
+                 and rcss.coll_date = ut.coll_date
+                 and rcss.chapter_id = ut.chapter_id
+                 and rcss.reset_date is null
+                 and rcss.reason_code != 'SQC')
+       group by ut.unit_id,
+                ut.coll_date,
+                ut.chapter_id,
+                u.batch_id,
+                u.contract_id,
+                u.os_unit_id,
+                ut.qc_test_date,
+                ut.qc_test_user,
+                u.insert_dats
+      union
+      select lv_session_id, -- second select is to get units by test id.
+             ut.unit_id,
+             ut.coll_date,
+             ut.chapter_id,
+             u.batch_id,
+             u.contract_id,
+             u.os_unit_id,
+             ut.qc_test_date,
+             ut.qc_test_user,
+             u.insert_dats,
+             NULL test_series_id,
+             MAX(test_id) test_id,
+             prog_in,
+             user_in,
+             'X'
+        from utrs ut, units u
+       where ut.unit_id = u.unit_id
+         and ut.chapter_id = u.chapter_id
+         and TRUNC(ut.coll_date) = TRUNC(u.coll_date)
+         --and ut.unit_id IN ('W110418092102', 'W110418092103', 'W804018100110')
+         and ut.cancel_flag is null
+         and ut.qc_test_date is not null
+         and ut.extract_date is null
+         and ut.test_series_id is null
+         and ut.test_id in
+             (select test_id
+                from valid_tests
+               where test_group in --('CNFRM', 'SUPP')
+                                 ( SELECT mc.code
+                                      FROM master_codes mc
+                                     WHERE mc.code_type = 'TSTGP'
+                                       AND ld_sysdate between mc.eff_date and nvl(mc.term_date, ld_sysdate+1)
+                                  )  
+               )
+         and not exists (select 'x'
+                from cnf_extract ce, cnf_extract_units ceu
+               where ce.extract_id = ceu.extract_id
+                 and NVL(ce.under_extract_Flag, 'N') IN ('X', 'Y')
+                 and ceu.unit_id = ut.unit_id
+                 and ceu.test_id = ut.test_id
+                 and ceu.test_series_id is null)
+         and not exists (select 'x'
+                from rgt_confirm_skip_samples rcss
+               where rcss.unit_id = ut.unit_id
+                 and rcss.coll_date = ut.coll_date
+                 and rcss.chapter_id = ut.chapter_id
+                 and rcss.reset_date is null
+                 and rcss.reason_code != 'SQC')
+       group by ut.unit_id,
+                ut.coll_date,
+                ut.chapter_id,
+                u.batch_id,
+                u.contract_id,
+                u.os_unit_id,
+                ut.qc_test_date,
+                ut.qc_test_user,
+                u.insert_dats;    
+ 
+    nRowCnt := SQL%ROWCOUNT; -- get the count.
+    
+    -- update count in parent table.
+    UPDATE cnf_extract
+      SET under_extract_flag = 'X', 
+          unit_count = nRowcnt
+    WHERE extract_id = lv_session_id;
+    
+    COMMIT;
+    
+    session_id_out := lv_session_id;
+    status_out := 'OK';
+    
+    
+ exception
+   when others then
+     status_out := 'Error in gen units';
+     null;
+ end gen_extract_units;
+
+
+  procedure commit_proc(session_id_in IN VARCHAR2, extract_id_out OUT VARCHAR2, status_out OUT VARCHAR2) is
+    lv_extract_id VARCHAR2(20);
+    lv_err_msg VARCHAR2(4000);
+    exit_error EXCEPTION;
+    nCnt NUMBER;
+  begin
+    -- get extract ID.
+    lv_extract_id := get_extract_id(session_id_in);    
+    
+    if lv_extract_id is null then
+      lv_err_msg := 'error in extract id generation';
+      raise exit_error;
+    end if;
+    
+    delete from cnf_extract_units
+    where extract_id= session_id_in
+     and nvl(select_flag, 'N') <> 'X';
+    
+    select count(1) into nCnt
+      from cnf_extract_units
+     where extract_id = session_id_in;
+    
+    
+    -- update count in parent table.
+    UPDATE cnf_extract
+      SET under_extract_flag = 'Y', 
+          unit_count = nCnt,
+          extract_id = lv_extract_id
+    WHERE extract_id = session_id_in;    
+    
+    -- 
+    UPDATE cnf_extract_units
+      SET extract_id = lv_extract_id
+     WHERE extract_id = session_id_in;
+
+    COMMIT; 
+         
+    extract_id_out := lv_extract_id;
+    status_out := 'OK';
+
+  exception
+    when exit_error then
+      status_out := lv_err_msg;
+    when others then
+      status_out := 'Error in commit proc';   
+  end commit_proc;
+
+  procedure clean_up_tables(session_id_in IN VARCHAR2, status_out OUT VARCHAR2) is
+   nCnt NUMBER;
+  begin  
+    status_out := 'OK';
+   select count(1) into nCnt
+     from cnf_extract
+    where under_extract_flag = 'X'
+      and extract_id = session_id_in;
+        
+   if nCnt <> 0 then
+    DELETE FROM cnf_extract
+    WHERE extract_id = session_id_in;
+      
+    DELETE FROM cnf_extract_units
+     WHERE extract_id = session_id_in;
+      
+    COMMIT; 
+   end if;
+  exception 
+    when others then
+      status_out := 'Error in clear form'; 
+  end;
+
+
+  procedure gen_series_report(extract_id_in IN VARCHAR2, 
+                              user_in       IN VARCHAR2, 
+                              chp_in        IN VARCHAR2, 
+                              start_time_in IN DATE,
+                              status_out    OUT VARCHAR2) is
+    exit_error EXCEPTION;
+    lv_user VARCHAR2(30);
+    lv_chp  VARCHAR2(4);
+    lv_flag VARCHAR2(1);
+    lv_mode VARCHAR2(1);
+  begin
+    status_out := 'OK';
+    lv_mode := 'E'; -- default is EXTRACT;
+    
+    -- 0) input parameter checks
+    if extract_id_in is null then
+       status_out := 'Extract ID is required.';
+       raise exit_error;  
+    end if;
+
+    begin
+      if start_time_in is null then -- not after time
+        
+        select re_extract_flag into lv_flag
+          from cnf_extract
+         where extract_id = extract_id_in
+           and rownum = 1;
+        if NVL(lv_flag,'N') = 'Y' then
+          lv_mode := 'R';  
+        end if;         
+        
+      else -- after time scenario.
+        
+        select ce.re_extract_flag into lv_flag
+          from cnf_schedule_extract cse, cnf_extract ce
+         where cse.extract_id = ce.extract_id
+           and NVL(cse.status, 'N') <> 'C'
+           and rownum = 1;
+        if NVL(lv_flag,'N') = 'X' then
+          lv_mode := 'R';  
+        end if;          
+      end if;
+    exception
+      when others then
+        status_out := 'Extract flag error ' || SUBSTR(SQLERRM, 1, 200);
+        raise exit_error;       
+    end;
+    
+    if user_in is null then
+      lv_user := NVL(lt_user_session.get_userid,'MANUAL');
+    else
+      lv_user := user_in;
+    end if;
+    
+    if chp_in is null then
+      lv_chp := NVL(lt_user_session.get_chapter_id,'WAD');
+    else
+      lv_chp := chp_in;
+    end if;
+    ---------
+    
+    
+    
+    -- 1) insert into cnf_rpt_parm_select temporary table.
+    begin
+      insert into cnf_rpt_parm_select
+        (APPL_ID,
+         USER_NAME,
+         REPORT_NAME,
+         PARM_ID,
+         PARM_NO,
+         PARM_SELECT,
+         PARM_CODE)
+      values
+        ('DON', 
+         lv_user,
+         'CFRSERIS', 
+         extract_id_in,
+         1, 
+         extract_id_in,
+         'EXTID');
+    exception 
+      when others then
+        status_out := 'Loc:01 ' || SUBSTR(SQLERRM, 1, 200);
+        raise exit_error;
+    end;   
+    
+    COMMIT;
+    -- 2) call pkg to process the temporary table.
+    begin
+      -- Call the procedure
+      generate_series_report.pop_rpt_parm_tables(pl_report_id    => extract_id_in,
+                                                 pl_user_id      => lv_user,
+                                                 pl_chapter_id   => lv_chp,
+                                                 pl_mode         => lv_mode, -- 'E', -- for extract;
+                                                 pl_start_time   => start_time_in
+                                                 );
+    exception
+      when others then
+        status_out := 'Loc:02 ' || SUBSTR(SQLERRM, 1, 200);
+        raise exit_error;
+    end;
+    
+  exception
+    when exit_error then
+      null;     
+    when others then
+      status_out := 'gen series report error ' || substr(sqlerrm, 1, 100);
+  end gen_series_report;
+begin
+  -- Initialization
+  --<Statement>;
+  null;
+end CNFREXTR;
+/

@@ -1,0 +1,310 @@
+<app-page-header-with-breadcrumb [config]="headerConfig" />
+
+<!-- Cell templates for color-coded columns -->
+<ng-template #testIdCellTpl let-row let-column="column">
+  <span [style.color]="getResultColor(row.resultStatus1 || '')" [style.font-weight]="getResultColor(row.resultStatus1 || '') ? 'bold' : 'normal'">
+    {{ row.testId }}
+  </span>
+</ng-template>
+
+<ng-template #resultCellTpl let-row let-column="column">
+  <span [style.color]="getResultColor(row.resultStatus1 || '')" [style.font-weight]="getResultColor(row.resultStatus1 || '') ? 'bold' : 'normal'">
+    {{ row.resultStatus1 }}
+    @if (row.resultStatus1 === 'R') {
+      <span class="sr-only">(Reactive)</span>
+    }
+  </span>
+</ng-template>
+
+<ng-template #interimResultCellTpl let-row let-column="column">
+  <span [style.color]="getResultColor(row.interimResult || '')" [style.font-weight]="getResultColor(row.interimResult || '') ? 'bold' : 'normal'">
+    {{ row.interimResult }}
+    @if (row.interimResult === 'R') {
+      <span class="sr-only">(Reactive)</span>
+    }
+  </span>
+</ng-template>
+
+<ng-template #unitIdCellTpl let-row let-column="column">
+  <span class="unit-id-cell">
+    {{ row.unitIdDisplay }}
+    @if (row.hasWarning) {
+      <mat-icon
+        class="warning-icon"
+        matTooltip="Unit has reactive result"
+        aria-label="Warning: Unit has reactive result">
+        error
+      </mat-icon>
+    }
+  </span>
+</ng-template>
+
+<section
+  class="results-extract-query-container"
+  [attr.aria-labelledby]="elementId('heading')"
+  role="region">
+
+  <!-- Search Form Section -->
+  <form
+    [formGroup]="searchForm"
+    (ngSubmit)="onRetrieve()"
+    [id]="elementId('search-form')"
+    class="search-form"
+    aria-label="Search results extract query"
+    novalidate>
+
+    <div class="form-row">
+      <!-- Contract ID Searchable Dropdown -->
+      <mat-form-field appearance="fill" class="form-field contract-field">
+        <mat-label [id]="labelId('contractId')">
+          Contract ID
+        </mat-label>
+        <mat-select
+          [id]="elementId('contractId')"
+          formControlName="contractId"
+          (selectionChange)="onContractSelected($event.value)"
+          [attr.aria-invalid]="f['contractId'].invalid && (f['contractId'].touched || submitted())"
+          [attr.aria-describedby]="f['contractId'].invalid && (f['contractId'].touched || submitted()) ? errorId('contractId') : null">
+          <mat-option class="search-option">
+            <ngx-mat-select-search
+              [formControl]="contractSearchCtrl"
+              placeholderLabel="Search..."
+              noEntriesFoundLabel="No results found">
+            </ngx-mat-select-search>
+          </mat-option>
+          @if (contractsLoading()) {
+            <mat-option disabled>
+              <em>Loading...</em>
+            </mat-option>
+          }
+          @if (!contractsLoading() && filteredContracts().length === 0) {
+            <mat-option disabled>
+              <em>No contracts found</em>
+            </mat-option>
+          }
+          @for (contract of filteredContracts(); track contract.contractId) {
+            <mat-option [value]="contract.contractId">
+              {{ contract.contractId }} - {{ contract.company }}
+            </mat-option>
+          }
+        </mat-select>
+        @if (f['contractId'].invalid && (f['contractId'].touched || submitted())) {
+          <mat-error [id]="errorId('contractId')">
+            @if (f['contractId'].errors?.['required']) {
+              Contract ID is required
+            }
+            @if (f['contractId'].errors?.['maxlength']) {
+              Contract ID cannot exceed 9 characters
+            }
+          </mat-error>
+        }
+      </mat-form-field>
+
+      <!-- Contract ID Description (Read-only) -->
+      <div class="contract-description-field" role="group" [attr.aria-labelledby]="elementId('contract-desc-label')">
+        <label class="description-label" [id]="elementId('contract-desc-label')">Contract ID Description</label>
+        <div class="description-value" role="status" [attr.aria-labelledby]="elementId('contract-desc-label')">{{ contractDescription() || '-' }}</div>
+      </div>
+
+      <!-- From Date -->
+      <mat-form-field appearance="fill" class="form-field date-field">
+        <mat-label [id]="labelId('fromDate')">
+          From Date
+        </mat-label>
+        <input
+          matInput
+          [matDatepicker]="fromDatePicker"
+          [id]="elementId('fromDate')"
+          formControlName="fromDate"
+          [max]="maxDate()"
+          [errorStateMatcher]="fromDateErrorMatcher"
+          placeholder="DD-MMM-YYYY"
+          (input)="onFromDateInput($event)"
+          [attr.aria-invalid]="f['fromDate'].invalid && (f['fromDate'].touched || submitted())"
+          [attr.aria-describedby]="f['fromDate'].invalid && (f['fromDate'].touched || submitted()) ? errorId('fromDate') : null">
+        <mat-datepicker-toggle matSuffix [for]="fromDatePicker"></mat-datepicker-toggle>
+        <mat-datepicker #fromDatePicker></mat-datepicker>
+        <mat-error [id]="errorId('fromDate')">{{ getFromDateError() }}</mat-error>
+      </mat-form-field>
+
+      <!-- To Date -->
+      <mat-form-field appearance="fill" class="form-field date-field">
+        <mat-label [id]="labelId('toDate')">
+          To Date
+        </mat-label>
+        <input
+          matInput
+          [matDatepicker]="toDatePicker"
+          [id]="elementId('toDate')"
+          formControlName="toDate"
+          [max]="maxDate()"
+          [errorStateMatcher]="toDateErrorMatcher"
+          placeholder="DD-MMM-YYYY"
+          (input)="onToDateInput($event)"
+          [attr.aria-invalid]="f['toDate'].invalid && (f['toDate'].touched || submitted())"
+          [attr.aria-describedby]="f['toDate'].invalid && (f['toDate'].touched || submitted()) ? errorId('toDate') : null">
+        <mat-datepicker-toggle matSuffix [for]="toDatePicker"></mat-datepicker-toggle>
+        <mat-datepicker #toDatePicker></mat-datepicker>
+        <mat-error [id]="errorId('toDate')">{{ getToDateError() }}</mat-error>
+      </mat-form-field>
+
+      <!-- Action Buttons -->
+      <div class="form-actions">
+        <button
+          mat-raised-button
+          color="primary"
+          type="submit"
+          [id]="elementId('retrieve-btn')"
+          [disabled]="loading()"
+          [attr.aria-label]="loading() ? 'Retrieving results, please wait' : null">
+          @if (loading()) {
+            <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+            <span class="sr-only">Retrieving...</span>
+          } @else {
+            RETRIEVE
+          }
+        </button>
+        <button
+          mat-button
+          type="button"
+          [id]="elementId('clear-btn')"
+          (click)="onClearAll()"
+          [disabled]="loading()">
+          CLEAR ALL
+        </button>
+      </div>
+    </div>
+  </form>
+
+  <!-- Error Alert -->
+  @if (error() && !loading()) {
+    <div class="error-alert" role="alert" aria-live="polite">
+      <mat-icon>error_outline</mat-icon>
+      <span>{{ error() }}</span>
+    </div>
+  }
+
+  <!-- Loading State -->
+  @if (loading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading"></mat-spinner>
+      <span class="loading-text">Loading results...</span>
+    </div>
+  }
+
+  <!-- Empty State - Before Search -->
+  @if (showEmptyState()) {
+    <div class="empty-state" role="status">
+      <div class="empty-icon-container">
+        <mat-icon class="empty-icon" aria-hidden="true">search</mat-icon>
+      </div>
+      <h3 class="empty-title">No Results to Display</h3>
+      <p class="empty-message">Please enter search criteria to view results</p>
+    </div>
+  }
+
+  <!-- No Results State - After Search -->
+  @if (showNoResults()) {
+    <div class="empty-state" role="status">
+      <div class="empty-icon-container">
+        <mat-icon class="empty-icon" aria-hidden="true">info</mat-icon>
+      </div>
+      <h3 class="empty-title">No Results Found</h3>
+      <p class="empty-message">No batches found for the selected criteria</p>
+    </div>
+  }
+
+  <!-- Results Area - Three-Panel Layout -->
+  @if (hasSearched() && allBatches().length > 0 && !loading()) {
+    <h2 class="sr-only">Results</h2>
+    <div class="results-area">
+      <!-- Panel 1: Batches -->
+      <div class="results-panel batches-panel">
+        <div class="panel-header">
+          <h3 class="panel-title">Batches</h3>
+          <app-search-bar
+            [config]="batchSearchConfig"
+            (search)="onBatchSearch($event)"
+            (cleared)="onBatchSearch('')">
+          </app-search-bar>
+        </div>
+
+        <div class="panel-content">
+          <app-data-table
+            [config]="batchTableConfig"
+            [data]="displayBatches()"
+            [loading]="loading()"
+            [highlightedRow]="selectedBatchForHighlight()"
+            [keepActiveRow]="true"
+            (rowClick)="onBatchSelected($event)">
+          </app-data-table>
+        </div>
+      </div>
+
+      <!-- Panel 2: Units -->
+      <div class="results-panel units-panel">
+        <div class="panel-header">
+          <h3 class="panel-title">{{ selectedBatch()?.batchId || 'Units' }}</h3>
+          <app-search-bar
+            [config]="unitSearchConfig"
+            (search)="onUnitSearch($event)"
+            (cleared)="onUnitSearch('')">
+          </app-search-bar>
+        </div>
+
+        <div class="panel-content">
+          <app-data-table
+            [config]="unitTableConfig"
+            [data]="filteredUnits()"
+            [loading]="detailLoading()"
+            [highlightedRow]="selectedUnitForHighlight()"
+            [keepActiveRow]="true"
+            (rowClick)="onUnitSelected($event)">
+          </app-data-table>
+        </div>
+      </div>
+
+      <!-- Panel 3: Test Results -->
+      <div class="results-panel test-results-panel">
+        <div class="panel-header">
+          <h3 class="panel-title">{{ selectedUnitDisplay()?.unitIdDisplay || 'Test Results' }}</h3>
+          @if (selectedUnitDisplay()?.hasWarning) {
+            <mat-icon
+              class="warning-icon-header"
+              matTooltip="Unit has reactive result"
+              aria-label="Warning: Unit has reactive result">
+              error
+            </mat-icon>
+          }
+          <app-search-bar
+            [config]="testSearchConfig"
+            (search)="onTestSearch($event)"
+            (cleared)="onTestSearch('')">
+          </app-search-bar>
+        </div>
+
+        <div class="panel-content">
+          <app-data-table
+            [config]="testTableConfig"
+            [data]="filteredTestResults()"
+            [loading]="detailLoading()">
+          </app-data-table>
+        </div>
+      </div>
+
+      <!-- Footer: Parameter ID and User (spans below Batches + Units panels) -->
+      @if (selectedBatch()) {
+        <dl class="results-footer">
+          <div class="footer-item">
+            <dt class="footer-label">Parameter ID</dt>
+            <dd class="footer-value">{{ selectedBatch()!.resultParmId }}</dd>
+          </div>
+          <div class="footer-item">
+            <dt class="footer-label">User</dt>
+            <dd class="footer-value">{{ selectedBatch()!.insertUser }}</dd>
+          </div>
+        </dl>
+      }
+    </div>
+  }
+</section>

@@ -1,0 +1,386 @@
+<app-page-header-with-breadcrumb [config]="pageHeaderConfig"></app-page-header-with-breadcrumb>
+
+<div class="page-content">
+  <!-- Filter Card -->
+  <div class="search-card">
+    <form [formGroup]="filterForm" class="search-form" (ngSubmit)="onRetrieve()">
+
+      <!-- Show Expired Dropdown -->
+      <mat-form-field appearance="fill" class="filter-field">
+        <mat-label>Show Expired</mat-label>
+        <mat-select formControlName="showExpired" aria-label="Show Expired">
+          <mat-select-trigger>
+            <span #expiredTrigger class="select-trigger-text"
+                  (mouseenter)="checkExpiredTruncation(expiredTrigger)"
+                  [matTooltip]="selectedExpiredDisplay()"
+                  [matTooltipDisabled]="!isExpiredTruncated"
+                  matTooltipPosition="above">
+              {{ selectedExpiredDisplay() }}
+            </span>
+          </mat-select-trigger>
+          @for (option of showExpiredOptions; track option.value) {
+            <mat-option [value]="option.value">{{ option.label }}</mat-option>
+          }
+        </mat-select>
+        @if (f['showExpired'].hasError('required') && f['showExpired'].touched) {
+          <mat-error>Show Expired is required</mat-error>
+        }
+      </mat-form-field>
+
+      <!-- Test ID Dropdown -->
+      <mat-form-field appearance="fill" class="filter-field">
+        <mat-label>Test ID</mat-label>
+        <mat-select formControlName="testId" aria-label="Test ID">
+          <mat-select-trigger>
+            <span #testIdTrigger class="select-trigger-text"
+                  (mouseenter)="checkTestIdTruncation(testIdTrigger)"
+                  [matTooltip]="selectedTestIdDisplay()"
+                  [matTooltipDisabled]="!isTestIdTruncated"
+                  matTooltipPosition="above">
+              {{ selectedTestIdDisplay() }}
+            </span>
+          </mat-select-trigger>
+          @if (loadingTestIds()) {
+            <mat-option disabled>
+              <mat-spinner diameter="20" class="inline-spinner"></mat-spinner>
+              Loading...
+            </mat-option>
+          } @else if (testIds().length === 0) {
+            <mat-option disabled>No data available</mat-option>
+          } @else if (testIds().length <= 3) {
+            @for (testId of testIds(); track testId.testId) {
+              <mat-option [value]="testId.testId">
+                {{ testId.testId }}{{ testId.testDescription ? ' - ' + testId.testDescription : '' }}
+              </mat-option>
+            }
+          } @else {
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="testIdSearchControl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel="">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (testId of filteredTestIds(); track testId.testId) {
+              <mat-option [value]="testId.testId">
+                {{ testId.testId }}{{ testId.testDescription ? ' - ' + testId.testDescription : '' }}
+              </mat-option>
+            }
+            @if (filteredTestIds().length === 0) {
+              <mat-option disabled>No data available</mat-option>
+            }
+          }
+        </mat-select>
+        @if (f['testId'].hasError('required') && f['testId'].touched) {
+          <mat-error>Test ID is required</mat-error>
+        }
+      </mat-form-field>
+
+      <!-- Test Description -->
+      <div class="day-label" role="group" aria-label="Test Description">
+        <div class="day-text" id="testDescLabel">Test Description</div>
+        <div class="day-value" aria-labelledby="testDescLabel">{{ selectedTestDescription() || '—' }}</div>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="action-col">
+        <button type="submit" class="btn-retrieve"
+                [disabled]="filterForm.invalid || loading()"
+                aria-label="Retrieve test kits">
+          RETRIEVE
+        </button>
+        <button type="button" class="btn-clear"
+                [disabled]="!formDirty() && testKitList().length === 0 && !hasSearched()"
+                (click)="onClearAll()"
+                aria-label="Clear all filters">
+          CLEAR ALL
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Loading State -->
+  @if (loading()) {
+    <div class="results-card">
+      <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+        <mat-spinner diameter="40"></mat-spinner>
+      </div>
+    </div>
+  }
+
+  <!-- Error State -->
+  @if (error() && !loading()) {
+    <div class="results-card">
+      <div class="error-container" role="alert" aria-live="assertive">
+        <mat-icon>error</mat-icon>
+        <p>{{ error() }}</p>
+        <button mat-button color="primary" (click)="onRetrieve()">Retry</button>
+      </div>
+    </div>
+  }
+
+  <!-- Master-Detail Layout -->
+  @if (!loading() && !error() && hasSearched() && (testKitList().length > 0 || isCreateMode())) {
+    <div class="master-detail-container">
+
+      <!-- Left Panel: Kit List -->
+      <aside class="kit-sidebar" aria-label="Test kit list panel">
+        <div class="sidebar-header">
+          <app-search-bar
+            [config]="searchConfig"
+            (search)="onKitSearch($event)">
+          </app-search-bar>
+          <button type="button" class="btn-create-kit" (click)="onCreateNewTestKit()"
+                  [disabled]="formAccessDenied()"
+                  aria-label="Create new test kit">
+            CREATE NEW TEST KIT
+          </button>
+        </div>
+
+        <!-- Kit List Table -->
+        <div class="kit-list-container" role="region" aria-label="Test kit list">
+          <table class="kit-list-table" aria-label="Test kit list">
+            <caption class="sr-only">List of test kits with QC expiration and license status</caption>
+            <colgroup>
+              <col class="col-kit-id">
+              <col class="col-qc-exp">
+              <col class="col-license">
+            </colgroup>
+            <thead>
+              <tr>
+                <th scope="col">Test Kit ID</th>
+                <th scope="col">QC Expiration</th>
+                <th scope="col">License Flag</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (kit of testKitItems(); track kit.kitId) {
+                <tr [class.active]="isKitSelected(kit)"
+                    (click)="onKitSelected(kit)"
+                    [attr.aria-selected]="isKitSelected(kit)"
+                    tabindex="0"
+                    (keydown.enter)="onKitSelected(kit)"
+                    (keydown.space)="onKitSelected(kit); $event.preventDefault()">
+                  <td>{{ kit.kitId }}</td>
+                  <td>{{ formatDateTime(kit.qcExpiration) }}</td>
+                  <td>{{ getLicenseFlagDisplay(kit.licenseFlag) }}</td>
+                </tr>
+              }
+
+              <!-- New Kit row in left table (Create mode) -->
+              @if (isCreateMode()) {
+                <tr class="new-kit-row active" aria-label="New test kit entry">
+                  <td><span class="sr-only">New kit</span></td>
+                  <td>
+                    <mat-form-field appearance="fill" class="inline-date-field" subscriptSizing="dynamic">
+                      <mat-label>QC Expiration Date</mat-label>
+                      <input matInput [matDatepicker]="qcPicker" [formControl]="newKitQcExpiration"
+                             placeholder="DD-MMM-YYYY"
+                             aria-label="QC Expiration Date"
+                             (input)="onQcDateInput($event)"
+                             (blur)="onQcDateBlur()">
+                      <mat-datepicker-toggle matIconSuffix [for]="qcPicker"></mat-datepicker-toggle>
+                      <mat-datepicker #qcPicker></mat-datepicker>
+                      @if ((newKitQcExpiration.hasError('matDatepickerParse') || newKitQcExpiration.hasError('invalidDate')) && newKitQcExpiration.touched) {
+                        <mat-error>Invalid date format</mat-error>
+                      }
+                    </mat-form-field>
+                  </td>
+                  <td>
+                    <mat-form-field appearance="fill" class="inline-select-field">
+                      <mat-label>License Flag</mat-label>
+                      <mat-select [formControl]="newKitLicenseFlag" aria-label="License Flag">
+                        @for (opt of licenseFlagOptions; track opt.value) {
+                          <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                        }
+                      </mat-select>
+                    </mat-form-field>
+                  </td>
+                </tr>
+              }
+
+              @if (testKitItems().length === 0 && !isCreateMode()) {
+                <tr>
+                  <td colspan="3" class="no-results-cell">No test kits found</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      </aside>
+
+      <!-- Right Panel: Kit Details -->
+      <main class="kit-detail-panel" aria-label="Test kit details" aria-live="polite">
+        @if (selectedKitId() || isCreateMode()) {
+          <div class="detail-header">
+            <h3 class="detail-title">
+              @if (isCreateMode()) {
+                Create New Test Kit
+              } @else {
+                Test Kit Details: {{ selectedKitId() }}
+              }
+            </h3>
+            <!-- BR-026: ADD NEW REAGENT only in create mode -->
+            @if (isCreateMode()) {
+              <button type="button" class="btn-add-reagent" (click)="onAddNewReagent()"
+                      aria-label="Add new reagent type">
+                ADD NEW REAGENT TYPE
+              </button>
+            } @else {
+              <button type="button" class="btn-add-reagent" (click)="onAddNewReagent()"
+                      aria-label="Add new reagent">
+                ADD NEW REAGENT
+              </button>
+            }
+          </div>
+
+          <div class="reagent-table-container">
+            <table class="reagent-table" aria-label="Reagent details">
+              <caption class="sr-only">Reagent details for the selected test kit</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Reagent Type</th>
+                  <th scope="col">Reagent Name</th>
+                  <th scope="col">Supplier</th>
+                  <th scope="col">Lot Number</th>
+                  <th scope="col">Expiration Date</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (reagent of reagentRows(); track $index; let i = $index) {
+                  <tr>
+                    <!-- Reagent Type dropdown (editable for new rows) -->
+                    <td>
+                      @if (reagent.isNew) {
+                        <mat-form-field appearance="fill" class="table-select-field">
+                          <mat-select [value]="reagent.reagentType"
+                                      (selectionChange)="onReagentTypeChange(i, $event.value)"
+                                      aria-label="Reagent Type">
+                            <mat-select-trigger>
+                              {{ getReagentTypeDisplay(reagent.reagentType) }}
+                            </mat-select-trigger>
+                            @for (opt of reagentTypeOptions; track opt.value) {
+                              <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                            }
+                          </mat-select>
+                        </mat-form-field>
+                      } @else {
+                        {{ getReagentTypeDisplay(reagent.reagentType) }}
+                      }
+                    </td>
+                    <!-- Reagent Name dropdown (editable for new rows, loaded from API) -->
+                    <td>
+                      @if (reagent.isNew) {
+                        <mat-form-field appearance="fill" class="table-select-field">
+                          <mat-select [value]="reagent.reagentId"
+                                      (selectionChange)="onReagentNameChange(i, $event.value)"
+                                      [disabled]="!reagent.reagentType"
+                                      aria-label="Reagent Name">
+                            <mat-select-trigger>
+                              {{ reagent.name || '' }}
+                            </mat-select-trigger>
+                            @if (getReagentLovForRow(i).length === 0 && reagent.reagentType) {
+                              <mat-option disabled>No reagents available</mat-option>
+                            } @else if (getReagentLovForRow(i).length <= 3) {
+                              @for (lov of getReagentLovForRow(i); track lov.reagentId) {
+                                <mat-option [value]="lov.reagentId">
+                                  {{ lov.reagentId }}{{ lov.reagentName ? ' - ' + lov.reagentName : '' }}
+                                </mat-option>
+                              }
+                            } @else {
+                              <mat-option>
+                                <ngx-mat-select-search
+                                  [formControl]="getReagentNameSearchControl(i)"
+                                  placeholderLabel="Search..."
+                                  noEntriesFoundLabel="">
+                                </ngx-mat-select-search>
+                              </mat-option>
+                              @for (lov of getFilteredReagentNamesForRow(i); track lov.reagentId) {
+                                <mat-option [value]="lov.reagentId">
+                                  {{ lov.reagentId }}{{ lov.reagentName ? ' - ' + lov.reagentName : '' }}
+                                </mat-option>
+                              }
+                              @if (getFilteredReagentNamesForRow(i).length === 0) {
+                                <mat-option disabled>No data available</mat-option>
+                              }
+                            }
+                          </mat-select>
+                        </mat-form-field>
+                      } @else {
+                        {{ reagent.name }}
+                      }
+                    </td>
+                    <!-- Supplier (read-only, auto-populated) -->
+                    <td>{{ reagent.supplier || '' }}</td>
+                    <!-- Lot Number (read-only, auto-populated) -->
+                    <td>{{ reagent.lotNo || '' }}</td>
+                    <!-- Expiration Date (read-only, auto-populated) -->
+                    <td>{{ reagent.expirationDate ? formatDateTime(reagent.expirationDate) : '' }}</td>
+                  </tr>
+                }
+                @if (reagentRows().length === 0) {
+                  <tr>
+                    <td colspan="5" class="no-results-cell">No reagents found for this kit</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Footer Actions -->
+          <div class="detail-footer">
+            <button type="button" class="btn-clear" (click)="onDetailClearAll()"
+                    aria-label="Clear all details">
+              CLEAR ALL
+            </button>
+            <button type="button" class="btn-cancel" (click)="onCancel()"
+                    aria-label="Cancel">
+              CANCEL
+            </button>
+            <button type="button" class="btn-save" (click)="onSave()"
+                    [disabled]="saving() || (!detailDirty() && !isCreateMode())"
+                    aria-label="Save">
+              @if (saving()) {
+                <mat-spinner diameter="20" class="inline-spinner" aria-label="Saving"></mat-spinner>
+              }
+              SAVE
+            </button>
+          </div>
+        } @else {
+          <div class="empty-detail-panel">
+            <p>Select a test kit from the list to view details</p>
+          </div>
+        }
+      </main>
+    </div>
+  }
+
+  <!-- Empty State: After search, no results (Bug 3 fix: show info message + create button) -->
+  @if (!loading() && !error() && hasSearched() && testKitList().length === 0 && !isCreateMode()) {
+    <div class="results-card">
+      <div class="empty-container">
+        <div class="empty-state-icon">
+          <mat-icon>info_outline</mat-icon>
+        </div>
+        <p class="empty-state-message">No test kits found for this Test ID</p>
+        @if (!formAccessDenied()) {
+          <button type="button" class="btn-create-kit" (click)="onCreateNewTestKit()"
+                  aria-label="Create new test kit">
+            CREATE NEW TEST KIT
+          </button>
+        }
+      </div>
+    </div>
+  }
+
+  <!-- Empty State: Before search (initial) -->
+  @if (!hasSearched() && !loading()) {
+    <div class="empty-container empty-container--standalone">
+      <div class="empty-state-icon">
+        <mat-icon>search</mat-icon>
+      </div>
+      <h3 class="empty-state-title">No Results to Display</h3>
+      <p class="empty-state-message">Scan or enter a Unit ID to begin.</p>
+    </div>
+  }
+</div>

@@ -1,0 +1,261 @@
+<h1 class="cdk-visually-hidden">{{ headerConfig().title }}</h1>
+<app-page-header-with-breadcrumb [config]="headerConfig()" />
+
+<main class="maintain-batch-data" aria-label="Maintain Batch Data" role="main">
+  <div class="main-card">
+
+    <!-- Search Card — Batch ID Dropdown -->
+    <div class="search-card">
+      <div class="search-card__fields">
+        <mat-form-field appearance="fill" subscriptSizing="dynamic" class="search-card__field">
+          <mat-label>Batch ID</mat-label>
+          <mat-select
+            #batchSelect
+            [formControl]="batchIdControl"
+            (selectionChange)="onBatchIdChange($event.value)"
+            (openedChange)="onBatchSelectOpened($event)"
+            aria-label="Batch ID">
+            <mat-select-trigger>{{ batchIdControl.value }}</mat-select-trigger>
+
+            @if (isLoadingLov) {
+              <mat-option disabled>
+                <div class="loading-option">
+                  <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
+                  <span>Loading...</span>
+                </div>
+              </mat-option>
+            } @else if (allBatchItems().length === 0) {
+              <mat-option disabled class="no-data-option">No batches available</mat-option>
+            } @else if (allBatchItems().length <= 3) {
+              @for (item of allBatchItems(); track item.batchId) {
+                <mat-option [value]="item.batchId">{{ item.batchId }}</mat-option>
+              }
+            } @else {
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="batchSearchCtrl"
+                  placeholderLabel="Search..."
+                  noEntriesFoundLabel=""
+                  [autofocus]="false">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (item of filteredBatchItems(); track item.batchId) {
+                <mat-option [value]="item.batchId">{{ item.batchId }}</mat-option>
+              }
+              @if (filteredBatchItems().length === 0) {
+                <mat-option disabled class="no-data-option">No batches found</mat-option>
+              }
+            }
+          </mat-select>
+        </mat-form-field>
+      </div>
+    </div>
+
+    <!-- Details Card -->
+    <div class="details-card" aria-live="polite">
+
+      <!-- Empty state before batch selected -->
+      @if (!selectedBatch && !isLoadingBatch) {
+        <div class="empty-state-container" role="status">
+          <div class="empty-state-icon" aria-hidden="true">
+            <mat-icon>search</mat-icon>
+          </div>
+          <h2 class="empty-state-title">No Batch Selected</h2>
+          <p class="empty-state-message">Select a Batch ID to view and edit batch details</p>
+        </div>
+      }
+
+      <!-- Loading state -->
+      @if (isLoadingBatch) {
+        <div class="loading-container" role="status" aria-label="Loading batch details">
+          <mat-spinner diameter="40" aria-hidden="true"></mat-spinner>
+          <span class="cdk-visually-hidden">Loading batch details...</span>
+        </div>
+      }
+
+      <!-- Form (shown when batch loaded) -->
+      @if (selectedBatch && !isLoadingBatch) {
+        <div class="details-card__content">
+          <form [formGroup]="form" class="batch-form">
+
+            <!-- Row 1: Contract Type | Contract Description | Check-In User | Check-In User Name -->
+            <div class="form-row">
+              <div class="readonly-field form-field--1x">
+                <label class="readonly-field__label" id="lbl-contract-type">Contract Type</label>
+                <div class="readonly-field__value" aria-labelledby="lbl-contract-type">{{ selectedBatch.contractId || '-' }}</div>
+              </div>
+              <div class="readonly-field form-field--2x">
+                <label class="readonly-field__label" id="lbl-contract-desc">Contract Description</label>
+                <div class="readonly-field__value" aria-labelledby="lbl-contract-desc">{{ selectedBatch.companyName || '-' }}</div>
+              </div>
+              <div class="readonly-field form-field--1x">
+                <label class="readonly-field__label" id="lbl-checkin-user">Check-In User</label>
+                <div class="readonly-field__value" aria-labelledby="lbl-checkin-user">{{ selectedBatch.checkinUserId || '-' }}</div>
+              </div>
+              <div class="readonly-field form-field--1x">
+                <label class="readonly-field__label" id="lbl-checkin-name">Check-In User Name</label>
+                <div class="readonly-field__value" aria-labelledby="lbl-checkin-name">{{ selectedBatch.checkinUserName || '-' }}</div>
+              </div>
+            </div>
+
+            <!-- Row 2: Received Date | Shipped Date | Sample | Min Temp | Max Temp -->
+            <div class="form-row">
+              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field--1x"
+                [class.has-error]="getReceivedDateError()">
+                <mat-label>Received Date</mat-label>
+                <input matInput
+                  formControlName="receivedDate"
+                  placeholder="DD-MMM-YYYY HH:mm"
+                  [attr.aria-required]="true"
+                  (keypress)="preventComma($event)"
+                  (keydown)="onDateTimeKeydown($event, 'receivedDate')"
+                  (blur)="onDateTimeBlur('receivedDate')"
+                  aria-label="Received Date" />
+                @if (getReceivedDateError()) {
+                  <mat-error>{{ getReceivedDateError() }}</mat-error>
+                }
+              </mat-form-field>
+
+              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field--1x"
+                [class.has-error]="getShippedDateError()">
+                <mat-label>Shipped Date</mat-label>
+                <input matInput
+                  [matDatepicker]="shippedPicker"
+                  formControlName="shippedDate"
+                  placeholder="DD-MMM-YYYY"
+                  [max]="maxShippedDate"
+                  [errorStateMatcher]="shippedDateErrorMatcher"
+                  (input)="onShippedDateInput($event)"
+                  aria-label="Shipped Date" />
+                <mat-datepicker-toggle matIconSuffix [for]="shippedPicker"></mat-datepicker-toggle>
+                <mat-datepicker #shippedPicker></mat-datepicker>
+                @if (getShippedDateError()) {
+                  <mat-error>{{ getShippedDateError() }}</mat-error>
+                }
+              </mat-form-field>
+
+              <div class="readonly-field form-field--1x">
+                <label class="readonly-field__label" id="lbl-sample">Sample</label>
+                <div class="readonly-field__value" aria-labelledby="lbl-sample">{{ selectedBatch.numberOfUnits ?? '-' }}</div>
+              </div>
+
+              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field--1x">
+                <mat-label>Minimum Receipt Temperature</mat-label>
+                <input matInput
+                  formControlName="minTemp"
+                  type="text"
+                  [attr.aria-required]="true"
+                  (keydown)="onTempKeyDown($event)"
+                  aria-label="Minimum Receipt Temperature" />
+                <span matTextSuffix>&nbsp;°C</span>
+                @if (form.get('minTemp')?.touched && form.get('minTemp')?.hasError('required')) {
+                  <mat-error>Min Temperature is required</mat-error>
+                } @else if (getTempError()) {
+                  <mat-error>{{ getTempError() }}</mat-error>
+                }
+              </mat-form-field>
+
+              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field--1x">
+                <mat-label>Maximum Receipt Temperature</mat-label>
+                <input matInput
+                  formControlName="maxTemp"
+                  type="text"
+                  [attr.aria-required]="true"
+                  (keydown)="onTempKeyDown($event)"
+                  aria-label="Maximum Receipt Temperature" />
+                <span matTextSuffix>&nbsp;°C</span>
+                @if (form.get('maxTemp')?.touched && form.get('maxTemp')?.hasError('required')) {
+                  <mat-error>Max Temperature is required</mat-error>
+                } @else if (getTempError()) {
+                  <mat-error>{{ getTempError() }}</mat-error>
+                }
+              </mat-form-field>
+            </div>
+
+            <!-- Row 3: Batch Date | Last Check-In QC Date | Profile Seq | Results QC User | Results Reconciliation Date -->
+            <div class="form-row">
+              <div class="readonly-field form-field--1x">
+                <label class="readonly-field__label" id="lbl-batch-date">Batch Date</label>
+                <div class="readonly-field__value" aria-labelledby="lbl-batch-date">{{ formatDateTime(selectedBatch.insertDats) }}</div>
+              </div>
+
+              @if (form.get('qcDate')?.disabled) {
+                <div class="readonly-field form-field--1x">
+                  <label class="readonly-field__label" id="lbl-qc-date">Last Check-In QC Date</label>
+                  <div class="readonly-field__value" aria-labelledby="lbl-qc-date">{{ selectedBatch.qcDate ? formatDateTime(selectedBatch.qcDate) : '-' }}</div>
+                </div>
+              } @else {
+                <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field--1x"
+                  [class.has-error]="getQcDateError()">
+                  <mat-label>Last Check-In QC Date</mat-label>
+                  <input matInput
+                    formControlName="qcDate"
+                    placeholder="DD-MMM-YYYY HH:mm"
+                    [attr.aria-required]="true"
+                    (keypress)="preventComma($event)"
+                    (keydown)="onDateTimeKeydown($event, 'qcDate')"
+                    (blur)="onDateTimeBlur('qcDate')"
+                    aria-label="Last Check-In QC Date" />
+                  @if (getQcDateError()) {
+                    <mat-error>{{ getQcDateError() }}</mat-error>
+                  }
+                </mat-form-field>
+              }
+
+              <div class="readonly-field form-field--1x">
+                <label class="readonly-field__label" id="lbl-profile-seq">Profile Seq</label>
+                <div class="readonly-field__value" aria-labelledby="lbl-profile-seq">{{ selectedBatch.profileSeqNo ?? '-' }}</div>
+              </div>
+
+              <div class="readonly-field form-field--1x">
+                <label class="readonly-field__label" id="lbl-results-qc-user">Results QC User</label>
+                <div class="readonly-field__value" aria-labelledby="lbl-results-qc-user">{{ selectedBatch.resultsQcUser || '-' }}</div>
+              </div>
+
+              @if (form.get('resultsQcDate')?.disabled) {
+                <div class="readonly-field form-field--1x">
+                  <label class="readonly-field__label" id="lbl-results-qc-date">Results Reconciliation Date</label>
+                  <div class="readonly-field__value" aria-labelledby="lbl-results-qc-date">{{ formatDate(selectedBatch.resultsQcDate) }}</div>
+                </div>
+              } @else {
+                <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field--1x"
+                  [class.has-error]="getResultsQcDateError()">
+                  <mat-label>Results Reconciliation Date</mat-label>
+                  <input matInput
+                    formControlName="resultsQcDate"
+                    placeholder="DD-MMM-YYYY HH:mm"
+                    [attr.aria-required]="true"
+                    (keypress)="preventComma($event)"
+                    (keydown)="onDateTimeKeydown($event, 'resultsQcDate')"
+                    (blur)="onDateTimeBlur('resultsQcDate')"
+                    aria-label="Results Reconciliation Date" />
+                  @if (getResultsQcDateError()) {
+                    <mat-error>{{ getResultsQcDateError() }}</mat-error>
+                  }
+                </mat-form-field>
+              }
+            </div>
+
+          </form>
+        </div>
+
+        <!-- Footer with action buttons -->
+        <div class="details-card__footer">
+          <button mat-button
+            class="btn-cancel"
+            (click)="onCancel()"
+            [disabled]="isSaving || !form.dirty">
+            CANCEL
+          </button>
+          <button mat-raised-button
+            class="btn-save"
+            (click)="onSave()"
+            [disabled]="!isFormValid || isSaving">
+            SAVE
+          </button>
+        </div>
+      }
+
+    </div>
+  </div>
+</main>

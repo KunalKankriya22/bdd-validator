@@ -1,0 +1,517 @@
+<app-page-header-with-breadcrumb [config]="headerConfig" />
+
+<section
+  class="equipment-container"
+  aria-labelledby="page-title"
+  role="region">
+
+  <!-- Loading State -->
+  @if (loading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" [attr.aria-label]="'Loading'"></mat-spinner>
+      <span class="cdk-visually-hidden">Loading, please wait...</span>
+    </div>
+  }
+
+  @if (!loading()) {
+    <form
+      [formGroup]="form"
+      (ngSubmit)="onSubmit()"
+      [id]="elementId('form')"
+      class="equipment-form"
+      novalidate>
+
+      <!-- Card 1: Equipment Selection -->
+      <div class="form-card">
+        <div class="form-row form-row-header">
+
+          <!-- Equipment Type -->
+          <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field scan-field">
+            <mat-label [id]="labelId('equipType')">Equipment Type</mat-label>
+            <mat-select
+              [id]="elementId('equipType')"
+              formControlName="equipType"
+              required
+              [attr.aria-invalid]="f['equipType'].invalid && (f['equipType'].touched || submitted())"
+              [attr.aria-describedby]="f['equipType'].invalid && (f['equipType'].touched || submitted()) ? errorId('equipType') : null">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="equipTypeSearchCtrl"
+                  placeholderLabel="Search..."
+                  noEntriesFoundLabel="No data found">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (type of filteredEquipmentTypes(); track type.value) {
+                <mat-option [value]="type.value">{{ type.label }}</mat-option>
+              }
+              @if (filteredEquipmentTypes().length === 0) {
+                <mat-option disabled>No data found</mat-option>
+              }
+            </mat-select>
+@if (f['equipType'].invalid && (f['equipType'].touched || submitted())) {
+              <mat-error [id]="errorId('equipType')">
+                @if (f['equipType'].errors?.['required']) { Equipment Type is required }
+                @if (f['equipType'].errors?.['maxlength']) {
+                  Cannot exceed {{ f['equipType'].errors?.['maxlength'].requiredLength }} characters
+                }
+              </mat-error>
+            }
+          </mat-form-field>
+
+          <!-- Equipment Type Description (readonly) -->
+          <div class="field-label" role="group" [attr.aria-label]="'Equipment Type Description'">
+            <span class="label" aria-hidden="true">Equipment Type Description</span>
+            <span class="value">{{ equipmentTypeName() || '-' }}</span>
+          </div>
+
+          <!-- ID (combobox: type new or pick existing) -->
+          <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+            <mat-label [id]="labelId('equipId')">ID</mat-label>
+            <input
+              matInput
+              #equipIdInput
+              [id]="elementId('equipId')"
+              formControlName="equipId"
+              maxlength="4"
+              required
+              [matAutocomplete]="equipIdAuto"
+              [readonly]="!form.get('equipType')?.value"
+              (focus)="onEquipIdFocus()"
+              [attr.aria-invalid]="f['equipId'].invalid && (f['equipId'].touched || submitted())"
+              [attr.aria-describedby]="f['equipId'].invalid && (f['equipId'].touched || submitted()) ? errorId('equipId') : null">
+            <button
+              mat-icon-button
+              matSuffix
+              type="button"
+              tabindex="-1"
+              [disabled]="!form.get('equipType')?.value"
+              (click)="toggleEquipIdPanel()"
+              [attr.aria-label]="equipIdAutoTrigger?.panelOpen ? 'Hide existing IDs' : 'Show existing IDs'"
+              [attr.aria-expanded]="equipIdAutoTrigger?.panelOpen">
+              <mat-icon aria-hidden="true">arrow_drop_down</mat-icon>
+            </button>
+            <mat-autocomplete #equipIdAuto="matAutocomplete">
+              @for (id of filteredEquipmentIds(); track id.value) {
+                <mat-option [value]="id.value">{{ id.label }}{{ id.description ? ' — ' + id.description : '' }}</mat-option>
+              }
+            </mat-autocomplete>
+            @if (f['equipId'].invalid && (f['equipId'].touched || submitted())) {
+              <mat-error [id]="errorId('equipId')">
+                @if (f['equipId'].errors?.['required']) { ID is required }
+              </mat-error>
+            }
+          </mat-form-field>
+
+          <!-- Equipment Ref No. — read-only display -->
+          <div class="field-label" role="group" [attr.aria-label]="'Equipment Ref No.'">
+            <span class="label" aria-hidden="true">Equipment Ref No.</span>
+            <span class="value">{{ f['equipRef'].value || '-' }}</span>
+          </div>
+
+          <!-- RETRIEVE -->
+          <button
+            mat-stroked-button
+            type="button"
+            class="retrieve-btn"
+            (click)="onRetrieve()"
+            [id]="elementId('retrieve-btn')"
+            [disabled]="loading() || !f['equipType'].value || !f['equipId'].value">
+            RETRIEVE
+          </button>
+
+          <!-- CLEAR ALL -->
+          <button
+            mat-button
+            type="button"
+            (click)="onClearAll()"
+            [id]="elementId('clear-all-header-btn')"
+            [disabled]="!f['equipType'].value && !f['equipId'].value && showEmptyState()"
+            class="clear-all-btn">
+            CLEAR ALL
+          </button>
+
+        </div>
+      </div>
+
+      <!-- Empty State -->
+      @if (showEmptyState()) {
+        <div class="form-card">
+          <div class="state-container" role="status" aria-live="polite">
+            <mat-icon class="state-icon" aria-hidden="true">search</mat-icon>
+            <p class="state-title">No Results to Display</p>
+            <p class="state-subtitle">Enter details to begin.</p>
+          </div>
+        </div>
+      }
+
+      <!-- Details Section -->
+      @if (!showEmptyState()) {
+        <div class="form-card">
+
+          <!-- Row 1: Status (editable) | Description | Serial Number | CLEAR ALL -->
+          <div class="form-row form-row-3-auto">
+
+            <!-- GAP-02: Status is now an editable select (was read-only display) -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('status')">Current Status</mat-label>
+              <mat-select
+                [id]="elementId('status')"
+                formControlName="status"
+                required
+                [attr.aria-invalid]="f['status'].invalid && (f['status'].touched || submitted())"
+                [attr.aria-describedby]="f['status'].invalid && (f['status'].touched || submitted()) ? errorId('status') : null">
+                @for (s of statuses(); track s.value) {
+                  <mat-option [value]="s.value">{{ s.label }} — {{ s.description }}</mat-option>
+                }
+              </mat-select>
+              @if (f['status'].invalid && (f['status'].touched || submitted())) {
+                <mat-error [id]="errorId('status')">
+                  @if (f['status'].errors?.['required']) { Status is required }
+                </mat-error>
+              }
+            </mat-form-field>
+
+            <div class="field-label" role="group" [attr.aria-label]="'Status Description'">
+              <span class="label" aria-hidden="true">Description</span>
+              <span class="value">{{ statusDescription() || '-' }}</span>
+            </div>
+
+            <!-- GAP-06: maxlength 12 (was 20); GAP-18: uppercase on input -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('serialNumber')">Serial Number</mat-label>
+              <input
+                matInput
+                [id]="elementId('serialNumber')"
+                formControlName="serialNumber"
+                maxlength="12"
+                style="text-transform: uppercase"
+                (input)="onSerialNumberInput($event)"
+                [attr.aria-invalid]="f['serialNumber'].invalid && (f['serialNumber'].touched || submitted())"
+                [attr.aria-describedby]="f['serialNumber'].invalid && (f['serialNumber'].touched || submitted()) ? errorId('serialNumber') : null">
+              @if (f['serialNumber'].invalid && (f['serialNumber'].touched || submitted())) {
+                <mat-error [id]="errorId('serialNumber')">
+                  @if (f['serialNumber'].errors?.['maxlength']) { Cannot exceed 12 characters }
+                </mat-error>
+              }
+            </mat-form-field>
+
+            <button
+              mat-button
+              type="button"
+              (click)="onClearAll()"
+              [id]="elementId('clear-all-details-btn')"
+              class="clear-all-btn">
+              CLEAR ALL
+            </button>
+
+          </div>
+
+          <!-- Row 2: Location | Location Description | In Service Date | Out of Service Date -->
+          <div class="form-row form-row-4">
+
+            <!-- GAP-08: maxLength 4 (was 15) -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('location')">Location</mat-label>
+              <mat-select
+                [id]="elementId('location')"
+                formControlName="location"
+                [attr.aria-invalid]="f['location'].invalid && (f['location'].touched || submitted())"
+                [attr.aria-describedby]="f['location'].invalid && (f['location'].touched || submitted()) ? errorId('location') : null">
+                <mat-option>
+                  <ngx-mat-select-search
+                    [formControl]="locationSearchCtrl"
+                    placeholderLabel="Search..."
+                    noEntriesFoundLabel="No data found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (loc of filteredLocations(); track loc.value) {
+                  <mat-option [value]="loc.value">{{ loc.label }}{{ loc.description ? ' — ' + loc.description : '' }}</mat-option>
+                }
+                @if (filteredLocations().length === 0) {
+                  <mat-option disabled>No data found</mat-option>
+                }
+              </mat-select>
+              @if (f['location'].invalid && (f['location'].touched || submitted())) {
+                <mat-error [id]="errorId('location')">Location is invalid</mat-error>
+              }
+            </mat-form-field>
+
+            <div class="field-label" role="group" [attr.aria-label]="'Location Description'">
+              <span class="label" aria-hidden="true">Location Description</span>
+              <span class="value">{{ locationDescription() || '-' }}</span>
+            </div>
+
+            <!-- GAP-01: In Service Date (was missing) -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('inServiceDate')">In Service On</mat-label>
+              <input
+                matInput
+                [matDatepicker]="inServiceDatePicker"
+                [id]="elementId('inServiceDate')"
+                formControlName="inServiceDate"
+                [max]="maxDate()"
+                [errorStateMatcher]="inServiceDateErrorMatcher"
+                [attr.aria-invalid]="!!getInServiceDateError()"
+                [attr.aria-describedby]="getInServiceDateError() ? errorId('inServiceDate') : null"
+                (input)="onInServiceDateInput($event)"
+                (dateChange)="onInServiceDateChange()"
+                maxlength="11">
+              <mat-datepicker-toggle matIconSuffix [for]="inServiceDatePicker"></mat-datepicker-toggle>
+              <mat-datepicker #inServiceDatePicker (closed)="onDatePickerClosed()"></mat-datepicker>
+              <mat-error [id]="errorId('inServiceDate')">{{ getInServiceDateError() }}</mat-error>
+            </mat-form-field>
+
+            <!-- GAP-01: Out of Service Date (was missing) -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('outServiceDate')">Out of Service On</mat-label>
+              <input
+                matInput
+                [matDatepicker]="outServiceDatePicker"
+                [id]="elementId('outServiceDate')"
+                formControlName="outServiceDate"
+                [min]="form.get('inServiceDate')?.value"
+                [errorStateMatcher]="outServiceDateErrorMatcher"
+                [attr.aria-invalid]="!!getOutServiceDateError()"
+                [attr.aria-describedby]="getOutServiceDateError() ? errorId('outServiceDate') : null"
+                (input)="onOutServiceDateInput($event)"
+                (dateChange)="onOutServiceDateChange()"
+                maxlength="11">
+              <mat-datepicker-toggle matIconSuffix [for]="outServiceDatePicker"></mat-datepicker-toggle>
+              <mat-datepicker #outServiceDatePicker (closed)="onDatePickerClosed()"></mat-datepicker>
+              <mat-error [id]="errorId('outServiceDate')">{{ getOutServiceDateError() }}</mat-error>
+            </mat-form-field>
+
+          </div>
+
+          <!-- Row 3: Institution ID | Manufacturer | Export Flag | First Prod Date | Last Prod Date -->
+          <div class="form-row form-row-5">
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('instId')">Institution ID</mat-label>
+              <input
+                matInput
+                [id]="elementId('instId')"
+                formControlName="instId"
+                maxlength="4"
+                [attr.aria-invalid]="f['instId'].invalid && (f['instId'].touched || submitted())"
+                [attr.aria-describedby]="f['instId'].invalid && (f['instId'].touched || submitted()) ? errorId('instId') : null">
+              @if (f['instId'].invalid && (f['instId'].touched || submitted())) {
+                <mat-error [id]="errorId('instId')">
+                  @if (f['instId'].errors?.['maxlength']) { Cannot exceed 4 characters }
+                </mat-error>
+              }
+            </mat-form-field>
+
+            <!-- GAP-07: maxlength 50 (was 30) -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('manufacturer')">Manufacturer</mat-label>
+              <input
+                matInput
+                [id]="elementId('manufacturer')"
+                formControlName="manufacturer"
+                maxlength="50"
+                [attr.aria-invalid]="f['manufacturer'].invalid && (f['manufacturer'].touched || submitted())"
+                [attr.aria-describedby]="f['manufacturer'].invalid && (f['manufacturer'].touched || submitted()) ? errorId('manufacturer') : null">
+              @if (f['manufacturer'].invalid && (f['manufacturer'].touched || submitted())) {
+                <mat-error [id]="errorId('manufacturer')">
+                  @if (f['manufacturer'].errors?.['maxlength']) { Cannot exceed 50 characters }
+                </mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('exportFlag')">Export Flag</mat-label>
+              <mat-select
+                [id]="elementId('exportFlag')"
+                formControlName="exportFlag">
+                @for (option of exportFlagOptions; track option.value) {
+                  <mat-option [value]="option.value">{{ option.label }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+
+            <!-- GAP-01: First Production Date (required, was missing) -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('firstProductionDate')">First Prod Date</mat-label>
+              <input
+                matInput
+                [matDatepicker]="firstProdDatePicker"
+                [id]="elementId('firstProductionDate')"
+                formControlName="firstProductionDate"
+                required
+                [min]="isEditMode() ? null : maxDate()"
+                [errorStateMatcher]="firstProdDateErrorMatcher"
+                [attr.aria-invalid]="!!getFirstProdDateError()"
+                [attr.aria-describedby]="getFirstProdDateError() ? errorId('firstProductionDate') : null"
+                (input)="onFirstProdDateInput($event)"
+                (dateChange)="onFirstProdDateChange()"
+                maxlength="11">
+              <mat-datepicker-toggle matIconSuffix [for]="firstProdDatePicker"></mat-datepicker-toggle>
+              <mat-datepicker #firstProdDatePicker (closed)="onDatePickerClosed()"></mat-datepicker>
+              <mat-error [id]="errorId('firstProductionDate')">{{ getFirstProdDateError() }}</mat-error>
+            </mat-form-field>
+
+            <!-- GAP-01: Last Production Date (was missing) -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('lastProductionDate')">Last Prod Date</mat-label>
+              <input
+                matInput
+                [matDatepicker]="lastProdDatePicker"
+                [id]="elementId('lastProductionDate')"
+                formControlName="lastProductionDate"
+                [min]="isEditMode() ? form.get('firstProductionDate')?.value : maxDate()"
+                [errorStateMatcher]="lastProdDateErrorMatcher"
+                [attr.aria-invalid]="!!getLastProdDateError()"
+                [attr.aria-describedby]="getLastProdDateError() ? errorId('lastProductionDate') : null"
+                (input)="onLastProdDateInput($event)"
+                (dateChange)="onLastProdDateChange()"
+                maxlength="11">
+              <mat-datepicker-toggle matIconSuffix [for]="lastProdDatePicker"></mat-datepicker-toggle>
+              <mat-datepicker #lastProdDatePicker (closed)="onDatePickerClosed()"></mat-datepicker>
+              <mat-error [id]="errorId('lastProductionDate')">{{ getLastProdDateError() }}</mat-error>
+            </mat-form-field>
+
+          </div>
+
+          <!-- Row 4: Service Contact | Phone # | Service Contract Start Date | Service Contract End Date -->
+          <div class="form-row form-row-4">
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('serviceContact')">Service Contact</mat-label>
+              <input
+                matInput
+                [id]="elementId('serviceContact')"
+                formControlName="serviceContact"
+                maxlength="50"
+                [attr.aria-invalid]="f['serviceContact'].invalid && (f['serviceContact'].touched || submitted())"
+                [attr.aria-describedby]="f['serviceContact'].invalid && (f['serviceContact'].touched || submitted()) ? errorId('serviceContact') : null">
+              @if (f['serviceContact'].invalid && (f['serviceContact'].touched || submitted())) {
+                <mat-error [id]="errorId('serviceContact')">
+                  @if (f['serviceContact'].errors?.['maxlength']) { Cannot exceed 50 characters }
+                </mat-error>
+              }
+            </mat-form-field>
+
+            <!-- GAP-20: label changed from "Phone No." to "Phone #" (matches FMB canvas) -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('servicePhone')">Phone #</mat-label>
+              <input
+                matInput
+                [id]="elementId('servicePhone')"
+                formControlName="servicePhone"
+                maxlength="20"
+                [attr.aria-invalid]="f['servicePhone'].invalid && (f['servicePhone'].touched || submitted())"
+                [attr.aria-describedby]="f['servicePhone'].invalid && (f['servicePhone'].touched || submitted()) ? errorId('servicePhone') : null">
+              @if (f['servicePhone'].invalid && (f['servicePhone'].touched || submitted())) {
+                <mat-error [id]="errorId('servicePhone')">
+                  @if (f['servicePhone'].errors?.['maxlength']) { Cannot exceed 20 characters }
+                </mat-error>
+              }
+            </mat-form-field>
+
+            <!-- GAP-01: Service Start Date (was missing) -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('serviceStartDate')">Service Contract Start Date</mat-label>
+              <input
+                matInput
+                [matDatepicker]="serviceStartDatePicker"
+                [id]="elementId('serviceStartDate')"
+                formControlName="serviceStartDate"
+                [max]="maxDate()"
+                [errorStateMatcher]="serviceStartDateErrorMatcher"
+                [attr.aria-invalid]="!!getServiceStartDateError()"
+                [attr.aria-describedby]="getServiceStartDateError() ? errorId('serviceStartDate') : null"
+                (input)="onServiceStartDateInput($event)"
+                (dateChange)="onServiceStartDateChange()"
+                maxlength="11">
+              <mat-datepicker-toggle matIconSuffix [for]="serviceStartDatePicker"></mat-datepicker-toggle>
+              <mat-datepicker #serviceStartDatePicker (closed)="onDatePickerClosed()"></mat-datepicker>
+              <mat-error [id]="errorId('serviceStartDate')">{{ getServiceStartDateError() }}</mat-error>
+            </mat-form-field>
+
+            <!-- GAP-01: Service End Date (was missing) -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="form-field">
+              <mat-label [id]="labelId('serviceEndDate')">Service Contract End Date</mat-label>
+              <input
+                matInput
+                [matDatepicker]="serviceEndDatePicker"
+                [id]="elementId('serviceEndDate')"
+                formControlName="serviceEndDate"
+                [min]="form.get('serviceStartDate')?.value"
+                [errorStateMatcher]="serviceEndDateErrorMatcher"
+                [attr.aria-invalid]="!!getServiceEndDateError()"
+                [attr.aria-describedby]="getServiceEndDateError() ? errorId('serviceEndDate') : null"
+                (input)="onServiceEndDateInput($event)"
+                (dateChange)="onServiceEndDateChange()"
+                maxlength="11">
+              <mat-datepicker-toggle matIconSuffix [for]="serviceEndDatePicker"></mat-datepicker-toggle>
+              <mat-datepicker #serviceEndDatePicker (closed)="onDatePickerClosed()"></mat-datepicker>
+              <mat-error [id]="errorId('serviceEndDate')">{{ getServiceEndDateError() }}</mat-error>
+            </mat-form-field>
+
+          </div>
+
+          <!-- Configurable Equipment Details Grid -->
+          <div class="configurable-details-section">
+            @if (configurableDetails().length === 0) {
+              <div class="state-container">
+                <mat-icon class="state-icon" aria-hidden="true">inventory_2</mat-icon>
+                <p class="state-title">No configurable details available</p>
+              </div>
+            } @else {
+              <div class="table-wrapper">
+                <table class="data-table" [attr.aria-label]="'Configurable Equipment Details'">
+                  <thead>
+                    <tr>
+                      <th scope="col">Sr No.</th>
+                      <th scope="col">Configurable Equipment Details</th>
+                      <th scope="col">Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (detail of configurableDetails(); track detail.sequence) {
+                      <tr>
+                        <td>{{ detail.sequence }}</td>
+                        <td>{{ detail.detail }}</td>
+                        <td>{{ detail.value || '-' }}</td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            }
+          </div>
+
+        </div>
+      }
+
+      <!-- Actions Card -->
+      <div class="form-card form-card--actions">
+        <div class="form-actions" role="group" aria-label="Form actions">
+          <button
+            mat-button
+            type="button"
+            (click)="onCancel()"
+            [id]="elementId('cancel-btn')"
+            [disabled]="loading()">
+            CANCEL
+          </button>
+          <button
+            mat-raised-button
+            color="primary"
+            type="submit"
+            [id]="elementId('save-btn')"
+            [disabled]="loading() || showEmptyState()"
+            [attr.aria-label]="loading() ? 'Saving, please wait' : 'Save'">
+            @if (loading()) {
+              <mat-spinner diameter="20" [attr.aria-label]="'Saving'"></mat-spinner>
+            } @else {
+              SAVE
+            }
+          </button>
+        </div>
+      </div>
+
+    </form>
+  }
+</section>

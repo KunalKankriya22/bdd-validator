@@ -1,0 +1,249 @@
+<div class="page-container">
+  <div class="layout-wrapper" [class.side-panel-active]="sidePanelOpen">
+    <!-- Main Content -->
+    <div class="main-content">
+      <app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+      <!-- Filter Card -->
+      <div class="filter-card">
+        <div class="filter-fields">
+          <mat-form-field appearance="fill" subscriptSizing="dynamic" class="attribute-group-field">
+            <mat-label>Enter Attribute Group*</mat-label>
+            <mat-select [formControl]="attributeGroupControl"
+                        placeholder="Select attribute group"
+                        (openedChange)="onDropdownOpened($event)">
+              <mat-select-trigger>
+                {{ getSelectedGroupDisplay() }}
+              </mat-select-trigger>
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="attributeGroupSearchControl"
+                  placeholderLabel="Search attribute groups..."
+                  noEntriesFoundLabel="No matching groups">
+                </ngx-mat-select-search>
+              </mat-option>
+              <mat-option *ngFor="let group of filteredAttributeGroups" [value]="group.code" [matTooltip]="group.code + ' - ' + group.description">
+                <div class="attribute-group-option">
+                  <span class="attribute-group-option__code">{{ group.code }}</span>
+                  <span class="attribute-group-option__separator">-</span>
+                  <span class="attribute-group-option__desc">{{ group.description }}</span>
+                </div>
+              </mat-option>
+            </mat-select>
+          </mat-form-field>
+
+          <div class="description-field">
+            <label class="description-label">Description</label>
+            <div class="description-value">{{ descriptionControl.value || '' }}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Table Card -->
+      <div class="table-card">
+        <!-- Search and Filter Bar - Only show when attribute group is selected -->
+        @if (attributeGroupControl.value) {
+          <div class="search-filter-bar">
+            <!-- Left section: Filter button and chips -->
+            <div class="search-filter-bar__left">
+              <button
+                mat-button
+                class="filter-button"
+                [class.filter-button--active]="filterPanelOpen"
+                [attr.aria-expanded]="filterPanelOpen"
+                aria-label="Filter attribute codes"
+                cdkOverlayOrigin
+                #filterTrigger="cdkOverlayOrigin"
+                (click)="toggleFilterPanel()">
+                <mat-icon aria-hidden="true">filter_list</mat-icon>
+                FILTER
+              </button>
+
+              <!-- Filter Chips -->
+              <app-filter-chips
+                *ngIf="filterChips().length > 0"
+                [chips]="filterChips()"
+                (removeChip)="removeFilterChip($event)"
+                (clearAll)="clearAllFilterChips()">
+              </app-filter-chips>
+            </div>
+
+            <!-- Right section: Search bar -->
+            <div class="search-filter-bar__right">
+              <app-search-bar
+                [config]="searchBarConfig"
+                [searchText]="searchText"
+                (search)="onSearch($event)"
+                (cleared)="onSearchCleared()">
+              </app-search-bar>
+            </div>
+          </div>
+        }
+
+        <!-- Filter Panel Overlay -->
+        @if (attributeGroupControl.value && filterTrigger) {
+          <ng-template
+            cdkConnectedOverlay
+            [cdkConnectedOverlayOrigin]="filterTrigger"
+            [cdkConnectedOverlayOpen]="filterPanelOpen"
+            [cdkConnectedOverlayHasBackdrop]="true"
+            [cdkConnectedOverlayBackdropClass]="'cdk-overlay-transparent-backdrop'"
+            [cdkConnectedOverlayOffsetY]="4"
+            (backdropClick)="closeFilterPanel()"
+            (detach)="closeFilterPanel()">
+          <app-filter-panel-base
+            [title]="'Filters'"
+            [maxContentHeight]="200"
+            [width]="350"
+            [clearDisabled]="!hasAnyFilterValue()"
+            [applyDisabled]="!hasAnyFilterValue()"
+            (apply)="applyFilters()"
+            (clear)="clearFilters()"
+            (close)="closeFilterPanel()">
+            <!-- Labelling Filter -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Labelling</mat-label>
+              <mat-select [formControl]="filterLabellingControl">
+                <mat-option value="Yes">Yes</mat-option>
+                <mat-option value="No">No</mat-option>
+              </mat-select>
+            </mat-form-field>
+
+            <!-- Exclusivity Flag Filter -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Exclusivity Flag</mat-label>
+              <mat-select [formControl]="filterExclusivityControl">
+                <mat-option value="Yes">Yes</mat-option>
+                <mat-option value="No">No</mat-option>
+              </mat-select>
+            </mat-form-field>
+
+            <!-- Effective Date Filter -->
+            <div class="filter-date-row">
+              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="period-field">
+                <mat-label>Period</mat-label>
+                <mat-select [formControl]="filterEffectiveDatePeriodControl">
+                  <mat-option value="After">After</mat-option>
+                  <mat-option value="Before">Before</mat-option>
+                </mat-select>
+              </mat-form-field>
+
+              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="date-field"
+                              [class.has-error]="getEffectiveDateError()">
+                <mat-label>Effective Date</mat-label>
+                <input matInput [matDatepicker]="filterEffDatePicker"
+                       #effectiveDateInput
+                       [formControl]="filterEffectiveDateControl"
+                       [errorStateMatcher]="effectiveDateErrorMatcher"
+                       (input)="onEffectiveDateInput($event)"
+                       (blur)="onEffectiveDateBlur()"
+                       placeholder="DD-MON-YYYY"
+                       aria-label="Effective Date"
+                       autocomplete="off" />
+                <mat-datepicker-toggle matIconSuffix [for]="filterEffDatePicker"></mat-datepicker-toggle>
+                <mat-datepicker #filterEffDatePicker></mat-datepicker>
+                <mat-error *ngIf="filterEffectiveDateControl.hasError('invalidDateFormat')">Invalid date format</mat-error>
+                <mat-error *ngIf="filterEffectiveDateControl.hasError('matDatepickerParse')">Invalid date format</mat-error>
+              </mat-form-field>
+            </div>
+
+            <!-- Termination Date Filter -->
+            <div class="filter-date-row">
+              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="period-field">
+                <mat-label>Period</mat-label>
+                <mat-select [formControl]="filterTerminationDatePeriodControl">
+                  <mat-option value="After">After</mat-option>
+                  <mat-option value="Before">Before</mat-option>
+                </mat-select>
+              </mat-form-field>
+
+              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="date-field"
+                              [class.has-error]="getTerminationDateError()">
+                <mat-label>Termination Date</mat-label>
+                <input matInput [matDatepicker]="filterTermDatePicker"
+                       #terminationDateInput
+                       [formControl]="filterTerminationDateControl"
+                       [errorStateMatcher]="terminationDateErrorMatcher"
+                       (input)="onTerminationDateInput($event)"
+                       (blur)="onTerminationDateBlur()"
+                       placeholder="DD-MON-YYYY"
+                       aria-label="Termination Date"
+                       autocomplete="off" />
+                <mat-datepicker-toggle matIconSuffix [for]="filterTermDatePicker"></mat-datepicker-toggle>
+                <mat-datepicker #filterTermDatePicker></mat-datepicker>
+                <mat-error *ngIf="filterTerminationDateControl.hasError('invalidDateFormat')">Invalid date format</mat-error>
+                <mat-error *ngIf="filterTerminationDateControl.hasError('matDatepickerParse')">Invalid date format</mat-error>
+              </mat-form-field>
+            </div>
+          </app-filter-panel-base>
+          </ng-template>
+        }
+
+        <div class="table-wrapper">
+          <app-data-table
+            [config]="tableConfig"
+            [data]="dataSource"
+            [loading]="isLoading"
+            [keepActiveRow]="sidePanelOpen"
+            [expandTemplate]="expandTemplate"
+            [expandedRows]="expandedRows"
+            [expandRowKey]="expandRowKey"
+            (pageChange)="onPageChange($event)"
+            (sortChange)="onSortChange($event)"
+            (rowAction)="onRowAction($event)"
+            (rowExpandToggle)="onRowExpandToggle($event)"
+            (expandAllToggle)="onExpandAllToggle($event)">
+          </app-data-table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Expand Template -->
+    <ng-template #expandTemplate let-row>
+      <div class="expanded-row-content">
+        <div class="expanded-row-field">
+          <span class="expanded-row-label">Amt</span>
+          <span class="expanded-row-value">{{ row.price || '-' }}</span>
+        </div>
+        <div class="expanded-row-field">
+          <span class="expanded-row-label">Service Code</span>
+          <span class="expanded-row-value">{{ row.serviceCode || '-' }}</span>
+        </div>
+        <div class="expanded-row-field">
+          <span class="expanded-row-label">Special Order</span>
+          <span class="expanded-row-value">{{ row.normalStockFlag === 'N' ? 'Yes' : 'No' }}</span>
+        </div>
+        <div class="expanded-row-field">
+          <span class="expanded-row-label">Regular Order</span>
+          <span class="expanded-row-value">{{ row.normalStockFlag === 'Y' ? 'Yes' : 'No' }}</span>
+        </div>
+        <div class="expanded-row-field">
+          <span class="expanded-row-label">Credit</span>
+          <span class="expanded-row-value">{{ row.creditFlag === 'Y' ? 'Yes' : 'No' }}</span>
+        </div>
+        <div class="expanded-row-field">
+          <span class="expanded-row-label">Effective Date</span>
+          <span class="expanded-row-value">{{ row.effectiveDate ? formatExpandedDate(row.effectiveDate) : '-' }}</span>
+        </div>
+        <div class="expanded-row-field">
+          <span class="expanded-row-label">Termination Date</span>
+          <span class="expanded-row-value">{{ row.terminationDate ? formatExpandedDate(row.terminationDate) : '-' }}</span>
+        </div>
+      </div>
+    </ng-template>
+
+    <!-- Side Panel -->
+    @if (sidePanelOpen) {
+      <div class="side-panel">
+        <app-add-edit-attribute-code
+          [mode]="sidePanelMode"
+          [data]="sidePanelData"
+          [selectedAttributeGroup]="attributeGroupControl.value"
+          (save)="onSidePanelSave($event)"
+          (saveAndCreateAnother)="onSidePanelSaveAndCreateAnother($event)"
+          (close)="closeSidePanel()">
+        </app-add-edit-attribute-code>
+      </div>
+    }
+  </div>
+</div>

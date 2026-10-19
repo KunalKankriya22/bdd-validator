@@ -1,0 +1,465 @@
+/* ********************************************************************************
+  Name              : SCH_SELECT_TEST.pkg
+  Created By        : Kishore Gummadi
+  Date Of Creation  : 04/14/2010
+  Purpose           : This package will load units that are
+			    sent in a file to the UTRS table. Only
+			    those units that have been validated
+                      will be inserted in the table.
+
+  Version History
+  
+  Date         Version        Description
+  --------------------------------------------------------------------
+  04/14/2010   01             Initial development - Kishore
+  12/15/2010   02             Get the log directory from the MASTER_CODES table 
+					instead of VSERV_MASTER table - Kishore
+  04/18/2011   03             replace user by lt_session_user.get_userid - Hussein 
+  
+  09/18/2014   04	      SCR 19556 - populate_utrs routine modified.  UTRS insert stmt modified
+  			      to insert 'SCHSLTST' as program ID instead of 'SCH_SELECT_TEST'.
+
+  ********************************************************************************   */
+CREATE OR REPLACE PACKAGE SCH_SELECT_TEST as
+  Procedure POPULATE_UTRS (p_file_name in varchar2,
+				   p_chapter_id in varchar2);
+
+  Procedure VALIDATE_UNIT_ID(p_unit_id in varchar2,
+                             p_chapter_id in varchar2,
+                             p_status out varchar2);
+END SCH_SELECT_TEST;
+/
+
+create or replace package body SCH_SELECT_TEST as
+
+  PROCEDURE validate_unit_id (p_unit_id in varchar2,
+                              p_chapter_id in varchar2,
+                              p_status out varchar2) IS
+    temp_c_center_id      varchar2(5);
+    temp_c_label_year     varchar(2);
+    temp_c_serial_no      varchar(6);
+    dummy			  varchar2(1);
+    dummy_x			  varchar2(1);
+    t_dummy			  varchar2(1);
+  BEGIN
+    p_status := 'OK';
+    -- Check if Unit has a valid scan length.
+    if nvl(length(p_unit_id), 0) in  (7, 13) then
+      if nvl(length(p_unit_id), 0) = 13 then --Assume to be a ISBT 128 Unit              
+        temp_c_center_id := substr(p_unit_id, 1, 5); -- Strip characters from 1 to 5 of p_unit_id (5 digits)
+  	  temp_c_label_year := substr(p_unit_id, 6, 2); -- Strip characters from 6 to 7 of p_unit_id (2 digits);
+        temp_c_serial_no := substr(p_unit_id, 8, 6); -- Strip characters from 8 to 13 of p_unit_id (6 digits);
+
+        /*begin
+          select 'x'
+            into dummy
+            from valid_collection_agencies
+           where chapter_id = p_chapter_id
+             and coll_id = temp_c_center_id
+             and contract_id = 'INTERNAL'
+             and rownum = 1;
+        exception
+          when others then
+            dummy := null;
+            p_status := 'Invalid ISBT unit id. Collection ID value does not match with the one in database';
+        end; */
+
+        if dummy = 'x' then
+          if ltrim(temp_c_label_year, '0123456789') is not null then
+	      p_status := 'Invalid ISBT unit id. Not a valid collection year';
+          end if;
+        end if;
+
+        if p_status = 'OK' then
+          if ltrim(temp_c_serial_no,'0123456789') is not null then
+            p_status := 'Invalid ISBT unit id. Not a numeric value in the last 6 digits';
+          end if;
+        end if;
+      else -- Codabar unit
+        if ltrim(p_unit_id, '0123456789') is not null then -- Check if value os numeric or not
+          begin
+            select max('x') 
+              into dummy_x
+              from bar_code_prefixes
+             where eye_read_trns = substr(p_unit_id, 1, 2)
+               and sysdate between eff_date and nvl(term_date, sysdate);
+          exception
+            when others then
+              dummy_x := null;
+              p_status := 'Invalid Codabar unit. Invalid 1st two characters of the 7-digit unit serial';
+          end;
+
+          if p_status = 'OK' then
+            if ltrim(substr(p_unit_id, 3, 5), '0123456789') is not null then -- Check if last five characters are numbers
+              p_status := 'Invalid Codabar unit. Last 5 characters in unit ID must be numeric';
+            end if;
+          end if;
+        end if;
+      end if; -- if nvl(length(p_unit_id), 0) = 13 then 
+	
+	-- Check if the unit is valid i.e. present in the UNITS table
+	if p_status = 'OK' then
+	  begin
+	    select 'X'
+		into t_dummy
+		from units
+	     where unit_id = p_unit_id
+             and rownum = 1;
+	  exception
+	    when others then
+		t_dummy := null;
+	  end;
+
+	  if nvl(t_dummy, 'Y') != 'X' then
+	    p_status := 'Invalid unit. Unit not present in the UNITS table';
+	  end if;
+	end if;
+    else
+    	p_status := 'Invalid unit id length';
+    end if; -- if nvl(length(p_unit_id), 0) in  (7, 13) then
+  END;
+
+  procedure POPULATE_UTRS(p_file_name in varchar2,
+				  p_chapter_id in varchar2) as
+
+    cursor c1 is 
+    select code_desc
+      from master_codes
+     where code_type = 'ADTST'
+       and sysdate between eff_date and nvl(term_date, sysdate + 1);
+
+    log_file                utl_file.file_type;                    
+    unit_id_file            utl_file.file_type;                    
+    select_test_log         varchar2(100) := substr(p_file_name, 1, instr(p_file_name, '.', -1, 1) - 1) || '_' || 
+							  	    to_char(sysdate, 'MMDDYYHH24MISS') || 
+							  	    '_' || LT_USER_SESSION.get_userid || '.log';
+    log_loc                 varchar2(50);
+    unit_id_row		    varchar2(32767);
+    t_unit_id		    units.unit_id%type;
+    t_status		    varchar2(1000);
+    t_chapter_id		    chapters.chapter_id%type;
+    t_unit_chapter_id	    units.chapter_id%type;
+    t_coll_date		    units.coll_date%type;
+    t_counter		    number;
+    temp_utr_max_seq_no     number;
+    temp_max_seq_no         number;
+    temp_utb_seq_no         number;
+    t_dummy			    varchar2(1);
+    t_utrs_present	    varchar2(1);
+    t_log_msg		    varchar2(1000);
+    t_c1_rowcount		    number;
+    LOG_EXCEPTION		    EXCEPTION;
+    DIR_EXCEPTION		    EXCEPTION;
+  begin
+    dbms_output.enable(3000000);
+
+    -- Get Log directory
+    begin 
+      select code_desc into log_loc
+        from master_codes
+       where code_type = 'LOGDR'
+         and code = 'UTIL'
+         and sysdate between eff_date and nvl(term_date, sysdate + 1);
+    exception
+      when no_data_found then
+        dbms_output.put_line('Log Dir not maintained. Process aborted');
+        raise DIR_EXCEPTION;
+      when others then
+        dbms_output.put_line('Error in fetching Log Dir :'|| sqlerrm);
+        raise DIR_EXCEPTION;
+    end;
+
+    -- Check if log file is open or not. If it is open, then close it
+    if utl_file.is_open(log_file) then
+      utl_file.fclose(log_file);
+    end if;
+
+    -- Check if unit id file is open or not. If it is open, then close it
+    if utl_file.is_open(unit_id_file) then
+      utl_file.fclose(unit_id_file);
+    end if;
+
+    log_file := utl_file.fopen(log_loc, select_test_log, 'w');
+    unit_id_file := utl_file.fopen(log_loc, p_file_name, 'r');
+
+    -- Get chapter id
+    begin
+      select chapter_id
+        into t_chapter_id
+        from chapters
+       where chapter_id = p_chapter_id
+         and rownum = 1;
+    exception
+      when others then
+        t_log_msg := 'Invalid chapter id. Process aborted';
+        raise LOG_EXCEPTION;
+    end;
+
+    -- Check to see if a duplicate file is being loaded
+    begin
+      select 'X'
+        into t_dummy
+        from instrument_log
+       where tb_id = 'CHAGAS'
+         and test_chapter_id = t_chapter_id
+         and file_name = p_file_name;
+    exception
+      when others then
+        t_dummy := null;
+    end;
+
+    if nvl(t_dummy, 'Y') = 'X' then
+      --dbms_output.put_line('Test');
+      utl_file.put_line(log_file, 'Duplicate input unit id file - ' || p_file_name);
+    else
+      -- Insert file name into INSTRUMENT_LOG table if file not present in the table
+      begin
+        insert into instrument_log
+          (tb_id,
+           test_chapter_id,
+           test_id,
+	     read_dats,
+	     machine_id,
+	     station_no,
+	     xmt_status,
+	     status_dats,
+           file_name)
+        values
+          ('CHAGAS',
+	     t_chapter_id,
+	     'TEST',
+	     sysdate,
+	     'TEST',
+	     '000',
+	     '00',
+	     sysdate,
+	     p_file_name);
+      exception
+        when others then
+	    utl_file.put_line(log_file, 'Could not insert file ' || p_file_name || ' file into INSTRUMENT_LOG table');
+      end;
+
+      loop
+        begin
+          utl_file.get_line(unit_id_file, unit_id_row);
+          if unit_id_row is null then
+            exit;
+          end if;
+          t_unit_id := trim(replace(unit_id_row, chr(13), ''));
+          validate_unit_id(t_unit_id, t_chapter_id, t_status);
+        
+          if t_status = 'OK' then
+            begin
+              select chapter_id
+                into t_unit_chapter_id
+                from units
+               where unit_id = t_unit_id
+                 and chapter_id = t_chapter_id;
+            exception
+              when no_data_found then
+                utl_file.put_line(log_file, t_unit_id || ' - ' || 
+                                  'Not Processed' || ' - ' ||
+                                  'Invalid Unit ID');
+              when too_many_rows then
+                utl_file.put_line(log_file, t_unit_id || ' - ' || 
+                                  'Not Processed' || ' - ' ||
+                                  'This unit has already been checked in by another chapter');
+              when others then
+                utl_file.put_line(log_file, t_unit_id || ' - ' || 
+                                  'Not Processed' || ' - ' ||
+                                  'Unknown reason');
+            end;
+
+            begin
+              select max(coll_date)
+                into t_coll_date
+                from units
+               where unit_id = t_unit_id 
+                 and chapter_id = t_unit_chapter_id;
+
+              if t_coll_date is null then
+                utl_file.put_line(log_file, t_unit_id || ' - ' || 
+                                  'Not Processed' || ' - ' ||
+                                  'This unit has already been checked in by another chapter');
+              end if;
+            exception
+              when others then
+                utl_file.put_line(log_file, t_unit_id || ' - ' || 
+                                  'Not Processed' || ' - ' ||
+                                  'Unknown reason');
+            end;
+
+            -- Check if cursor retrieves any rows
+		t_c1_rowcount := 0;
+		for c1count in c1 loop
+		  t_c1_rowcount := t_c1_rowcount + 1;
+		end loop;
+
+            if t_c1_rowcount > 0 then
+              for c1rec in c1 loop
+		    -- Check if test ID is present in UTRS table. If present, then do not schedule unit
+		    begin
+		      select 'X'
+			  into t_utrs_present
+			  from utrs
+		       where unit_id = t_unit_id
+			   and test_id = c1rec.code_desc
+			   and rownum = 1;
+		    exception
+		      when others then
+			  t_utrs_present := null;
+		    end;
+
+		    if nvl(t_utrs_present, 'Y') != 'X' then
+                  begin
+                    select max(test_seq_no)
+                      into temp_utr_max_seq_no
+                      from utrs
+                     where unit_id = t_unit_id 
+                       and nvl(trunc(coll_date), t_coll_date) = nvl(trunc(t_coll_date), sysdate) 
+                       and nvl(chapter_id, t_unit_chapter_id) = nvl(t_unit_chapter_id, t_chapter_id) 
+                       and test_id = c1rec.code_desc;
+                  exception
+                    when others then
+                      temp_utr_max_seq_no := 0;
+                  end;
+
+                  temp_utr_max_seq_no := nvl(temp_utr_max_seq_no, 0);
+                  temp_max_seq_no := temp_utr_max_seq_no + 1;
+
+                  begin
+                    insert into utrs
+                      (unit_id, coll_date, 
+                       chapter_id, test_id,
+                       test_seq_no, program_id,
+                       insert_dats, insert_user_id)
+                    values 
+                      (t_unit_id, t_coll_date,
+                       t_unit_chapter_id, c1rec.code_desc,
+                       temp_max_seq_no, 'SCHSLTST', 
+                       sysdate, LT_USER_SESSION.get_userid);
+                  exception
+                    when OTHERS then
+                      utl_file.put_line(log_file, t_unit_id || ' - ' || 
+                                        'Not Processed' || ' - ' || c1rec.code_desc || ': ' ||
+                                        'Error inserting into UTRS table');
+                  end;
+
+                  -- Check to see if verified results are already present in UNIT_TEST_BASE
+                  begin
+                    select min(test_seq_no)
+                      into temp_utb_seq_no
+                      from unit_test_base
+                     where unit_id = t_unit_id 
+		           and nvl(trunc(coll_Date), t_coll_date) = nvl(trunc(t_coll_date), sysdate) 
+		           and nvl(chapter_id, t_unit_chapter_id) = nvl(t_unit_chapter_id, t_chapter_id) 
+		           and test_id = c1rec.code_desc
+		           and result_status_1 is not null 
+		           and result_status_2 is null 
+		           and cancel_flag is null;
+                  exception
+                    when OTHERS then
+                      temp_utb_seq_no := 0;
+                  end;
+
+                  if nvl(temp_utb_seq_no,0) = 0 then
+                    -- Verfified result not present
+                    null;
+                  else
+                    -- Verified result present
+                    begin
+                      update utrs
+                         set (test_state, test_mode, result_status_1,
+                              result_status_2, tb_id, test_chapter_id,
+                              tb_seq_no, well_number, absorbance,
+                              ratio, result_dats, result_user_id,
+                              testing_lab_code, program_id) = (select test_state, test_mode, result_status_1,
+                                  						    result_status_2, tb_id, test_chapter_id,
+                           						          tb_seq_no, well_number, absorbance,
+                           						          ratio, result_dats, result_user_id,
+                           						          testing_lab_code, program_id
+                    						           from unit_test_base
+                    						          where unit_id = t_unit_id 
+									            and nvl(trunc(coll_Date), t_coll_date) = nvl(trunc(t_coll_date), sysdate) 
+									            and nvl(chapter_id, t_unit_chapter_id) = nvl(t_unit_chapter_id, t_chapter_id) 
+									            and test_id = c1rec.code_desc
+									            and test_seq_no = temp_utb_seq_no 
+									            and cancel_flag is null)
+                       where unit_id = t_unit_id 
+			       and nvl(trunc(coll_Date), sysdate) = nvl(trunc(t_coll_date), t_coll_date) 
+			       and nvl(chapter_id, t_unit_chapter_id) = nvl(t_unit_chapter_id, t_chapter_id) 
+			       and test_id = c1rec.code_desc
+			       and test_seq_no = temp_max_seq_no 
+			       and cancel_flag is null;
+                    exception
+                      when OTHERS then
+                        utl_file.put_line(log_file, t_unit_id || ' - ' || 
+                                          'Not Processed' || ' - ' || c1rec.code_desc || ': ' ||
+                                          'Error updating the UTRS table');
+                    end;
+
+                    begin
+                      delete from unit_test_base
+                       where unit_id = t_unit_id 
+			       and nvl(trunc(coll_Date), t_coll_date) = nvl(trunc(t_coll_date), sysdate)
+                         and nvl(chapter_id, t_unit_chapter_id) = nvl(t_chapter_id, 'WAD')
+                         and test_id = c1rec.code_desc
+			       and test_seq_no = temp_utb_seq_no 
+			       and cancel_flag is null;
+                    exception
+                      when OTHERS then
+                        utl_file.put_line(log_file, t_unit_id || ' - ' || 
+                                          'Not Processed' || ' - ' || c1rec.code_desc || ': ' ||
+                                          'Error deleting from the UNIT_TEST_BASE table');
+                    end;
+                  end if; -- if nvl(temp_utb_seq_no,0) = 0 then
+                else
+			utl_file.put_line(log_file, '          ' || c1rec.code_desc || ' - ' || 
+                                          'Not Processed. Test already scheduled');
+		    end if; -- if nvl(t_utrs_present, 'Y') != 'X' then
+              end loop; -- for c1rec in c1 loop
+            else
+              utl_file.put_line(log_file, 'No records retrieved for code type ADTST');
+	      end if; -- if t_c1_rowcount > 0 then
+
+            utl_file.put_line(log_file, t_unit_id || ' - ' || 
+                                        'Processed');
+		utl_file.put_line(log_file, '');
+          else
+            utl_file.put_line(log_file, t_unit_id || ' - ' || 
+                              'Not Processed' || ' - ' ||
+                              t_status);
+		utl_file.put_line(log_file, '');
+          end if; -- if t_status = 'OK' then
+        exception -- unit id file loop begin
+          when others then
+            exit;
+        end;
+
+        /*-- Commit after every 100 rows have been processed
+        t_counter := t_counter + 1;
+        if t_counter >= 100 then
+          t_counter := 0;
+          commit;
+        end if; */
+        commit;
+      end loop; -- unit id file loop
+      
+    end if; -- if t_dummy is not null then
+
+    utl_file.fclose(unit_id_file);
+    utl_file.fclose(log_file);
+
+  exception
+    when LOG_EXCEPTION then
+      rollback;
+      utl_file.put_line(log_file, t_log_msg);
+      utl_file.fclose(unit_id_file);
+      utl_file.fclose(log_file);
+    when DIR_EXCEPTION then
+      null;
+  end populate_utrs;     
+end;
+/
+
+

@@ -1,0 +1,192 @@
+<div class="order-processing-status-container">
+  <!-- Page Header with Action Buttons -->
+  <app-page-header-with-breadcrumb [config]="headerConfig()"></app-page-header-with-breadcrumb>
+
+  <!-- Search + Filter Bar (OUTSIDE tabs — single instance) -->
+  <div class="search-filter-bar">
+    <app-search-bar [config]="searchConfig" (search)="onSearch($event)"></app-search-bar>
+
+    <button
+      mat-icon-button
+      color="primary"
+      (click)="toggleFilter()"
+      [id]="elementId('filter-btn')"
+      [attr.aria-label]="'Toggle filters'"
+      [attr.aria-expanded]="filterOpen()"
+      cdkOverlayOrigin
+      #filterTrigger="cdkOverlayOrigin">
+      <mat-icon>filter_list</mat-icon>
+    </button>
+
+    <ng-template
+      cdkConnectedOverlay
+      [cdkConnectedOverlayOrigin]="filterTrigger"
+      [cdkConnectedOverlayOpen]="filterOpen()"
+      [cdkConnectedOverlayHasBackdrop]="true"
+      [cdkConnectedOverlayBackdropClass]="'cdk-overlay-transparent-backdrop'"
+      (backdropClick)="toggleFilter()">
+      <app-filter-panel
+        [statusCodes]="statusCodes()"
+        [currentFilters]="filters()"
+        (applyFilters)="onApplyFilters($event)"
+        (clearFilters)="onClearFilters()"
+        (close)="toggleFilter()">
+      </app-filter-panel>
+    </ng-template>
+  </div>
+
+  <!-- Filter Chips -->
+  @if (filterChips().length > 0) {
+    <div class="filter-chips-bar">
+      <app-filter-chips
+        [chips]="filterChips()"
+        (removeChip)="onRemoveChip($event)"
+        (clearAll)="onClearFilters()">
+      </app-filter-chips>
+    </div>
+  }
+
+  <!-- Tabs -->
+  <mat-tab-group
+    [selectedIndex]="selectedTab()"
+    (selectedIndexChange)="onTabChange($event)"
+    [id]="elementId('tab-group')"
+    class="order-tabs"
+    animationDuration="0ms">
+    @for (label of tabLabels; track $index) {
+      <mat-tab [label]="label">
+        <div class="tab-content">
+          <!-- Loading State -->
+          @if (loading()) {
+            <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+              <mat-spinner diameter="40"></mat-spinner>
+              <p>Loading orders...</p>
+            </div>
+          }
+
+          <!-- Error State -->
+          @if (error() && !loading()) {
+            <div class="error-container" role="alert" aria-live="assertive">
+              <mat-icon aria-hidden="true">error</mat-icon>
+              <p>{{ error() }}</p>
+              <button mat-raised-button color="primary" (click)="retry()">Retry</button>
+            </div>
+          }
+
+          <!-- Master-Detail Layout -->
+          @if (isReady() && hasData()) {
+            <div class="master-detail-layout">
+              <div class="order-list-panel">
+                <app-data-table
+                  [config]="orderListTableConfig()"
+                  [data]="currentOrders()"
+                  [loading]="loading()"
+                  [highlightedRow]="selectedOrder()"
+                  (rowClick)="onOrderRowClick($event)">
+                </app-data-table>
+              </div>
+
+              <div class="order-detail-panel">
+                @if (selectedOrder()) {
+                  <app-order-detail
+                    [order]="selectedOrder()!"
+                    [statusDescriptions]="statusDescriptionMap()">
+                  </app-order-detail>
+                } @else {
+                  <div class="empty-detail-state">
+                    <mat-icon aria-hidden="true">search</mat-icon>
+                    <h3>No Results to Display</h3>
+                    <p>Please enter search criteria to view results or select from the list</p>
+                  </div>
+                }
+              </div>
+            </div>
+          }
+
+          @if (isReady() && !hasData()) {
+            <div class="empty-state">
+              <mat-icon aria-hidden="true">search</mat-icon>
+              <h3>No Results to Display</h3>
+              <p>Please enter search criteria to view results or select from the list</p>
+            </div>
+          }
+        </div>
+      </mat-tab>
+    }
+  </mat-tab-group>
+</div>
+
+<!-- Status Cell Template for Order List DataTable -->
+<ng-template #statusCellTpl let-row>
+  <span class="status-chip" [ngClass]="'status-' + getStatusColor(row.orderStatus)">
+    {{ statusDescriptionMap()[row.orderStatus] || row.orderStatus }}
+  </span>
+</ng-template>
+
+<!-- Side Panel Overlays for Action Buttons -->
+@if (activePanel()) {
+  <div class="overlay-backdrop" (click)="closeSidePanel()"></div>
+  <div class="overlay-side-panel">
+    <div class="side-panel">
+      <!-- Ordered Attributes/Antigens Panel -->
+      @if (activePanel() === 'ordered-attr') {
+        <div class="side-panel-header">
+          <h2>Ordered Attributes / Antigens</h2>
+          <button mat-icon-button (click)="closeSidePanel()"><mat-icon>close</mat-icon></button>
+        </div>
+        <div class="side-panel-content">
+          @if (panelLoading()) {
+            <div class="loading-container"><mat-spinner diameter="32"></mat-spinner></div>
+          } @else {
+            <h3>Ordered Antigens</h3>
+            <app-data-table [config]="orderedAntigensTableConfig" [data]="orderedAntigens()"></app-data-table>
+            <h3>Ordered Attributes</h3>
+            <app-data-table [config]="orderedAttributesTableConfig" [data]="orderedAttributes()"></app-data-table>
+          }
+        </div>
+        <div class="side-panel-actions">
+          <button mat-stroked-button (click)="closeSidePanel()">CLOSE</button>
+        </div>
+      }
+
+      <!-- Shipped Products Panel -->
+      @if (activePanel() === 'shipped-products') {
+        <div class="side-panel-header">
+          <h2>Shipped Products</h2>
+          <button mat-icon-button (click)="closeSidePanel()"><mat-icon>close</mat-icon></button>
+        </div>
+        <div class="side-panel-content">
+          @if (panelLoading()) {
+            <div class="loading-container"><mat-spinner diameter="32"></mat-spinner></div>
+          } @else {
+            <app-data-table [config]="shippedProductsTableConfig" [data]="shippedProducts()"></app-data-table>
+          }
+        </div>
+        <div class="side-panel-actions">
+          <button mat-stroked-button (click)="closeSidePanel()">CLOSE</button>
+        </div>
+      }
+
+      <!-- Shipped Attributes/Antigens Panel -->
+      @if (activePanel() === 'shipped-attr') {
+        <div class="side-panel-header">
+          <h2>Shipped Attributes / Antigens</h2>
+          <button mat-icon-button (click)="closeSidePanel()"><mat-icon>close</mat-icon></button>
+        </div>
+        <div class="side-panel-content">
+          @if (panelLoading()) {
+            <div class="loading-container"><mat-spinner diameter="32"></mat-spinner></div>
+          } @else {
+            <h4>Product Antigens</h4>
+            <app-data-table [config]="shippedAntigensTableConfig" [data]="shippedAntigens()"></app-data-table>
+            <h4>Product Attributes</h4>
+            <app-data-table [config]="shippedAttributesTableConfig" [data]="shippedAttributesData()"></app-data-table>
+          }
+        </div>
+        <div class="side-panel-actions">
+          <button mat-stroked-button (click)="closeSidePanel()">CLOSE</button>
+        </div>
+      }
+    </div>
+  </div>
+}

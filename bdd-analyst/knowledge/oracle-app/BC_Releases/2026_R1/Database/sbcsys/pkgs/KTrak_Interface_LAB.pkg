@@ -1,0 +1,589 @@
+CREATE OR REPLACE PACKAGE KTrak_Interface_Lab
+/*-----------------------------------------------------------------------------
+PACKAGE		:	Knowledge Trak Interface for LAB Application
+PURPOSE   	:	Interface to Knowlege Trak application
+DEVELOPER 	:	Ashok Vardhan
+DEV. DATE 	:	03 Feb 2012
+NOTES     	:	Similar to KTrak_Interface.pkg for Donor - Only change is master_codes table. Error Codes used: 9400 to 9405
+Ver       	:	01  -- Same as ver 03 for KTrak_Interface in Donor Package
+
+Modification History
+-------------------------------------------------------------------------------
+Modified by	 |     on		|	   Version	  |  Remarks
+-------------------------------------------------------------------------------
+Ashok		 |  02/16/2012		|	 	02	  |	1) IM:6751--Sysdate converted to local date in get_KT_api_url;
+-------------------------------------------------------------------------------
+Ashok		 |  02/22/2012		|	 	03	  |	1) IM:6992 - KTRAK master code is under MASTR.  For donor it is under CODTP.
+									2) Passing userid without 'OPS$' part to LIFETRACK_TIMEZONE_CONVERT.GET_CHAPTERid_DB;
+-----------------------------------------------------------------------------*/
+AUTHID CURRENT_USER
+AS
+
+SUBTYPE name_t IS VARCHAR2 (32767);
+TYPE xml_nodes_t IS TABLE OF VARCHAR2(100) INDEX BY name_t;
+
+PROCEDURE get_KT_api_url(
+	cmd_name IN VARCHAR2,
+	encoded_url OUT VARCHAR2,
+	errcde OUT VARCHAR2,
+	errmsg OUT VARCHAR2
+ );
+
+PROCEDURE get_url_response (
+   p_url      IN    VARCHAR2,
+   p_cmd      IN    VARCHAR2,
+   url_resp   OUT   VARCHAR2,
+   errcde     OUT   VARCHAR2,
+   errmsg     OUT   VARCHAR2
+);
+
+PROCEDURE XML_PARSER(
+	xmlpayload IN VARCHAR2,
+	errcde	   OUT VARCHAR2,
+	errmsg OUT VARCHAR2
+);
+
+FUNCTION get_xmlnode_value(
+	node_name_in IN name_t
+) RETURN VARCHAR2;
+
+PROCEDURE call_api_cmd (
+    in_cmd        IN    VARCHAR2,
+    out_string    OUT   VARCHAR2,
+    out_errcde	  OUT   VARCHAR2,
+    out_errmsg	  OUT   VARCHAR2
+);
+END KTrak_Interface_Lab;
+/
+
+
+CREATE OR REPLACE PACKAGE BODY KTrak_Interface_Lab
+/*-----------------------------------------------------------------------------
+PACKAGE		:	Knowledge Trak Interface
+PURPOSE   	:	Interface to Knowlege Trak application
+DEVELOPER 	:	Ashok Vardhan
+DEV. DATE 	:	22 Dec 2011
+NOTES     	:	Initial version.
+Ver       	:	01
+Comments	: Error Codes: 9400, 9401 , 9402 are used and need to be defined in Error Codes table
+			  94XX is used as internal error code and need not be defined in Error Codes table.
+Modification History
+-------------------------------------------------------------------------------
+Modified by		on		Version	Remarks
+-------------------------------------------------------------------------------
+Ashok		 |  02/16/2012		|	 	02	  |	1) IM:6751--Sysdate converted to local date in get_KT_api_url;
+-------------------------------------------------------------------------------
+Ashok		 |  02/16/2012		|	 	03	  |	1) IM:6992--CODTP master code replaced by 'MASTR'.
+									   Lab - master code - MASTR
+									   Donor - master code - CODTP.
+									2) Passing userid without 'OPS$' part to LIFETRACK_TIMEZONE_CONVERT.GET_CHAPTERid_DB;
+-----------------------------------------------------------------------------*/
+AS
+
+
+xml_nodes_tab xml_nodes_t;
+
+--------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------
+
+--Error Codes: 9400, 9401
+PROCEDURE get_KT_api_url(
+	cmd_name IN VARCHAR2,
+	encoded_url OUT VARCHAR2,
+	errcde OUT VARCHAR2,
+	errmsg OUT VARCHAR2
+ )
+ AS
+ l_CODTP VARCHAR2(5) := 'MASTR'; -- IM: 6992 - MASTR is the master code in LAB (same as 'CODTP' in donor).
+ l_KTRAK VARCHAR2(5) := 'KTRAK';
+ l_ACODE VARCHAR2(5) := 'ACODE';
+ l_DNAME VARCHAR2(5) := 'DNAME';
+ l_KTURL VARCHAR2(5) := 'KTURL';
+ l_RCMD	 VARCHAR2(5) := 'RCMD';
+
+ -- IM:6751
+ l_chapter_id VARCHAR2(10);
+ l_local_sysdate DATE;
+ l_user_id    VARCHAR2(10);
+ ---
+ cmd_ktrak_code VARCHAR2(50);
+ cmd_app_code VARCHAR2(50);
+ cmd_db_name VARCHAR2(20);
+ cmd_user_id VARCHAR2(20);
+ cmd_sep VARCHAR2(5) := '&';
+ cmd_kt_url VARCHAR2(50);
+ cmd_kt_rcmd VARCHAR2(50);
+
+ cmd_string VARCHAR2(2000);
+ encoded_cmd VARCHAR2(2000);
+
+ exit_process EXCEPTION;
+
+ cursor cur_master_code(in_codetype IN VARCHAR2, in_code IN VARCHAR2) is
+    select code_desc
+     from master_codes
+    where code_type = in_codetype
+      and code = in_code
+	  and trunc(l_local_sysdate) between eff_date and nvl(term_date,l_local_sysdate+365);
+
+  Function get_base64encoded_cmd(cmd_string IN VARCHAR2) return VARCHAR2 is
+   encode_char_set VARCHAR2(20) := 'WE8ISO8859P1';
+   encoding PLS_INTEGER := UTL_ENCODE.BASE64;
+  begin
+    return utl_encode.text_encode(cmd_string, encode_char_set, encoding);
+  end;
+
+  function get_kt_user_id return varchar2 is
+   l_user_id VARCHAR2(20);
+  begin
+    begin
+      select kt_user_id into l_user_id
+        from system_users
+       where  user_id = LT_USER_SESSION.get_userid
+         and  trunc(sysdate) between eff_date and nvl(term_date,sysdate+365);
+    exception
+	  when others then
+	    l_user_id := NULL;
+    end;
+
+    return l_user_id;
+  end get_kt_user_id;
+begin
+
+  errcde := null;
+  errmsg := null;
+  encoded_cmd := null;
+
+  -- Get KT User ID;
+  cmd_user_id := get_kt_user_id;
+  if cmd_user_id is null then
+	 errcde := '9400'; -- User ID not configured.
+	 errmsg := NULL; --'KT user id is not configured in LifeTrak';
+	 raise exit_process;
+  end if;
+
+  -- IM:6751--Sysdate converted to local date;
+  -- IM: 6992 -- passing user id with out 'OPS$' part.
+  l_user_id := LT_USER_SESSION.GET_USERID; -- Returns user id in OPS$ format;
+  SELECT DECODE( UPPER(SUBSTR(l_user_id,1,3)),'OPS', SUBSTR(l_user_id,5),l_user_id ) INTO l_user_id FROM DUAL;
+
+  l_chapter_id := Lifetrack_timezone_convert.get_chapter_id_db(l_user_id);  
+  l_local_sysdate := Lifetrack_timezone_convert.get_local_time(l_chapter_id, sysdate);
+  ----
+
+  -- check ktrak code
+  open cur_master_code(l_CODTP, l_KTRAK);
+  fetch cur_master_code into cmd_ktrak_code;
+  close cur_master_code;
+
+  if cmd_ktrak_code is null then
+	 errcde := '9401'; -- master code not defined for KTrak
+	 errmsg := l_KTRAK;
+	 raise exit_process;
+  end if;
+  
+  -- get application code
+  open cur_master_code(l_KTRAK, l_ACODE);
+  fetch cur_master_code into cmd_app_code;
+  close cur_master_code;
+
+  if cmd_app_code is null then
+	 errcde := '9401'; -- master code not defined for KTrak
+	 errmsg := l_ACODE;
+	 raise exit_process;
+   end if;
+
+   -- get company code (db name)
+   open cur_master_code(l_KTRAK, l_DNAME);
+   fetch cur_master_code into cmd_db_name;
+   close cur_master_code;
+
+   if cmd_db_name is null then
+	 errcde := '9401'; -- master code not defined for KTrak
+	 errmsg := l_DNAME;
+	 raise exit_process;
+   end if;
+
+   -- get KT Instance URL
+   open cur_master_code(l_KTRAK, l_KTURL);
+   fetch cur_master_code into cmd_kt_url;
+   close cur_master_code;
+
+   if cmd_kt_url is null then
+	 errcde := '9401'; -- master code not defined for KTrak
+	 errmsg := l_KTURL;
+	 raise exit_process;
+   end if;
+
+   -- get KT Remote Interactive Session Command;
+   open cur_master_code(l_KTRAK, l_RCMD);
+   fetch cur_master_code into cmd_kt_rcmd;
+   close cur_master_code;
+
+   if cmd_kt_rcmd is null then
+	 errcde := '9401'; -- master code not defined for KTrak
+	 errmsg := l_RCMD;
+	 raise exit_process;
+   end if;
+
+   -- Command name
+   if cmd_name is null then
+	 errcde := '94XX'; -- Input command error; Internal Error; No need to define in Error Codes.
+	 errmsg := 'Command name is null';
+	 raise exit_process;
+   end if;
+
+   -- Construct command string;
+
+   cmd_string := 'cmd=' || cmd_name;
+   cmd_string := cmd_string || cmd_sep;
+   cmd_string := cmd_string || 'AppCode=' || cmd_app_code;
+   cmd_string := cmd_string || cmd_sep;
+   cmd_string := cmd_string || 'DBName=' || cmd_db_name;
+   cmd_string := cmd_string || cmd_sep;
+   cmd_string := cmd_string || 'UserID=' || lower(cmd_user_id);
+
+   --dbms_output.put_line('command string : ' || cmd_string);
+
+   encoded_cmd := get_base64encoded_cmd(cmd_string);
+
+   if encoded_cmd is not null then
+     encoded_url := cmd_kt_url || cmd_kt_rcmd || encoded_cmd;
+   end if;
+
+EXCEPTION
+  when exit_process then
+     encoded_url := null;
+END GET_KT_API_URL;
+
+
+--------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------
+
+-- Error code: 9402
+PROCEDURE get_url_response (
+   p_url      IN    VARCHAR2,
+   p_cmd      IN    VARCHAR2,
+   url_resp   OUT   VARCHAR2,
+   errcde     OUT   VARCHAR2,
+   errmsg     OUT   VARCHAR2
+)
+AS
+   req     UTL_HTTP.req;
+   resp    UTL_HTTP.resp;
+   NAME    VARCHAR2 (255);
+   VALUE   VARCHAR2 (1023);
+   v_msg   VARCHAR2 (4000);
+   v_ans   VARCHAR2(4000);
+BEGIN
+  -- Initialise errcde to null
+  errcde := null;
+
+/* request that exceptions are raised for error Status Codes */
+   UTL_HTTP.set_response_error_check (ENABLE => TRUE);
+/* allow testing for exceptions like Utl_Http.Http_Server_Error */
+   UTL_HTTP.set_detailed_excp_support (ENABLE => TRUE);
+/*
+  Utl_Http.set_proxy (
+    proxy                 => 'www-proxy.us.oracle.com',
+    no_proxy_domains      => 'us.oracle.com'    );
+*/
+
+   req := UTL_HTTP.begin_request (url => p_url, method => 'GET');
+
+/*  Alternatively use method => 'POST' and Utl_Http.Write_Text to
+    build an arbitrarily long message
+*/
+
+/*
+   Utl_Http.set_authentication (
+          r              => req,
+        username       => 'SomeUser',
+        PASSWORD       => 'SomePassword',
+        scheme         => 'Basic',
+        for_proxy      => FALSE      --this info is for the target Web server
+   );
+*/
+
+/*
+   UTL_HTTP.set_header (r          => req,
+                        NAME       => 'User-Agent',
+                        VALUE      => 'Mozilla/4.0'
+                       );
+*/
+
+   resp := UTL_HTTP.get_response (r => req);
+
+
+/* -- For debugging
+   DBMS_OUTPUT.put_line ('Status code: ' || resp.status_code);
+   DBMS_OUTPUT.put_line ('Reason phrase: ' || resp.reason_phrase);
+
+   FOR i IN 1 .. Utl_Http.get_header_count (r => resp)
+   LOOP
+          Utl_Http.get_header (r => resp, n => i, NAME => NAME, VALUE => VALUE);
+        DBMS_OUTPUT.put_line (NAME || ': ' || VALUE);
+   END LOOP;
+*/
+
+-- For user status, response data contains xml string
+-- For other commands, response data is not required.
+IF UPPER(p_cmd) = 'USERSTATUS' THEN
+   -- For user Status command, Response maximum size is 2000.  So, below loop logic will be executed only once.
+   DECLARE
+     resp_err_pos NUMBER;
+	 resp_err_msg VARCHAR2(2000);
+   BEGIN
+      LOOP
+         UTL_HTTP.read_text (r => resp, DATA => v_msg);
+		 -- Added on 01/18/2012; V02
+		 -- Check for ErrorAlert() in the response message.  If found, grab the message in alert function and assign a error code.
+		 -- Eg: alert("Grab this message");
+		 SELECT INSTR( NVL(v_msg, 'XXX'), 'onLoad="ErrorAlert()"') into resp_err_pos from dual;
+		 IF resp_err_pos <> 0 then
+		   SELECT INSTR( NVL(v_msg, 'XXX'), 'You do not have permission') into resp_err_pos from dual;
+		   IF resp_err_pos <> 0 then
+		     errcde := 9403; -- You do not have permission to access KnowledgeTrak.
+			 errmsg := null;
+  		     RAISE UTL_HTTP.end_of_body;
+		   ELSE
+		   	 resp_err_msg := SUBSTR(v_msg, INSTR(v_msg, 'alert("') + 7 , INSTR(v_msg, '")') - INSTR(v_msg, 'alert("') - 7) ;	
+		     errcde := 9403;
+		     errmsg := ' Error Msg :' || resp_err_msg;			   	 
+		     RAISE UTL_HTTP.end_of_body;
+		   END IF;
+		 END IF;
+		 -----
+         url_resp := url_resp || v_msg;
+      END LOOP;
+   EXCEPTION
+      WHEN UTL_HTTP.end_of_body
+      THEN
+         NULL;
+   END;
+END IF;
+
+UTL_HTTP.end_response (r => resp);
+
+EXCEPTION
+   /*   The exception handling illustrates the use of "pragma-ed" exceptions
+        like Utl_Http.Http_Client_Error. In a realistic example, the program
+       would use these when it coded explicit recovery actions.
+
+       Request_Failed is raised for all exceptions after calling
+       Utl_Http.Set_Detailed_Excp_Support ( ENABLE=>FALSE )
+       And it is NEVER raised after calling with ENABLE=>TRUE
+   */
+   WHEN UTL_HTTP.request_failed
+   THEN
+      --DBMS_OUTPUT.put_line ('Request_Failed: ' || UTL_HTTP.get_detailed_sqlerrm);
+	  errcde := '9402';
+	  errmsg := 'Request_Failed: ' || SUBSTR(UTL_HTTP.get_detailed_sqlerrm, 1, 500);
+/* raised by URL http://xxx.oracle.com/ */
+   WHEN UTL_HTTP.http_server_error
+   THEN
+      --DBMS_OUTPUT.put_line (   'Http_Server_Error: ' || UTL_HTTP.get_detailed_sqlerrm);
+	  errcde := '9402';
+	  errmsg := 'Server_Error: ' || SUBSTR(UTL_HTTP.get_detailed_sqlerrm, 1, 500);
+/* raised by URL http://otn.oracle.com/xxx */
+   WHEN UTL_HTTP.http_client_error
+   THEN
+      --DBMS_OUTPUT.put_line (   'Http_Client_Error: ' || UTL_HTTP.get_detailed_sqlerrm);
+	  errcde := '9402';
+	  errmsg := 'Client_Error: ' || SUBSTR(UTL_HTTP.get_detailed_sqlerrm, 1, 500);
+/* code for all the other defined exceptions you can recover from */
+   WHEN OTHERS
+   THEN
+      --DBMS_OUTPUT.put_line (SQLERRM);
+	  errcde := '9402';
+	  errmsg := 'SQL Error Msg: ' || SUBSTR(sqlerrm, 1, 500);
+END get_url_response;
+
+
+--------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------
+ PROCEDURE XML_PARSER(xmlpayload IN VARCHAR2, errcde OUT VARCHAR2, errmsg OUT VARCHAR2) is
+
+	p  	 xmlparser.parser;
+	doc  xmldom.DOMDocument;
+
+	-- prints elements in a document
+	procedure loadElements(doc xmldom.DOMDocument) is
+	  nl  xmldom.DOMNodeList;
+	  len number;
+	  n   xmldom.DOMNode;
+	  node_name VARCHAR2(20);
+	  node_value VARCHAR2(100);
+	begin
+	  xml_nodes_tab.delete;
+	  -- get all elements
+	  nl := xmldom.getElementsByTagName(doc, '*');
+	  len := xmldom.getLength(nl);
+	  -- loop through elements
+	  for i in 0..len-1 loop
+	    n := xmldom.item(nl, i);
+		if i != 0 then
+	        node_name := xmldom.getNodeName(n); --dbms_output.put(xmldom.getNodeName(n));
+		end if;
+		-- get the text node associated with the element node
+	    n := xmldom.getFirstChild(n);
+	    if xmldom.getNodeType(n) = xmldom.TEXT_NODE then
+		   node_value := xmldom.getNodeValue(n); --dbms_output.put('=' || xmldom.getNodeValue(n));
+	    end if;
+	    --dbms_output.put(' ');
+		if i!= 0 then
+		  xml_nodes_tab(node_name) := node_value;
+		end if;
+	  end loop;
+	  --dbms_output.put_line('');
+	end loadElements;
+ BEGIN
+   -- new parser
+   p := xmlparser.newParser;
+
+   -- set some characteristics
+   xmlparser.setValidationMode(p, FALSE);
+
+   --Parse input string
+   xmlparser.parseBuffer(p,xmlpayload);
+
+   -- get document
+   doc := xmlparser.getDocument(p);
+
+   -- Print document elements
+   --dbms_output.put('The elements are: ');
+   loadElements(doc);
+   -- deal with exceptions
+ EXCEPTION
+
+ when xmldom.INDEX_SIZE_ERR then
+   errcde := '94XX';
+   errmsg := 'Index Size error';
+   --raise_application_error(-20120, 'Index Size error');
+
+ when xmldom.DOMSTRING_SIZE_ERR then
+   errcde := '94XX';
+   errmsg := 'String Size error';
+   --raise_application_error(-20120, 'String Size error');
+
+ when xmldom.HIERARCHY_REQUEST_ERR then
+   errcde := '94XX';
+   errmsg := 'Hierarchy Request error';
+   --raise_application_error(-20120, 'Hierarchy request error');
+
+ when xmldom.WRONG_DOCUMENT_ERR then
+   errcde := '94XX';
+   errmsg := 'Wrong Doc error';
+   --raise_application_error(-20120, 'Wrong doc error');
+
+ when xmldom.INVALID_CHARACTER_ERR then
+   errcde := '94XX';
+   errmsg := 'Invalid Char error';
+   --raise_application_error(-20120, 'Invalid Char error');
+
+ when xmldom.NO_DATA_ALLOWED_ERR then
+   errcde := '94XX';
+   errmsg := 'No data allowed error';
+   --raise_application_error(-20120, 'Nod data allowed error');
+
+ when xmldom.NO_MODIFICATION_ALLOWED_ERR then
+   errcde := '94XX';
+   errmsg := 'No Mod allowed error';
+   --raise_application_error(-20120, 'No mod allowed error');
+
+ when xmldom.NOT_FOUND_ERR then
+   errcde := '94XX';
+   errmsg := 'Not found error';
+   --raise_application_error(-20120, 'Not found error');
+
+ when xmldom.NOT_SUPPORTED_ERR then
+   errcde := '94XX';
+   errmsg := 'Not supported error';
+   --raise_application_error(-20120, 'Not supported error');
+
+ when xmldom.INUSE_ATTRIBUTE_ERR then
+   errcde := '94XX';
+   errmsg := 'In use attr error' ;
+   --raise_application_error(-20120, 'In use attr error');
+end xml_parser;
+
+--------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------
+ FUNCTION get_xmlnode_value(node_name_in IN name_t) RETURN VARCHAR2
+ IS
+ BEGIN
+  if xml_nodes_tab.EXISTS(node_name_in) then
+    return xml_nodes_tab(node_name_in);
+  else
+    return null;
+  end if;
+ END get_xmlnode_value;
+
+--------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------
+
+PROCEDURE call_api_cmd (
+    in_cmd        IN    VARCHAR2,
+    out_string    OUT   VARCHAR2,
+    out_errcde	  OUT   VARCHAR2,
+    out_errmsg	  OUT   VARCHAR2
+)
+ AS
+  api_url    VARCHAR2(4000);
+  xml_string VARCHAR2(4000);
+  exit_process EXCEPTION;
+BEGIN
+  -- Get encoded api URL.
+  get_KT_api_url(
+  				 cmd_name => in_cmd,
+				 encoded_url => api_url,
+				 errcde => out_errcde,
+				 errmsg => out_errmsg
+				 );
+
+  if out_errcde is not null then
+    raise exit_process;
+  end if;
+
+  api_url := replace(api_url,chr(13) || chr(10), '');
+
+  get_url_response(
+	   			   p_url          => api_url,
+	   			   p_cmd	  => in_cmd,
+	   			   url_resp	  => xml_string, -- used only for UserStatus Command;
+	   			   errcde	  => out_errcde,
+	   			   errmsg	  => out_errmsg
+				   );
+
+ if out_errcde is not null then
+   raise exit_process;
+ end if;
+
+ if UPPER(in_cmd) = 'USERSTATUS' then
+   --dbms_output.put_line(' XML Parser ' || xml_string);
+   XML_PARSER(	xmlpayload => xml_string,
+		errcde     => out_errcde,
+		errmsg	   => out_errmsg
+	      );
+   if out_errcde is not null then
+     raise exit_process;
+   end if;
+
+ else
+   --dbms_output.put_line(' Call URL : ' || api_url);
+   out_string := api_url;
+ end if;
+
+EXCEPTION
+  WHEN exit_process THEN
+    NULL;
+END call_api_cmd;
+
+END KTrak_Interface_Lab;
+/
+
+Create or Replace Public Synonym Ktrak_Interface_Lab for Ktrak_Interface_Lab;
+
+
+Grant execute on Ktrak_Interface_Lab to ops$dbadmn,lt_lab,util,ltapi,ops$srvsys;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             

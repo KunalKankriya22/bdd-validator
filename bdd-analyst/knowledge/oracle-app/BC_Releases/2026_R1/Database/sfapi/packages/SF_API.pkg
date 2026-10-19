@@ -1,0 +1,1107 @@
+CREATE OR REPLACE package sf_api is
+
+  -- Author     : ASHOKV
+  -- Created    : 9/1/2020 3:46:18 PM
+  -- Purpose    : This package provides routines 
+    /*
+                  donor_data_processor  : to process donor information and insert into api tables
+                  lab_data_processor    : to process lab information and insert into api tables
+                  archive_data          : to archive records that are ready by external system.
+    */
+  -- Versions   : 
+  -- 01 -   09/01/2020  -   Initial version of SalesForce Interface package.
+  -- 02 -   09/15/2020  -   New routine to process result added. Fixed various bugs from sprint 102
+  -- 03  -  05/26/2021 - MLT 4280
+
+  -- Public function and procedure declarations
+  PROCEDURE donor_data_processor;
+  PROCEDURE lab_data_processor;  
+  PROCEDURE archive_data;
+  PROCEDURE archive_controller;
+  PROCEDURE insert_donor_controller(rec_in IN SF_DONOR_CONTROLLER%ROWTYPE);
+end sf_api;
+
+/
+
+
+CREATE OR REPLACE package body sf_api is
+
+    -- Private type declarations
+    SUBTYPE API_SF_DONOR_PROFILE_rt   IS API_SF_DONOR_PROFILE%ROWTYPE;
+    SUBTYPE API_SF_DONOR_DONS_rt      IS API_SF_DONOR_DONS%ROWTYPE;
+    SUBTYPE API_SF_DONOR_PHYSICAL_rt  IS API_SF_DONOR_PHYSICAL%ROWTYPE;
+    SUBTYPE API_SF_PROCESS_SIGNALS_rt IS API_SF_PROCESS_SIGNALS%ROWTYPE;
+
+    TYPE API_SF_DONOR_PHYSICAL_aat    IS TABLE OF API_SF_DONOR_PHYSICAL%ROWTYPE     INDEX BY BINARY_INTEGER;
+    TYPE API_SF_DONOR_ELIGIBILITY_aat IS TABLE OF API_SF_DONOR_ELIGIBILITY%ROWTYPE  INDEX BY BINARY_INTEGER;
+    TYPE API_SF_DELETED_DATA_aat      IS TABLE OF API_SF_DELETED_DATA%ROWTYPE       INDEX BY BINARY_INTEGER;
+    TYPE DELETE_TABLES_aat            IS TABLE OF VARCHAR2(30)                      INDEX BY BINARY_INTEGER;
+
+    TYPE CSZ_rt IS RECORD(
+        city        VALID_CITY_STATE.CITY%TYPE,
+        state_code  VALID_CITY_STATE.STATE%TYPE,
+        zip         VALID_CITY_STATE.ZIP%TYPE
+    );
+
+    SUBTYPE API_SF_COMPONENTS_rt        IS API_SF_COMPONENTS%ROWTYPE;
+    SUBTYPE API_SF_COMP_SPLITRATE_rt    IS API_SF_COMP_SPLITRATE%ROWTYPE;
+    SUBTYPE API_SF_SHIPMENTS_rt         IS API_SF_SHIPMENTS%ROWTYPE;
+    SUBTYPE API_SF_TEST_RESULT_TIME_rt  IS API_SF_TEST_RESULT_TIME%ROWTYPE;
+
+    -- Private constant declarations
+    --<ConstantName> constant <Datatype> := <Value>;
+    gc_PF_mastercode CONSTANT VALID_MASTER_CODES.CODE_TYPE%TYPE := 'SFPF';
+    gc_PC_mastercode CONSTANT VALID_MASTER_CODES.CODE_TYPE%TYPE := 'SFPC';
+    gc_log_srcID     CONSTANT VARCHAR2(5)                       := 'SFA';
+
+    gc_PROFILE_event     CONSTANT VARCHAR2(30) := 'PROFILE';
+    gc_ELIGIBILITY_event CONSTANT VARCHAR2(30) := 'ELIGIBILITY';        
+    gc_DONATION_event    CONSTANT VARCHAR2(30) := 'DONATION';
+    gc_PHYSICAL_event    CONSTANT VARCHAR2(30) := 'PHYSICAL';
+    gc_DELETE_event      CONSTANT VARCHAR2(30) := 'DELETE';
+
+    gc_COMPONENT_event CONSTANT VARCHAR2(30) := 'COMPONENT';
+    gc_SHIPMENT_event  CONSTANT VARCHAR2(30) := 'SHIPMENT';
+    gc_RESULT_event    CONSTANT VARCHAR2(30) := 'RESULT'; 
+
+    g_process VARCHAR2(30);
+
+    -- Private variable declarations
+    -- used by all donor_* function routines
+    g_chapter_id     DONATIONS.CHAPTER_ID%TYPE;
+    g_donation_type  DONATIONS.DONATION_TYPE%TYPE;
+    g_donor_weight   DONORS.DONOR_WEIGHT%TYPE;
+    g_insert_date    DATE;
+    g_sysdate        DATE;
+
+    CURSOR donor_controller_cur IS
+      SELECT donor_id, coll_date, transaction_id, process_event, rowid
+        FROM sf_donor_controller
+       WHERE NVL(under_processing_flag, 'N') = 'X'
+       ORDER BY insert_date ASC;
+    g_donor_rec donor_controller_cur%ROWTYPE;       
+
+    -- used by all lab_* function routines    
+    CURSOR lab_controller_cur IS
+      SELECT unit_id, coll_date, product_code, process_event, status, rowid
+        FROM sf_lab_controller
+       WHERE NVL(under_processing_flag, 'N') = 'X'
+       ORDER BY insert_date ASC;
+
+    g_lab_rec lab_controller_cur%ROWTYPE; 
+    g_lab_donor_id    DONORS.DONOR_ID%TYPE;
+    g_lab_chapter_id  DONATIONS.CHAPTER_ID%TYPE;
+    g_lab_insert_date DATE;
+    ----
+
+   PROCEDURE raise_error (err_in IN INTEGER := SQLCODE, msg_in IN VARCHAR2 := NULL)
+   IS
+   BEGIN
+      IF err_in BETWEEN -20999 AND -20000
+      THEN
+         raise_application_error (
+            err_in
+          , SUBSTR (msg_in, 1, 255)
+         );
+      ELSIF err_in > 0 AND err_in NOT IN (1, 100)
+      THEN
+         raise_application_error (
+            -20000
+          , err_in || '-' || msg_in
+         );
+      ELSIF err_in IN (100, -1403)
+      THEN
+         RAISE NO_DATA_FOUND;
+      /* Re-raise any other exception using dynamic PL/SQL. */
+      ELSE
+         EXECUTE IMMEDIATE   'DECLARE myexc EXCEPTION; '
+                          || '   PRAGMA EXCEPTION_INIT (myexc, '
+                          || TO_CHAR (err_in)
+                          || ');'
+                          || 'BEGIN  RAISE myexc; END;';
+      END IF;
+   END raise_error;
+
+   PROCEDURE log_and_continue( err_src_in IN VARCHAR2,
+                                err_in IN INTEGER := SQLCODE,
+                                msg_in IN VARCHAR2 := NULL)
+    IS PRAGMA AUTONOMOUS_TRANSACTION;
+    BEGIN   
+        insert into LT_DONOR_API_LOG
+          (source_id,
+           data_source_name,
+           log_text,
+           insert_date,
+           program_id)
+        values
+          (gc_log_srcID,
+           err_src_in,
+           err_in || ': ' || msg_in,
+           g_sysdate,
+           gc_log_srcID);   
+
+        COMMIT;     
+    END log_and_continue;
+
+   PROCEDURE log_and_stop( err_src_in IN VARCHAR2,
+                           err_in IN INTEGER := SQLCODE,
+                           msg_in IN VARCHAR2 := NULL) IS
+    BEGIN
+        log_and_continue(err_src_in, err_in, msg_in);        
+        raise_error(err_in, msg_in);
+    EXCEPTION 
+        WHEN OTHERS THEN
+            ROLLBACK;
+            raise_application_error('-20000', 'API Log Error');
+    END log_and_stop;
+
+    FUNCTION get_local_time(date_in IN DATE) RETURN DATE IS
+        lv_chapter VARCHAR2(20);
+    BEGIN
+        IF g_process = 'DONOR' THEN
+          lv_chapter := g_chapter_id;
+        ELSIF g_process = 'LAB' THEN
+          lv_chapter := g_lab_chapter_id;
+        END IF;
+        IF date_in IS NOT NULL THEN
+            RETURN lifetrack_timezone_convert.get_local_time(lv_chapter, date_in);
+        ELSE
+            RETURN NULL;
+        END IF;        
+    END get_local_time;
+
+    FUNCTION init_delete_tables_list RETURN DELETE_TABLES_aat IS
+        tables_list DELETE_TABLES_aat;
+    BEGIN
+        tables_list(0) := 'API_SF_DONOR_DONS';
+        tables_list(1) := 'API_SF_DONOR_ELIGIBILITY';
+        tables_list(2) := 'API_SF_DONOR_PHYSICAL';
+        tables_list(3) := 'API_SF_PROCESS_SIGNALS';        
+        RETURN tables_list;
+    END init_delete_tables_list;
+
+    PROCEDURE donor_init( donor_rec_in IN donor_controller_cur%ROWTYPE ) IS
+        CURSOR don_cur IS
+          SELECT dn.donor_id, dn.coll_date, dn.chapter_id, dn.unit_id, dn.donation_type, d.donor_weight
+            FROM donations dn, donors d
+           WHERE dn.donor_id = d.donor_id
+             AND dn.transaction_id = donor_rec_in.transaction_id;
+        -- if coll date is present get the previous donation OR get the last donation if coll.date is null
+        CURSOR prev_donation_cur IS
+          SELECT donation_type, coll_date, chapter_id
+            FROM donations
+           WHERE donor_id = donor_rec_in.donor_id
+             AND coll_date < NVL(donor_rec_in.coll_date, SYSDATE + 10)
+          ORDER BY coll_date DESC; 
+
+        don_row don_cur%ROWTYPE;
+        prev_don_row prev_donation_cur%ROWTYPE;
+
+        invalid_data EXCEPTION;
+    BEGIN
+        g_process := 'DONOR';
+
+        IF donor_rec_in.PROCESS_EVENT = gc_PROFILE_event 
+            OR donor_rec_in.TRANSACTION_ID IS NULL THEN
+            -- bypass validation for PROFILE UPDATE scenario where transaction id is not available.
+            OPEN prev_donation_cur;
+            FETCH prev_donation_cur INTO prev_don_row;
+            CLOSE prev_donation_cur;
+        ELSE
+            OPEN don_cur;
+            FETCH don_cur INTO don_row;
+            CLOSE don_cur;
+
+            IF donor_rec_in.PROCESS_EVENT <> gc_DELETE_event THEN
+                IF donor_rec_in.DONOR_ID <> don_row.DONOR_ID THEN
+                    RAISE invalid_data;
+                END IF;
+            END IF;
+
+            IF donor_rec_in.COLL_DATE <> don_row.COLL_DATE THEN
+                RAISE invalid_data;
+            END IF;        
+        END IF;
+
+        g_donor_rec     := donor_rec_in;
+        g_sysdate       := SYSDATE;
+        g_chapter_id    := NVL(don_row.CHAPTER_ID, NVL(prev_don_row.chapter_id, 'WAD'));
+        g_donation_type := NVL(don_row.DONATION_TYPE, 'AL');
+        g_donor_weight  := don_row.DONOR_WEIGHT;
+        g_insert_date   := lifetrack_timezone_convert.get_local_time(g_chapter_id, SYSDATE);
+
+    EXCEPTION
+        WHEN invalid_data THEN
+            log_and_continue(g_donor_rec.donor_id || '- donor_init', 3001, 'Data mismatch');
+            RAISE;
+    END donor_init;
+
+    FUNCTION donor_profile_oneRow RETURN API_SF_DONOR_PROFILE_rt
+    IS
+        CURSOR donors_cur IS
+          SELECT DONOR_ID,
+                 GENDER,
+                 DATE_OF_BIRTH,
+                 FIRST_NAME,
+                 MIDDLE_NAME,
+                 LAST_NAME,
+                 SSN,
+                 LAST_NAME_SUFFIX,
+                 ETHNIC_GROUP,
+                 DONOR_WEIGHT,
+                 HEIGHT,
+                 BLOOD_TYPE
+           FROM donors
+          WHERE donor_id = g_donor_rec.donor_id;
+
+        CURSOR donor_addresses_cur IS
+          SELECT da.*
+            FROM donor_addresses da
+           WHERE donor_id = g_donor_rec.donor_id;
+
+        CURSOR donor_picture_cur IS
+          SELECT dp.donor_pic
+            FROM donor_pictures dp
+          WHERE donor_id= g_donor_rec.donor_id;
+
+        donors_row donors_cur%ROWTYPE;
+        donor_addresses_row donor_addresses_cur%ROWTYPE;
+
+        api_rec API_SF_DONOR_PROFILE_rt;
+        csz_row CSZ_rt;
+        alt_csz_row CSZ_rt;
+
+        -- phone format
+        FUNCTION get_formatted_phone(area_code_in IN VARCHAR2, phone_no_in IN VARCHAR2) RETURN VARCHAR2 IS
+        BEGIN
+            IF area_code_in IS NOT NULL THEN
+                RETURN area_code_in || phone_no_in;
+            ELSE
+                RETURN NULL;
+            END IF;
+        END get_formatted_phone;
+
+        FUNCTION get_city_state_zip(usps_id_in IN NUMBER) RETURN CSZ_rt IS
+            csz_row CSZ_rt;
+            CURSOR csz_cur IS
+              SELECT city, state, zip
+                FROM valid_city_state
+               WHERE usps_id = usps_id_in;
+        BEGIN
+            IF usps_id_in IS NOT NULL AND usps_id_in <> 0 THEN
+                OPEN csz_cur;
+                FETCH csz_cur INTO csz_row;
+                CLOSE csz_cur;
+            END IF;     
+
+            RETURN csz_row;
+        END;
+
+    BEGIN
+        OPEN donors_cur;
+        FETCH donors_cur INTO donors_row;
+        CLOSE donors_cur;
+
+        api_rec.DONOR_ID         := donors_row.DONOR_ID;
+        api_rec.GENDER           := donors_row.GENDER;
+        api_rec.DATE_OF_BIRTH    := donors_row.DATE_OF_BIRTH;
+        api_rec.FIRST_NAME       := donors_row.FIRST_NAME;
+        api_rec.MIDDLE_NAME      := donors_row.MIDDLE_NAME;
+        api_rec.LAST_NAME        := donors_row.LAST_NAME;
+        api_rec.SSN              := donors_row.SSN;
+        api_rec.LAST_NAME_SUFFIX := donors_row.LAST_NAME_SUFFIX;
+        api_rec.ETHNIC_GROUP     := donors_row.ETHNIC_GROUP;
+        api_rec.DONOR_WEIGHT     := donors_row.DONOR_WEIGHT; 
+        api_rec.HEIGHT           := donors_row.HEIGHT;
+        api_rec.BLOOD_TYPE       := donors_row.blood_type;
+
+        OPEN donor_addresses_cur;
+        FETCH donor_addresses_cur INTO donor_addresses_row;
+        CLOSE donor_addresses_cur;
+
+        api_rec.HOME_PHONE   := get_formatted_phone(donor_addresses_row.H_AREA_CODE, donor_addresses_row.H_PHONE_NO);
+        api_rec.MOBILE_PHONE := get_formatted_phone(donor_addresses_row.M_AREA_CODE, donor_addresses_row.M_PHONE_NO);
+        api_rec.WORK_PHONE   := get_formatted_phone(donor_addresses_row.D_AREA_CODE, donor_addresses_row.D_PHONE_NO);
+        api_rec.WORK_EXTENSION := donor_addresses_row.EXTENSION;
+
+        api_rec.INTL_ADDR_FLAG := donor_addresses_row.INTL_ADDR_FLAG;
+
+        api_rec.HOME_ADDRESS_STREET := donor_addresses_row.STREET_NAME; 
+        api_rec.HOME_ADDRESS_APT    := donor_addresses_row.SUITE_APT;    
+        csz_row := get_city_state_zip(donor_addresses_row.USPS_ID);                  
+        api_rec.HOME_ADDRESS_CITY   := csz_row.city;
+        api_rec.HOME_ADDRESS_STATE  := csz_row.state_code;
+        api_rec.HOME_ADDRESS_ZIP    := csz_row.zip;
+
+        api_rec.INTL_ADDRESS_1      := donor_addresses_row.INTL_ADDRESS_1;
+        api_rec.INTL_ADDRESS_2      := donor_addresses_row.INTL_ADDRESS_2;
+        api_rec.INTL_ADDRESS_3      := donor_addresses_row.INTL_ADDRESS_3;
+        api_rec.INTL_ADDRESS_4      := donor_addresses_row.INTL_ADDRESS_4;
+        api_rec.COUNTRY_NAME        := donor_addresses_row.COUNTRY_NAME;
+        api_rec.INTL_POSTAL_CODE    := donor_addresses_row.INTL_POSTAL_CODE;
+
+        api_rec.ALT_ADDRESS_STREET  := donor_addresses_row.ALT_STREET_NAME;
+        api_rec.ALT_ADDRESS_APT     := donor_addresses_row.ALT_SUITE_APT;
+        alt_csz_row := get_city_state_zip(donor_addresses_row.ALT_USPS_ID);   
+        api_rec.ALT_ADDRESS_CITY    := alt_csz_row.city;
+        api_rec.ALT_ADDRESS_STATE   := alt_csz_row.state_code;
+        api_rec.ALT_ADDRESS_ZIP     := alt_csz_row.zip;
+
+        api_rec.EMAIL := donor_addresses_row.email;
+        OPEN donor_picture_cur;
+        FETCH donor_picture_cur INTO api_rec.DONOR_PICTURE;
+        CLOSE donor_picture_cur;
+
+        api_rec.YTD_DONATIONS   := DON_STD.DONOR_YTD_UNIT_COUNT(g_donor_rec.donor_id, g_chapter_id);
+        api_rec.LIFE_DONATIONS  := DON_STD.DONOR_LIFE_UNIT_COUNT(g_donor_rec.donor_id, g_chapter_id);
+        api_rec.INSERT_DATE     := g_insert_date;
+
+        --DBMS_OUTPUT.PUT_LINE(donors_row.DONOR_ID);
+
+        RETURN api_rec;
+
+    END donor_profile_oneRow;
+
+    FUNCTION donor_dons_oneRow RETURN API_SF_DONOR_DONS_rt IS
+        CURSOR don_cur IS
+          SELECT donor_id, donation_type, procedure_code, unit_id, coll_date, deferral_id
+            FROM donations
+           WHERE transaction_id = g_donor_rec.transaction_id;
+        don_row don_cur%ROWTYPE;
+        api_row API_SF_DONOR_DONS_rt;
+    BEGIN
+        OPEN don_cur;
+        FETCH don_cur INTO don_row;
+        CLOSE don_cur;
+
+        api_row.DONOR_ID        := don_row.donor_id;
+        api_row.DONATION_TYPE   := don_row.donation_type;
+        api_row.PROCEDURE_CODE  := don_row.procedure_code;
+        api_row.UNIT_ID         := don_row.unit_id;
+        api_row.COLL_DATE       := don_row.coll_date;
+        api_row.DEFERRAL_ID     := don_row.deferral_id;
+        api_row.INSERT_DATE     := g_insert_date; 
+
+        RETURN api_row;
+    END;
+
+    FUNCTION donor_delete_mulRows RETURN API_SF_DELETED_DATA_aat IS
+        deleteTables_list CONSTANT DELETE_TABLES_aat := init_delete_tables_list();
+        api_rows API_SF_DELETED_DATA_aat; 
+        indx BINARY_INTEGER;
+    BEGIN
+        FOR table_indx IN deleteTables_list.FIRST .. deleteTables_list.LAST LOOP
+            indx := NVL(api_rows.LAST, 0)+1;
+            api_rows(indx).DONOR_ID         :=  g_donor_rec.donor_id;
+            api_rows(indx).COLL_DATE        :=  g_donor_rec.coll_date;
+            api_rows(indx).DELETE_API_TABLE :=  deleteTables_list(table_indx);
+            api_rows(indx).DELETE_REASON    :=  'DETACH';
+            api_rows(indx).INSERT_DATE      :=  g_insert_date;
+        END LOOP;
+        RETURN api_rows;
+    END donor_delete_mulRows;
+
+    FUNCTION donor_physical_mulRows RETURN API_SF_DONOR_PHYSICAL_aat IS
+        CURSOR phy_cur(local_date_in DATE) IS
+         SELECT physical_code, NVL(physical_value_repeat, physical_value) phy_value
+           FROM physical_findings
+          WHERE transaction_id = g_donor_rec.transaction_id
+            AND physical_code IN (SELECT code
+                                    FROM valid_master_codes
+                                   WHERE code_type = gc_PF_mastercode
+                                     AND local_date_in BETWEEN eff_date AND NVL(term_date, local_date_in + 1));
+        api_rows API_SF_DONOR_PHYSICAL_aat; 
+        indx BINARY_INTEGER;
+        ld_local_date DATE;
+    BEGIN
+        ld_local_date := lifetrack_timezone_convert.get_local_time(g_chapter_id, SYSDATE);
+        FOR phy_rec IN phy_cur(ld_local_date) LOOP
+            indx := NVL(api_rows.LAST, 0)+1;
+            --dbms_output.put_line(phy_rec.physical_code || phy_rec.physical_value);
+            api_rows(indx).donor_id         := g_donor_rec.donor_id;
+            api_rows(indx).coll_date        := g_donor_rec.coll_date;
+            api_rows(indx).physical_code    := phy_rec.physical_code;
+            api_rows(indx).physical_value   := phy_rec.phy_value;
+            api_rows(indx).insert_date      := g_insert_date;
+        END LOOP;
+
+        RETURN api_rows;
+    END donor_physical_mulRows;
+
+    FUNCTION donor_eligibility_mulRows
+        RETURN API_SF_DONOR_ELIGIBILITY_aat IS
+
+        CURSOR pp_cur(local_date_in DATE) IS
+          SELECT code
+            FROM valid_master_codes
+           WHERE code_type = gc_PC_mastercode
+             AND local_date_in BETWEEN eff_date AND NVL(term_date, local_date_in+1);
+
+        CURSOR prev_donation_cur IS
+          SELECT donation_type, coll_date
+            FROM donations
+           WHERE donor_id = g_donor_rec.donor_id
+             AND coll_date < NVL(g_donor_rec.coll_date, SYSDATE + 10)
+          ORDER BY coll_date DESC;   
+
+        api_rows API_SF_DONOR_ELIGIBILITY_aat;
+        ld_local_date DATE;
+
+        -- only current eligibility is needed.
+        /*
+        nCount NUMBER;
+        lb_donor_history_found BOOLEAN;
+        ld_prev_coll_date DATE;
+        lv_prev_don_type  DONATIONS.DONATION_TYPE%TYPE;
+        */
+
+        PROCEDURE set_api_row(don_type_in IN VARCHAR2,
+                              coll_date_in IN DATE,
+                              proc_code_in IN VARCHAR2) IS
+            lv_inter_type VARCHAR2(10);
+            indx BINARY_INTEGER;
+        BEGIN
+            indx := NVL(api_rows.LAST, 0)+1;
+            api_rows(indx).DONOR_ID       := g_donor_rec.donor_id;
+            --api_rows(indx).COLL_DATE      := coll_date_in;   -- MLT 4280 Edwin 
+            api_rows(indx).ELIG_PROC_CODE := proc_code_in;
+            api_rows(indx).insert_date    := g_insert_date;
+            don_core.check_eligibility
+               (p_donor_id          => g_donor_rec.donor_id,
+                p_procedure_code    => proc_code_in,
+                p_donation_type     => don_type_in,
+                p_coll_date         => coll_date_in,
+                p_donor_weight      => g_donor_weight,
+                p_elig_status       => api_rows(indx).ELIG_STATUS,
+                p_deff_date         => api_rows(indx).NEXT_ELIG_DATE,
+                p_inter_type        => lv_inter_type,
+                p_reason            => api_rows(indx).DEFERRAL_REASON);
+        END set_api_row;
+    BEGIN
+        /* -- only current eligibility is needed.
+        SELECT COUNT(1) INTO nCount
+          FROM sf_donor_data_hist
+         WHERE donor_id = g_donor_rec.donor_id;
+
+        lb_donor_history_found := nCount > 0; 
+        IF NOT lb_donor_history_found THEN
+            OPEN prev_donation_cur;
+            FETCH prev_donation_cur INTO lv_prev_don_type, ld_prev_coll_date;
+            CLOSE prev_donation_cur;
+        END IF;
+        */
+
+        ld_local_date := lifetrack_timezone_convert.get_local_time(g_chapter_id, SYSDATE);
+        -- populate current eligibility procedures. 
+        FOR pp_rec IN pp_cur(ld_local_date)
+        LOOP
+            set_api_row(g_donation_type, NVL(g_donor_rec.coll_date, TRUNC(ld_local_date)), pp_rec.code);
+        END LOOP;
+
+        /*
+        -- populate previous donation eligibility procedures
+        IF ld_prev_coll_date IS NOT NULL THEN
+            FOR pp_rec IN pp_cur
+            LOOP
+                set_api_row(lv_prev_don_type, ld_prev_coll_date, pp_rec.code);
+            END LOOP;    
+        END IF;  
+        */
+        RETURN api_rows;
+    END donor_eligibility_mulRows;
+
+    FUNCTION donor_status_oneRow RETURN API_SF_PROCESS_SIGNALS_rt IS
+        CURSOR status_cur IS
+          SELECT lookup_start, lookup_end, 
+                 phy_findings_start, phy_findings_end, 
+                 hlth_hist_start, hlth_hist_end,
+                 phelob_start, phelob_end
+            FROM online_status
+           WHERE transaction_id = g_donor_rec.transaction_id;
+
+        CURSOR consent_cur IS
+          SELECT insert_date
+            FROM donor_consents
+           WHERE transaction_id = g_donor_rec.transaction_id;
+
+        status_row status_cur%ROWTYPE;
+        api_row API_SF_PROCESS_SIGNALS_rt;
+
+        ld_consent_date DATE;
+        ld_min_date DATE;
+        ld_max_date DATE;
+        ld_temp_start DATE;
+        ld_temp_end DATE;
+        ld_screening_start DATE;
+        ld_screening_end DATE;
+    BEGIN
+        OPEN status_cur;
+        FETCH status_cur INTO status_row;
+        CLOSE status_cur;
+
+        api_row.DONOR_ID                := g_donor_rec.donor_id;
+        api_row.COLL_DATE               := g_donor_rec.coll_date;
+        api_row.DONOR_ARRIVED_TIME      := get_local_time(status_row.LOOKUP_START);
+
+        OPEN consent_cur;
+        FETCH consent_cur INTO ld_consent_date;
+        CLOSE consent_cur;
+
+        ld_min_date := ADD_MONTHS(TRUNC(SYSDATE), -12); -- 1 YEAR
+        ld_max_date := ADD_MONTHS(TRUNC(SYSDATE), 12); -- 1 year;
+
+        ld_temp_start := LEAST (   NVL(status_row.PHY_FINDINGS_START, ld_max_date), 
+                                   NVL(status_row.HLTH_HIST_START, ld_max_date),
+                                   NVL(ld_consent_date, ld_max_date)
+                                );
+        ld_temp_end   := GREATEST (  NVL(status_row.PHY_FINDINGS_END, ld_min_date), 
+                                     NVL(status_row.HLTH_HIST_END, ld_min_date),
+                                     NVL(ld_consent_date, ld_min_date)
+                                  );      
+        --log_and_continue('AVTEST', 6001, 'ld_temp_start ' || to_char(ld_temp_start, 'MM-DD-YYYY HH24:MI'));
+        --log_and_continue('AVTEST', 6001, 'ld_temp_end ' || to_char(ld_temp_end, 'MM-DD-YYYY HH24:MI'));
+        IF ld_temp_start = ld_max_date THEN
+            ld_screening_start := NULL;
+        ELSE
+            ld_screening_start := ld_temp_start;
+        END IF;
+        IF ld_temp_end = ld_min_date THEN
+            ld_screening_end := NULL;
+        ELSE
+            ld_screening_end := ld_temp_end;
+        END IF;  
+        /*
+        SELECT DECODE(ld_temp_start, ld_max_date, NULL, ld_temp_start),
+               DECODE(ld_temp_end, ld_min_date, NULL, ld_temp_end)
+          INTO ld_screening_start, ld_screening_end
+          FROM DUAL;
+        */  
+        --log_and_continue('AVTEST', 6001, 'ld_screening_start ' || to_char(ld_screening_start, 'MM-DD-YYYY HH24:MI'));
+        --log_and_continue('AVTEST', 6001, 'ld_screening_end ' || to_char(ld_screening_end, 'MM-DD-YYYY HH24:MI'));          
+        --log_and_continue('AVTEST', 6001, 'ld_consent_date ' || to_char(ld_consent_date, 'MM-DD-YYYY HH24:MI'));   
+        -- Special case where only consent is signed but HH and PHY were not done.
+        -- In this case, just use the consent date as start date and leave the end date as null.
+        IF ld_screening_start = ld_consent_date AND ld_screening_end = ld_consent_date AND ld_consent_date IS NOT NULL THEN
+            ld_screening_end := NULL;
+        END IF;
+
+        api_row.SCREENING_START_TIME    := get_local_time(ld_screening_start);
+        api_row.SCREENING_END_TIME      := get_local_time(ld_screening_end);
+
+        --log_and_continue('AVTEST', 6001, 'SCREENING_START_TIME ' || to_char(api_row.SCREENING_START_TIME, 'MM-DD-YYYY HH24:MI'));
+        --log_and_continue('AVTEST', 6001, 'SCREENING_END_TIME ' || to_char(api_row.SCREENING_END_TIME, 'MM-DD-YYYY HH24:MI'));
+        --log_and_continue('AVTEST', 6001, 'process ' || g_process);
+        --log_and_continue('AVTEST', 6001,'chapter ' || g_chapter_id);        
+
+        api_row.DONATION_START_TIME     := get_local_time(status_row.phelob_start);
+        api_row.DONATION_END_TIME       := get_local_time(status_row.phelob_end);
+        api_row.INSERT_DATE             := g_insert_date; 
+
+        RETURN api_row;    
+
+    END donor_status_oneRow;
+
+  -- Function and procedure implementations
+    PROCEDURE donor_data_processor IS
+
+        donor_profile_row       API_SF_DONOR_PROFILE_rt;
+        donor_dons_row          API_SF_DONOR_DONS_rt;
+        donor_status_row        API_SF_PROCESS_SIGNALS_rt;
+
+        donor_physical_rows     API_SF_DONOR_PHYSICAL_aat;
+        donor_eligibility_rows  API_SF_DONOR_ELIGIBILITY_aat;
+
+        donor_delete_rows       API_SF_DELETED_DATA_aat;
+    BEGIN
+        FOR controller_rec IN donor_controller_cur 
+        LOOP
+            BEGIN
+                donor_init( controller_rec );
+
+                IF NVL(controller_rec.process_event, gc_PROFILE_event) = gc_PROFILE_event THEN          
+                    donor_profile_row   := donor_profile_oneRow;  
+
+                    DELETE FROM API_SF_DONOR_PROFILE
+                    WHERE donor_id = donor_profile_row.DONOR_ID
+                    AND record_read_date IS NULL; 
+
+                    INSERT INTO API_SF_DONOR_PROFILE
+                      VALUES donor_profile_row;          
+                END IF;
+
+
+                IF NVL(controller_rec.process_event, gc_DONATION_event) = gc_DONATION_event THEN          
+                    donor_dons_row      := donor_dons_oneRow;
+
+                    DELETE FROM API_SF_DONOR_DONS
+                    WHERE donor_id = donor_dons_row.DONOR_ID
+                    AND record_read_date IS NULL; 
+
+                    INSERT INTO API_SF_DONOR_DONS
+                      VALUES donor_dons_row;                
+                END IF;
+
+                IF controller_rec.process_event IS NULL THEN          
+                    donor_status_row    := donor_status_oneRow;
+
+                    DELETE FROM API_SF_PROCESS_SIGNALS
+                    WHERE donor_id = donor_status_row.DONOR_ID
+                    AND record_read_date IS NULL;
+
+                    INSERT INTO API_SF_PROCESS_SIGNALS
+                        VALUES donor_status_row;            
+                END IF;
+
+                IF NVL(controller_rec.process_event, gc_PHYSICAL_event) = gc_PHYSICAL_event THEN          
+                    donor_physical_rows.DELETE;
+                    donor_physical_rows := donor_physical_mulRows;
+
+                    IF donor_physical_rows.COUNT > 0 THEN
+
+                        DELETE FROM API_SF_DONOR_PHYSICAL
+                        WHERE donor_id = g_donor_rec.donor_id
+                        AND record_read_date IS NULL;
+
+                        FOR indx IN donor_physical_rows.FIRST .. donor_physical_rows.LAST
+                        LOOP
+                            INSERT INTO API_SF_DONOR_PHYSICAL
+                              VALUES donor_physical_rows(indx);
+                        END LOOP;
+                    END IF;            
+                END IF;
+
+                IF controller_rec.process_event = gc_DELETE_event THEN          
+                    donor_delete_rows.DELETE;
+                    donor_delete_rows := donor_delete_mulRows;
+
+                    IF donor_delete_rows.COUNT > 0 THEN
+
+                        DELETE FROM API_SF_DELETED_DATA
+                        WHERE donor_id = g_donor_rec.donor_id
+                        AND record_read_date IS NULL;
+
+                        FOR indx IN donor_delete_rows.FIRST .. donor_delete_rows.LAST
+                        LOOP
+                            INSERT INTO API_SF_DELETED_DATA
+                              VALUES donor_delete_rows(indx);
+                        END LOOP;
+                    END IF;            
+                END IF;
+
+                IF NVL(controller_rec.process_event, gc_ELIGIBILITY_event) = gc_ELIGIBILITY_event THEN          
+                    donor_eligibility_rows.DELETE;
+                    donor_eligibility_rows := donor_eligibility_mulRows;
+                    IF donor_eligibility_rows.COUNT > 0 THEN
+
+                        DELETE FROM API_SF_DONOR_ELIGIBILITY
+                          WHERE donor_id = g_donor_rec.donor_id
+                            AND record_read_date IS NULL;
+
+                        FOR indx IN donor_eligibility_rows.FIRST .. donor_eligibility_rows.LAST
+                        LOOP
+                            INSERT INTO API_SF_DONOR_ELIGIBILITY
+                              VALUES donor_eligibility_rows(indx);
+                        END LOOP;
+                    END IF;            
+                END IF;                
+
+                DELETE FROM sf_donor_data_hist
+                 WHERE donor_id = g_donor_rec.donor_id;
+
+                INSERT INTO sf_donor_data_hist(donor_id, date_sent, insert_date)
+                 VALUES (g_donor_rec.donor_id, g_insert_date, g_insert_date);                
+
+                UPDATE sf_donor_controller
+                  SET under_processing_flag = 'C'
+                WHERE rowid = controller_rec.rowid;               
+
+
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                 log_and_continue(g_donor_rec.donor_id || ' - donor_data_processor', 3002, DBMS_UTILITY.format_error_backtrace);
+                 log_and_continue(g_donor_rec.donor_id || ' - donor_data_processor', 3003, DBMS_UTILITY.format_error_stack);
+                 dbms_output.put_line(DBMS_UTILITY.format_call_stack);
+                 dbms_output.put_line(DBMS_UTILITY.format_error_stack);
+                 dbms_output.put_line(DBMS_UTILITY.format_error_backtrace);  
+                 ROLLBACK;
+            END;     
+        END LOOP;
+    END donor_data_processor;
+
+    PROCEDURE lab_init(  lab_rec_in IN lab_controller_cur%ROWTYPE
+                        ) IS
+        CURSOR lab_cur IS
+          SELECT unit_id, coll_date, chapter_id
+            FROM units
+           WHERE unit_id = lab_rec_in.unit_id;
+        CURSOR donation_cur IS
+          SELECT donor_id
+            FROM donations
+          WHERE unit_id = lab_rec_in.unit_id;
+
+        lab_row lab_cur%ROWTYPE;
+        invalid_data EXCEPTION;
+    BEGIN
+        g_process  := 'LAB';
+        g_lab_rec  := lab_rec_in;
+
+        OPEN lab_cur;
+        FETCH lab_cur INTO lab_row;
+        CLOSE lab_cur;
+
+        IF lab_row.coll_date <> lab_rec_in.coll_date THEN
+            RAISE invalid_data;
+        END IF;
+
+        OPEN donation_cur;
+        FETCH donation_cur INTO g_lab_donor_id;
+        CLOSE donation_cur;
+
+        g_lab_chapter_id    := lab_row.CHAPTER_ID;
+        g_lab_insert_date   := lifetrack_timezone_convert.get_local_time(g_lab_chapter_id, SYSDATE);
+    EXCEPTION
+        WHEN invalid_data THEN
+            log_and_continue(g_lab_donor_id || ' - lab-init', 4001, 'Data mismatch');
+            RAISE;            
+    END lab_init;
+
+    FUNCTION lab_component_oneRow RETURN API_SF_COMPONENTS_rt
+    IS
+        api_rec API_SF_COMPONENTS_rt;
+        ln_dummy PLS_INTEGER;
+    BEGIN
+
+        -- For modify and delete, product code is already modified or deleted, so cannot query the old prod code.
+        IF NVL(g_lab_rec.status,'X') NOT IN ('MODIFY','DELETE') THEN 
+            SELECT 1 into ln_dummy
+              FROM components
+             WHERE unit_id = g_lab_rec.unit_id
+               AND product_code = g_lab_rec.product_code;    
+        END IF;
+
+        api_rec.COLL_DATE       := g_lab_rec.coll_date;
+        api_rec.UNIT_ID         := g_lab_rec.unit_id;
+        api_rec.PRODUCT_CODE    := g_lab_rec.product_code;
+        api_rec.INSERT_DATE     := g_lab_insert_date;
+        api_rec.STATUS          := g_lab_rec.status;
+        IF api_rec.STATUS = 'NEW' THEN
+            api_rec.COMP_START_TIME := api_rec.INSERT_DATE;
+        END IF;
+
+        RETURN api_rec;
+    EXCEPTION
+        WHEN no_data_found THEN
+            log_and_continue(g_lab_rec.unit_id || ' - lab-component', 4002, 'Data mismatch');
+            RAISE;
+    END lab_component_oneRow;
+
+    FUNCTION lab_splitrate_oneRow RETURN API_SF_COMP_SPLITRATE_rt
+    IS
+        api_rec API_SF_COMP_SPLITRATE_rt;
+        FUNCTION unit_split_rate(unit_id_in IN VARCHAR2) RETURN NUMBER IS
+            nCnt NUMBER;
+        BEGIN
+            SELECT COUNT(1) INTO nCnt
+              FROM components
+             WHERE unit_id = unit_id_in
+               AND reject_reason_code IS NULL;
+
+            RETURN nCnt;  
+        END unit_split_rate;
+
+    BEGIN
+        api_rec.COLL_DATE       := g_lab_rec.coll_date;
+        api_rec.UNIT_ID         := g_lab_rec.unit_id;
+        api_rec.SPLIT_RATE      := unit_split_rate(g_lab_rec.unit_id);
+        api_rec.INSERT_DATE     := g_lab_insert_date;
+
+        RETURN api_rec;
+    EXCEPTION
+        WHEN no_data_found THEN
+            log_and_continue(g_lab_rec.unit_id || ' - lab-component', 4004, 'Data mismatch');
+            RAISE;
+    END lab_splitrate_oneRow;
+
+
+    FUNCTION lab_shipment_oneRow RETURN API_SF_SHIPMENTS_rt
+    IS
+        api_rec API_SF_SHIPMENTS_rt;
+        CURSOR shipment_cur IS
+         SELECT sh.consignee_id, sh.shipment_date
+           FROM shipments sh, shipped_products sp
+          WHERE sh.shipment_no = sp.shipment_no
+            AND sp.unit_id = g_lab_rec.unit_id
+            AND sp.coll_date = g_lab_rec.coll_date
+            AND sp.chapter_id = g_lab_chapter_id
+            AND sp.product_code = g_lab_rec.product_code
+         ORDER BY sh.shipment_date DESC;
+
+        CURSOR customer_cur(p_consignee_id IN VARCHAR2) IS
+          SELECT customer_id
+            FROM consignee
+           WHERE consignee_id = p_consignee_id
+             AND chapter_id = g_lab_chapter_id;
+
+        ld_shipment_date DATE;     
+    BEGIN
+        api_rec.COLL_DATE       := g_lab_rec.coll_date;
+        api_rec.SHIPPED_PRODUCT  := g_lab_rec.product_code;
+        OPEN shipment_cur;
+        FETCH shipment_cur INTO api_rec.consignee_id, ld_shipment_date;
+        CLOSE shipment_cur;
+
+        api_rec.shipment_date := lifetrack_timezone_convert.get_local_time(g_lab_chapter_id, ld_shipment_date);
+
+        OPEN customer_cur(api_rec.consignee_id);
+        FETCH customer_cur INTO api_rec.customer_id;
+        CLOSE customer_cur;
+
+        api_rec.INSERT_DATE     := g_lab_insert_date;
+        api_rec.unit_id         := g_lab_rec.unit_id;
+
+        RETURN api_rec;
+    EXCEPTION
+        WHEN no_data_found THEN
+            log_and_continue(g_lab_rec.unit_id || ' - lab-shipment', 4003, 'Data mismatch');
+            RAISE;
+    END lab_shipment_oneRow;
+
+    FUNCTION lab_result_oneRow RETURN API_SF_TEST_RESULT_TIME_rt
+    IS
+        api_rec API_SF_TEST_RESULT_TIME_rt;
+        ld_result_dats DATE;
+        CURSOR result_cur IS
+          SELECT result_dats
+            FROM utrs
+           WHERE unit_id = g_lab_rec.unit_id
+             AND coll_date = g_lab_rec.coll_date
+             AND chapter_id = g_lab_chapter_id
+             AND result_dats IS NOT NULL
+             AND cancel_flag IS NULL; 
+    BEGIN
+        api_rec.UNIT_ID   := g_lab_rec.unit_id;
+        OPEN result_cur;
+        FETCH result_cur INTO ld_result_dats;
+        CLOSE result_cur;
+        api_rec.RESULT_DATE := get_local_time(ld_result_dats);
+        api_rec.INSERT_DATE := g_lab_insert_date;
+
+        RETURN api_rec;
+    EXCEPTION
+        WHEN no_data_found THEN
+            log_and_continue(g_lab_rec.unit_id || ' - lab-result', 4004, 'Data mismatch');
+            RAISE;        
+    END lab_result_oneRow;
+
+    PROCEDURE lab_data_processor IS
+        lab_component_row API_SF_COMPONENTS_rt;   
+        lab_splitrate_row API_SF_COMP_SPLITRATE_rt;
+        lab_shipment_row API_SF_SHIPMENTS_rt;
+        lab_result_row API_SF_TEST_RESULT_TIME_rt;
+
+    BEGIN
+        FOR controller_rec IN lab_controller_cur 
+        LOOP
+            BEGIN
+                lab_init(controller_rec);
+
+                IF controller_rec.process_event = gc_COMPONENT_event THEN
+
+                    -- Step 1: Insert into api_sf_components.
+                    --
+                    lab_component_row := lab_component_oneRow;
+
+                    DELETE FROM api_sf_components
+                     WHERE unit_id = lab_component_row.unit_id
+                      AND coll_date = lab_component_row.coll_date
+                      AND product_code = lab_component_row.product_code
+                      AND record_read_date IS NULL;
+
+                    INSERT INTO api_sf_components
+                    VALUES lab_component_row;
+                    ---
+
+                    -- Step 2: Insert into api_sf_comp_splitrate
+                    --
+                    lab_splitrate_row := lab_splitrate_oneRow;
+
+                    DELETE FROM api_sf_comp_splitrate
+                      WHERE unit_id = lab_splitrate_row.unit_id
+                        AND coll_date = lab_splitrate_row.coll_date
+                        AND record_read_date IS NULL;
+
+                    INSERT INTO api_sf_comp_splitrate
+                     VALUES lab_splitrate_row;                    
+                    --
+
+                    -- Step 3: Insert into sf_lab_data_hist
+                    DELETE FROM sf_lab_data_hist
+                    WHERE unit_id = lab_component_row.unit_id
+                      AND product_code = lab_component_row.product_code;
+
+                    INSERT INTO sf_lab_data_hist(unit_id, product_code, date_sent_to_sf)
+                    VALUES(lab_component_row.unit_id, lab_component_row.product_code, g_lab_insert_date);
+                    --------
+                ELSIF controller_rec.process_event = gc_RESULT_event THEN
+                    -- Step 1: Insert into api_sf_test_Result_time;
+                    --
+                    lab_result_row := lab_result_oneRow;
+
+                    DELETE FROM api_sf_test_result_time
+                     WHERE unit_id = lab_result_row.unit_id
+                     AND record_read_date IS NULL;            
+
+                    INSERT INTO api_sf_test_result_time
+                      VALUES lab_result_row;
+                    ---
+
+                    -- Step 2: Update sf_lab_data_hist table
+                    UPDATE sf_lab_data_hist
+                      SET result_date = lab_result_row.result_date
+                    WHERE unit_id = lab_result_row.unit_id;
+                    ---
+
+                ELSIF controller_rec.process_event = gc_SHIPMENT_event THEN
+                    -- Step 1: Insert into api_sf_shipments table.
+                    --
+                    lab_shipment_row  := lab_shipment_oneRow;
+
+                    DELETE FROM api_sf_shipments
+                      WHERE unit_id = lab_shipment_row.unit_id
+                       AND coll_date = lab_shipment_row.coll_date
+                       AND shipped_product = lab_shipment_row.shipped_product
+                       AND customer_id = lab_shipment_row.customer_id
+                       AND consignee_id = lab_shipment_row.consignee_id
+                       AND record_read_date IS NULL;
+
+                    INSERT INTO api_sf_shipments
+                    VALUES lab_shipment_row;     
+                    ---
+                END IF; 
+
+                UPDATE sf_lab_controller
+                  SET under_processing_flag = 'C'
+                WHERE rowid = controller_rec.rowid;               
+
+
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                 log_and_continue(g_lab_donor_id || ' - lab_data_processor', 4000, DBMS_UTILITY.format_error_backtrace);
+                 log_and_continue(g_lab_donor_id || ' - lab_data_processor', 4000, DBMS_UTILITY.format_error_stack);
+                 ROLLBACK;
+            END;     
+        END LOOP;
+    END lab_data_processor;
+
+    PROCEDURE archive_data IS
+       TYPE tab_name_t IS TABLE OF all_tables.table_name%TYPE INDEX BY PLS_INTEGER;
+       api_tab_names tab_name_t;
+    BEGIN
+        SELECT table_name BULK COLLECT INTO api_tab_names 
+          FROM all_tables
+         WHERE table_name LIKE 'API_SF%'
+           AND table_name NOT LIKE 'API_SF%ARCH'
+           AND owner = 'SFAPI';
+
+        IF api_tab_names.COUNT > 0 THEN
+            FOR indx IN api_tab_names.FIRST .. api_tab_names.LAST LOOP
+                BEGIN
+                    -- Insert into archive table.
+                    EXECUTE IMMEDIATE 'INSERT INTO ' || api_tab_names(indx) || '_ARCH' || 
+                                       ' SELECT * FROM ' || api_tab_names(indx) ||
+                                        ' WHERE RECORD_READ_DATE IS NOT NULL';                                        
+
+                    BEGIN
+                        -- Delete from api table.
+                        EXECUTE IMMEDIATE 'DELETE FROM ' || api_tab_names(indx) ||
+                                            ' WHERE RECORD_READ_DATE IS NOT NULL';     
+
+                        -- COMMIT only if insert into archive and delete from api are succesful.
+                        COMMIT;
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            log_and_continue('Error Cleaning ' || api_tab_names(indx), 5000, DBMS_UTILITY.FORMAT_ERROR_STACK);
+                            ROLLBACK;
+                    END;
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        log_and_continue('Error inserting into ' || api_tab_names(indx) || '_ARCH', 5001, DBMS_UTILITY.FORMAT_ERROR_STACK);
+                        ROLLBACK;
+                END;
+            END LOOP;
+        END IF;         
+    END archive_data;
+
+    PROCEDURE archive_controller IS
+       TYPE tab_name_t IS TABLE OF all_tables.table_name%TYPE INDEX BY PLS_INTEGER;
+       api_tab_names tab_name_t;
+    BEGIN
+        SELECT table_name BULK COLLECT INTO api_tab_names 
+          FROM all_tables
+         WHERE table_name LIKE '%_CONTROLLER'
+           AND owner = 'SFAPI';
+
+        IF api_tab_names.COUNT > 0 THEN
+            FOR indx IN api_tab_names.FIRST .. api_tab_names.LAST LOOP
+                BEGIN
+                    -- Insert into archive table.
+                    EXECUTE IMMEDIATE 'INSERT INTO ' || api_tab_names(indx) || '_ARCH' || 
+                                       ' SELECT * FROM ' || api_tab_names(indx) ||
+                                        ' WHERE UNDER_PROCESSING_FLAG = ''C''';                                        
+
+                    BEGIN
+                        -- Delete from api table.
+                        EXECUTE IMMEDIATE 'DELETE FROM ' || api_tab_names(indx) ||
+                                            ' WHERE UNDER_PROCESSING_FLAG = ''C''';     
+
+                        -- COMMIT only if insert into archive and delete from api are succesful.
+                        COMMIT;
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            log_and_continue('Error Cleaning ' || api_tab_names(indx), 6000, DBMS_UTILITY.FORMAT_ERROR_STACK);
+                            ROLLBACK;
+                    END;
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        log_and_continue('Error inserting into ' || api_tab_names(indx) || '_ARCH', 6001, DBMS_UTILITY.FORMAT_ERROR_STACK);
+                        ROLLBACK;
+                END;
+            END LOOP;
+        END IF;         
+    END archive_controller;
+
+    PROCEDURE insert_donor_controller(rec_in IN SF_DONOR_CONTROLLER%ROWTYPE) IS
+        nCnt NUMBER;
+    BEGIN
+        IF rec_in.process_event IN ('PROFILE', 'ELIGIBILITY') THEN
+            SELECT COUNT(1) INTO nCnt
+              FROM sf_donor_controller
+             WHERE donor_id = rec_in.donor_id
+               AND NVL(process_event, rec_in.process_event) = rec_in.process_event
+               AND under_processing_flag = 'X';
+        ELSE
+            SELECT COUNT(1) INTO nCnt
+              FROM sf_donor_controller
+             WHERE donor_id = rec_in.donor_id
+               AND transaction_id = rec_in.transaction_id
+               AND NVL(process_event, rec_in.process_event) = rec_in.process_event
+               AND under_processing_flag = 'X';        
+        END IF;
+
+        IF nCnt = 0 THEN
+            INSERT INTO sf_donor_controller
+               VALUES rec_in;   
+        END IF;       
+    END insert_donor_controller;
+
+begin
+  -- Initialization
+  -- <Statement>;
+  null;
+end sf_api;
+
+/

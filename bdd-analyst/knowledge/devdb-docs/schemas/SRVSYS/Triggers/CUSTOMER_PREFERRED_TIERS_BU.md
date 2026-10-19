@@ -1,0 +1,46 @@
+---
+tags:
+  - trigger
+  - SRVSYS
+---
+# CUSTOMER_PREFERRED_TIERS_BU
+
+**Schema**: [[schemas/SRVSYS/SRVSYS|SRVSYS]]
+**Table**: [[schemas/SRVSYS/Tables/CUSTOMER_PREFERRED_TIERS|CUSTOMER_PREFERRED_TIERS]]
+**Type**: BEFORE EACH ROW
+**Event**: UPDATE
+**Status**: ENABLED
+
+## Trigger Body
+
+```plsql
+begin
+  insert into CUSTOMER_PREFERRED_TIERS_AUDIT
+  (	CHAPTER_ID,
+	CUSTOMER_ID,
+	PRODUCT_TYPE,
+	TIER,
+	ALTERNATE_TIER_FLAG,
+	EFF_DATE,
+	TERM_DATE,
+	LAST_MODIFIED_DATE,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  (	:new.CHAPTER_ID,
+	:new.CUSTOMER_ID,
+	:new.PRODUCT_TYPE,
+	:new.TIER,
+	:new.ALTERNATE_TIER_FLAG,
+	:new.EFF_DATE,
+	:new.TERM_DATE,
+	:new.LAST_MODIFIED_DATE,
+	:new.AUDIT_KEY,
+	'UPDATE',LT_USER_SESSION.GET_USERID,
+    sysdate
+  ) ;
+  end ;
+```

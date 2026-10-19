@@ -1,0 +1,208 @@
+<div class="upload-status-tab">
+  <!-- Toolbar - Only show when data has been loaded -->
+  @if (chapterId && instrumentId && hasLoadedData()) {
+    <div class="toolbar">
+      <div class="toolbar__controls-left">
+        <button mat-button class="filter-button" cdkOverlayOrigin #filterOrigin="cdkOverlayOrigin"
+                (click)="toggleFilter()" [class.filter-button--active]="isFilterOpen"
+                aria-label="Toggle filter panel"
+                [attr.aria-expanded]="isFilterOpen">
+          <mat-icon aria-hidden="true">filter_list</mat-icon>
+          FILTER
+        </button>
+
+        <!-- Filter overlay -->
+        <ng-template cdkConnectedOverlay [cdkConnectedOverlayOrigin]="filterOrigin"
+                     [cdkConnectedOverlayOpen]="isFilterOpen" [cdkConnectedOverlayHasBackdrop]="true"
+                     [cdkConnectedOverlayFlexibleDimensions]="true"
+                     [cdkConnectedOverlayGrowAfterOpen]="true"
+                     [cdkConnectedOverlayPush]="true"
+                     cdkConnectedOverlayBackdropClass="cdk-overlay-transparent-backdrop"
+                     (backdropClick)="onFilterClose()">
+          <app-upload-status-filter-panel
+            [currentFilters]="currentFilters"
+            [chapterId]="chapterId"
+            [instrumentId]="instrumentId"
+            [uploadStatusList]="uploadStatusList()"
+            [statusOptions]="statusOptions()"
+            (apply)="onFilterApply($event)"
+            (close)="onFilterClose()">
+          </app-upload-status-filter-panel>
+        </ng-template>
+
+        <!-- Inline Filter Chips -->
+        @if (filterChips.length > 0) {
+          <app-filter-chips
+            [chips]="filterChips"
+            [maxVisible]="3"
+            (removeChip)="removeFilterChip($event)"
+            (clearAll)="clearAllFilters()">
+          </app-filter-chips>
+        }
+      </div>
+
+      <app-search-bar
+        [config]="searchConfig"
+        (search)="onSearch($event)"
+        class="search-bar" />
+    </div>
+  }
+
+  <!-- Get Started State - Before selecting chapter/instrument -->
+  @if (!chapterId || !instrumentId) {
+    <div class="empty-state" role="status">
+      <mat-icon class="empty-state__icon" aria-hidden="true">edit</mat-icon>
+      <p class="empty-state__title">Get Started</p>
+      <p class="empty-state__message">
+        Select a Chapter ID and Instrument ID to access instrument interface functions.
+      </p>
+    </div>
+  }
+
+  <!-- Table Container - Show when chapter and instrument are selected -->
+  @if (chapterId && instrumentId) {
+    <div class="table-container">
+      <!-- Loading State -->
+      @if (loading()) {
+        <div class="table-loading-state" role="status" aria-live="polite">
+          <mat-spinner diameter="48" aria-label="Loading upload status"></mat-spinner>
+          <p>Loading upload status...</p>
+        </div>
+      }
+
+      <!-- Empty State - No data loaded yet -->
+      @if (!loading() && !hasLoadedData()) {
+        <div class="table-empty-state">
+          <mat-icon class="empty-icon" aria-hidden="true">edit</mat-icon>
+          <p class="empty-message">Click the RETRIEVE button to load upload status data.</p>
+        </div>
+      }
+
+      <!-- Data Table - Always show when data has been loaded -->
+      @if (!loading() && hasLoadedData()) {
+        <div class="table-wrapper">
+          <table mat-table [dataSource]="paginatedData()" class="data-table" aria-label="Upload status table">
+          <!-- LT TB ID Column -->
+          <ng-container matColumnDef="ltTbId">
+            <th mat-header-cell *matHeaderCellDef [attr.aria-sort]="sortDirection() === 'ASC' ? 'ascending' : 'descending'">
+              <button mat-button class="column-header column-header--sortable" (click)="toggleSort()" aria-label="Sort by Test Batch ID">
+                <span>Test Batch ID</span>
+                <mat-icon class="sort-icon" aria-hidden="true">{{ sortDirection() === 'ASC' ? 'arrow_upward' : 'arrow_downward' }}</mat-icon>
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.ltTbId || '-' }}</td>
+          </ng-container>
+
+          <!-- Upload Status Column -->
+          <ng-container matColumnDef="uploadStatus">
+            <th mat-header-cell *matHeaderCellDef>
+              <button mat-button class="column-header">
+                Status
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ getStatusLabel(row.uploadStatus) }}</td>
+          </ng-container>
+
+          <!-- Total Records Processed Column -->
+          <ng-container matColumnDef="totRecProcessed">
+            <th mat-header-cell *matHeaderCellDef>
+              <button mat-button class="column-header">
+                Processed
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.totRecProcessed ?? '-' }}</td>
+          </ng-container>
+
+          <!-- Total Records Loaded Column -->
+          <ng-container matColumnDef="totRecLoaded">
+            <th mat-header-cell *matHeaderCellDef>
+              <button mat-button class="column-header">
+                Loaded
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.totRecLoaded ?? '-' }}</td>
+          </ng-container>
+
+          <!-- Total Records Rejected Column -->
+          <ng-container matColumnDef="totRecRejected">
+            <th mat-header-cell *matHeaderCellDef>
+              <button mat-button class="column-header">
+                Rejected
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.totRecRejected ?? '-' }}</td>
+          </ng-container>
+
+          <!-- Process Date Column -->
+          <ng-container matColumnDef="processDate">
+            <th mat-header-cell *matHeaderCellDef>
+              <button mat-button class="column-header">
+                Process Date
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.processDate ? (row.processDate | date: 'dd-MMM-yyyy' | uppercase) : '-' }}</td>
+          </ng-container>
+
+          <!-- Log File Name Column -->
+          <ng-container matColumnDef="logFileName">
+            <th mat-header-cell *matHeaderCellDef>
+              <button mat-button class="column-header">
+                Log File Name
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.logFileName || '-' }}</td>
+          </ng-container>
+
+          <!-- Actions Column -->
+          <ng-container matColumnDef="actions">
+            <th mat-header-cell *matHeaderCellDef><span class="cdk-visually-hidden">Actions</span></th>
+            <td mat-cell *matCellDef="let row">
+              <button
+                mat-icon-button
+                (click)="openUnitDetails(row.fileId)"
+                [disabled]="!row.ltTbId"
+                aria-label="View unit details"
+                matTooltip="View unit details">
+                <mat-icon aria-hidden="true">visibility</mat-icon>
+              </button>
+            </td>
+          </ng-container>
+
+          <!-- Header and Row Definitions -->
+          <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+          <tr
+            mat-row
+            *matRowDef="let row; columns: displayedColumns"
+            class="table-row"></tr>
+        </table>
+        </div>
+
+        <!-- Empty State Overlay - Show when no data -->
+        @if (paginatedData().length === 0) {
+          <div class="table-empty-state">
+            <mat-icon class="empty-icon" aria-hidden="true">search_off</mat-icon>
+            <p class="empty-title">No Data Available</p>
+            @if (filterChips.length > 0 || searchText()) {
+              <p class="empty-message">No records found for the selected filters. Try adjusting your filters or search criteria.</p>
+            } @else {
+              <p class="empty-message">No upload status records found for the selected Instrument ID.</p>
+            }
+          </div>
+        }
+
+        <!-- Paginator -->
+        <nav class="paginator-nav" aria-label="Table pagination navigation">
+          <mat-paginator
+            [length]="totalItems()"
+            [pageSize]="pageSize()"
+            [pageIndex]="pageIndex()"
+            [pageSizeOptions]="[10, 25, 50, 100]"
+            (page)="onPageChange($event)"
+            showFirstLastButtons
+            aria-label="Select page">
+          </mat-paginator>
+        </nav>
+      }
+    </div>
+  }
+</div>

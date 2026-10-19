@@ -1,0 +1,483 @@
+<div class="main-content">
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <div class="content-area">
+
+    <!-- ── Card 1: Codabar Unit Input ─────────────────────────────────────── -->
+    <div class="section-card">
+      <div class="card-section-title">Codabar Unit to be Relabeled</div>
+
+      <div class="codabar-input-row">
+
+        <!-- Unit ID — Step 1: donor-lib validates format (same as all screens)
+                       Step 2: postValidate calls GET /relabel-codabar-isbt/unit/{unitId} -->
+        <app-unit-id-field
+          label="Unit ID"
+          [required]="true"
+          placeholder="Scan or type Unit ID"
+          [skipDoubleEntry]="true"
+          [showBarcodeIcon]="true"
+          (validated)="onUnitValidated($event)"
+          (cleared)="onUnitCleared()"
+        />
+
+        <!-- Collection Date — read-only display field -->
+        <div class="codabar-display-field" role="group" [attr.aria-label]="'Collection Date'">
+          <span class="codabar-display-field__label" aria-hidden="true">Collection Date</span>
+          <span class="codabar-display-field__value">{{ collectionDateDisplay() }}</span>
+        </div>
+
+        <!-- Product Code — dropdown populated from API; unit-filtered after unit scan -->
+        <mat-form-field appearance="fill" class="product-code-field">
+          <mat-label>Product Code</mat-label>
+          <mat-select
+            [value]="productCodeValue()"
+            (selectionChange)="onProductCodeSelect($event.value)"
+>
+            @for (pc of productCodeOptions(); track pc.code) {
+              <mat-option [value]="pc.code">
+                <span class="pc-option-code">{{ pc.code }}</span>
+                @if (pc.description) {
+                  <span class="pc-option-desc"> - {{ pc.description }}</span>
+                }
+              </mat-option>
+            }
+          </mat-select>
+          <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+        </mat-form-field>
+
+      </div>
+
+      @if (isLoadingUnit()) {
+        <div class="card1-loading">
+          <mat-spinner diameter="20" aria-label="Loading unit data" />
+        </div>
+      }
+    </div>
+
+    <!-- ── Cards 2–4: shown only after product code is selected ─────────────── -->
+    @if (productCodeSelected()) {
+
+      <!-- ── Card 2: Codabar Unit Details ────────────────────────────────── -->
+      <div class="section-card">
+        <div class="card-section-title">Codabar Unit to be Relabeled</div>
+        <div class="unit-details">
+
+          <!-- Product Description -->
+          <div class="details-field-full">
+            <div class="field-display__label">Product Description</div>
+            <div class="field-display__value">{{ currentProductDescription() }}</div>
+          </div>
+
+          <!-- Row: System Label Decision | Expiration Date | Import Contract ID -->
+          <div class="details-row">
+            <div class="field-display">
+              <div class="field-display__label">System Label Decision</div>
+              <div class="field-display__value">{{ unitData()?.systemLabelDecision || '-' }}</div>
+            </div>
+            <div class="field-display">
+              <div class="field-display__label">Expiration Date</div>
+              <div class="field-display__value">{{ formatDate(unitData()?.expiryDate) }}</div>
+            </div>
+            <div class="field-display">
+              <div class="field-display__label">Import Contract ID</div>
+              <div class="field-display__value">{{ unitData()?.contractId || '-' }}</div>
+            </div>
+          </div>
+
+          <!-- Row: Donor ID | Name | DOB | ABO -->
+          <div class="details-row">
+            <div class="field-display">
+              <div class="field-display__label">Donor ID</div>
+              <div class="field-display__value">{{ unitData()?.donorId || '-' }}</div>
+            </div>
+            <div class="field-display">
+              <div class="field-display__label">Name</div>
+              <div class="field-display__value">{{ donorFullName() }}</div>
+            </div>
+            <div class="field-display">
+              <div class="field-display__label">DOB</div>
+              <div class="field-display__value">{{ formatDate(unitData()?.donorDateOfBirth) }}</div>
+            </div>
+            <div class="field-display">
+              <div class="field-display__label">ABO</div>
+              <div class="field-display__value">{{ unitData()?.donorBloodType || '-' }}</div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ── Card 3: Bottom split — Attributes + ISBT Entry + Footer ──────── -->
+      <div class="bottom-card">
+      <div class="bottom-section">
+
+        <!-- Left: Present Attributes -->
+        <div class="attributes-card">
+          <div class="card-section-title">Present Attributes</div>
+
+          @if (isLoadingAttributes()) {
+            <div class="loading-row">
+              <mat-spinner diameter="20" aria-label="Loading attributes" />
+            </div>
+          }
+
+          <div class="attributes-table-wrapper">
+            <table class="attributes-table" aria-label="Present Attributes">
+              <thead>
+                <tr>
+                  <th scope="col">Attribute Group</th>
+                  <th scope="col">Attribute Code</th>
+                  <th scope="col">Type</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (attr of unitAttributes(); track $index) {
+                  <tr>
+                    <td>{{ attr.attribGroup }}</td>
+                    <td>{{ attr.attribCode }}</td>
+                    <td>{{ attr.attribType }}</td>
+                  </tr>
+                }
+                @if (unitAttributes().length === 0 && !isLoadingAttributes()) {
+                  <tr>
+                    <td colspan="3" class="empty-row">No attributes found</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Right: ISBT Entry Form -->
+        <div class="isbt-card" [formGroup]="isbtForm">
+          <div class="card-section-title">Enter ISBT Unit / Product Details</div>
+
+          <!-- Row 1: ISBT Unit ID | Catalog Number | Lot Number -->
+          <div class="isbt-form-row isbt-row-3col">
+
+            <mat-form-field appearance="fill">
+              <mat-label>Unit ID</mat-label>
+              <input matInput formControlName="isbtUnitId"
+                     (input)="onIsbtUnitIdChange()"
+                     (blur)="onIsbtUnitIdBlur()"
+                     (keyup.enter)="onIsbtUnitIdBlur()"
+                     required aria-required="true" />
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+              @if (isbtUnitIdState() === 'validating') {
+                <mat-hint>Validating...</mat-hint>
+              }
+              @if (isbtUnitIdState() === 'valid') {
+                <mat-hint class="valid-hint">Valid ISBT unit</mat-hint>
+              }
+              @if (isbtUnitIdError()) {
+                <mat-error>{{ isbtUnitIdError() }}</mat-error>
+              } @else if (isbtForm.get('isbtUnitId')?.hasError('required') && isbtForm.get('isbtUnitId')?.touched) {
+                <mat-error>ISBT Unit ID is required.</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill">
+              <mat-label>Catalog Number</mat-label>
+              <mat-select formControlName="catalogNumber"
+                          (selectionChange)="onCatalogNumberChange($event.value)"
+                          >
+                <mat-option [value]="null">None</mat-option>
+                @for (cat of catalogNumbers(); track cat.catalogNumber) {
+                  <mat-option [value]="cat.catalogNumber">{{ cat.catalogNumber }}</mat-option>
+                }
+              </mat-select>
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+
+            <mat-form-field appearance="fill">
+              <mat-label>Lot Number</mat-label>
+              <mat-select formControlName="lotNumber" >
+                <mat-option [value]="null">None</mat-option>
+                @for (lot of lotNumbers(); track lot.lotNumber) {
+                  <mat-option [value]="lot.lotNumber">{{ lot.lotNumber }}</mat-option>
+                }
+              </mat-select>
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+
+          </div>
+
+          <!-- Row 2: Product Code | ABO | Description -->
+          <div class="isbt-form-row isbt-row-3col">
+
+            <mat-form-field appearance="fill">
+              <mat-label>Product Code</mat-label>
+              <mat-select formControlName="isbtProductCode" >
+                @for (pc of activeProductCodes(); track pc.productCode) {
+                  <mat-option [value]="pc.productCode">
+                    {{ pc.productCode }}{{ pc.description ? ' - ' + pc.description : '' }}
+                  </mat-option>
+                }
+              </mat-select>
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+
+            <div class="field-display">
+              <div class="field-display__label">ABO</div>
+              <div class="field-display__value">{{ aboLabel() }}</div>
+            </div>
+
+            <div class="field-display">
+              <div class="field-display__label">Description</div>
+              <div class="field-display__value">{{ aboDescription() }}</div>
+            </div>
+
+            <div class="field-display">
+              <div class="field-display__label">Tested ABORH</div>
+              <div class="field-display__value">{{ testedAbo() }}</div>
+            </div>
+
+          </div>
+
+          <!-- Row 3: Product Description (full width) -->
+          <div class="isbt-form-row">
+            <div class="field-display">
+              <div class="field-display__label">Description</div>
+              <div class="field-display__value">{{ currentProductDescription() }}</div>
+            </div>
+          </div>
+
+          <!-- Row 4: Expiration Date | Time | Special Test | Description -->
+          <div class="isbt-form-row isbt-row-4col">
+
+            <mat-form-field appearance="fill">
+              <mat-label>Expiration Date</mat-label>
+              <input matInput [matDatepicker]="expPicker" formControlName="expirationDate"
+                     [min]="minDate"
+                     [errorStateMatcher]="expDateErrorMatcher"
+                     (input)="onExpirationDateInput($event)"
+                     required
+                     aria-label="Expiration Date" aria-required="true" />
+              <mat-datepicker-toggle matIconSuffix [for]="expPicker"
+                                     aria-label="Open expiration date calendar" />
+              <mat-datepicker #expPicker />
+              @if (getExpirationDateError()) {
+                <mat-error>{{ getExpirationDateError() }}</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" class="time-field">
+              <mat-label>Time</mat-label>
+              <input matInput appTime24hr formControlName="expirationTime"
+                     required
+                     aria-label="Expiration Time" aria-required="true" />
+              @if (isbtForm.get('expirationTime')?.hasError('invalidTime') && isbtForm.get('expirationTime')?.touched) {
+                <mat-error>Invalid time format (HH:MM).</mat-error>
+              } @else if (isbtForm.get('expirationTime')?.hasError('required') && isbtForm.get('expirationTime')?.touched) {
+                <mat-error>Time is required.</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill">
+              <mat-label>Special Test</mat-label>
+              <mat-select formControlName="specialTestingCode" >
+                <mat-option [value]="null">None</mat-option>
+                @for (st of specialTestingCodes(); track st.productCode) {
+                  <mat-option [value]="st.productCode">{{ st.productCode }}</mat-option>
+                }
+              </mat-select>
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+
+            <div class="field-display">
+              <div class="field-display__label">Description</div>
+              <div class="field-display__value">{{ specialTestDescription() }}</div>
+            </div>
+
+          </div>
+
+          <!-- Row 5: Import FIN | Confirm Print -->
+          <div class="isbt-form-row isbt-row-2col">
+
+            <mat-form-field appearance="fill">
+              <mat-label>Import FIN</mat-label>
+              <mat-select formControlName="facilityCode" >
+                <mat-option [value]="null">None</mat-option>
+                @for (fc of facilityCodes(); track fc.collId) {
+                  <mat-option [value]="fc.collId">{{ fc.collId }} - {{ fc.collName }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+
+            <mat-form-field appearance="fill">
+              <mat-label>Please confirm to Print Label?</mat-label>
+              <mat-select formControlName="confirmPrint"                           (selectionChange)="onConfirmPrintChange($event.value)">
+                <mat-option value="Y">Yes</mat-option>
+                <mat-option value="N">No</mat-option>
+              </mat-select>
+            </mat-form-field>
+
+          </div>
+
+        </div><!-- /isbt-card -->
+
+      </div><!-- /bottom-section -->
+
+      <!-- ── Card Footer: Action Buttons ──────────────────────────────────── -->
+      <div class="action-row">
+        <button mat-button class="notes-btn"
+                (click)="openNotesDialog()"
+                aria-label="Enter Notes">
+          ENTER NOTES
+        </button>
+        <button mat-flat-button color="primary" class="reprint-btn"
+                (click)="onReprint()"
+                [disabled]="isSaving()"
+                aria-label="Reprint Label">
+          @if (isSaving()) {
+            <mat-spinner diameter="18" aria-hidden="true" />
+          }
+          REPRINT
+        </button>
+      </div>
+
+      </div><!-- /bottom-card -->
+
+    }<!-- /unitValidated -->
+
+  </div><!-- /content-area -->
+
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- Label Verification Dialog                                              -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  @if (showLabelVerification()) {
+    <div class="dialog-backdrop" (click)="closeLabelVerification()" aria-hidden="true"></div>
+    <div class="dialog-panel" (click)="$event.stopPropagation()"
+         role="dialog" aria-modal="true" [attr.aria-label]="'Label Verification'"
+         (keydown.escape)="closeLabelVerification()">
+
+        <div class="dialog-header">
+          <h2 class="dialog-title">Label Verification</h2>
+          <button mat-icon-button class="dialog-close-btn"
+                  (click)="closeLabelVerification()" [attr.aria-label]="'Close dialog'">
+            <mat-icon aria-hidden="true">close</mat-icon>
+          </button>
+        </div>
+
+        <div class="dialog-body">
+
+          <!-- Scan Unit/ABO -->
+          <div class="verify-section-label">Scan</div>
+          <div class="verify-scan-row">
+            <mat-form-field appearance="fill" class="scan-field">
+              <mat-label>Unit/ABO</mat-label>
+              <input matInput
+                     [value]="verificationScanUnitAbo()"
+                     (input)="onScanUnitAbo($event)"
+                     (keyup.enter)="onScanUnitAboEnter()"
+                     aria-label="Scan Unit ABO barcode" />
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+          </div>
+
+          <!-- Unit ID | ABO | Description -->
+          <div class="verify-fields-row">
+            <mat-form-field appearance="fill">
+              <mat-label>Unit ID</mat-label>
+              <input matInput
+                     [value]="verificationUnitId()"
+                     (input)="onVerificationUnitIdInput($event)"
+                     (blur)="onVerificationUnitIdBlur()"
+                     aria-label="Verification Unit ID" />
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+
+            <mat-form-field appearance="fill">
+              <mat-label>ABO</mat-label>
+              <mat-select [value]="verificationAbo()"
+                          (selectionChange)="onVerificationAboChange($event.value)"
+                          aria-label="Verification ABO">
+                @for (ab of aboValues(); track ab.aboLabel) {
+                  <mat-option [value]="ab.aboLabel">{{ ab.aboLabel }}</mat-option>
+                }
+              </mat-select>
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+
+            <div class="field-display">
+              <div class="field-display__label">Description</div>
+              <div class="field-display__value">{{ verificationAboDesc() }}</div>
+            </div>
+          </div>
+
+          <!-- Scan Product Code / Expiration Date -->
+          <div class="verify-section-label">Scan</div>
+          <div class="verify-scan-row">
+            <mat-form-field appearance="fill" class="scan-field">
+              <mat-label>Product Code / Expiration Date</mat-label>
+              <input matInput
+                     [value]="verificationScanProductExp()"
+                     (input)="onScanProductExp($event)"
+                     (keyup.enter)="onScanProductExpEnter()"
+                     aria-label="Scan Product Code Expiration Date barcode" />
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+          </div>
+
+          <!-- Product Code | Expiration Date | Time | Special Testing -->
+          <div class="verify-fields-row verify-fields-row--4col">
+            <mat-form-field appearance="fill">
+              <mat-label>Product Code</mat-label>
+              <input matInput
+                     [value]="verificationProductCode()"
+                     (input)="onVerificationProductCodeInput($event)"
+                     aria-label="Verification Product Code" />
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+
+            <mat-form-field appearance="fill">
+              <mat-label>Expiration Date</mat-label>
+              <input matInput [matDatepicker]="verifyExpPicker"
+                     [value]="verificationExpDate()"
+                     (dateChange)="onVerificationExpDateChange($event.value)"
+                     aria-label="Verification Expiration Date" />
+              <mat-datepicker-toggle matIconSuffix [for]="verifyExpPicker"
+                                     aria-label="Open expiration date calendar" />
+              <mat-datepicker #verifyExpPicker />
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" class="time-field">
+              <mat-label>Time</mat-label>
+              <input matInput
+                     [value]="verificationExpTime()"
+                     (input)="onVerificationExpTimeInput($event)"
+                     (blur)="onVerificationExpTimeBlur()"
+                     placeholder="HH:MM"
+                     maxlength="5"
+                     aria-label="Verification Expiration Time" />
+            </mat-form-field>
+
+            <mat-form-field appearance="fill">
+              <mat-label>Special Testing</mat-label>
+              <input matInput
+                     [value]="verificationSpecialTesting()"
+                     (input)="onVerificationSpecialTestInput($event)"
+                     (blur)="onVerificationSpecialTestBlur()"
+                     aria-label="Verification Special Testing" />
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+          </div>
+
+        </div><!-- /dialog-body -->
+
+        <div class="dialog-footer">
+          <button mat-button class="notes-btn"
+                  (click)="closeLabelVerification()"
+                  aria-label="Close verification dialog">
+            CLOSE
+          </button>
+        </div>
+
+      </div><!-- /dialog-panel -->
+  }
+
+
+</div><!-- /main-content -->

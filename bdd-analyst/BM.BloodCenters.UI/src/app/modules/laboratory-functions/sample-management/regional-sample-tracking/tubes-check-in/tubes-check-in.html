@@ -1,0 +1,491 @@
+<div class="tubes-check-in-layout">
+  <!-- C-3: aria-live status region for loading/saving — always in DOM -->
+  <div aria-live="polite" aria-atomic="true" class="sr-only">
+    @if (isLoading()) { Loading data, please wait. }
+    @if (isSaving()) { Saving check-in, please wait. }
+  </div>
+  <!-- S-7: Announce when tube entry panel becomes available -->
+  <div aria-live="polite" aria-atomic="true" class="sr-only">
+    @if (showSection3()) { Tube entry form is ready. Enter barcodes for each tube. }
+  </div>
+
+  <!-- Page Header with Breadcrumb -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Main content wrapper -->
+  <div class="content-wrapper">
+
+    <!-- ══════════════════════════════════════════════════════════════════════════
+         SECTION 1: Filter Fields (Always visible)
+         ══════════════════════════════════════════════════════════════════════════ -->
+    <div class="filter-panel">
+      <form [formGroup]="section1Form" class="filter-rows-container" aria-label="Tubes check-in filters">
+
+        <!-- Row 1: Contract, Profile, Received Date/Time -->
+        <div class="filter-row">
+          <!-- Contract ID -->
+          <mat-form-field appearance="fill" class="filter-field filter-field--contract" subscriptSizing="dynamic">
+            <mat-label>Contract ID </mat-label>
+            <mat-select
+              formControlName="contractId"
+              (selectionChange)="onSection1ContractChange($event.value)">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="contractSearchControl"
+                  placeholderLabel="Search contracts..."
+                  noEntriesFoundLabel="No matching contracts">
+                </ngx-mat-select-search>
+              </mat-option>
+
+              @if (filteredContractOptions().length === 0) {
+                <mat-option disabled>No data available</mat-option>
+              }
+
+              @for (contract of filteredContractOptions(); track contract.contractId) {
+                <mat-option [value]="contract.contractId">{{ contract.contractId }} - {{ contract.company }}</mat-option>
+              }
+            </mat-select>
+            @if (section1Form.get('contractId')?.invalid && section1Form.get('contractId')?.touched) {
+              <mat-error>Contract ID is required</mat-error>
+            }
+          </mat-form-field>
+
+          <!-- Contract ID Description (readonly) -->
+          <mat-form-field appearance="fill" floatLabel="always" class="filter-field filter-field--desc readonly-field" subscriptSizing="dynamic">
+            <mat-label>Contract ID Description</mat-label>
+            <input matInput [value]="selectedContract()?.description || ''" placeholder="-" readonly aria-readonly="true" aria-label="Contract ID Description" />
+          </mat-form-field>
+
+          <!-- Profile Set ID -->
+          <mat-form-field appearance="fill" class="filter-field filter-field--md" subscriptSizing="dynamic">
+            <mat-label>Profile Set ID </mat-label>
+            <mat-select
+              formControlName="profileSetId"
+              (selectionChange)="onSection1ProfileChange($event.value)">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="profileSetSearchControl"
+                  placeholderLabel="Search profile sets..."
+                  noEntriesFoundLabel="No matching profile sets">
+                </ngx-mat-select-search>
+              </mat-option>
+
+              @if (filteredProfileSetOptions().length === 0) {
+                <mat-option disabled>No data available</mat-option>
+              }
+
+              @for (profile of filteredProfileSetOptions(); track profile.profileSetId) {
+                <mat-option [value]="profile.profileSetId">{{ profile.profileSetId }}</mat-option>
+              }
+            </mat-select>
+            @if (section1Form.get('profileSetId')?.invalid && section1Form.get('profileSetId')?.touched) {
+              <mat-error>Profile Set ID is required</mat-error>
+            }
+          </mat-form-field>
+
+          <!-- M-5: Received Date + Time grouped for AT -->
+          <div role="group" aria-label="Received date and time" class="date-time-group">
+          <!-- Received Date — FMB: not in future, not older than 9 days -->
+          <mat-form-field appearance="fill" class="filter-field filter-field--sm" subscriptSizing="dynamic">
+            <mat-label>Received Date</mat-label>
+            <input matInput
+              [matDatepicker]="receivedDatePicker"
+              formControlName="receivedDate"
+              placeholder="DD-MMM-YYYY"
+              [min]="minReceivedDate"
+              [max]="maxReceivedDate"
+              (input)="onDateInput($event, 'receivedDate')"
+              (blur)="onDateInput($event, 'receivedDate')"
+              (dateChange)="onReceivedDateChange()" />
+            <mat-datepicker-toggle matIconSuffix [for]="receivedDatePicker" aria-label="Open received date calendar"></mat-datepicker-toggle>
+            <mat-datepicker #receivedDatePicker></mat-datepicker>
+            <mat-error>
+              @if (section1Form.get('receivedDate')?.hasError('invalidDate') || section1Form.get('receivedDate')?.hasError('matDatepickerParse')) { Invalid date — use DD-MMM-YYYY format }
+              @else if (section1Form.get('receivedDate')?.hasError('matDatepickerMin')) { Received date cannot be older than 9 days }
+              @else if (section1Form.get('receivedDate')?.hasError('matDatepickerMax')) { Received date cannot be in the future }
+              @else if (section1Form.get('receivedDate')?.hasError('required')) { Received date is required }
+            </mat-error>
+          </mat-form-field>
+
+          <!-- Received Time -->
+          <mat-form-field appearance="fill" class="filter-field filter-field--xs" subscriptSizing="dynamic">
+            <mat-label>Received Time</mat-label>
+            <input matInput formControlName="receivedTime" placeholder="HH:MM"
+              (input)="onTimeInput($event, 'receivedTime')"
+              (blur)="onTimeInput($event, 'receivedTime')" />
+            <mat-error>
+              @if (section1Form.get('receivedTime')?.hasError('pattern')) { Enter time as HH:MM (e.g. 14:30) }
+            </mat-error>
+          </mat-form-field>
+          </div>
+        </div>
+
+        <!-- Row 2: Shipment #/RFID, Shipment Date/Time, Option -->
+        <div class="filter-row">
+          <!-- Shipment #/RFID — alphanumeric + hyphen + underscore only -->
+          <mat-form-field appearance="fill" class="filter-field filter-field--lg" subscriptSizing="dynamic">
+            <mat-label>Shipment #/RFID</mat-label>
+            <input matInput formControlName="shipmentRfid" maxlength="50"
+              (input)="section1Form.get('shipmentRfid')?.markAsTouched(); section1Form.get('shipmentRfid')?.markAsDirty()"
+              (blur)="section1Form.get('shipmentRfid')?.markAsTouched()" />
+            <mat-error>
+              @if (section1Form.get('shipmentRfid')?.hasError('pattern')) { Only letters, numbers, hyphens, and underscores are allowed }
+            </mat-error>
+          </mat-form-field>
+
+          <!-- M-5: Shipment Date + Time grouped for AT -->
+          <div role="group" aria-label="Shipment date and time" class="date-time-group">
+          <!-- Shipment Date -->
+          <mat-form-field appearance="fill" class="filter-field filter-field--sm" subscriptSizing="dynamic">
+            <mat-label>Shipment Date</mat-label>
+            <input matInput
+              [matDatepicker]="shipmentDatePicker"
+              formControlName="shipmentDate"
+              placeholder="DD-MMM-YYYY"
+              [max]="maxShipmentDate"
+              (input)="onDateInput($event, 'shipmentDate')"
+              (blur)="onDateInput($event, 'shipmentDate')"
+              (dateChange)="section1Form.get('shipmentDate')?.markAsTouched()" />
+            <mat-datepicker-toggle matIconSuffix [for]="shipmentDatePicker" aria-label="Open shipment date calendar"></mat-datepicker-toggle>
+            <mat-datepicker #shipmentDatePicker></mat-datepicker>
+            <mat-error>
+              @if (section1Form.get('shipmentDate')?.hasError('invalidDate') || section1Form.get('shipmentDate')?.hasError('matDatepickerParse')) { Invalid date — use DD-MMM-YYYY format }
+              @else if (section1Form.get('shipmentDate')?.hasError('matDatepickerMax')) { Shipment date cannot be in the future }
+            </mat-error>
+          </mat-form-field>
+
+          <!-- Shipment Time -->
+          <mat-form-field appearance="fill" class="filter-field filter-field--xs" subscriptSizing="dynamic">
+            <mat-label>Shipment Time</mat-label>
+            <input matInput formControlName="shipmentTime" placeholder="HH:MM"
+              (input)="onTimeInput($event, 'shipmentTime')"
+              (blur)="onTimeInput($event, 'shipmentTime')" />
+            <mat-error>
+              @if (section1Form.get('shipmentTime')?.hasError('pattern')) { Enter time as HH:MM (e.g. 09:00) }
+            </mat-error>
+          </mat-form-field>
+          </div>
+
+          <!-- Option -->
+          <mat-form-field appearance="fill" class="filter-field filter-field--sm" subscriptSizing="dynamic">
+            <mat-label>Option</mat-label>
+            <mat-select
+              formControlName="optionCode"
+              (selectionChange)="onSection2OptionChange($event.value)">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="optionSearchControl"
+                  placeholderLabel="Search options..."
+                  noEntriesFoundLabel="No matching options">
+                </ngx-mat-select-search>
+              </mat-option>
+
+              @if (filteredOptionOptions().length === 0) {
+                <mat-option disabled>No data available</mat-option>
+              }
+
+              @for (option of filteredOptionOptions(); track option.code) {
+                <mat-option [value]="option.code">{{ option.code }} - {{ option.description }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <!-- Option Description (readonly) -->
+          <mat-form-field appearance="fill" floatLabel="always" class="filter-field filter-field--desc readonly-field" subscriptSizing="dynamic">
+            <mat-label>Option Description</mat-label>
+            <input matInput [value]="selectedOption()?.description || ''" placeholder="-" readonly aria-readonly="true" aria-label="Option Description" />
+          </mat-form-field>
+        </div>
+
+        <!-- Row 3: Batch ID, Collection Date, Sequence, Actions -->
+        <div class="filter-row filter-row--with-actions">
+          <!-- Batch ID -->
+          <mat-form-field appearance="fill" class="filter-field filter-field--md" subscriptSizing="dynamic">
+            <mat-label>Batch ID</mat-label>
+            <mat-select
+              formControlName="batchId"
+              (selectionChange)="onSection3BatchChange($event.value)">
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="batchIdSearchControl"
+                  placeholderLabel="Search batch IDs..."
+                  noEntriesFoundLabel="No matching batch IDs">
+                </ngx-mat-select-search>
+              </mat-option>
+
+              <!-- NEW option always available -->
+              <mat-option value="NEW">NEW</mat-option>
+
+              <!-- Existing batch IDs -->
+              @if (filteredBatchIdOptions().length === 0) {
+                <mat-option disabled>No existing batches</mat-option>
+              } @else {
+                @for (batchId of filteredBatchIdOptions(); track batchId) {
+                  <mat-option [value]="batchId">{{ batchId }}</mat-option>
+                }
+              }
+            </mat-select>
+            @if (section1Form.get('batchId')?.invalid && section1Form.get('batchId')?.touched) {
+              <mat-error>Batch ID is required</mat-error>
+            }
+          </mat-form-field>
+
+          <!-- Collection Date -->
+          <mat-form-field appearance="fill" class="filter-field filter-field--sm" subscriptSizing="dynamic">
+            <mat-label>Collection Date
+              @if (section1Form.get('batchId')?.value?.toUpperCase() === 'NEW') {
+                <span class="required-indicator" aria-hidden="true">*</span>
+                <span class="sr-only"> (required)</span>
+              }
+            </mat-label>
+            <input matInput
+              [matDatepicker]="collectionDatePicker"
+              formControlName="collectionDate"
+              placeholder="DD-MMM-YYYY"
+              [min]="minCollDate"
+              [max]="maxCollDate"
+              (input)="onDateInput($event, 'collectionDate')"
+              (blur)="onDateInput($event, 'collectionDate')"
+              (dateChange)="section1Form.get('collectionDate')?.markAsTouched()" />
+            <mat-datepicker-toggle matIconSuffix [for]="collectionDatePicker" aria-label="Open collection date calendar"></mat-datepicker-toggle>
+            <mat-datepicker #collectionDatePicker></mat-datepicker>
+            <mat-error>
+              @if (section1Form.get('collectionDate')?.hasError('invalidDate') || section1Form.get('collectionDate')?.hasError('matDatepickerParse')) { Invalid date — use DD-MMM-YYYY format }
+              @else if (section1Form.get('collectionDate')?.hasError('matDatepickerMin')) { Collection date cannot be before received date }
+              @else if (section1Form.get('collectionDate')?.hasError('matDatepickerMax')) { Collection date cannot be in the future }
+              @else if (section1Form.get('collectionDate')?.hasError('required')) { Collection date is required when batch ID is NEW }
+            </mat-error>
+          </mat-form-field>
+
+          <!-- Sequence (readonly) -->
+          <mat-form-field appearance="fill" floatLabel="always" class="filter-field filter-field--xs readonly-field" subscriptSizing="dynamic">
+            <mat-label>Sequence</mat-label>
+            <input matInput [value]="selectedBatch()?.sequence || ''" placeholder="-" readonly aria-label="Sequence number" />
+          </mat-form-field>
+
+          <!-- Action Buttons -->
+          <div class="filter-actions">
+            <button mat-stroked-button class="action-btn action-btn--primary" type="button" [disabled]="!canRetrieve()" (click)="onRetrieve()">
+              RETRIEVE
+            </button>
+            <button mat-stroked-button class="action-btn action-btn--secondary" (click)="onClearAll()" type="button" [disabled]="!canClearAll()">
+              CLEAR ALL
+            </button>
+          </div>
+        </div>
+
+      </form>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════════════════════
+         EMPTY STATE (Shown when RETRIEVE not clicked)
+         ══════════════════════════════════════════════════════════════════════════ -->
+    @if (!hasRetrieved()) {
+      <div class="empty-state">
+        <mat-icon class="empty-state-icon" aria-hidden="true">search</mat-icon>
+        <h2 class="empty-state-title">No Results to Display</h2>
+        <p class="empty-state-subtitle">Select Contract ID and Profile Set ID, then click RETRIEVE to view tubes.</p>
+      </div>
+    }
+
+    <!-- ══════════════════════════════════════════════════════════════════════════
+         SECTION 2: Tabs Panel with Table (Visible after RETRIEVE clicked)
+         ══════════════════════════════════════════════════════════════════════════ -->
+    @if (showSection3()) {
+      <div class="units-panel section-2">
+        <div class="tab-content">
+
+              <!-- Tube Barcode Input Fields (using unit-id-field component) -->
+              <div class="tube-fields-row"
+                   role="group"
+                   aria-label="Tube barcode entry"
+                   (keyup.enter)="onTubeEnterSubmit()">
+                <!-- Outside Red -->
+                <app-unit-id-field
+                  #outsideRedField
+                  [label]="'Outside Red'"
+                  [validateFfValue]="'N'"
+                  [required]="false"
+                  [requirePostValidation]="true"
+                  [skipDoubleEntry]="true"
+                  [showBarcodeIcon]="true"
+                  [hintValid]="''"
+                  [hintDefault]="'Scan barcode'"
+                  [disabled]="!isTubeFieldEnabled().outsideRed"
+                  (postValidate)="onTubePostValidate($event, 'outsideRed')"
+                  (validated)="onTubeValidated($event, 'outsideRed')"
+                  (cleared)="onTubeCleared('outsideRed')"
+                  (emptyTab)="onTubeFieldBlur('outsideRed')"
+                  class="tube-field"
+                />
+
+                <!-- Red -->
+                <app-unit-id-field
+                  #redField
+                  [label]="'Red'"
+                  [validateFfValue]="'N'"
+                  [required]="false"
+                  [requirePostValidation]="true"
+                  [skipDoubleEntry]="true"
+                  [showBarcodeIcon]="true"
+                  [hintValid]="''"
+                  [hintDefault]="'Scan barcode'"
+                  [disabled]="!isTubeFieldEnabled().red"
+                  (postValidate)="onTubePostValidate($event, 'red')"
+                  (validated)="onTubeValidated($event, 'red')"
+                  (cleared)="onTubeCleared('red')"
+                  (emptyTab)="onTubeFieldBlur('red')"
+                  class="tube-field"
+                />
+
+                <!-- OS Purple 1 -->
+                <app-unit-id-field
+                  #osPurple1Field
+                  [label]="'OS Purple 1'"
+                  [validateFfValue]="'N'"
+                  [required]="false"
+                  [requirePostValidation]="true"
+                  [skipDoubleEntry]="true"
+                  [showBarcodeIcon]="true"
+                  [hintValid]="''"
+                  [hintDefault]="'Scan barcode'"
+                  [disabled]="!isTubeFieldEnabled().osPurple1"
+                  (postValidate)="onTubePostValidate($event, 'osPurple1')"
+                  (validated)="onTubeValidated($event, 'osPurple1')"
+                  (cleared)="onTubeCleared('osPurple1')"
+                  (emptyTab)="onTubeFieldBlur('osPurple1')"
+                  class="tube-field"
+                />
+
+                <!-- Purple 1 -->
+                <app-unit-id-field
+                  #purple1Field
+                  [label]="'Purple 1'"
+                  [validateFfValue]="'N'"
+                  [required]="false"
+                  [requirePostValidation]="true"
+                  [skipDoubleEntry]="true"
+                  [showBarcodeIcon]="true"
+                  [hintValid]="''"
+                  [hintDefault]="'Scan barcode'"
+                  [disabled]="!isTubeFieldEnabled().purple1"
+                  (postValidate)="onTubePostValidate($event, 'purple1')"
+                  (validated)="onTubeValidated($event, 'purple1')"
+                  (cleared)="onTubeCleared('purple1')"
+                  (emptyTab)="onTubeFieldBlur('purple1')"
+                  class="tube-field"
+                />
+
+                <!-- OS Purple 2 -->
+                <app-unit-id-field
+                  #osPurple2Field
+                  [label]="'OS Purple 2'"
+                  [validateFfValue]="'N'"
+                  [required]="false"
+                  [requirePostValidation]="true"
+                  [skipDoubleEntry]="true"
+                  [showBarcodeIcon]="true"
+                  [hintValid]="''"
+                  [hintDefault]="'Scan barcode'"
+                  [disabled]="!isTubeFieldEnabled().osPurple2"
+                  (postValidate)="onTubePostValidate($event, 'osPurple2')"
+                  (validated)="onTubeValidated($event, 'osPurple2')"
+                  (cleared)="onTubeCleared('osPurple2')"
+                  (emptyTab)="onTubeFieldBlur('osPurple2')"
+                  class="tube-field"
+                />
+
+                <!-- Purple 2 -->
+                <app-unit-id-field
+                  #purple2Field
+                  [label]="'Purple 2'"
+                  [validateFfValue]="'N'"
+                  [required]="false"
+                  [requirePostValidation]="true"
+                  [skipDoubleEntry]="true"
+                  [showBarcodeIcon]="true"
+                  [hintValid]="''"
+                  [hintDefault]="'Scan barcode'"
+                  [disabled]="!isTubeFieldEnabled().purple2"
+                  (postValidate)="onTubePostValidate($event, 'purple2')"
+                  (validated)="onTubeValidated($event, 'purple2')"
+                  (cleared)="onTubeCleared('purple2')"
+                  (emptyTab)="onTubeFieldBlur('purple2')"
+                  class="tube-field"
+                />
+              </div>
+
+              <!-- Table WITH SEQUENCE column -->
+              <div class="table-wrapper">
+                <app-data-table
+                  [config]="unitTableConfig()"
+                  [data]="tableData()"
+                  (rowAction)="onTableRowAction($event)">
+                </app-data-table>
+
+                <!-- Action Footer Inside Table - BY UNITS -->
+                <div class="action-footer">
+                  <div class="action-footer__right">
+                    <button mat-stroked-button class="action-button action-button--clear" (click)="onClearAll()" type="button">
+                      CLEAR ALL
+                    </button>
+                    <button mat-stroked-button class="action-button action-button--secondary" (click)="onViewProfileTests()" type="button">
+                      VIEW PROFILE TESTS
+                    </button>
+                    <button mat-stroked-button class="action-button action-button--secondary" (click)="onViewUnitsInBatch()" type="button">
+                      VIEW UNITS IN BATCH
+                    </button>
+                    <button mat-stroked-button class="action-button action-button--secondary" (click)="onEnterNotes()" type="button">
+                      ENTER NOTES
+                    </button>
+                  </div>
+                </div>
+            </div>
+
+        </div>
+      </div>
+    }
+
+    <!-- ══════════════════════════════════════════════════════════════════════════
+         SIDE PANELS
+         ══════════════════════════════════════════════════════════════════════════ -->
+
+  <!-- Profile Tests Panel -->
+  @if (showProfileTestsPanel()) {
+    <div class="side-panel-backdrop" (click)="onCloseProfileTests()" aria-hidden="true"></div>
+    <div class="side-panel-container open"
+         role="dialog"
+         aria-modal="true"
+         aria-label="Profile Tests"
+         cdkTrapFocus
+         cdkTrapFocusAutoCapture
+         (keydown.escape)="onCloseProfileTests()">
+      <app-profile-tests
+        [contractId]="selectedContract()?.contractId ?? null"
+        [profileSetId]="selectedProfileSet()?.profileSetId ?? null"
+        (closePanel)="onCloseProfileTests()">
+      </app-profile-tests>
+    </div>
+  }
+
+  <!-- Units in Batch Panel -->
+  @if (showUnitsInBatchPanel()) {
+    <div class="side-panel-backdrop" (click)="onCloseUnitsInBatch()" aria-hidden="true"></div>
+    <div class="side-panel-container open"
+         role="dialog"
+         aria-modal="true"
+         aria-label="Units in Batch"
+         cdkTrapFocus
+         cdkTrapFocusAutoCapture
+         (keydown.escape)="onCloseUnitsInBatch()">
+      <app-units-in-batch
+        [batchId]="section1Form.get('batchId')?.value ?? null"
+        (closePanel)="onCloseUnitsInBatch()">
+      </app-units-in-batch>
+    </div>
+  }
+
+
+  </div> <!-- Close content-wrapper -->
+
+</div> <!-- Close tubes-check-in-layout -->

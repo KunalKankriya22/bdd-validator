@@ -1,0 +1,27 @@
+--------------------------------------------------------
+--  File created - Tuesday-December-11-2018   
+--------------------------------------------------------
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\VALID_PARAMETERS_BU.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\VALID_FF_VALUES_BI.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\VALID_FF_VALUES_BU.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\SYSTEM_USERS_BEFORE_DELETE.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\EMF_TARGET_PROCESS_BI.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\INST_BEFORE_INSERT_UPDATE.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\SYSTEM_USERS_BEFORE_UPDATE.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\VALID_PARAMETERS_BI.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\SYSTEM_USERS_BEFORE_INSERT.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\ENHANCED_MANUF_CONFIG_BU.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\VALID_PARAMETERS_BD.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\CHAPTERS_BI.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\EMF_PARM_DEF_BI.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\VALID_EMF_PROC_DEF_BI.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\LT_DOCUMENT_LIBRARY_BI.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\EMF_SOURCE_PROCESS_BI.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\VALID_FF_VALUES_BD.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\RPT_PARM_BI.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\CHAPTERS_BD.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\CHAPTERS_BU.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\INSTITUTIONS_BEFORE_DELETE.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\EMF_PROCESS_MAPPING_BI.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\VALID_USER_CHAPTERS_BI.sql
+@C:\Users\seshus\Desktop\LT2018\LT2018R2\triggers\util\UTILENHANCED_MANUF_CONFIG_BD.sql

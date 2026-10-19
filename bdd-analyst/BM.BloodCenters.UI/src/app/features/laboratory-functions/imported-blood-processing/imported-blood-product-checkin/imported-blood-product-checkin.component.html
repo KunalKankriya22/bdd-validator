@@ -1,0 +1,509 @@
+<div class="main-content">
+  <app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+  <div class="content-area">
+
+    @if (loading()) {
+      <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+        <mat-spinner diameter="40" aria-label="Loading"></mat-spinner>
+        <span class="sr-only">Loading, please wait...</span>
+      </div>
+    }
+
+    @if (!loading()) {
+
+      <!-- ── Batch Card ──────────────────────────────────────────────── -->
+      <div class="batch-card">
+        <div class="batch-section" [formGroup]="batchForm">
+
+          <!-- Row 1: Contract ID | Description | Batch | CLEAR ALL -->
+          <div class="batch-header-row">
+            <mat-form-field appearance="fill">
+              <mat-label>Contract ID</mat-label>
+              <mat-select [id]="elementId('contractId')" formControlName="contractId"
+                [attr.aria-invalid]="f['contractId'].invalid && (f['contractId'].touched || submitted())"
+                aria-required="true">
+                <mat-option disabled>
+                  <ngx-mat-select-search [formControl]="contractSearchCtrl"
+                    placeholderLabel="Search contract..." noEntriesFoundLabel="No matching contracts">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (contract of filteredContracts(); track contract.contractId) {
+                  <mat-option [value]="contract.contractId">{{ contract.contractId }}</mat-option>
+                }
+              </mat-select>
+              @if (f['contractId'].invalid && (f['contractId'].touched || submitted())) {
+                <mat-error>Contract ID is required</mat-error>
+              }
+            </mat-form-field>
+
+            <div class="field-display">
+              <div class="field-display__label">Description</div>
+              <div class="field-display__value">{{ contractDescription() || '-' }}</div>
+            </div>
+
+            <mat-form-field appearance="fill">
+              <mat-label>Batch</mat-label>
+              <mat-select [(ngModel)]="selectedBatchId" [ngModelOptions]="{standalone: true}"
+                (ngModelChange)="onBatchSelect($event)"
+                [disabled]="isNewBatchFlow()">
+                <mat-option disabled>
+                  <ngx-mat-select-search [formControl]="batchSearchCtrl"
+                    placeholderLabel="Search batch..." noEntriesFoundLabel="No matching batches">
+                  </ngx-mat-select-search>
+                </mat-option>
+                <mat-option value="__NEW__">+ Create New Batch</mat-option>
+                @for (batch of filteredBatches(); track batch.batchId) {
+                  <mat-option [value]="batch.batchId">{{ batch.batchId }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+
+            <div class="button-wrapper">
+              @if (isBatchCreated() && !isNewBatchFlow() && hasPendingChanges()) {
+                <button type="button" mat-raised-button color="primary" class="update-batch-btn"
+                  [disabled]="batchForm.invalid || batchLoading() || (cartonsChanged() && !allCartonsEntered())"
+                  (click)="onUpdateBatch()">
+                  @if (batchLoading()) { Saving... } @else { UPDATE BATCH }
+                </button>
+              }
+              <button type="button" mat-button class="clear-btn" (click)="onClearBatch()">
+                CLEAR ALL
+              </button>
+            </div>
+          </div>
+
+          <!-- Batch shipment details + Carton panel: visible when batch selected OR new batch flow -->
+          @if (isBatchCreated() || isNewBatchFlow()) {
+            <div class="batch-content-row">
+              <div class="batch-fields-panel">
+
+                <!-- Shipment Bill# | Shipment Date | Received Date | Product Type -->
+                <div class="form-row-4">
+                  <mat-form-field appearance="fill">
+                    <mat-label>Shipment Bill Number#</mat-label>
+                    <input matInput [id]="elementId('airwayBillNo')" formControlName="airwayBillNo" maxlength="14"
+                      aria-required="true"
+                      [attr.aria-invalid]="f['airwayBillNo'].invalid && (f['airwayBillNo'].touched || submitted())">
+                    <mat-hint>Characters remaining : {{ (14 - (f['airwayBillNo'].value?.length || 0)).toString().padStart(2,'0') }}/14</mat-hint>
+                    @if (f['airwayBillNo'].invalid && (f['airwayBillNo'].touched || submitted())) {
+                      <mat-error>Shipment Bill Number is required</mat-error>
+                    }
+                  </mat-form-field>
+
+                  <mat-form-field appearance="fill">
+                    <mat-label>Shipment Date</mat-label>
+                    <input matInput [matDatepicker]="shippedPicker" [id]="elementId('shippedDate')"
+                      formControlName="shippedDate" placeholder="DD-MMM-YYYY"
+                      aria-required="true"
+                      [attr.aria-invalid]="f['shippedDate'].invalid && (f['shippedDate'].touched || submitted())">
+                    <mat-datepicker-toggle matIconSuffix [for]="shippedPicker"></mat-datepicker-toggle>
+                    <mat-datepicker #shippedPicker></mat-datepicker>
+                    @if (f['shippedDate'].invalid && (f['shippedDate'].touched || submitted())) {
+                      <mat-error>Shipment Date is required</mat-error>
+                    }
+                  </mat-form-field>
+
+                  <mat-form-field appearance="fill">
+                    <mat-label>Received Date</mat-label>
+                    <input matInput [matDatepicker]="receivedPicker" [id]="elementId('receivedDate')"
+                      formControlName="receivedDate" [min]="f['shippedDate'].value" placeholder="DD-MMM-YYYY"
+                      aria-required="true"
+                      [attr.aria-invalid]="f['receivedDate'].invalid && (f['receivedDate'].touched || submitted())">
+                    <mat-datepicker-toggle matIconSuffix [for]="receivedPicker"></mat-datepicker-toggle>
+                    <mat-datepicker #receivedPicker></mat-datepicker>
+                    @if (f['receivedDate'].invalid && (f['receivedDate'].touched || submitted())) {
+                      <mat-error>Received Date is required</mat-error>
+                    }
+                    @if (batchForm.hasError('receivedBeforeShipped')) {
+                      <mat-error>Must be on or after Shipment Date</mat-error>
+                    }
+                  </mat-form-field>
+
+                  <mat-form-field appearance="fill">
+                    <mat-label>Product Type</mat-label>
+                    <mat-select [id]="elementId('productType')" formControlName="productType" aria-required="true">
+                      <mat-option disabled>
+                        <ngx-mat-select-search [formControl]="productTypeSearchCtrl"
+                          placeholderLabel="Search type..." noEntriesFoundLabel="No matching types">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (pt of filteredProductTypes(); track $index) {
+                        <mat-option [value]="pt.productType">{{ pt.productType }}</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                </div>
+
+                <!-- Min Temp | Max Temp | Cartons | Unit Count | License Flag -->
+                <div class="form-row-5">
+                  <mat-form-field appearance="fill">
+                    <mat-label>Minimum Temperature</mat-label>
+                    <input matInput type="number" [id]="elementId('minTemp')" formControlName="minTemp"
+                      aria-required="true"
+                      [attr.aria-invalid]="f['minTemp'].invalid && (f['minTemp'].touched || submitted())">
+                    @if (f['minTemp'].invalid && (f['minTemp'].touched || submitted())) {
+                      <mat-error>Required</mat-error>
+                    }
+                  </mat-form-field>
+
+                  <mat-form-field appearance="fill">
+                    <mat-label>Maximum Temperature</mat-label>
+                    <input matInput type="number" [id]="elementId('maxTemp')" formControlName="maxTemp"
+                      aria-required="true"
+                      [attr.aria-invalid]="f['maxTemp'].invalid && (f['maxTemp'].touched || submitted())">
+                    @if (f['maxTemp'].invalid && (f['maxTemp'].touched || submitted())) {
+                      <mat-error>Required</mat-error>
+                    }
+                    @if (batchForm.hasError('maxTempLessThanMin')) {
+                      <mat-error>Must be ≥ Minimum Temperature</mat-error>
+                    }
+                  </mat-form-field>
+
+                  <mat-form-field appearance="fill">
+                    <mat-label>Cartons</mat-label>
+                    <input matInput type="number" [id]="elementId('cartonCount')" formControlName="cartonCount"
+                      inputmode="numeric" aria-required="true"
+                      [attr.aria-invalid]="f['cartonCount'].invalid && (f['cartonCount'].touched || submitted())">
+                    @if (f['cartonCount'].invalid && (f['cartonCount'].touched || submitted())) {
+                      <mat-error>Min 1</mat-error>
+                    }
+                  </mat-form-field>
+
+                  <mat-form-field appearance="fill">
+                    <mat-label>Unit Count</mat-label>
+                    <input matInput type="number" [id]="elementId('numberOfUnits')" formControlName="numberOfUnits"
+                      inputmode="numeric" aria-required="true"
+                      [attr.aria-invalid]="f['numberOfUnits'].invalid && (f['numberOfUnits'].touched || submitted())">
+                    @if (f['numberOfUnits'].invalid && (f['numberOfUnits'].touched || submitted())) {
+                      <mat-error>Min 1</mat-error>
+                    }
+                  </mat-form-field>
+
+                  <mat-form-field appearance="fill">
+                    <mat-label>License Flag</mat-label>
+                    <mat-select [id]="elementId('licenseFlag')" formControlName="licenseFlag" aria-required="true"
+                      (selectionChange)="onLicenseFlagChange()">
+                      <mat-option value="Y">Yes</mat-option>
+                      <mat-option value="N">No</mat-option>
+                    </mat-select>
+                  </mat-form-field>
+
+                  @if (isNewBatchFlow()) {
+                    <button type="button" mat-raised-button color="primary" class="save-batch-btn"
+                      [disabled]="batchForm.invalid || batchLoading() || !allCartonsEntered()"
+                      (click)="onCreateBatch()">
+                      @if (batchLoading()) { Saving... } @else { SAVE BATCH }
+                    </button>
+                  }
+                </div>
+              </div>
+
+              <!-- Carton table (right panel) -->
+              <div class="carton-panel">
+                <table class="carton-table" aria-label="Cartons">
+                  <thead>
+                    <tr>
+                      <th scope="col">Sequence Number</th>
+                      <th scope="col">Carton ID <span class="required-indicator">*</span></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (carton of cartons(); track carton.sequence; let i = $index) {
+                      <tr>
+                        <td>{{ carton.sequence }}</td>
+                        <td>
+                          <mat-form-field appearance="fill" class="carton-id-field" subscriptSizing="dynamic">
+                            <input matInput type="number" [value]="carton.cartonNo"
+                              placeholder="Enter carton ID" required
+                              (input)="onCartonIdChange(i, $any($event.target).value)">
+                          </mat-form-field>
+                        </td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          }
+        </div>
+      </div>
+
+      <!-- ── Component Section ──────────────────────────────────────── -->
+      <div class="results-card">
+
+        <!-- Component entry row: visible when batch is selected and all cartons entered — FE-10 -->
+        @if (isBatchCreated() && allCartonsEntered()) {
+          <div class="entry-section">
+            <form [formGroup]="componentForm" (ngSubmit)="onCheckInComponent()">
+              <div class="filter-row--entry">
+
+                <!-- External Unit ID -->
+                <app-unit-id-field
+                  #externalUnitIdField
+                  label="External Unit ID"
+                  placeholder="Scan or type"
+                  [required]="true"
+                  [validateFfValue]="'N'"
+                  [skipDoubleEntry]="true"
+                  [showBarcodeIcon]="true"
+                  [scanPatterns]="SCAN_PATTERNS.UNIT_ID"
+                  (postValidate)="onExternalUnitIdPostValidate($event)"
+                  (validated)="onExternalUnitIdValidated($event)"
+                  (cleared)="onExternalUnitIdCleared()">
+                </app-unit-id-field>
+
+                <!-- Internal Unit ID -->
+                <app-unit-id-field
+                  #internalUnitIdField
+                  label="Internal Unit ID"
+                  placeholder="Scan or type"
+                  [required]="true"
+                  [validateFfValue]="'N'"
+                  [skipDoubleEntry]="true"
+                  [showBarcodeIcon]="true"
+                  [scanPatterns]="SCAN_PATTERNS.UNIT_ID"
+                  [disabled]="isIsbt()"
+                  (postValidate)="onInternalUnitIdPostValidate($event)"
+                  (validated)="onInternalUnitIdValidated($event)"
+                  (cleared)="onInternalUnitIdCleared()">
+                </app-unit-id-field>
+
+                <!-- Product Code — FE-2: scan-select-field -->
+                <app-scan-select-field
+                  #productCodeField
+                  label="Product Code"
+                  [required]="true"
+                  [showBarcodeIcon]="true"
+                  [showDropdown]="codeScheme() !== 'I'"
+                  [disabled]="!unitIdsValidated()"
+                  [scanPatterns]="SCAN_PATTERNS.PRODUCT"
+                  [options]="productCodeLovOptions()"
+                  [parseFn]="parseProductCode"
+                  (valueChanged)="onProductCodeChanged($event)"
+                  (cleared)="onProductCodeCleared()">
+                </app-scan-select-field>
+
+                <!-- ABO — always visible, user must scan/select blood type for every imported unit -->
+                <app-scan-select-field
+                  #aboField
+                  label="ABO"
+                  placeholder="Scan or select ABO"
+                  [required]="true"
+                  [showBarcodeIcon]="true"
+                  [uppercase]="false"
+                  [disabled]="!productCodeValidated()"
+                  [scanPatterns]="SCAN_PATTERNS.ABO"
+                  [options]="aboLovOptions()"
+                  [parseFn]="parseAbo"
+                  (valueChanged)="onAboChanged($event)"
+                  (cleared)="onAboCleared()">
+                </app-scan-select-field>
+
+                <!-- Label (readonly) -->
+                <div class="field-display">
+                  <div class="field-display__label">Label</div>
+                  <div class="field-display__value">{{ cf['productLabel'].value || '-' }}</div>
+                </div>
+
+                <!-- Expiration Date — plain text input with scan support (abo-labeling-isbt pattern) -->
+                <!-- Disabled/enabled via effect() on FormControl (reactive forms ignore [attr.disabled]) -->
+                <mat-form-field appearance="fill">
+                  <mat-label>Expiration Date</mat-label>
+                  <input #expiryInput matInput
+                    formControlName="expiryDate"
+                    placeholder="DD-MMM-YYYY"
+                    autocomplete="off"
+                    aria-label="Scan or enter expiration date"
+                    (blur)="onScanExpiryBlur()"
+                    (input)="onAutoScan($event, SCAN_PATTERNS.EXPIRY)">
+                  @if (fieldProcessing['expiryDate']) {
+                    <mat-hint class="field-validating">Validating...</mat-hint>
+                  }
+                  <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true"
+                    class="scan-icon" [class.scan-icon--disabled]="!aboValidated()">
+                </mat-form-field>
+
+                <!-- Attributes — post-commit focus management (FMB: S_ATTRIB_FLAG) -->
+                <mat-form-field appearance="fill">
+                  <mat-label>Attributes</mat-label>
+                  <mat-select #hasAttributesSelect formControlName="hasAttributes" [id]="elementId('hasAttributes')"
+                    (selectionChange)="onAttributesFlagChange()">
+                    <mat-option value="">-</mat-option>
+                    <mat-option value="Y">Yes</mat-option>
+                  </mat-select>
+                </mat-form-field>
+
+                <div class="button-wrapper">
+                  <button type="button" mat-button class="clear-btn" (click)="onClearComponent()">
+                    CLEAR ALL
+                  </button>
+                </div>
+
+              </div>
+            </form>
+          </div>
+        }
+
+        <!-- Component table or empty state -->
+        @if (components().length > 0) {
+          <div class="table-wrapper">
+            <table class="data-table" aria-label="Checked-in components">
+              <thead>
+                <tr>
+                  <th scope="col">External Unit ID</th>
+                  <th scope="col">Internal Unit ID</th>
+                  <th scope="col">Product Code</th>
+                  <th scope="col">ABO</th>
+                  <th scope="col">Label</th>
+                  <th scope="col">Expiration Date</th>
+                  <th scope="col">Attributes</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (c of components(); track c.internalUnitId) {
+                  <tr [class.selected-row]="selectedComponentForStatus() === c.internalUnitId"
+                    (click)="onSelectComponentForStatus(c)">
+                    <td>{{ c.externalUnitId || '-' }}</td>
+                    <td>{{ c.internalUnitId }}</td>
+                    <td>{{ c.productCode }}</td>
+                    <td>{{ c.abo || '-' }}</td>
+                    <td>{{ c.label || '-' }}</td>
+                    <td>{{ c.expirationDate ? (c.expirationDate | date:'dd-MMM-yyyy HH:mm') : '-' }}</td>
+                    <td>{{ c.attributes || '-' }}</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+
+          <div class="pagination-footer">
+            <mat-paginator
+              [length]="componentsTotal()"
+              [pageSize]="componentsPageSize()"
+              [pageIndex]="componentsPageIndex()"
+              [pageSizeOptions]="[10, 25, 50, 100]"
+              [showFirstLastButtons]="true"
+              (page)="onPageChange($event)"
+              aria-label="Components per page">
+            </mat-paginator>
+          </div>
+        } @else {
+          <div class="empty-state">
+            <div class="empty-state__icon-wrapper">
+              <mat-icon aria-hidden="true">search</mat-icon>
+            </div>
+            @if (!isBatchCreated()) {
+              <p class="empty-state__title">No Batch Selected</p>
+              <p class="empty-state__subtitle">Select a contract and batch to begin.</p>
+            } @else if (!allCartonsEntered()) {
+              <p class="empty-state__title">Cartons Required</p>
+              <p class="empty-state__subtitle">Fill all carton IDs to enable component scanning.</p>
+            } @else {
+              <p class="empty-state__title">No Results to Display</p>
+              <p class="empty-state__subtitle">Scan or enter a Unit ID to begin.</p>
+            }
+          </div>
+        }
+
+        <!-- ── Attribute Section — always visible when batch exists, disabled when no component selected -->
+        @if (isBatchCreated()) {
+          <div class="attribute-section" [class.attribute-section--disabled]="!attributeSectionActive()">
+            <form [formGroup]="attributeForm">
+              <div class="attribute-entry-row">
+
+                <!-- Attribute Group -->
+                <mat-form-field appearance="fill">
+                  <mat-label>Attribute Group</mat-label>
+                  <mat-select formControlName="attribGroup"
+                    [disabled]="!attributeSectionActive()">
+                    <mat-option disabled>
+                      <ngx-mat-select-search [formControl]="attrGroupSearchCtrl"
+                        placeholderLabel="Search group..." noEntriesFoundLabel="No matching groups">
+                      </ngx-mat-select-search>
+                    </mat-option>
+                    @for (opt of filteredAttrGroups(); track opt.value) {
+                      <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                    }
+                  </mat-select>
+                </mat-form-field>
+
+                <!-- Group Description (readonly) -->
+                <div class="field-display">
+                  <div class="field-display__label">Description</div>
+                  <div class="field-display__value">{{ attributeGroupDescription || '-' }}</div>
+                </div>
+
+                <!-- Attribute Code — disabled until group selected AND section active -->
+                <mat-form-field appearance="fill">
+                  <mat-label>Attribute Code</mat-label>
+                  <mat-select formControlName="attribCode"
+                    [disabled]="!attributeSectionActive() || attrCodeDisabled()"
+                    (selectionChange)="attributeForm.valid && onAddAttribute()">
+                    <mat-option disabled>
+                      <ngx-mat-select-search [formControl]="attrCodeSearchCtrl"
+                        placeholderLabel="Search code..." noEntriesFoundLabel="No matching codes">
+                      </ngx-mat-select-search>
+                    </mat-option>
+                    @for (opt of filteredAttrCodes(); track opt.value) {
+                      <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+                    }
+                  </mat-select>
+                </mat-form-field>
+
+                <!-- Code Description (readonly) -->
+                <div class="field-display">
+                  <div class="field-display__label">Description</div>
+                  <div class="field-display__value">{{ attributeCodeDescription || '-' }}</div>
+                </div>
+
+                <div class="button-wrapper">
+                  <button type="button" mat-button class="clear-btn"
+                    [disabled]="!attributeSectionActive()"
+                    (click)="attributeForm.reset()">
+                    CLEAR ALL
+                  </button>
+                </div>
+
+              </div>
+            </form>
+
+            <!-- Attribute table -->
+            <div class="table-wrapper attr-table-wrapper">
+              <table class="data-table" aria-label="Component attributes">
+                <thead>
+                  <tr>
+                    <th scope="col">Attribute Group</th>
+                    <th scope="col">Description</th>
+                    <th scope="col">Attribute Code</th>
+                    <th scope="col">Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (attr of selectedComponentAttributes(); track attr.attribCode) {
+                    <tr>
+                      <td>{{ attr.attribGroup }}</td>
+                      <td>{{ attr.attributeGroupDesc }}</td>
+                      <td>{{ attr.attribCode }}</td>
+                      <td>{{ attr.attributeCodeDesc }}</td>
+                    </tr>
+                  }
+                  @if (selectedComponentAttributes().length === 0) {
+                    <tr class="empty-row">
+                      <td colspan="4">No attributes added.</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
+        }
+
+      </div>
+
+    }
+
+  </div><!-- /content-area -->
+</div><!-- /main-content -->
+
+<span class="sr-only" aria-live="polite" aria-atomic="true"></span>

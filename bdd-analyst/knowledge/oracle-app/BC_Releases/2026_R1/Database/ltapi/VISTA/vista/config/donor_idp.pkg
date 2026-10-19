@@ -1,0 +1,312 @@
+CREATE OR REPLACE PACKAGE donor_idp IS
+
+   -- Ver: 01   --- Original after migrating to 2018
+   -- Ver: 02   -- MLT 3797
+
+   FUNCTION latest_test_result (p_trans_id VARCHAR2,p_donor_id VARCHAR2, p_test VARCHAR2
+                                , p_chapter_id VARCHAR2 DEFAULT 'WAD')
+     RETURN VARCHAR2;
+   --------------------------------------------------------------------------
+   --  Returns the latest test results for a given Donor.
+   --  p_test values: PLT, HCT, CMV, HLA
+   --------------------------------------------------------------------------
+   FUNCTION physical_findings (p_txn_id VARCHAR2, p_code VARCHAR2
+                               , p_chap VARCHAR2 DEFAULT 'WAD')
+     RETURN VARCHAR2;
+   --------------------------------------------------------------------------
+   --  Returns the physical finding for the given transaction and physical
+   --  code.
+   --------------------------------------------------------------------------
+
+   FUNCTION donor_elig_prod (p_trans_id VARCHAR2,
+                              p_donor_id VARCHAR2
+                             , p_product VARCHAR2
+                             , p_donation_type VARCHAR2 DEFAULT 'AL'
+                             , p_coll_date DATE DEFAULT null)
+     RETURN VARCHAR2;
+   --------------------------------------------------------------------------
+   -- Returns number of units of the product group that the donor is eligible
+   -- to donate.  Checks all procedure codes for a given product, based on
+   -- the content maintained in idp_conv_ref_values
+   --------------------------------------------------------------------------
+   Procedure update_vis_eligibility(p_mode in VARCHAR2,
+                                    p_transaction_id in VARCHAR2);
+
+   --------------------------------
+   --Insert or update the VIS_ELIGIBILITYT Table
+
+
+END donor_idp;
+/
+
+
+CREATE OR REPLACE PACKAGE BODY donor_idp IS
+
+   FUNCTION latest_test_result (p_trans_id VARCHAR2,p_donor_id VARCHAR2,
+                                p_test VARCHAR2,
+				p_chapter_id VARCHAR2 DEFAULT 'WAD' )
+   --------------------------------------------------------------------------
+   --  Returns the latest test results for a given Donor.
+   --  p_test values: PLT, HCT, CMV, HLA
+   --------------------------------------------------------------------------
+     RETURN VARCHAR2
+   IS
+      v_test_date   DATE;
+      v_result      VARCHAR2(20);
+	  v_trans_id    VARCHAR2(10);
+   BEGIN
+      IF p_test = 'PLT' THEN
+        /* SELECT MAX(coll_date)
+           INTO v_test_date
+           FROM donations
+          WHERE donor_id = p_donor_id
+		    AND chapter_id = p_chapter_id
+            AND (plt_pre_count IS NOT NULL OR plt_post_count IS NOT NULL);
+         IF v_test_date IS NOT NULL THEN
+            SELECT TO_CHAR(NVL(MIN(plt_post_count), MIN(plt_pre_count)))
+              INTO v_result
+              FROM ops$donsys.donations
+             WHERE donor_id = p_donor_id
+               AND (plt_pre_count IS NOT NULL OR plt_post_count IS NOT NULL)
+               AND coll_date = v_test_date;
+         ELSE
+            v_result := null;
+         END IF;
+		 */ 
+		   Begin
+		      SELECT nvl(physical_value_repeat,physical_value) 
+		      INTO v_result from physical_findings
+		      WHERE transaction_id=p_trans_id and physical_code IN
+		       (SELECT parameter_value from valid_parameters where
+			       parameter_code='VPLATE' and sysdate between eff_date and
+				   nvl(term_date,sysdate+1));
+     	  Exception when others then 
+		     v_result:=null;
+		  End;		  	 			  
+				  		 
+      ELSIF p_test = 'HCT' THEN
+         SELECT nvl(physical_value_repeat,physical_value) 
+           INTO v_result
+           FROM physical_findings
+          WHERE transaction_id IN
+                (SELECT transaction_id FROM donations
+                  WHERE donor_id = p_donor_id
+                    AND chapter_id = p_chapter_id)
+            AND physical_code = 'HCT'
+            AND chapter_id = p_chapter_id
+            AND insert_date IN
+                (SELECT MAX(insert_date)
+                   FROM physical_findings
+                  WHERE transaction_id IN
+                        (SELECT transaction_id FROM donations
+                          WHERE donor_id = p_donor_id
+                            AND chapter_id = p_chapter_id)
+                    AND physical_code = 'HCT'
+                    AND physical_value IS NOT NULL)
+            AND physical_value IS NOT NULL;
+      ELSIF p_test = 'CMV' THEN
+         SELECT result_code
+           INTO v_result
+           FROM unit_test_results
+          WHERE unit_id IN
+                (SELECT unit_id FROM donations
+                  WHERE donor_id = p_donor_id
+                    AND chapter_id = p_chapter_id)
+            AND test_id = 'CMV'
+            AND insert_date =
+                (SELECT MAX(insert_date)
+                   FROM unit_test_results
+                  WHERE unit_id IN
+                        (SELECT unit_id FROM donations
+                          WHERE donor_id = p_donor_id
+                            AND chapter_id = p_chapter_id)
+                    AND test_id = 'CMV'
+                    AND result_code IS NOT NULL)
+            AND result_code IS NOT NULL;
+      ELSE
+         v_result := null;
+      END IF;
+      RETURN v_result;
+   END latest_test_result;
+
+   FUNCTION physical_findings (p_txn_id VARCHAR2, p_code VARCHAR2
+                               , p_chap VARCHAR2 DEFAULT 'WAD')
+     RETURN VARCHAR2
+   IS
+      v_result   VARCHAR2(10);
+   BEGIN
+      SELECT nvl(physical_value_repeat,physical_value)
+        INTO v_result
+        FROM physical_findings
+       WHERE transaction_id = p_txn_id
+         AND physical_code = p_code
+         AND chapter_id = p_chap;
+      RETURN v_result;
+   EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+        RETURN null;
+      WHEN OTHERS THEN
+        RETURN 'ERROR';
+   END physical_findings;
+
+   FUNCTION donor_elig_prod (p_trans_id VARCHAR2
+                             ,p_donor_id VARCHAR2
+                             , p_product VARCHAR2
+                             , p_donation_type VARCHAR2 DEFAULT 'AL'
+                             , p_coll_date DATE DEFAULT null)
+     RETURN VARCHAR2
+   IS
+      --------------------------------------------------------------------
+      --
+      --------------------------------------------------------------------
+      v_is_elig     VARCHAR2(20);
+      v_result      VARCHAR2(20);
+      v_deff_date   DATE;
+      v_inter_type  VARCHAR2(20);
+      v_reason      VARCHAR2(80);
+      v_local_date  DATE;
+      v_chapter     varchar2(4);
+      nCount        NUMBER:=0;
+      v_donor_weight NUMBER;
+
+      CURSOR c_prod IS
+         --------------------------------------------------------
+		 -- All procedure codes MUST be defined both LifeTrak
+		 -- as well as Vista to have elegibility checked.
+		 -- If procedure code does not exist in LifeTrak,
+		 -- Donor is ALWAYS eligible for the procedure code
+		 --------------------------------------------------------
+         SELECT i.target_value, i.conv_proc_call
+           FROM idp_conv_ref_values i, valid_proc_codes p
+          WHERE i.source_code_type = 'PROD'
+            AND i.target_code_type = 'PROC'
+            AND i.source_value = p_product
+            AND i.target_value = p.procedure_code
+            AND i.term_date is null
+            AND p.term_date is null
+          ORDER BY NVL(conv_proc_call, '0') DESC;
+
+   BEGIN
+      v_result:=0;
+
+
+      -- Get chapter ID
+      begin
+       select chapter_id into v_chapter from donations where
+       transaction_id=p_trans_id and rownum=1;
+      exception when others then 
+       v_chapter:='WAD';
+      end;
+      
+  -- Get donor weight
+      begin
+       select donor_weight into v_donor_weight from donors where
+       donor_id=p_donor_id and rownum=1;
+      exception when others then 
+       v_donor_weight:=null;
+      end;
+
+
+
+      v_local_date:=Lifetrack_timezone_convert.get_local_time(v_chapter,sysdate);
+
+      FOR rp IN c_prod LOOP
+         don_core.check_eligibility(p_donor_id, rp.target_value, p_donation_type, v_local_date,
+                                    v_donor_weight, v_is_elig, v_deff_date, v_inter_type, v_reason);
+
+		      --FInd if the transaction is already in the system
+			   select nvl(count(*),0) into nCount from vis_eligibility_det where
+			   transaction_id=p_trans_id and donor_id=p_donor_id and group_id=p_product
+			   and procedure_code=rp.target_value;
+
+			   If nCount = 0 then
+			      INSERT into VIS_ELIGIBILITY_DET (
+                                          TRANSACTION_ID,
+                                          DONOR_ID,
+                                          GROUP_ID,
+                                          PROCEDURE_CODE,
+                                          STATUS,
+                                          LAST_MODIFIED_DATE,
+                                          LAST_MODIFIED_USER
+							  )
+					         VALUES
+					         (p_trans_id,
+					         p_donor_id,
+						p_product,
+						rp.target_value,
+						v_is_elig,
+						sysdate,
+						user);
+
+			   Else
+			        UPDATE VIS_ELIGIBILITY_DET set status=v_is_elig,last_modified_date=sysdate,
+					        last_modified_user=user where transaction_id=p_trans_id and
+						  donor_id=p_donor_id
+						 and group_id=p_product and
+						 procedure_code=rp.target_value;
+			   End If;
+
+              If v_is_elig='Y' then
+                   If rp.conv_proc_call > v_result then
+	     	 	      v_result:=rp.conv_proc_call;
+     		       End If;
+	          End If;
+      END LOOP;
+      IF v_result IS NULL THEN
+	     v_result := 0;
+	  END IF;
+      RETURN v_result;
+   END donor_elig_prod;
+
+   Procedure update_vis_eligibility(p_mode in varchar2,
+               p_transaction_id in VARCHAR2) IS
+
+     plt_elig  varchar2(1);
+     plasma_elig varchar2(1);
+     rbc_elig varchar2(1);
+     wb_elig   varchar2(1);
+	 v_did     varchar2(10);
+	 v_dtype   varchar2(10);
+BEGIN
+   SELECT donor_id, donation_type
+     INTO v_did, v_dtype
+     FROM donations
+    WHERE transaction_id = p_transaction_id;
+
+   plt_elig    := donor_elig_prod(p_transaction_id,v_did, 'PLT', v_dtype);
+   plasma_elig := donor_elig_prod(p_transaction_id,v_did, 'PLASMA', v_dtype);
+   rbc_elig    := donor_elig_prod(p_transaction_id,v_did, 'RBC', v_dtype);
+   wb_elig     := donor_elig_prod(p_transaction_id,v_did, 'WB', v_dtype);
+
+  If p_mode='I' then
+       INSERT INTO VIS_ELIGIBILITY
+                 (TRANSACTION_ID,
+                  PLATELET_ELIGIBLE,
+                  PLASMA_ELIGIBLE,
+                  RBC_ELIGIBLE,
+                  WHOLE_BLOOD_ELIGIBLE,
+                  LAST_MODIFIED_DATE)
+       VALUES
+               (p_transaction_id,
+	        plt_elig,
+                plasma_elig,
+                rbc_elig,
+                wb_elig,
+                 sysdate);
+    Else
+	    UPDATE VIS_ELIGIBILITY set PLATELET_ELIGIBLE=plt_elig,
+                                   PLASMA_ELIGIBLE=plasma_elig,
+				   RBC_ELIGIBLE=rbc_elig,
+				   WHOLE_BLOOD_ELIGIBLE=wb_elig,
+				   LAST_MODIFIED_DATE=sysdate
+             where Transaction_id=p_transaction_id;
+    End If;
+
+   End update_vis_eligibility;
+
+END donor_idp ;
+/
+
+Create or replace Public Synonym donor_idp for donor_idp;
+
+Grant execute on donor_idp to public;

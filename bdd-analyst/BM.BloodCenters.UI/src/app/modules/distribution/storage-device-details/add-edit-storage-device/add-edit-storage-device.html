@@ -1,0 +1,282 @@
+<div class="side-panel-wrapper">
+
+  <!-- Header -->
+  <div class="side-panel-header">
+    <div class="title-section">
+      <h2 class="panel-title" tabindex="-1">{{ panelTitle }}</h2>
+      @if (lastModified) {
+        <p class="last-modified">{{ lastModified }}</p>
+      }
+    </div>
+
+    <button type="button" mat-icon-button class="close-button" (click)="onCancel()" aria-label="Close panel">
+      <mat-icon>close</mat-icon>
+    </button>
+  </div>
+
+  <!-- Body -->
+  <div class="panel-body">
+    <form [formGroup]="form" class="device-form">
+      <div class="form-grid">
+
+        <!-- Row 1: Device Type (half width) -->
+        <div class="form-row">
+          @if (mode === 'edit') {
+            <div class="readonly-field">
+              <span class="readonly-field__label" id="readonly-device-type">Device Type</span>
+              <div class="readonly-field__value" aria-labelledby="readonly-device-type">{{ data?.deviceType || '-' }}</div>
+            </div>
+          } @else {
+            <mat-form-field appearance="fill">
+              <mat-label>Device Type</mat-label>
+              <mat-select formControlName="deviceType">
+                @if (deviceTypeLovOptions.length === 0) {
+                  <mat-option value="" disabled class="panel-option--status">
+                    No data available
+                  </mat-option>
+                } @else if (deviceTypeLovOptions.length <= 3) {
+                  @for (option of deviceTypeLovOptions; track option.code) {
+                    <mat-option [value]="option.code">{{ option.code }} - {{ option.description }}</mat-option>
+                  }
+                } @else {
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="deviceTypeSearchControl"
+                      placeholderLabel="Search..."
+                      noEntriesFoundLabel="">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @for (option of filteredDeviceTypes(); track option.code) {
+                    <mat-option [value]="option.code">{{ option.code }} - {{ option.description }}</mat-option>
+                  }
+                  @if (filteredDeviceTypes().length === 0) {
+                    <mat-option disabled class="panel-option--status">
+                      No data available
+                    </mat-option>
+                  }
+                }
+              </mat-select>
+              <mat-error>Device Type is required</mat-error>
+            </mat-form-field>
+          }
+        </div>
+
+        <!-- Row 2: Device Description (full width) -->
+        <mat-form-field appearance="fill" class="full-width">
+          <mat-label>Device Description</mat-label>
+          <input matInput
+                 formControlName="deviceDescription"
+                 maxlength="50"
+                 (keydown)="onDescriptionKeydown($event)">
+          <mat-error *ngIf="form.get('deviceDescription')?.hasError('required')">Device Description is required</mat-error>
+          <mat-error *ngIf="form.get('deviceDescription')?.hasError('whitespaceOnly')">Description cannot be only spaces</mat-error>
+          <mat-error *ngIf="form.get('deviceDescription')?.hasError('maxlength')">Exceeds max length</mat-error>
+        </mat-form-field>
+
+        <!-- Row 3: Number + Status Code -->
+        <div class="form-row" role="group" aria-label="Number and status code">
+          @if (mode === 'edit') {
+            <div class="readonly-field">
+              <span class="readonly-field__label" id="readonly-number">Number</span>
+              <div class="readonly-field__value" aria-labelledby="readonly-number">{{ data?.deviceNumber || '-' }}</div>
+            </div>
+          } @else {
+            <mat-form-field appearance="fill">
+              <mat-label>Number</mat-label>
+              <input matInput
+                     formControlName="deviceNumber"
+                     maxlength="2"
+                     (keydown)="onNumericKeydown($event)"
+                     (paste)="onNumericPaste($event, 'deviceNumber', 2)">
+              <mat-error *ngIf="form.get('deviceNumber')?.hasError('required')">Number is required</mat-error>
+              <mat-error *ngIf="form.get('deviceNumber')?.hasError('pattern')">Number must be exactly 2 digits</mat-error>
+            </mat-form-field>
+          }
+
+          <mat-form-field appearance="fill">
+            <mat-label>Status Code</mat-label>
+            <mat-select formControlName="deviceStatus">
+              @for (option of deviceStatusLovOptions; track option.code) {
+                <mat-option [value]="option.code">{{ option.code }} - {{ option.description }}</mat-option>
+              }
+            </mat-select>
+            <mat-error>Status Code is required</mat-error>
+          </mat-form-field>
+        </div>
+
+        <!-- Row 4: Count + Commissioned Date -->
+        <div class="form-row" role="group" aria-label="Count and commissioned date">
+          <mat-form-field appearance="fill">
+            <mat-label>Count</mat-label>
+            <input matInput
+                   formControlName="rackCount"
+                   maxlength="4"
+                   (keydown)="onNumericKeydown($event)"
+                   (paste)="onNumericPaste($event, 'rackCount', 4)">
+            <mat-error *ngIf="form.get('rackCount')?.hasError('required')">Count is required</mat-error>
+            <mat-error *ngIf="form.get('rackCount')?.hasError('min')">Must be >= 0</mat-error>
+          </mat-form-field>
+
+          <mat-form-field appearance="fill">
+            <mat-label>Commissioned Date</mat-label>
+            <input matInput
+                   [matDatepicker]="installPicker"
+                   formControlName="installDate"
+                   placeholder="DD-MMM-YYYY"
+                   [max]="today"
+                   [matDatepickerFilter]="installDateFilter"
+                   [errorStateMatcher]="installDateErrorMatcher"
+                   (input)="onOptionalDateInput($event, 'installDate')">
+            <mat-datepicker-toggle matIconSuffix [for]="installPicker"></mat-datepicker-toggle>
+            <mat-datepicker #installPicker></mat-datepicker>
+            @if (getInstallDateError()) {
+              <mat-error>{{ getInstallDateError() }}</mat-error>
+            }
+          </mat-form-field>
+        </div>
+
+        <!-- Row 5: Last Service Date + Next Service Date -->
+        <div class="form-row" role="group" aria-label="Service dates">
+          <mat-form-field appearance="fill">
+            <mat-label>Last Service Date</mat-label>
+            <input matInput
+                   [matDatepicker]="lastServicePicker"
+                   formControlName="lastServiceDate"
+                   placeholder="DD-MMM-YYYY"
+                   [max]="today"
+                   [matDatepickerFilter]="lastServiceDateFilter"
+                   [errorStateMatcher]="lastServiceDateErrorMatcher"
+                   (input)="onOptionalDateInput($event, 'lastServiceDate')">
+            <mat-datepicker-toggle matIconSuffix [for]="lastServicePicker"></mat-datepicker-toggle>
+            <mat-datepicker #lastServicePicker></mat-datepicker>
+            @if (getLastServiceDateError()) {
+              <mat-error>{{ getLastServiceDateError() }}</mat-error>
+            }
+          </mat-form-field>
+
+          <mat-form-field appearance="fill">
+            <mat-label>Next Service Date</mat-label>
+            <input matInput
+                   [matDatepicker]="nextServicePicker"
+                   formControlName="nextServiceDate"
+                   placeholder="DD-MMM-YYYY"
+                   [matDatepickerFilter]="nextServiceDateFilter"
+                   [errorStateMatcher]="nextServiceDateErrorMatcher"
+                   (input)="onOptionalDateInput($event, 'nextServiceDate')">
+            <mat-datepicker-toggle matIconSuffix [for]="nextServicePicker"></mat-datepicker-toggle>
+            <mat-datepicker #nextServicePicker></mat-datepicker>
+            @if (getNextServiceDateError()) {
+              <mat-error>{{ getNextServiceDateError() }}</mat-error>
+            }
+          </mat-form-field>
+        </div>
+
+        <!-- Row 6: Last Temperature + Last Reading Date -->
+        <div class="form-row" role="group" aria-label="Temperature and reading date">
+          <mat-form-field appearance="fill">
+            <mat-label>Last Temperature (C)</mat-label>
+            <input matInput
+                   formControlName="lastTemperature"
+                   maxlength="7"
+                   (keydown)="onDecimalKeydown($event)"
+                   (paste)="onDecimalPaste($event)">
+          </mat-form-field>
+
+          <mat-form-field appearance="fill">
+            <mat-label>Last Reading Date</mat-label>
+            <input matInput
+                   [matDatepicker]="tempReadPicker"
+                   formControlName="tempReadDate"
+                   placeholder="DD-MMM-YYYY"
+                   [max]="today"
+                   [matDatepickerFilter]="tempReadDateFilter"
+                   [errorStateMatcher]="tempReadDateErrorMatcher"
+                   (input)="onOptionalDateInput($event, 'tempReadDate')">
+            <mat-datepicker-toggle matIconSuffix [for]="tempReadPicker"></mat-datepicker-toggle>
+            <mat-datepicker #tempReadPicker></mat-datepicker>
+            @if (getTempReadDateError()) {
+              <mat-error>{{ getTempReadDateError() }}</mat-error>
+            }
+          </mat-form-field>
+        </div>
+
+        <!-- Row 7: Effective Date + Termination Date -->
+        <div class="form-row" role="group" aria-label="Effective and termination dates">
+          @if (mode === 'edit') {
+            <div class="readonly-field">
+              <span class="readonly-field__label" id="readonly-effective-date">Effective Date</span>
+              <div class="readonly-field__value" aria-labelledby="readonly-effective-date">{{ formatDate(data?.effectiveDate)?.toUpperCase() }}</div>
+            </div>
+          } @else {
+            <mat-form-field appearance="fill" [class.has-error]="getEffectiveDateError()">
+              <mat-label>Effective Date</mat-label>
+              <input matInput
+                     [matDatepicker]="effectivePicker"
+                     formControlName="effectiveDate"
+                     placeholder="DD-MMM-YYYY"
+                     [min]="minEffectiveDate"
+                     [errorStateMatcher]="effDateErrorMatcher"
+                     (input)="onEffectiveDateInput($event)">
+              <mat-datepicker-toggle matIconSuffix [for]="effectivePicker"></mat-datepicker-toggle>
+              <mat-datepicker #effectivePicker></mat-datepicker>
+              @if (getEffectiveDateError()) {
+                <mat-error>{{ getEffectiveDateError() }}</mat-error>
+              }
+            </mat-form-field>
+          }
+
+          <mat-form-field appearance="fill" [class.has-error]="getTerminationDateError()">
+            <mat-label>Termination Date</mat-label>
+            <input matInput
+                   [matDatepicker]="terminationPicker"
+                   formControlName="terminationDate"
+                   placeholder="DD-MMM-YYYY"
+                   [matDatepickerFilter]="terminationDateFilter"
+                   [errorStateMatcher]="termDateErrorMatcher"
+                   (input)="onTerminationDateInput($event)">
+            <mat-datepicker-toggle matIconSuffix [for]="terminationPicker"></mat-datepicker-toggle>
+            <mat-datepicker #terminationPicker></mat-datepicker>
+            @if (getTerminationDateError()) {
+              <mat-error>{{ getTerminationDateError() }}</mat-error>
+            }
+          </mat-form-field>
+        </div>
+
+      </div>
+    </form>
+  </div>
+
+  <!-- Footer -->
+  <div class="panel-footer">
+    <div class="footer-actions">
+      <button type="button" mat-button class="cancel-btn" (click)="onCancel()" [disabled]="isSaving">
+        CANCEL
+      </button>
+
+      @if (mode === 'add') {
+        <button type="button" mat-stroked-button class="secondary-btn"
+                (click)="onSaveAndCreateAnother()"
+                [disabled]="!isFormValid || isSaving">
+          ADD AND CREATE ANOTHER
+        </button>
+        <button type="button" mat-raised-button class="primary-btn"
+                (click)="onSave()"
+                [disabled]="!isFormValid || isSaving">
+          ADD
+        </button>
+      } @else {
+        <button type="button" mat-button class="cancel-btn"
+                (click)="onClearAll()"
+                [disabled]="isSaving || !form.dirty">
+          CLEAR ALL
+        </button>
+        <button type="button" mat-raised-button class="primary-btn"
+                (click)="onSave()"
+                [disabled]="!isFormValid || isSaving">
+          SAVE
+        </button>
+      }
+    </div>
+  </div>
+
+</div>

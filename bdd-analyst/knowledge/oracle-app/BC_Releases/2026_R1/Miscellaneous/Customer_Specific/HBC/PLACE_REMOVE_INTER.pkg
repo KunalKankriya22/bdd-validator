@@ -1,0 +1,161 @@
+create or replace PACKAGE PLACE_REMOVE_INTER IS
+
+PROCEDURE ins_comp_inter
+                 (p_unit_id             IN      VARCHAR2,
+                  p_product_code	IN      varchar2,
+	      	  p_inter_code 		IN      varchar2,
+                  p_insert_dats         IN      DATE,
+                  p_inter_user_id     	IN      varchar2,
+                  pl_status             OUT     VARCHAR2) ;
+
+
+PROCEDURE del_comp_inter
+	       (p_unit_id          IN   VARCHAR2,
+		p_product_code     IN   VARCHAR2,
+		p_inter_code       IN   VARCHAR2);
+
+END PLACE_REMOVE_INTER;
+/
+
+create or replace PACKAGE BODY PLACE_REMOVE_INTER IS
+
+/*---#######################################################################
+    Program Name        : PLACE_REMOVE_INTER
+    Date Creation       : 06-13-2011
+    Program Author      : Edwin
+    Version             : 01 [Original]
+---#######################################################################*/
+
+/* --------------------------------------------------------------------- */
+/* NAME : PLACE_REMOVE_INTER
+ -----------------------------------------------------------------
+ Desc:This procedure insert one record into COMPONENT_INTERDICTIONS table.
+ Inp: unit_id,product_code,inter_code,insert_dats,inter_user_id 
+ Out: p_status
+      p_status is OK if successfully computed else contains error
+ -----------------------------------------------------------------
+*/
+
+PROCEDURE ins_comp_inter
+                (p_unit_id              IN      VARCHAR2,
+		 p_product_code 	IN      varchar2,
+		 p_inter_code 		IN      varchar2,
+		 p_insert_dats          IN      DATE,
+		 p_inter_user_id   	IN      varchar2,
+                 pl_status              OUT     VARCHAR2) 
+IS
+
+ nIcount         number:=0;
+ p_coll_date     DATE;
+ p_chapter_id    VARCHAR2(4);
+ nCount          NUMBER:=0;
+ p_status        VARCHAR2(200);
+ skip_record     EXCEPTION;
+ nProd           NUMBER:=0;
+BEGIN
+
+    -- Get the collection date
+
+    Begin
+       select coll_date,chapter_id into p_coll_date,p_chapter_id
+       from units where unit_id=p_unit_id;
+    Exception
+       when no_data_found then 
+          p_status:='Invalid Unit ID-'||p_unit_id;
+          raise skip_record;
+       when others then 
+         p_status:='Error-'||p_unit_id||'  '||sqlerrm;
+         raise skip_record;
+    End;
+  
+   -- Check if the product code is valid
+
+    select nvl(count(*),0) into nProd from valid_products where
+    product_code=substr(p_product_code,1,5) and
+    sysdate between eff_date and nvl(term_date,sysdate+1);
+
+    If nProd = 0 then 
+      p_status:='Invalid Product code';
+      raise skip_record;
+   End If;
+
+
+  -- Check if the product and unit combination is valid
+
+   select nvl(count(*),0) into nCount
+           from components
+           where unit_id =  p_unit_id and
+               trunc(coll_date) = trunc(p_coll_date) and
+               nvl(product_code,' ') = nvl(p_product_code,' ') and
+               reject_reason_code is null;
+
+  If nCount = 0 then 
+    p_status:='This unit and product combination is invalid';
+    raise skip_record;
+  Else   
+
+     Begin
+           select nvl(count(*),0) into nIcount
+           from component_interdictions
+           where unit_id =  p_unit_id and
+               trunc(coll_date) = trunc(p_coll_date) and
+               inter_code = p_inter_code and
+               nvl(product_code,' ') = nvl(p_product_code,' ');
+     Exception
+            when others then
+               p_status := 'Err70. SQL Failed of component_interdictions'||
+                      substr(sqlerrm,1,100);
+               raise skip_record;
+     End;
+
+      If nIcount = 0 then
+          Begin  /* insert into component_interdictions*/
+              insert into component_interdictions
+                    (unit_id,coll_date,chapter_id,product_code,inter_code,
+		    insert_dats,inter_user_id)
+               values
+                     (p_unit_id,p_coll_date,p_chapter_id,p_product_code,
+		     p_inter_code,p_insert_dats,p_inter_user_id);
+          Exception
+             When others then
+               p_status := 'Err71. Unable to Insert in component interdictions'
+                           ||substr(sqlerrm,1,200);
+              raise skip_record;
+          End;
+      End if;
+
+  End If;
+    
+           pl_status := 'OK';
+          -- commit;
+ Exception 
+  When skip_record then 
+   insert into UNIT_PROD_ERROR_LOG (UNIT_ID,PRODUCT_CODE,DATA_CODE,ERROR_LOG,
+				    SOURCE_ID,INSERT_DATE,INSERT_USER)
+                            values (p_unit_id,p_product_code,p_inter_code,
+				    p_status,'PLACE_REMOVE_INTER',SYSDATE,USER);
+ -- COMMIT;
+ when others then
+   p_status:=sqlerrm;
+   insert into UNIT_PROD_ERROR_LOG (UNIT_ID,PRODUCT_CODE,DATA_CODE,ERROR_LOG,
+				    SOURCE_ID,INSERT_DATE,INSERT_USER)
+                            values (p_unit_id,p_product_code,p_inter_code,
+				    p_status,'PLRMINNTER', SYSDATE,USER);
+  --COMMIT;
+ END ins_comp_inter;
+
+PROCEDURE del_comp_inter
+	       (p_unit_id          IN   VARCHAR2,
+                p_product_code     IN   VARCHAR2,
+	        p_inter_code       IN   VARCHAR2)
+IS
+
+BEGIN
+    delete from component_interdictions where unit_id=p_unit_id and
+			    product_code=p_product_code and
+			    inter_code=p_inter_code;
+     commit;
+
+END del_comp_inter;
+END PLACE_REMOVE_INTER;   /* package body*/
+/

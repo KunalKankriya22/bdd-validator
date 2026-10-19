@@ -1,0 +1,827 @@
+CREATE OR REPLACE PACKAGE ATIRDNAT IS
+
+/*  This is NAT
+--  Created By        : Hussein Abbas
+--  Date Of Creation  : 03/13/12
+--  Version           : 01
+                      : 02  IM: 8438 Edwin-04/20/12  */
+
+procedure main_proc(file_name in varchar2, v_inst_id in varchar2,
+                     p_chapter_id in varchar2);
+function f_check_duplicate RETURN BOOLEAN;
+procedure f_process;
+procedure f_generate_batch_id;
+procedure f_insert_nat_data;
+procedure f_insert_test_batch_hdr;
+procedure f_update_last_unit_id;
+procedure f_insert_test_batch_det;
+procedure f_insert_instrument_log;
+procedure f_process_detail;
+procedure f_process_test;
+function f_validate_test return boolean;
+function f_validate_result return boolean;
+procedure f_get_codabar_scheme;
+procedure f_init_variables;
+procedure f_windup;
+procedure check_error_1(p_module_name  in varchar2,
+			                  p_statement_id in varchar2,
+			                  p_error_key    in varchar2,
+			                  p_error_desc   in varchar2);
+PROCEDURE f_ins_parmid;
+PROCEDURE rollback_and_exit;
+-------------------
+program_version varchar2(5) := '01';
+----char *program_version = "01";
+err_key varchar2(70);
+sql_code number;
+err number;
+sql_msg varchar2(500);
+uid varchar2(6);
+result_file_name varchar2(300);
+curr_time varchar2(18);
+log_file_name varchar2(500);
+parm_id varchar2(200);
+v_machine_id varchar2(6);
+inp_ppid varchar2(50);
+temp_unit_id varchar2(16);
+--rowid char(18);
+arr_eye_read_trns VARCHAR2(500);
+Selection char(2);
+complete boolean :=false;
+read_record varchar2(1000);
+uid_length int;
+lab_code VARchar2(10);
+test_batch_id VARCHAR2(100);
+xmt_status char(2);
+v_chapter_id varchar2(4);
+codabar_unit_scheme VARchar2(50);
+machine_code_char char(5);
+test_code VARchar2(5);
+unit_id varchar2(15);
+tempisbt varchar2(5);
+misc_fld varchar2(6);
+v_test_id varchar2(15);
+Prevtest_id varchar2(15);
+master_test_id varchar2(15);
+result_status_desc varchar2(50);
+result_status varchar2(5);
+test_date varchar2(22);
+analyzer VARCHAR2(10);
+nat_count number;
+nat_tot number;
+other_count number ;
+unit_id_len number;
+machine_code number;
+function_result VARchar2(500);
+--EXEC SQL END DECLARE SECTION;
+detail_buffer char(500);
+other_detail_buffer char(180);
+hdr_flag varchar2(100);
+ins_other_count number;
+not_end_of_stream number;
+n_tests number;
+load_count number;
+arr_test_batch varchar2 (200);--(MAXTESTID);
+itest_id VARCHAR2(10);
+ctest_id char(5);
+logfile                UTL_FILE.FILE_TYPE;
+instfile               UTL_FILE.FILE_TYPE;
+LogDir                 VARCHAR2(150);
+logfilename            VARCHAR2(500);
+p_file_name            VARCHAR2(500);
+p_chp_sys_date         DATE;
+g_local_time           DATE;
+
+END;
+/
+
+-----------------------------------------------------------------------
+CREATE OR REPLACE package body ATIRDNAT IS
+
+PROCEDURE add_log_entry(p_log_text in varchar2) is
+BEGIN
+         UTL_FILE.putf(logfile,'%s\n',p_log_text);
+         UTL_FILE.fflush(logfile);
+END add_log_entry;
+
+
+
+procedure main_proc(file_name in varchar2, v_inst_id in varchar2,
+                    p_chapter_id in varchar2) is
+ start_time   VARCHAR2(30);
+ end_time     VARCHAR2(30);
+Begin
+      dbms_output.enable(50000000);
+      v_machine_id:=v_inst_id;
+      result_file_name:=file_name;
+      v_chapter_id:=p_chapter_id;
+
+      p_chp_sys_date:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                                sysdate);
+
+      begin
+           select code_desc into LogDir from master_codes
+           where code_type='LOGDR' and code='ILOG' and sysdate
+	   between eff_date and nvl(term_date,sysdate);
+      exception
+           when utl_file.invalid_path then
+               dbms_output.put_line('Invalid path or filename');
+	       rollback_and_exit;
+           when others then
+           dbms_output.put_line('Error in prepare_log_filename');
+	   rollback_and_exit;
+       end;
+
+      begin
+       p_file_name:=substr(result_file_name,1,instr(result_file_name,'.',1)-1);
+       select 'ATIRDNAT_'||p_file_name||'_'||
+       decode(substr(user,1,4),'OPS$',substr(user,5),user)||'.r'
+       into logfilename from dual;
+      exception
+	  when others then
+	     dbms_output.put_line('Error in getting logfilename ... Aborting');
+	     rollback_and_exit;
+      end;
+
+        begin
+          g_local_time:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                                  sysdate);
+
+     	   start_time := to_char(g_local_time,'mm-dd-yy hh24:mi:ss');
+           logfile:=UTL_FILE.fopen(LogDir,logfilename, 'w');
+           instfile:=UTL_FILE.fopen(LogDir,result_file_name, 'r');
+           add_log_entry(' Nat Results Read Log File');
+           add_log_entry('----------------------------------');
+           add_log_entry(' ');
+	         add_log_entry('NAT-Read Results  start time:'||start_time);
+	         add_log_entry('File Name  : '||result_file_name);
+	         add_log_entry('Log Name   : '||logfilename);
+	         add_log_entry('----------------------------------------');
+
+       exception
+	  when utl_file.invalid_path then
+	   dbms_output.put_line('Invalid path or filename');
+	   rollback_and_exit;
+        end;
+------------------------------------------------------------------------
+	
+	if  f_check_duplicate then
+		begin
+
+	f_get_codabar_scheme;
+	f_init_variables;
+	f_process;
+	f_windup;
+	
+	end;
+	end if;
+
+end; --main
+-----------------------------------------------------------------------
+
+/************************************************************************/
+function f_check_duplicate return boolean is
+	 begin
+   
+	SELECT 'x'  INTO Selection
+    FROM INSTRUMENT_LOG
+	WHERE FILE_NAME = substr(result_file_name,instr(result_file_name,'/',-1)+1)
+    AND XMT_STATUS > 40;
+     return true;
+	
+	 exception when no_data_found then
+	
+   return true;
+	 when others then
+
+		add_log_entry('File Name already exists ......');
+		add_log_entry('File not loaded. Reason : DUP TRANSMISSION');
+		xmt_status:='30';
+    INSERT INTO INSTRUMENT_LOG
+		SELECT tb_id, test_chapter_id, test_id, sysdate,
+			     machine_id, station_no, '30', sysdate,
+			     result_file_name,'','',''
+		FROM   INSTRUMENT_LOG
+	  WHERE  FILE_NAME = substr(result_file_name,instr(result_file_name,'/',-1)+1)
+      AND  XMT_STATUS = '50';
+		err_key:='Insert into INST LOG';
+		check_error_1('ATIRDNAT','99',err_key,sqlerrm);
+		f_ins_parmid;
+		COMMIT;
+		return false;
+end; --f_check_duplicate
+/************************************************************************/
+procedure f_process is
+begin
+    ins_other_count := 1;
+	analyzer:='NA';
+	f_generate_batch_id;
+  
+	f_process_detail;
+	
+	end;
+
+/************************************************************************/
+procedure f_generate_batch_id is
+VBATCHTEST NUMBER;
+begin
+
+    /*
+  begin
+	  err_key:='User/Chapter Problem';
+	  SELECT CHAPTER_ID INTO v_chapter_id
+    FROM SYSTEM_USERS
+    WHERE USER_ID = user;
+  	check_error_1('ATIRDNAT','30',err_key,'');
+	  exception when no_data_found then
+	  add_log_entry('User Not Associated With any chapter...Aborting');
+	  check_error_1('ATIRDNAT','30',err_key,'User/Chapter Not Associated in file');
+		rollback_and_exit;
+	end;
+	----------------------------------------------------------------------
+    */
+
+   begin
+
+   SELECT to_char(p_chp_sys_date,'MMDDYY')||'-'||analyzer||'R'||
+           lpad(decode(sign(nvl(max_number,0)-nvl(starting_number,0)),
+                  -1,nvl(starting_number,0),nvl(max_number,0))+1,4,'0')
+    INTO   test_batch_id
+    FROM   number_generation
+    WHERE  chapter_id = v_chapter_id
+    AND    number_type = 'TB_ID'
+    FOR update of max_number ;
+	exception when others then
+	  err_key:='Problem in number_generation';
+	  check_error_1('ATIRDNAT','38',err_key,'');
+   	rollback_and_exit;
+  end;
+  -------------------------------------------------------------------------
+  begin
+   	SELECT MAX(nvl(max_number,0))+1
+    INTO   VBATCHTEST
+    FROM   number_generation
+    WHERE  chapter_id = v_chapter_id
+    AND    number_type = 'TB_ID';
+    UPDATE NUMBER_GENERATION
+   	SET max_number = VBATCHTEST--to_number(substr(test_batch_id,11))
+   	WHERE chapter_id = v_chapter_id
+   	AND  number_type= 'TB_ID' ;
+    commit;
+    check_error_1('ATIRDNAT','60','','');
+	add_log_entry(' Test batch ID :-  '||substr(test_batch_id,1,14));
+    exception when others then
+	  err_key:='Update NUMBER_GENERATION Problem';
+	  check_error_1('ATIRDNAT','50',err_key,'');
+	 end;
+end;
+
+/************************************************************************/
+procedure f_insert_nat_data is
+ begin
+   BEGIN
+		 --------------------------------------------
+		 function_result := sbclib.load_holding_tests
+		  		(unit_id,
+		  		 rtrim(master_test_id),
+		  		 null,
+		  		 'NA',
+		  		 null,
+		  		 rtrim(result_status),
+				 substr(test_batch_id,1,14),
+				   rtrim(v_machine_id),
+		  		 null,
+		  		 null,
+				   'ATIRDNAT',
+		  		 to_date(test_date,'MM/DD/YYYYHH24:MI:SS'),
+		  		 v_chapter_id);
+      END;
+   if function_result !='0' then
+
+	  err_key:=function_result;
+	  check_error_1('ATIRDNAT','70',err_key,'Insert into holding tests Problem');
+   end if;
+   
+
+    nat_count:=nat_count+1;
+    nat_tot:=nat_tot+1;
+end;
+/************************************************************************/
+procedure f_insert_test_batch_hdr is
+begin
+
+	INSERT INTO TEST_BATCH_HDR
+			(tb_id,
+			 test_chapter_id,
+			 first_unit_id,
+			 insert_dats,
+			 user_id) VALUES
+			(substr(test_batch_id,1,14),
+			 v_chapter_id,
+			 SUBSTR(unit_id,1,15),
+			 sysdate,
+			 decode(substr(user,1,4),'OPS$',substr(user,5),user));
+exception when others then
+	err_key:='Insert into TB HDR Problem';
+	check_error_1('ATIRDNAT','90',err_key,'');
+end;
+/************************************************************************/
+procedure f_update_last_unit_id is
+begin
+  UPDATE TEST_BATCH_HDR
+	SET last_unit_id = unit_id
+	WHERE tb_id = substr(test_batch_id,1,14) AND
+	test_chapter_id = v_chapter_id;
+exception when others then
+	err_key:='Insert into TB HDR/Last UNIT ID Problem';
+	check_error_1('ATIRDNAT','100',err_key ,'');
+	end;
+/************************************************************************/
+procedure f_insert_test_batch_det is
+ begin
+ null;
+
+   begin
+    SELECT testing_lab_code INTO lab_code
+    FROM system_users
+    WHERE user_id = user;
+     dbms_output.put_line('Before insert into the details');
+	
+	INSERT INTO TEST_BATCH_DET
+			(tb_id,
+			 test_chapter_id,
+			 test_id,
+			 test_type,
+             testing_lab_code) VALUES
+			(substr(test_batch_id,1,14),
+			 v_chapter_id,
+			 SUBSTR(RTRIM(master_test_id),1,10),
+			 'A',
+             lab_code);
+	   
+    exception when others then
+         dbms_output.put_line('insert test batch det='||sqlerrm);
+
+	   err_key:='Insert into TB DET';
+	   check_error_1('ATIRDNAT','110',err_key,'');
+	   
+	
+ end;
+
+	  BEGIN
+   dbms_output.put_line('Ch='||v_chapter_id||' Te='||master_test_id||' '||
+                        v_machine_id);
+	  
+      function_result := sbclib.insert_test_parms
+			(v_chapter_id,
+			 master_test_id,
+			 test_batch_id,
+			 v_machine_id,
+			'ATIRDNAT');
+	   END;
+       --------------------- test_batch_parms table should have entry for selected test batch ID------------  
+	   
+	   If function_result!='0' then
+	  err_key:=v_test_id||'  '|| function_result;
+	  check_error_1('ATIRDNAT','300',err_key,'Error inserting test parameters');
+      end if;
+	 
+	
+end;
+/************************************************************************/
+procedure f_insert_instrument_log is
+begin
+   
+    INSERT INTO INSTRUMENT_LOG
+				(tb_id,
+				test_chapter_id,
+				test_id,
+				read_dats,
+				machine_id,
+				station_no,
+				xmt_status,
+				status_dats,
+				file_name)
+    VALUES
+				(substr(test_batch_id,1,14),
+				 v_chapter_id,
+				 SUBSTR(RTRIM(master_test_id),1,10),
+				 sysdate,
+				 v_machine_id,
+				 analyzer,
+				 '10',
+				 sysdate,
+				 substr(result_file_name,instr(result_file_name,'/',-1)+1));
+exception when others then
+	err_key:='Insert into INST LOG';
+	check_error_1('ATIRDNAT','120',err_key,'');
+	
+	NULL;
+end;
+ 
+/************************************************************************/
+procedure f_process_detail is
+   i int;
+   status varchar2(500);
+   /***************/
+   --READ_RECORD:
+   /***************/
+begin
+   detail_buffer:=0;
+  
+  begin
+ IF utl_file.is_open(instfile) THEN
+    LOOP
+      BEGIN
+        utl_file.get_line(instfile, read_record);
+        detail_buffer:=nvl(substr(read_record,1,80),'0');
+        IF read_record IS NULL or read_record=' ' THEN
+            not_end_of_stream := 0;
+            EXIT;
+        ELSE
+	   begin
+	      if length(detail_buffer) >= 71 then--72 then
+                f_process_test;
+              else
+      	        nat_tot:=nat_tot+1;
+                add_log_entry('Record ' ||nat_tot||
+                              ' not lodaed'||detail_buffer);
+             end if;
+          end;
+       END IF;
+     EXCEPTION
+        WHEN no_data_found THEN
+ 		  complete:=TRUE;
+          EXIT;
+      END;
+    END LOOP;
+  END IF;
+  utl_file.fclose(instfile);
+ end;
+  
+end;
+/************************************************************************/
+procedure f_process_test is
+
+tempbuffer varchar2(79);
+begin
+   temp_unit_id:=null;
+   tempisbt:=substr(detail_buffer,7,1);
+   unit_id:=substr(detail_buffer,8,13);--substr(detail_buffer,7,15);
+   v_test_id:=substr(detail_buffer,23,15);
+   result_status_desc:=substr(detail_buffer,38,15);
+   test_date:=substr(detail_buffer,53,19);
+   misc_fld:=substr(detail_buffer,72,6);
+  dbms_output.put_line('Unit='||unit_id||' Test='||v_test_id||
+                       'Res='||result_status_desc||' Chapter='||v_chapter_id);
+
+   SELECT decode(tempisbt,'=',substr(ltrim(unit_id),1,13),ltrim(unit_id)), 
+   length(ltrim(unit_id)) INTO TEMP_unit_id, uid_length
+   FROM dual;
+--   temp_unit_id:=unit_id;
+     unit_id_len := length(rtrim(unit_id));
+
+   if unit_id_len in (7,10) then
+   	begin
+   	  if codabar_unit_scheme = 'A' and ltrim(unit_id,'1234567890') is null
+		THEN
+			machine_code_char:=SUBSTR(unit_id,1,2);
+			machine_code := TO_NUMBER(machine_code_char);
+
+			UNIT_ID:=UNIT_ID||SUBSTR(MACHINE_CODE,1,2);
+		END IF;
+
+	end;
+  END IF;
+
+    if not f_validate_test THEN  --if f_validate_test THEN
+      RETURN;
+    END IF;
+
+    if not f_validate_result then 
+       return;
+    end if;
+
+   f_insert_nat_data;
+
+   if  hdr_flag = 'N' THEN
+      f_insert_test_batch_hdr;
+      hdr_flag := 'Y';
+      Prevtest_id:=SUBSTR(v_test_id,15);
+   else
+   BEGIN
+   if Prevtest_id= SUBSTR(v_test_id,1,15)
+   THEN
+    DBMS_OUTPUT.PUT('Multiple Test IDs '|| Prevtest_id||'  ' ||v_test_id);
+    ADD_LOG_ENTRY('File not loaded. Reason : MULTIPLE TEST IDs '||
+                   Prevtest_id||'  ' ||v_test_id);
+    xmt_status:=30;
+	  INSERT INTO INSTRUMENT_LOG
+	      SELECT tb_id, test_chapter_id, test_id, sysdate,
+		      machine_id, station_no, '30', sysdate,
+                      file_name,'','',''
+		FROM INSTRUMENT_LOG
+		WHERE FILE_NAME = substr(file_name,instr(file_name,'/',-1)+1)
+		AND XMT_STATUS = '50';
+    err_key:='Insert into INST LOG';
+	  check_error_1('ATIRDNAT','99',err_key,'');
+    f_ins_parmid;
+   COMMIT;
+   --rollback_and_exit;
+   END IF;
+   END;
+   END IF;
+   
+   if NVL(itest_id,'N') != 'Y' THEN
+	  f_insert_instrument_log;
+	  f_insert_test_batch_det;
+	  itest_id := 'Y';
+   END IF;
+ commit;
+end;
+/************************************************************************/
+
+function f_validate_test return boolean is
+begin
+
+   err_key:='machine_test_id= '||v_test_id;
+
+  begin
+   SELECT test_id
+   INTO master_test_id
+   FROM valid_instrument_tests
+   WHERE machine_test_id = rtrim(v_test_id)
+   AND machine_id = v_machine_id
+   AND chapter_id = v_chapter_id
+   AND sysdate between eff_date and nvl(term_date,sysdate);
+   --check_error_1('ATIRDNAT','200',err_key,'');
+   return true;
+   exception when  no_data_found then
+	  add_log_entry('Invalid Test ID ......');
+    add_log_entry('File not loaded. Reason : INVALID TEST ID');
+	  xmt_status:='30';
+	  INSERT INTO INSTRUMENT_LOG
+	  SELECT tb_id, test_chapter_id, test_id, sysdate,
+				machine_id, station_no, '30', sysdate,
+				file_name,'','',''
+	  FROM INSTRUMENT_LOG
+	  WHERE FILE_NAME = substr(file_name,instr(file_name,'/',-1)+1)
+      AND XMT_STATUS = '50';
+	  err_key:='Insert into INST LOG';
+	  check_error_1('ATIRDNAT','99',err_key,'');
+    f_ins_parmid;
+    commit;
+    return  false;
+   when others then
+    return false;
+  end;
+end;
+
+/************************************************************************/
+function f_validate_result return boolean is
+begin
+
+   err_key:='machine_result_status= '||result_status_desc;
+   result_status:=replace (result_status,substr(result_status,1,3),'   ');
+
+  begin
+    result_status:=null;
+
+   SELECT result_status
+   INTO  result_status
+   FROM valid_instrument_test_results
+   WHERE test_id = master_test_id
+   AND machine_result_status = rtrim(result_status_desc)
+   AND machine_id = v_machine_id
+   AND chapter_id = v_chapter_id
+   AND sysdate between eff_date and nvl(term_date,sysdate);
+   --check_error_1('ATIRDNAT','250',err_key,'');
+   return true;
+
+   exception when no_data_found then
+	  add_log_entry('Invalid Result ......');
+    add_log_entry('File not loaded. Reason : INVALID RESULT STATUS');
+    xmt_status:='30';
+    INSERT INTO INSTRUMENT_LOG
+	  SELECT tb_id, test_chapter_id, test_id, sysdate,
+				   machine_id, station_no, '30', sysdate,
+				   file_name,'','',''
+	  FROM   INSTRUMENT_LOG
+	  WHERE  FILE_NAME = substr(file_name,instr(file_name,'/',-1)+1)
+      AND  XMT_STATUS = '50';
+	  err_key:='Insert into INST LOG';
+	  check_error_1('ATIRDNAT','99',err_key,'');
+    f_ins_parmid;
+    COMMIT;
+    return false;
+    when others then
+    return false;
+ end;
+end;
+
+/************************************************************************/
+procedure f_get_codabar_scheme is
+
+   /*
+   This functions gets the codabar unit scheme from INSTITUTIONS table.
+   If the scheme is 'A' then it will populate an array with eye_read_trns
+   from BAR_CODE_PREFIXES table.
+   If it is not 'A' then the control is returned to the calling routine.
+   */
+ i int;
+ a_eye_read_trns varchar2(100);
+ a_machine_code number;
+begin
+   err_key:='Institution';
+  begin
+     SELECT nvl(codabar_unit_scheme,'*')
+     INTO  codabar_unit_scheme
+     FROM institutions
+     WHERE sysdate between eff_date and nvl(term_date,sysdate);
+     check_error_1('ATIRDNAT','220',err_key,'');
+     exception when no_data_found then
+     check_error_1('ATIRDNAT','220',err_key,'No institution data available');
+   end;
+   if (codabar_unit_scheme != 'A') then
+      return;
+    end if;
+    err_key:='bar code prefixes';
+    select to_number(machine_code), eye_read_trns
+   into   a_machine_code, a_eye_read_trns
+   from bar_code_prefixes
+   where sysdate between eff_date and nvl(term_date,sysdate);
+   check_error_1('ATIRDNAT','230',err_key,'');
+
+   /*
+     the following code is to move the selected rows into a serially
+     indexed array for easy access.
+   */
+   arr_eye_read_trns:=' ';
+   arr_eye_read_trns:= a_eye_read_trns;
+   exception when others then
+   	null;
+  end;
+/************************************************************************/
+procedure f_init_variables is
+ begin
+    curr_time         :=to_char(sysdate,'YYMMDDHH24MI');
+	arr_test_batch    :=NULL;
+	not_end_of_stream := 1;
+	hdr_flag          := 'N';
+	xmt_status        :='10';
+	load_count        := 0;
+	nat_count         := 0;
+	nat_tot           := 0;
+
+end;
+/************************************************************************/
+procedure f_windup is
+begin
+	f_update_last_unit_id;
+	UPDATE INSTRUMENT_LOG
+	SET XMT_STATUS = '50',
+	OK_COUNT = nat_count
+	WHERE TB_ID = substr(test_batch_id,1,14)
+    AND TEST_ID = master_test_id
+    AND TEST_CHAPTER_ID = v_chapter_id;
+    err_key:='Update Instrument Log NAT CNT';
+	  check_error_1('ATIRDNAT','140',err_key,'');
+  	f_ins_parmid;
+	  add_log_entry('NAT - Read Results Program successfully completed ');
+	  add_log_entry('Units with NAT Results loaded  '||nat_count);
+ 	  
+           g_local_time:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                                   sysdate);
+           curr_time:=to_char(g_local_time,'YYMMDDHH24MI');
+	  add_log_entry('Program end time : '||curr_time);
+	add_log_entry('****************************************************');
+  UTL_FILE.fclose(logfile);
+	commit;
+	end;
+/************************************************************************/
+
+procedure check_error_1(p_module_name  in varchar2,
+		        p_statement_id in varchar2,
+		        p_error_key    in varchar2,
+		       p_error_desc   in varchar2) is
+ error_desc   varchar2(70);
+ module_name  varchar2(70);
+ statement_id varchar2(70);
+ error_key    varchar2(70);
+begin
+    if sqlcode >= 0 and p_error_desc is  null  -- not null
+      then
+      return;
+      end if;
+       module_name  := p_module_name;
+       statement_id := p_statement_id;
+       error_key    := substr(p_error_key,1,70);
+       add_log_entry('At statement ' ||statement_id||'-'||p_error_key||' '||
+                      p_error_desc|| '   - Terminating...');
+    if sqlcode < 0
+    	then
+       add_log_entry('Oracle error');
+       error_desc:=substr(sqlerrm,1,70);
+       add_log_entry('SQL Statement was :-'||error_desc);
+
+    else
+	   add_log_entry('non-Oracle error');
+     error_desc:=p_error_desc;
+    end if;
+      insert into system_error_log
+			(module_name,
+			insert_dats,
+			user_id,
+			statement_id,
+			error_key,
+			error_desc)
+   	values
+         	(module_name,
+		 	sysdate,
+		 	decode(substr(user,1,4),'OPS$',substr(user,5),user),
+		 	statement_id,
+		 	error_key,
+		 	error_desc);
+
+    /* update status to 'ABORTED'  in the instrument log */
+    update instrument_log
+    set xmt_status = '80'
+    where tb_id = substr(test_batch_id,1,14)
+    and test_chapter_id = v_chapter_id;
+
+    delete from rpt_parm
+             where user_name = decode(substr(user,1,4),'OPS$',
+                                     substr(user,5),user)
+             and report_name = 'ATIRDNAT'
+             and parm_id = substr(rtrim(p_file_name),1,20);
+
+     insert into rpt_parm
+		   (appl_id,
+		user_name,
+		report_name,
+		parm_id,
+		parm_date,
+		submit_date,
+		report_status)
+	values ('SBC',
+		 decode(substr(user,1,4),'OPS$',substr(user,5),user),
+					'ATIRDNAT',
+					substr(rtrim(p_file_name),1,20),
+					sysdate,
+					sysdate,
+					'C');
+          commit;
+          ---rollback_and_exit;
+end;
+
+/*												*/
+/*********************************************************************/
+procedure f_ins_parmid is
+
+begin
+      delete from rpt_parm
+          where   user_name = decode(substr(user,1,4),'OPS$',substr(user,5),user)
+            and   report_name = 'ATIRDNAT'
+            and   parm_id = p_file_name;
+      insert into rpt_parm
+	          (appl_id,
+                   user_name,
+	           report_name,
+	       	   parm_id,
+		   parm_date,
+	           submit_date,
+	           report_status)
+	          values ('SBC',
+		 decode(substr(user,1,4),'OPS$',substr(user,5),user),
+		'ATIRDNAT',
+		substr(rtrim(p_file_name),1,20),
+		sysdate,
+		sysdate,
+		'C');
+	err_key:='Insert INTO rpt_parm';
+	check_error_1('ATIRDNAT','200',err_key ,'');
+end;
+/********************************************************************/
+
+procedure rollback_and_exit is
+Begin
+rollback;
+add_log_entry('Aborting');
+UTL_FILE.fclose(logfile);
+raise_application_error('-20000','Aborting');
+End rollback_and_exit;
+
+/*********************************************************************/
+
+END ATIRDNAT ;
+/
+
+-----------------------------------------------------------------------
+drop public synonym ATIRDNAT 
+/
+create public synonym ATIRDNAT  for ATIRDNAT 
+/
+grant execute on ATIRDNAT  to public
+/
+
+

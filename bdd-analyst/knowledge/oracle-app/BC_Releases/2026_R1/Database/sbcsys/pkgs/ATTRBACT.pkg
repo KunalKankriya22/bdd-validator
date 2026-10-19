@@ -1,0 +1,774 @@
+create or replace PACKAGE          "ATTRBACT" is
+/*****************************************************************************
+Developed By : Subash
+Create Date  : 12.10.2004
+Purpose      : BacT
+Date Mod     : 02.11.2004
+Version      : 01
+Date Mod     : 04.18.2011
+Version      : 02      by: Hussein; replace user by lt_session_user.get_userid
+
+
+
+
+**************************************************************************** */
+
+PROCEDURE add_log_entry(p_log_text varchar2, p_file UTL_FILE.FILE_TYPE);
+PROCEDURE add_log_entry_reac(p_log_text varchar2, p_file UTL_FILE.FILE_TYPE);
+procedure main_proc(file_name in varchar2,inst_id in varchar2, inst_test_id in varchar2);
+procedure process;
+procedure readrecord;
+procedure get_column(txtline in varchar2, delimit in char,strt in number,endc in number,outcol out varchar2);
+procedure get_column_1(txtline in varchar2, delimit in char,sub_delimit in char,strt in number,endc in number,substart in number, outcol out varchar2);
+procedure init_variables;
+procedure convert_unit_id ;
+procedure update_rpt_parm(p_report_name in varchar2, p_parm_id in varchar2);
+procedure rollback_and_exit ;
+procedure insert_attributes;
+procedure insert_instrument_log;
+procedure get_reactive;
+procedure sched_conf_utr (p_unit_id varchar2,
+			  p_coll_date date,
+			  p_chapter_id varchar2,
+			  p_conf_test_id varchar2 ,
+			  p_program_id varchar2 );
+function IsTestMissing (p_unit_id varchar2,
+                        p_coll_date date,
+			p_chapter_id varchar2,
+			p_test_id  varchar2) RETURN BOOLEAN;
+procedure insert_attrib (p_unit_id varchar2,
+			 p_coll_date date,
+			 p_chapter_id varchar2,
+			 p_test_id varchar2,
+			 p_attrib_group varchar2,
+			 p_attrib_code varchar2,
+			 p_program_id varchar2);
+procedure insert_inter (p_unit_id varchar2,
+			p_coll_date date,
+			p_chapter_id varchar2,
+			p_inter_code varchar2,
+			p_test_id varchar2 ,
+			p_program_id varchar2  );
+FUNCTION IS_ANY_ATTRIBUTES (p_unit_id varchar2,
+                            p_coll_date date ,
+			    p_chapter_id varchar2,
+			    p_test_id varchar2 ) RETURN BOOLEAN;
+field_delimiter varchar2(1):='|';
+sub_field_delimiter varchar2(1) := '^';
+repeat_delimiter varchar2(1);
+component_delimiter varchar2(1);
+escape_delimiter varchar2(1);
+   logfile UTL_FILE.FILE_TYPE;
+   logerrfile UTL_FILE.FILE_TYPE;
+   logreacfile UTL_FILE.FILE_TYPE;
+   instfile UTL_FILE.FILE_TYPE;
+   LogDir varchar2(50);
+   LogErrDir varchar2(50);
+   LogReacDir varchar2(50);
+   LogInstDir varchar2(50);
+   logfilename varchar2(50);
+   logerrfilename varchar2(50);
+   logreacfilename varchar2(50);
+   read_record varchar2(500);
+   complete boolean:=false;
+   plate_id varchar2(10);
+   bottle_id varchar2(9);
+   v_tb_id varchar2(14);
+   v_test_id varchar2(10);
+   v_source_test_id varchar2(10);
+   cut_off varchar2(10);
+   v_machine_id varchar2(5);
+   v_inst_test_id  varchar2(10);
+   maxnum  number;
+   v_unit_id varchar2(15);
+   dummy_unit_id varchar2(15);
+   verify_unit_id varchar2(15);
+   process_date_time  varchar2(15);
+   process_date  varchar2(15);
+   v_absorbance varchar2(12);
+   temp_coll_date date;
+   result_date date;
+   v_result_status varchar2(4);
+   negative_result varchar2(4);
+   temp_x varchar2(1);
+   reactive_result varchar2(4);
+   codabar_unit_scheme varchar2(1);
+   testing_lab_code varchar2(2);
+   v_chapter_id varchar2(4);
+   first_unit boolean:=TRUE;
+   well_type varchar2(1);
+   result_file_name varchar2(60);
+   prev_test_id varchar2(10);
+   good_unit Boolean :=FALSE;
+   result_read Boolean := FALSE;
+   plate_seq_no varchar2(1) := null;
+   v_number_of_repeats           number(1);
+   v_inter_code                  varchar2(4);
+   v_attrib_group                varchar2(5);
+   v_attrib_code                 varchar2(5);
+   v_confirm_test_id_1           varchar2(10);
+   v_confirm_test_id_2           varchar2(10);
+   v_display_attrib              varchar2(5);
+   v_display_inter               varchar2(15);
+   v_display_sched_test          varchar2(25);
+   display_inter  boolean:=TRUE;
+   display_test   boolean:= TRUE;
+end ATTRBACT;
+/
+
+create or replace PACKAGE BODY          "ATTRBACT" is
+PROCEDURE add_log_entry(p_log_text varchar2, p_file UTL_FILE.FILE_TYPE) is
+BEGIN
+         UTL_FILE.putf(p_file,'%s\n',p_log_text);
+         UTL_FILE.fflush(p_file);
+END add_log_entry;
+PROCEDURE add_log_entry_reac(p_log_text varchar2, p_file UTL_FILE.FILE_TYPE) is
+BEGIN
+         UTL_FILE.putf(p_file,'%s\n',p_log_text);
+         UTL_FILE.fflush(p_file);
+END add_log_entry_reac;
+procedure main_proc(file_name in varchar2, inst_id in varchar2, inst_test_id in varchar2) is
+   begin
+      dbms_output.enable(50000000);
+      v_machine_id:=inst_id;
+      v_inst_test_id := inst_test_id;
+      result_file_name:=file_name;
+      begin
+          select code_desc into LogInstDir from master_codes
+          where code_type='LOGDR' and code='BACT' and
+	  sysdate between eff_date and nvl(term_date,sysdate);
+          select code_desc into LogDir from master_codes
+          where code_type='LOGDR' and code='IDLOG' and
+	  sysdate between eff_date and nvl(term_date,sysdate);
+          select code_desc into LogErrDir from master_codes
+          where code_type='LOGDR' and code='IELOG' and
+	  sysdate between eff_date and nvl(term_date,sysdate);
+          select code_desc into LogReacDir from master_codes
+          where code_type='LOGDR' and code='IRLOG' and
+	  sysdate between eff_date and nvl(term_date,sysdate);
+	  select 'BACT_'||to_char(sysdate,'YYMMDD')||'_'||
+	  LT_USER_SESSION.get_userid||'.r',
+	  'BACTERR_'||to_char(sysdate,'YYMMDD')||'_'||
+	  LT_USER_SESSION.get_userid||'.r'
+	  into logfilename, logerrfilename from dual;
+	  exception when no_data_found then
+	      dbms_output.put_line('Error in getting log directory .. Aborting');
+	      raise;
+      end;
+      begin
+          logfile:=UTL_FILE.fopen(LogDir,logfilename, 'a');
+	  logerrfile := UTL_FILE.fopen(LogErrDir, logerrfilename,'a');
+          instfile :=UTL_FILE.fopen(LogInstDir,file_name, 'r');
+	  add_log_entry('File Name:'||file_name, logerrfile);
+      exception
+           when utl_file.invalid_path then
+           dbms_output.put_line('Invalid path or filename');raise;
+      end;
+	  init_variables;
+	  loop
+	  process;
+	  exit when complete;
+	  end loop;
+          if result_read and good_unit then
+             insert_attributes;
+            add_log_entry(rpad(v_unit_id,15)||rpad(v_result_status,4)||nvl(to_char(result_date,'mm-dd-yy hh24:mi'),'              ')||' '||nvl(to_char(sysdate,'mm-dd-yy hh24:mi'),'              ')||' '||'Attr: '||nvl(rpad(v_display_attrib,5),'     ')||' '||'Interdictions: '||v_display_inter, logfile);
+            get_reactive;
+            v_display_inter:= null;
+	    v_display_sched_test := null;
+	    v_absorbance := null;
+	    v_display_attrib := null;
+	    result_read := FALSE;
+          end if;
+	  update_rpt_parm('BACT',to_char(sysdate,'YYMMDD'));
+	  update_rpt_parm('BACTERR',to_char(sysdate,'YYMMDD'));
+	  commit;
+	  UTL_FILE.fclose(logfile);
+	  UTL_FILE.fclose(logerrfile);
+end;
+procedure process is
+rescode varchar2(5);
+rec_type  varchar2(1);
+rec_type_1  varchar2(15);
+begin
+   readrecord;
+   if not complete then
+   begin
+     rec_type:=substr(substr(read_record,1,instr(read_record,field_delimiter,1)-1),-1);
+     if rec_type='O' then
+     if result_read and good_unit then
+           insert_attributes;
+           add_log_entry(rpad(v_unit_id,15)||rpad(v_result_status,4)||nvl(to_char(result_date,'mm-dd-yy hh24:mi'),'              ')||' '||nvl(to_char(sysdate,'mm-dd-yy hh24:mi'),'              ')||' '||'Attr: '||nvl(rpad(v_display_attrib,5),'     ')||' '||'Interdictions: '||v_display_inter, logfile);
+           get_reactive;
+           v_display_inter:= null;
+	   v_display_sched_test := null;
+	   v_absorbance := null;
+	   v_display_attrib := null;
+	   result_read := FALSE;
+     end if;
+        good_unit:=true;
+	result_read := FALSE;
+        get_column(read_record,field_delimiter,3,4,v_unit_id);
+	dummy_unit_id := v_unit_id;
+        if length(v_unit_id) not in (7,10,13) then
+           add_log_entry('Unit ID:'||v_unit_id||':Invalid length',logerrfile);
+           good_unit:=FALSE;
+        end if;
+	if good_unit then
+        if codabar_unit_scheme='A' then
+           convert_unit_id;
+        end if;
+	end if;
+	if good_unit then
+	begin
+	temp_coll_date := null;
+	  select max(coll_date)
+	   into temp_coll_date
+	   from units
+	   where unit_id = v_unit_id
+	   and chapter_id = v_chapter_id;
+	   if temp_coll_date is null then
+	    add_log_entry('Unit ID:'||v_unit_id||':Unit not checked in', logerrfile);
+	    good_unit := FALSE;
+           end if;
+        exception
+	   when others then
+	      add_log_entry('Unit ID:'||v_unit_id||':Error in selecting Coll Date:'||sqlerrm,logerrfile);
+	      good_unit := FALSE;
+        end;
+	end if;
+     end if;
+     if good_unit then
+	if first_unit then
+	   insert_instrument_log;
+	   first_unit:=false;
+        end if;
+     end if;
+     if good_unit then
+     if rec_type='R' and not result_read then
+	begin
+        get_column(read_record,field_delimiter,12,13,process_date_time);
+        result_date := to_date(process_date_time, 'YYYYMMDDHH24MISS');
+	exception
+	  when others then
+	    add_log_entry('Unit ID:'||v_unit_id||':Invalid Result Date',logerrfile);
+            result_date := null;
+        end;
+        get_column(read_record,field_delimiter,3,4,rescode);
+        get_column_1(read_record,field_delimiter,sub_field_delimiter,2,3,5,bottle_id);
+        begin
+          select result_status
+	  into v_result_status
+	  from valid_instrument_test_results
+         where test_id=v_test_id and machine_id=v_machine_id
+	   and machine_result_status=rescode and
+	   sysdate between eff_date and nvl(term_date,sysdate);
+	   result_read :=true;
+        exception when others then
+          add_log_entry('Unit ID:'||v_unit_id||':Error translating result code:'||rescode||sqlerrm, logerrfile);
+	  good_unit:=FALSE;
+        end;
+     end if;
+     end if;
+     if rec_type='R' and result_read then
+	get_column(read_record,field_delimiter,3,4,v_absorbance);
+     end if;
+   end;
+  end if;
+end process;
+procedure readrecord is
+begin
+utl_file.get_line(instfile,read_record);
+exception
+  when no_data_found then
+  complete:=TRUE;
+  when UTL_FILE.READ_ERROR then
+  add_log_entry(result_file_name||':Error reading file',logerrfile);
+  rollback_and_exit;
+end readrecord;
+procedure get_column(txtline in varchar2, delimit in char,strt in number,endc in number,outcol out varchar2) is
+begin
+outcol := substr(txtline,instr(txtline,delimit, 1, strt)+1,instr(txtline,delimit,1,endc)- instr(txtline,delimit,1,strt)-1);
+end get_column;
+procedure get_column_1(txtline in varchar2, delimit in char,sub_delimit in char,strt in number,endc in number,substart in number, outcol out varchar2) is
+p_value varchar2(30);
+begin
+p_value := substr(txtline,instr(txtline,delimit, 1, strt)+1,instr(txtline,delimit,1,endc)- instr(txtline,delimit,1,strt));
+outcol := substr(p_value,instr(p_value,sub_delimit,1,substart)+1,instr(p_value,delimit,1)-instr(p_value,sub_delimit,1,substart)-1);
+end get_column_1;
+procedure init_variables is
+begin
+   begin
+   SELECT testing_lab_code,chapter_id into testing_lab_code,v_chapter_id
+   from system_users
+   where user_id = LT_USER_SESSION.get_userid
+   and sysdate between eff_date and nvl(term_date,sysdate);
+   exception when no_data_found then
+      testing_lab_code:='99';
+      v_chapter_id:='WAD';
+   end;
+   begin
+ select nvl(codabar_unit_scheme,'*') into  codabar_unit_scheme
+ from institutions where sysdate between eff_date and nvl(term_date,sysdate);
+ exception when no_data_found then
+    add_log_entry('No institution data available ', logerrfile);
+    rollback_and_exit;
+    end;
+     begin
+      select test_id
+      into v_test_id from valid_instrument_tests where
+	   machine_id=v_machine_id and machine_test_id= v_inst_test_id and
+	   sysdate between eff_date and nvl(term_date,sysdate);
+     exception
+       when others then
+         add_log_entry('Error in translating machine test ID BACT:'||sqlerrm, logerrfile);
+         rollback_and_exit;
+     end;
+end init_variables;
+procedure insert_attributes is
+temp_x  varchar2(1);
+begin
+     if is_any_attributes(v_unit_id, temp_coll_date, v_chapter_id, v_test_id)
+     then
+	  plate_seq_no := 'R';
+     else
+	  plate_seq_no := 'I';
+     end if;
+     begin
+      select  number_of_repeats,
+              inter_code,
+              attrib_group,
+              attrib_code,
+              confirm_test_id_1,
+              confirm_test_id_2
+      into
+              v_number_of_repeats,
+              v_inter_code,
+              v_attrib_group,
+              v_attrib_code,
+              v_confirm_test_id_1,
+              v_confirm_test_id_2
+      from    valid_test_results
+     where   test_id = v_test_id and
+             result_status = v_result_status and
+             plate_seq = plate_seq_no and
+             sysdate between eff_date and nvl(term_date,sysdate+365);
+   if v_attrib_code is not null then
+      v_display_attrib := v_attrib_code;
+      display_inter := TRUE;
+      insert_attrib(v_unit_id,
+		    temp_coll_date,
+		    v_chapter_id,
+		    v_test_id,
+		    v_attrib_group,
+		    v_attrib_code,
+		    'ATTRBACT');
+   end if;
+   if v_inter_code is not null then
+      display_inter := TRUE;
+      insert_inter(v_unit_id,
+		   temp_coll_date,
+		   v_chapter_id,
+	           v_inter_code,
+		   null,
+		   'ATTRBACT');
+      if display_inter then
+         if v_display_inter is not null then
+            v_display_inter := v_display_inter||','||v_inter_code;
+         else
+	    v_display_inter := v_inter_code;
+         end if;
+       end if;
+   end if;
+   if v_confirm_test_id_1 is not null
+      and IsTestMissing(v_unit_id,
+		    temp_coll_date,
+		    v_chapter_id,
+		    v_confirm_test_id_1)
+  then
+      display_test := TRUE;
+     sched_conf_utr(v_unit_id,
+		   temp_coll_date,
+		   v_chapter_id,
+                   v_confirm_test_id_1,
+		   'ATTRBACT');
+     if display_test then
+        v_display_sched_test := v_confirm_test_id_1;
+     end if;
+  end if;
+  if v_confirm_test_id_2 is not null
+     and IsTestMissing(v_unit_id,
+		       temp_coll_date,
+		       v_chapter_id,
+		       v_confirm_test_id_2)
+  then
+      display_test := TRUE;
+      sched_conf_utr(v_unit_id,
+		   temp_coll_date,
+		   v_chapter_id,
+                   v_confirm_test_id_2,
+		   'ATTRBACT');
+      if display_test then
+        if v_display_sched_test is not null then
+           v_display_sched_test := v_display_sched_test||','||v_confirm_test_id_2;
+        else
+            v_display_sched_test := v_confirm_test_id_2;
+        end if;
+      end if;
+  end if;
+    exception
+      when no_data_found then
+        add_log_entry('Unit ID:'||v_unit_id||':No valid test results: '||v_result_status||' For '|| plate_seq_no,logerrfile);
+      when others then
+        add_log_entry('Unit ID:'||v_unit_id||':No valid test results:'||sqlerrm||v_result_status||' For '|| plate_seq_no,logerrfile);
+   end;
+end insert_attributes;
+procedure convert_unit_id is
+begin
+select eye_read_trns||substr(v_unit_id,3) into v_unit_id from bar_code_prefixes
+where machine_code=substr(v_unit_id,1,2) and
+sysdate between eff_date and nvl(term_date,sysdate);
+exception
+    when no_data_found then
+    begin
+	select eye_read_trns||substr(v_unit_id,3)
+	into v_unit_id from bar_code_prefixes
+        where eye_read_trns=substr(v_unit_id,1,2)
+	and sysdate between eff_date and nvl(term_date,sysdate);
+    exception
+      when no_data_found then
+        add_log_entry('Unit ID:'||v_unit_id||':No bar_code translation exists', logerrfile);
+	good_unit := false;
+      when others then
+        add_log_entry('Unit ID:'||v_unit_id||':Problem with bar_code translation:'||sqlerrm, logerrfile);
+	good_unit := false;
+    end;
+end convert_unit_id;
+procedure rollback_and_exit is
+begin
+rollback;
+add_log_entry('Aborting',logerrfile);
+raise_application_error('-20000','ABORTING');
+UTL_FILE.fclose(logfile);
+UTL_FILE.fclose(logerrfile);
+UTL_FILE.fclose(logreacfile);
+end rollback_and_exit;
+FUNCTION IS_ANY_ATTRIBUTES (p_unit_id varchar2,
+			  p_coll_date date ,
+			  p_chapter_id varchar2,
+			  p_test_id varchar2 )
+return BOOLEAN is
+attr_count   number(2) :=0;
+BEGIN
+  select count(*)
+  into attr_count
+  from unit_attributes
+  where unit_id = p_unit_id
+  and  coll_date = p_coll_date
+  and  chapter_id = p_chapter_id
+  and  attrib_code in (select attrib_code
+		       from valid_test_results
+		       where test_id = p_test_id
+		       and sysdate between eff_date
+			    and nvl(term_date, sysdate+1));
+   if attr_count > 0 then
+      return(TRUE);
+   else
+      return(FALSE);
+   end if;
+END IS_ANY_ATTRIBUTES;
+procedure insert_inter (p_unit_id varchar2,
+			p_coll_date date,
+			p_chapter_id varchar2,
+			p_inter_code varchar2,
+			p_test_id varchar2 ,
+			p_program_id varchar2  ) is
+temp_x  varchar2(1);
+begin
+   if p_inter_code is not null then
+   begin
+     select 'x'
+       into temp_x
+     from valid_interdictions
+     where inter_code = p_inter_code
+     and sysdate between eff_date and nvl(term_date, sysdate+1);
+     begin
+     insert into unit_interdictions
+		( unit_id,
+		  coll_date,
+		  chapter_id,
+		  inter_code,
+		  insert_dats,
+		  inter_user_id,
+		  source_test_id,
+		  program_id
+		)
+	values
+		( p_unit_id,
+		  p_coll_date,
+		  p_chapter_id,
+		  p_inter_code,
+		  sysdate,
+		  LT_USER_SESSION.get_userid,
+		  p_test_id,
+		  p_program_id
+		);
+     exception
+	when dup_val_on_index then
+	 display_inter := FALSE;
+	when others then
+	  add_log_entry('Unit ID:'||v_unit_id||':Error in creating interdictions', logerrfile);
+     end;
+   exception
+      when others then
+	 display_inter := FALSE;
+	add_log_entry('Unit ID:'||v_unit_id||':Invalid Interdiction Code:'||p_inter_code, logerrfile);
+   end;
+  end if;
+
+end insert_inter;
+	--
+	-- 		Create an attribute
+	--
+procedure insert_attrib (p_unit_id varchar2,
+			 p_coll_date date,
+			 p_chapter_id varchar2,
+			 p_test_id varchar2,
+			 p_attrib_group varchar2,
+			 p_attrib_code varchar2,
+			 p_program_id varchar2)
+			is
+a_status_flag           varchar2(1) := NULL;
+a_stop_label_flag       varchar2(1) := NULL;
+a_inter_code            varchar2(4) := NULL;
+begin
+	begin
+	select status_flag,
+	       stop_label_flag,
+	       inter_code
+	into
+		a_status_flag,
+		a_stop_label_flag,
+		a_inter_code
+	from valid_attributes
+	where attrib_group = p_attrib_group and
+	      attrib_code = p_attrib_code and
+	      unit_scheme_type = decode(length(p_unit_id),13,'I','C')
+	      and sysdate between eff_date and nvl(term_date,sysdate+365);
+	begin
+	insert into unit_attributes
+		(
+		unit_id,
+		coll_date,
+		chapter_id,
+		attrib_group,
+		attrib_code,
+		status_flag,
+		stop_label_flag,
+		insert_dats,
+		insert_user_id,
+		program_id,
+		source_test_id
+		)
+		values
+		(
+		p_unit_id,
+		p_coll_date,
+		p_chapter_id,
+		p_attrib_group,
+		p_attrib_code,
+		a_status_flag,
+		a_stop_label_flag,
+		sysdate,
+		LT_USER_SESSION.get_userid,
+		p_program_id,
+		p_test_id
+		);
+      exception
+	when dup_val_on_index then
+	v_display_attrib := null;
+        when others then
+	add_log_entry('Unit ID:'||v_unit_id||':Error in inserting attributes', logerrfile);
+      end ;
+    exception
+      when others then
+	v_display_attrib := null;
+	add_log_entry('Unit ID:'||v_unit_id||':Invalid Attribute', logerrfile);
+    end;
+     if  a_inter_code is not null then
+	insert_inter (	p_unit_id ,
+			p_coll_date,
+			p_chapter_id,
+			a_inter_code, null,
+			p_program_id ) ;
+        if display_inter then
+	   v_display_inter := a_inter_code;
+        end if;
+     end if;
+end insert_attrib;
+function IsTestMissing (p_unit_id varchar2,
+			p_coll_date date,
+			p_chapter_id varchar2,
+			p_test_id  varchar2) return BOOLEAN is
+test_count	number (2);
+begin
+	select 	count(*)
+	into	test_count
+	from    utrs
+	where unit_id = p_unit_id
+	  and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+	  and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+	  and test_id = p_test_id
+	  and cancel_flag is null;
+	if test_count > 0 then
+		return FALSE;
+	else
+		return TRUE;
+	end if;
+end IsTestMissing;
+procedure sched_conf_utr (p_unit_id varchar2,
+			  p_coll_date date,
+			  p_chapter_id varchar2,
+			  p_conf_test_id varchar2 ,
+			  p_program_id varchar2 ) is
+temp_x  varchar2(1);
+begin
+  begin
+    select 'x'
+     into temp_x
+    from valid_tests
+    where test_id = p_conf_test_id
+    and sysdate between eff_date and nvl(term_date, sysdate+1);
+    begin
+	insert into utrs
+	(
+	unit_id,
+	coll_date,
+	chapter_id,
+	test_seq_no,
+	test_id,
+	insert_dats,
+	insert_user_id,
+	program_id
+	)
+	select
+	p_unit_id,
+	p_coll_date,
+	p_chapter_id,
+	nvl (max (test_seq_no), 0) + 1,
+	p_conf_test_id,
+	sysdate,
+	LT_USER_SESSION.get_userid,
+	p_program_id
+        from utrs utr1
+	where utr1.unit_id = p_unit_id
+        and nvl(utr1.coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+        and nvl(utr1.chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+        and utr1.test_id = p_conf_test_id;
+     exception
+	when dup_val_on_index then
+	display_test := FALSE;
+	when others then
+	  add_log_entry('Unit ID:'||v_unit_id||':Error in inserting confirmatory test:'||p_conf_test_id,logerrfile);
+     end;
+  exception
+     when others then
+	add_log_entry('Unit ID:'||v_unit_id||':Invalid Confirmatory Test:'||p_conf_test_id,logerrfile);
+	display_test := FALSE;
+  end;
+end sched_conf_utr ;
+procedure get_reactive is
+begin
+  begin
+   select 'x'
+    into temp_x
+    from master_codes
+    where code_type='REAC'
+     and code=v_result_status
+     and sysdate between eff_date and nvl(term_date, sysdate+1)
+     and code in (select result_status from valid_test_results
+		  where sysdate between eff_date and nvl(term_date, sysdate+1)
+		  and test_id = v_test_id);
+  begin
+    select 'BCTREAC_'||rtrim(ltrim(v_unit_id))||'_'||
+         LT_USER_SESSION.get_userid||'.r'
+     into logreacfilename from dual;
+  exception
+    when no_data_found then
+       dbms_output.put_line('Error in getting log directory .. Aborting');
+       raise;
+  end;
+  logreacfile := UTL_FILE.fopen(LogReacDir, logreacfilename,'w');
+     add_log_entry_reac('Unit ID      :'||v_unit_id, logreacfile);
+     add_log_entry_reac('Unit ID Read :'||dummy_unit_id, logreacfile);
+     add_log_entry_reac('File Name    :'||result_file_name, logreacfile);
+     add_log_entry_reac('Result Date  :'||to_char(result_date,'mm/dd/yy hh24:mi'), logreacfile);
+     add_log_entry_reac('Process Date :'||to_char(sysdate,'mm/dd/yy hh24:mi'), logreacfile);
+     add_log_entry_reac('Inter Added  :'||v_display_inter, logreacfile);
+     add_log_entry_reac('Test Sched   :'||v_display_sched_test, logreacfile);
+     add_log_entry_reac('No of Hours  :'||v_absorbance, logreacfile);
+     add_log_entry_reac('Bottle ID    :'||bottle_id, logreacfile);
+  UTL_FILE.fclose(logreacfile);
+  update_rpt_parm('BCTREAC',v_unit_id);
+  exception
+     when others then
+       null;
+  end;
+end get_reactive;
+procedure update_rpt_parm(p_report_name in varchar2, p_parm_id in varchar2) is
+temp_y  varchar2(1);
+begin
+begin
+   select 'x'
+     into  temp_y
+     from rpt_parm
+     where report_name = p_report_name
+     and parm_id = p_parm_id
+     and appl_id = 'SBC';
+exception
+  when no_data_found then
+    begin
+     insert into rpt_parm
+     (appl_id, user_name, report_name, parm_id, parm_date, submit_date,
+      report_status)
+     values ('SBC', LT_USER_SESSION.get_userid,
+     p_report_name, p_parm_id, sysdate, sysdate, 'C');
+   exception
+    when others then
+     add_log_entry('Error inserting into rpt_parm:'||sqlerrm, logerrfile);
+   end;
+ when others then
+    null;
+end;
+end update_rpt_parm;
+procedure insert_instrument_log is
+temp_x varchar2(1);
+begin
+begin
+    select 'x' into temp_x from instrument_log where file_name=substr(result_file_name,instr(result_file_name,'/',-1)+1);
+    add_log_entry('File '||substr(result_file_name,instr(result_file_name,'/',-1)+1)||' already uploaded',logerrfile);
+    rollback_and_exit;
+    exception when no_data_found then null;
+    when too_many_rows then
+    begin
+    add_log_entry('File '||substr(result_file_name,instr(result_file_name,'/',-1)+1)||' already uploaded',logerrfile);
+    rollback_and_exit;
+    end;
+    when others then
+    begin
+    add_log_entry('Error verifying instrument_log:'||sqlerrm,logerrfile);
+    rollback_and_exit;
+    end;
+end;
+begin
+ insert into instrument_log ( tb_id, test_chapter_id, test_id, read_dats,
+		          machine_id, station_no, xmt_status, status_dats,
+			  file_name)
+ values ('ATTRBACT', v_chapter_id,v_test_id, sysdate,v_machine_id, ' ', '70', sysdate, substr(result_file_name,instr(result_file_name,'/',-1)+1));
+ exception when others then
+      add_log_entry('Error creating instrument log:'||sqlerrm, logerrfile);
+      rollback_and_exit;
+      end;
+end insert_instrument_log;
+end ATTRBACT;
+/
+

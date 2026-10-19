@@ -1,0 +1,254 @@
+<div class="checkin-discard-container">
+  <app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+  <div class="page-wrapper">
+    <!-- Filter Section -->
+    <section
+      class="filter-section"
+      [attr.aria-labelledby]="elementId('filter-heading')"
+      role="region">
+      <h2 [id]="elementId('filter-heading')" class="sr-only">Product Checkin Form</h2>
+
+      <!-- Live region for status announcements -->
+      <div class="sr-only" aria-live="polite" role="status">
+        @if (isLoadingProductCodes()) { Loading product codes... }
+        @if (isLoadingAboTypes()) { Loading ABO types... }
+        @if (isCheckingIn()) { Checking in product... }
+      </div>
+
+      <div [formGroup]="filterForm" class="filter-form">
+        <!-- Row 1: Scan Fields -->
+        <fieldset class="filter-row filter-fieldset">
+          <legend class="sr-only">Product Scan Fields</legend>
+          <!-- Unit ID (shared component) -->
+          <app-unit-id-field
+            [validateFfValue]="'N'"
+            [required]="true"
+            [showBarcodeIcon]="true"
+            [hintValid]="'Unit found in discard'"
+            (postValidate)="onUnitPostValidate($event)"
+            (validated)="onUnitValidated($event)"
+            (cleared)="onUnitCleared()"
+            class="form-field"
+          />
+
+          <!-- Collection Date (display only) -->
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label>Collection Date</mat-label>
+            <input
+              matInput
+              [id]="elementId('collDate')"
+              [value]="validatedUnit()?.collDate || ''"
+              disabled
+            />
+          </mat-form-field>
+
+          <!-- Product Code -->
+          <div class="dropdown-field-wrapper">
+            <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+              <mat-label>Product Code</mat-label>
+              <mat-select
+                [id]="elementId('productCode')"
+                formControlName="productCode"
+                [disabled]="!unitIdField?.isValid"
+                aria-description="Supports barcode scanning"
+                (openedChange)="onDropdownOpened($event)"
+                (selectionChange)="onProductCodeSelected()">
+                @if (isLoadingProductCodes()) {
+                  <mat-option disabled>
+                    <mat-spinner diameter="20" aria-label="Loading product codes"></mat-spinner>
+                    <span>Loading...</span>
+                  </mat-option>
+                } @else if (productCodes().length === 0) {
+                  <mat-option disabled>{{ unitIdField?.isValid ? 'No products available' : 'Validate unit first' }}</mat-option>
+                } @else if (productCodes().length <= 3) {
+                  @for (code of productCodes(); track code.productCode) {
+                    <mat-option [value]="code.productCode">
+                      {{ code.productCode }}{{ code.productType ? ' - ' + code.productType : '' }}
+                    </mat-option>
+                  }
+                } @else {
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="productCodeSearchControl"
+                      placeholderLabel="Search..."
+                      noEntriesFoundLabel=""
+                      [ariaLabel]="'Search product codes'">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @for (code of filteredProductCodes(); track code.productCode) {
+                    <mat-option [value]="code.productCode">
+                      {{ code.productCode }}{{ code.productType ? ' - ' + code.productType : '' }}
+                    </mat-option>
+                  }
+                  @if (filteredProductCodes().length === 0) {
+                    <mat-option disabled>No data available</mat-option>
+                  }
+                }
+              </mat-select>
+            </mat-form-field>
+            <img src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-indicator-dropdown" />
+          </div>
+
+          <!-- Pool product indicator -->
+          @if (isPoolProduct()) {
+            <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+              <mat-label>ABORh</mat-label>
+              <input matInput value="POOL" readonly disabled aria-label="ABORh is Pool product" />
+            </mat-form-field>
+          }
+
+          <!-- ABORh (conditionally rendered — hidden for pool products) -->
+          @if (!isPoolProduct()) {
+          <div class="dropdown-field-wrapper">
+            <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+              <mat-label>ABORh</mat-label>
+              <mat-select
+                [id]="elementId('aboRh')"
+                formControlName="aboRh"
+                [disabled]="!f['productCode'].value"
+                (openedChange)="onDropdownOpened($event)"
+                (selectionChange)="onAboSelected()">
+                @if (isLoadingAboTypes()) {
+                  <mat-option disabled>
+                    <mat-spinner diameter="20" aria-label="Loading ABO types"></mat-spinner>
+                    <span>Loading...</span>
+                  </mat-option>
+                } @else if (aboTypes().length === 0) {
+                  <mat-option disabled>{{ f['productCode'].value ? 'No ABO types available' : 'Select product first' }}</mat-option>
+                } @else if (aboTypes().length <= 3) {
+                  @for (abo of aboTypes(); track abo.bloodType) {
+                    <mat-option [value]="abo.bloodType">
+                      {{ abo.aboDesc }}
+                    </mat-option>
+                  }
+                } @else {
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="aboSearchControl"
+                      placeholderLabel="Search..."
+                      noEntriesFoundLabel=""
+                      [ariaLabel]="'Search ABO types'">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                  @for (abo of filteredAboTypes(); track abo.bloodType) {
+                    <mat-option [value]="abo.bloodType">
+                      {{ abo.aboDesc }}
+                    </mat-option>
+                  }
+                  @if (filteredAboTypes().length === 0) {
+                    <mat-option disabled>No data available</mat-option>
+                  }
+                }
+              </mat-select>
+            </mat-form-field>
+            <img src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-indicator-dropdown" />
+          </div>
+          }
+
+          <!-- Clear All Button -->
+          @if (unitIdField?.isValid) {
+            <button
+              mat-button
+              color="primary"
+              class="clear-all-btn"
+              (click)="clearForm()"
+              aria-label="Clear all fields">
+              Clear All
+            </button>
+          }
+        </fieldset>
+
+        <!-- Row 2: Location Fields -->
+        <fieldset class="filter-row filter-fieldset">
+          <legend class="sr-only">Location Fields</legend>
+          <!-- Warehouse ID -->
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label>Location # Warehouse ID</mat-label>
+            <mat-select
+              [id]="elementId('warehouseId')"
+              formControlName="warehouseId"
+              [disabled]="!f['aboRh'].value"
+              [attr.aria-describedby]="!f['aboRh'].value ? elementId('warehouseHint') : null"
+              (selectionChange)="onWarehouseChanged()">
+              @for (wh of warehouses(); track wh.warehouseId) {
+                <mat-option [value]="wh.warehouseId">
+                  {{ wh.warehouseId }}{{ wh.description ? ' - ' + wh.description : '' }}
+                </mat-option>
+              }
+            </mat-select>
+            <span [id]="elementId('warehouseHint')" class="sr-only">Select ABORh first</span>
+          </mat-form-field>
+
+          <!-- Device Number -->
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label>Location # Device Number</mat-label>
+            <mat-select
+              [id]="elementId('deviceNumber')"
+              formControlName="deviceNumber"
+              [disabled]="!f['warehouseId'].value"
+              (selectionChange)="onDeviceChanged()">
+              @for (dev of devices(); track dev.deviceNumber) {
+                <mat-option [value]="dev.deviceNumber">
+                  {{ dev.deviceNumber }}{{ dev.description ? ' - ' + dev.description : '' }}
+                </mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <!-- Rack Number -->
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label>Location # Rack Number</mat-label>
+            <mat-select
+              [id]="elementId('rackNumber')"
+              formControlName="rackNumber"
+              [disabled]="!f['deviceNumber'].value"
+              (selectionChange)="onRackChanged()">
+              @for (rack of racks(); track rack.rackNumber) {
+                <mat-option [value]="rack.rackNumber">
+                  {{ rack.rackNumber }}{{ rack.description ? ' - ' + rack.description : '' }}
+                </mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <!-- Tray Number -->
+          <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+            <mat-label>Tray Number</mat-label>
+            <mat-select
+              [id]="elementId('trayNumber')"
+              formControlName="trayNumber"
+              [disabled]="!f['rackNumber'].value"
+              (selectionChange)="onTrayChanged()">
+              @for (tray of trays(); track tray.trayNumber) {
+                <mat-option [value]="tray.trayNumber">
+                  {{ tray.trayNumber }}
+                </mat-option>
+              }
+            </mat-select>
+            <span aria-live="polite">
+              @if (isCheckingIn()) {
+                <mat-spinner matSuffix diameter="20" aria-label="Checking in product"></mat-spinner>
+              }
+            </span>
+          </mat-form-field>
+        </fieldset>
+      </div>
+    </section>
+
+    <!-- Results Section -->
+    <section
+      class="results-section"
+      [attr.aria-labelledby]="elementId('results-heading')"
+      role="region">
+      <h2 [id]="elementId('results-heading')" class="sr-only">Checked In Products</h2>
+
+      <app-data-table
+        [config]="tableConfig"
+        [data]="inventoryData()"
+        [loading]="false"
+        (sortChange)="onSortChange($event)">
+      </app-data-table>
+    </section>
+  </div>
+</div>

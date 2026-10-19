@@ -1,0 +1,272 @@
+<!-- Form -->
+<form
+  [formGroup]="form"
+  (ngSubmit)="onSubmit()"
+  [id]="elementId('form')"
+  class="check-in-form"
+  novalidate
+  [attr.aria-labelledby]="elementId('heading')"
+  role="region">
+
+  <h2 [id]="elementId('heading')" class="sr-only">Offline Product Check-In</h2>
+
+  <!-- Container 1: Header row - Inventory Class + Received Date + CLEAR ALL -->
+  <section class="form-card" aria-label="Header fields">
+    <div class="form-row header-row">
+      <mat-form-field appearance="fill" class="form-field form-field--inv-class" subscriptSizing="dynamic">
+        <mat-label>Inventory Class</mat-label>
+        <mat-select
+          [id]="elementId('inventoryClass')"
+          formControlName="inventoryClass">
+          @if (loadingInventoryClasses()) {
+            <mat-option disabled aria-label="Loading inventory classes">Loading...</mat-option>
+          }
+          @for (invClass of inventoryClasses(); track invClass.code) {
+            <mat-option [value]="invClass.code">
+              {{ invClass.code }} - {{ invClass.codeDesc }}
+            </mat-option>
+          }
+        </mat-select>
+        @if (form.get('inventoryClass')?.hasError('required') && form.get('inventoryClass')?.touched) {
+          <mat-error>Inventory Class is required</mat-error>
+        }
+      </mat-form-field>
+
+      <mat-form-field appearance="fill" class="form-field form-field--received-date" subscriptSizing="dynamic">
+        <mat-label>Received Date</mat-label>
+        <input
+          matInput
+          [id]="elementId('receivedDate')"
+          formControlName="receivedDate"
+          placeholder="DD-MMM-YYYY HH:mm"
+          [matTooltip]="'Format: DD-MMM-YYYY HH:mm (e.g., 17-JUN-2026 14:30)'"
+          matTooltipPosition="above"
+          (blur)="onReceivedDateBlur()">
+        @if (form.get('receivedDate')?.hasError('required') && form.get('receivedDate')?.touched) {
+          <mat-error>Received Date is required</mat-error>
+        } @else if (form.get('receivedDate')?.hasError('invalidFormat')) {
+          <mat-error>Invalid format. Use DD-MMM-YYYY HH:mm</mat-error>
+        } @else if (form.get('receivedDate')?.hasError('futureDate')) {
+          <mat-error>Received Date cannot be in the future</mat-error>
+        }
+      </mat-form-field>
+
+      <button
+        mat-button
+        type="button"
+        class="clear-all-link"
+        aria-label="Clear all header fields"
+        (click)="clearHeaderFields()"
+        [disabled]="submitting()">
+        CLEAR ALL
+      </button>
+    </div>
+  </section>
+
+  <!-- Container 2: Product details + Storage + Check In -->
+  <div aria-live="polite">
+  @if (showDetailRows()) {
+    <section class="form-card" aria-label="Product details and storage">
+      <div class="form-row detail-row">
+        <!-- Unit ID (shared component) -->
+        <app-unit-id-field
+          [validateFfValue]="'N'"
+          [required]="true"
+          [showBarcodeIcon]="true"
+          (postValidate)="onUnitPostValidate($event)"
+          (validated)="onUnitValidated($event)"
+          (cleared)="onUnitCleared()"
+          class="form-field form-field--unit-id"
+        />
+
+        <!-- Collection Date (Read-only, auto-populated) -->
+        <div class="field-readonly" role="group" [attr.aria-labelledby]="elementId('collectionDate-label')">
+          <span class="field-readonly__label" [id]="elementId('collectionDate-label')">Collection Date</span>
+          <span class="field-readonly__value" [id]="elementId('collectionDate')">
+            {{ collectionDate() || '-' }}
+          </span>
+        </div>
+
+        <!-- Product Code (scannable) -->
+        <mat-form-field appearance="fill" class="form-field form-field--product-code" subscriptSizing="dynamic">
+          <mat-label>Product Code</mat-label>
+          <input
+            matInput
+            [id]="elementId('productCode')"
+            formControlName="productCode"
+            placeholder="Scan or type product code"
+            [matAutocomplete]="productCodeAuto"
+            #productCodeTrigger="matAutocompleteTrigger"
+            (blur)="onProductCodeScanBlur(productCodeTrigger)">
+          @if (fieldProcessing['productCode']) {
+            <mat-spinner matSuffix diameter="20" role="status" aria-label="Validating"></mat-spinner>
+          } @else {
+            <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+          }
+          @if (fieldProcessing['productCode']) {
+            <mat-hint class="field-validating">Validating scan...</mat-hint>
+          }
+          @if (form.get('productCode')?.hasError('required') && form.get('productCode')?.touched) {
+            <mat-error>Product Code is required</mat-error>
+          } @else if (form.get('productCode')?.hasError('serverError')) {
+            <mat-error>{{ fieldErrors['productCode'] }}</mat-error>
+          }
+          <mat-autocomplete #productCodeAuto="matAutocomplete"
+            (optionSelected)="onProductCodeOptionSelected($event.option.value)"
+            autoActiveFirstOption>
+            @if (loadingProductCodes()) {
+              <mat-option disabled aria-label="Loading product codes">Loading...</mat-option>
+            }
+            @for (pc of filteredProductCodes; track pc.productCode) {
+              <mat-option [value]="pc.productCode">
+                {{ pc.productCode }}{{ pc.productType ? ' (' + pc.productType + ')' : '' }}
+              </mat-option>
+            }
+          </mat-autocomplete>
+        </mat-form-field>
+
+        <!-- ABORh (scannable) -->
+        <mat-form-field appearance="fill" class="form-field form-field--aborh" subscriptSizing="dynamic">
+          <mat-label>ABORh</mat-label>
+          <input
+            matInput
+            [id]="elementId('bloodType')"
+            formControlName="bloodType"
+            placeholder="Scan or type ABO/Rh"
+            [matAutocomplete]="aboTypeAuto"
+            #aboTrigger="matAutocompleteTrigger"
+            (blur)="onAboScanBlur(aboTrigger)">
+          @if (fieldProcessing['bloodType']) {
+            <mat-spinner matSuffix diameter="20" role="status" aria-label="Validating"></mat-spinner>
+          } @else {
+            <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+          }
+          @if (fieldProcessing['bloodType']) {
+            <mat-hint class="field-validating">Validating scan...</mat-hint>
+          }
+          @if (form.get('bloodType')?.hasError('required') && form.get('bloodType')?.touched) {
+            <mat-error>ABORh is required</mat-error>
+          } @else if (form.get('bloodType')?.hasError('serverError')) {
+            <mat-error>{{ fieldErrors['bloodType'] }}</mat-error>
+          }
+          <mat-autocomplete #aboTypeAuto="matAutocomplete"
+            (optionSelected)="onAboOptionSelected($event.option.value)"
+            autoActiveFirstOption>
+            @if (loadingAboTypes()) {
+              <mat-option disabled aria-label="Loading ABO types">Loading...</mat-option>
+            }
+            @for (abo of filteredAboTypes; track abo.aboCode) {
+              <mat-option [value]="abo.aboCode">
+                {{ abo.aboCode }} - {{ abo.aboDescription }}
+              </mat-option>
+            }
+          </mat-autocomplete>
+        </mat-form-field>
+
+        <!-- Expiration Date + Time (merged, text input like label verification) -->
+        <mat-form-field appearance="fill" class="form-field form-field--exp-date" subscriptSizing="dynamic">
+          <mat-label>Expiration Date</mat-label>
+          <input
+            matInput
+            [id]="elementId('expirationDate')"
+            formControlName="expirationDate"
+            placeholder="DD-MMM-YYYY HH:mm"
+            [matTooltip]="'Format: DD-MMM-YYYY HH:mm (e.g., 02-JAN-2025 14:30)'"
+            matTooltipPosition="above"
+            (blur)="onExpirationDateBlur()">
+          @if (fieldProcessing['expirationDate']) {
+            <mat-spinner matSuffix diameter="20" role="status" aria-label="Validating"></mat-spinner>
+          } @else {
+            <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+          }
+          @if (fieldProcessing['expirationDate']) {
+            <mat-hint class="field-validating">Validating scan...</mat-hint>
+          }
+          @if (form.get('expirationDate')?.hasError('required') && form.get('expirationDate')?.touched) {
+            <mat-error>Expiration Date is required</mat-error>
+          } @else if (form.get('expirationDate')?.hasError('invalidFormat')) {
+            <mat-error>Invalid format. Use DD-MMM-YYYY HH:mm</mat-error>
+          }
+        </mat-form-field>
+      </div>
+
+      <!-- Row 3: Storage location + CLEAR ALL (Gap 7: conditional visibility) -->
+      @if (locationRequired()) {
+      <div class="form-row storage-row">
+        <!-- Gap 3: Warehouse dropdown -->
+        <mat-form-field appearance="fill" class="form-field form-field--warehouse" subscriptSizing="dynamic">
+          <mat-label>Warehouse ID</mat-label>
+          <mat-select
+            [id]="elementId('warehouseId')"
+            formControlName="warehouseId">
+            <mat-option value="">-- Select --</mat-option>
+            @for (wh of warehouses(); track wh.warehouseId) {
+              <mat-option [value]="wh.warehouseId">
+                {{ wh.warehouseId }}{{ wh.warehouseDesc && wh.warehouseDesc !== wh.warehouseId ? ' - ' + wh.warehouseDesc : '' }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field form-field--device" subscriptSizing="dynamic">
+          <mat-label>Device Number</mat-label>
+          <mat-select
+            [id]="elementId('deviceNumber')"
+            formControlName="deviceNumber">
+            <mat-option value="">-- Select --</mat-option>
+            @for (device of devices(); track device.deviceNumber) {
+              <mat-option [value]="device.deviceNumber">
+                {{ device.deviceNumber }}{{ device.deviceDesc ? ' - ' + device.deviceDesc : '' }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field form-field--rack" subscriptSizing="dynamic">
+          <mat-label>Rack Number</mat-label>
+          <mat-select
+            [id]="elementId('rackNumber')"
+            formControlName="rackNumber">
+            <mat-option value="">-- Select --</mat-option>
+            @for (rack of racks(); track rack.rackNumber) {
+              <mat-option [value]="rack.rackNumber">
+                {{ rack.rackNumber }}{{ rack.rackDesc ? ' - ' + rack.rackDesc : '' }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field form-field--tray" subscriptSizing="dynamic">
+          <mat-label>Tray Number</mat-label>
+          <mat-select
+            [id]="elementId('trayId')"
+            formControlName="trayId"
+            (selectionChange)="onTrayChanged()">
+            <mat-option value="">-- Select --</mat-option>
+            @for (tray of trays(); track tray.trayId) {
+              <mat-option [value]="tray.trayId">
+                {{ tray.trayId }} ({{ tray.currentCount }}/{{ tray.maxCapacity }})
+              </mat-option>
+            }
+          </mat-select>
+          @if (submitting()) {
+            <mat-spinner matSuffix diameter="20" role="status" aria-label="Validating"></mat-spinner>
+          }
+        </mat-form-field>
+
+        <button
+          mat-button
+          type="button"
+          class="clear-all-link"
+          aria-label="Clear all detail and storage fields"
+          (click)="clearDetailFields()"
+          [disabled]="submitting()">
+          CLEAR ALL
+        </button>
+      </div>
+      }
+
+    </section>
+  }
+  </div>
+</form>

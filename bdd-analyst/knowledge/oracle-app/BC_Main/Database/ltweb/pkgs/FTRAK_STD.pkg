@@ -1,0 +1,1675 @@
+CREATE OR REPLACE PACKAGE FTRAK_STD
+AUTHID CURRENT_USER AS
+/* ----------------------------------------
+*
+||    Program Name                : FTRAK_STD
+||    Date Creation               : 01/07/2020
+||    Current Version             : 01 : Ashok:  Initial version (took LTWEB.WEB_HHQ_PKG latest version and applied changes on top of it)
+                                  : 02 : Ashok:  01/14/2020 gen_barcode_string and process_barcode_string routines added.
+                                  : 03 : Ashok: 01/23/2020 download_web_responses routine added.
+                                  : 04 : Ashok: 01/27/2020 gender_in parameter removed from gen_questions..
+                                  : 05 : Ashok: 01/28/2020 download_web_responses routine paramters modified - removed unnecsssary paramters.
+                                  : 06 : Ashok: 01/31/2020 download_web_responses modified to add new parameter online_id and donor_web_responded check added
+                                  : 07 : Ashok: 02/03/2020 validate_donor_info check moved earlier to donor_web_responded check;
+                                  : 08 : Ashok: 02/10/2020 DONOR_HHQ_HISTORY table issue - MLT 3016
+                                  : 09 : Ashok: 10/15/2020 gen_questions routine modified - MLT 3731 (Search for V09)
+                                  : 10 : Ashok: 05/03/2021 (search for V10) - update flag in online_status when responses are downloaded (used for survey)
+                                  : 11 : Ashok: 05/11/2021 (search for V11) - gender_out parameter added to validate_id 2019R2SP6 for new FastTrak
+-------------------------------------------- */
+ FUNCTION abbr_enabled RETURN BOOLEAN;
+ /*
+  -- Call the procedure
+      ftrak_std.gen_questions(online_id_in => :online_id_in,
+                              gender_in => :gender_in);
+  -- i/p parameters:
+     -- online_id_in is required.
+     -- gender_in is optional.
+ */
+ PROCEDURE gen_questions(online_id_in IN VARCHAR2);
+
+ /*
+  -- Call the procedure
+  ftrak_std.validate_id(id_type_in => :id_type_in,
+                        id_in => :id_in,
+                        id_dob_in => :id_dob_in,
+                        fname_out => :fname_out,
+                        lname_out => :lname_out,
+                        is_valid_out => :is_valid_out,
+                        error_out => :error_out);
+  -- i/p parameters:
+     -- id_type_in is required.
+     -- id_in is required.
+     -- id_dob_in is required.
+
+  -- o/p parameters
+     -- fname_out  
+     -- lname_out  
+     -- is_valid_out  - varchar2 (holds VALID or INVALID)
+     -- error_out   -- varchar2 (holds NULL or error message)
+*/ 
+ PROCEDURE validate_ID(id_type_in IN VARCHAR2,
+                       id_in IN VARCHAR2,
+                       id_dob_in IN DATE,
+                       fname_out OUT VARCHAR2,
+                       lname_out OUT VARCHAR2,
+                       gender_out   OUT VARCHAR2,
+                       is_valid_out OUT VARCHAR2,
+                       error_out OUT VARCHAR2);
+
+ PROCEDURE gen_barcode_string(online_id_in IN VARCHAR2,
+                              string_out   OUT VARCHAR2,
+                              status_out   OUT VARCHAR2);                       
+
+ PROCEDURE process_barcode_string(string_in IN VARCHAR2,
+                                   online_id_out OUT VARCHAR2,
+                                   status_out   OUT VARCHAR2);
+  /*
+  -- Use this routine to download donor web responses to ONSITE system.
+  ftrak_std.download_web_responses(session_id_in => :session_id_in,
+                                   scan_in => :scan_in,
+                                   transaction_id_in => :transaction_id_in,
+                                   screener_id_in => :screener_id_in,
+                                   prog_name_in => :prog_name_in,
+                                   abbr_flag_out => :abbr_flag_out,
+                                   hh_comp_flag_out => :hh_comp_flag_out,
+                                   status_out => :status_out);
+  -- i/p parameters:
+     -- scan_in is required: either 14 char ONLINE ID or BARCODE STRING (encrypted) 
+     -- transaction_id_in is required: Donation transaction
+     -- screener_id_in is required: User ID
+
+  -- o/p parameters
+     -- status_out -- 'OK' for success OR error message for failure;
+*/ 
+  PROCEDURE download_web_responses(scan_in           IN VARCHAR2,
+                                   online_id_in      IN VARCHAR2,
+                                   transaction_id_in IN VARCHAR2,
+                                   screener_id_in    IN VARCHAR2,
+                                   status_out        OUT VARCHAR2);   
+
+  FUNCTION disable_online_button(transaction_id_in IN VARCHAR2) RETURN BOOLEAN;
+END FTRAK_STD;
+
+
+/
+
+
+CREATE OR REPLACE PACKAGE BODY "FTRAK_STD" AS
+  lv_sep  VARCHAR2(1) := '~';
+  lv_null VARCHAR2(2) := '!#';
+
+  FUNCTION abbr_enabled RETURN BOOLEAN IS
+    CURSOR hh_template_cur IS
+      SELECT 1
+        FROM health_history_template
+       WHERE donation_type = 'AL'
+         AND NVL(abbr_flag, 'N') = 'Y'
+         AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1);
+    l_dummy     PLS_INTEGER;
+    l_cur_found BOOLEAN;
+  BEGIN
+    OPEN hh_template_cur;
+    FETCH hh_template_cur
+      INTO l_dummy;
+    l_cur_found := hh_template_cur%FOUND;
+    CLOSE hh_template_cur;
+
+    RETURN l_cur_found;
+  END abbr_enabled;
+  ---
+  PROCEDURE gen_questions(online_id_in IN VARCHAR2) AS
+    PRAGMA autonomous_transaction;
+
+    CURSOR hh_template_cur IS
+      SELECT hht.randomization_flag
+        FROM health_history_template hht
+       WHERE hht.donation_type = 'AL'
+         AND SYSDATE BETWEEN hht.eff_date AND
+             NVL(hht.term_date, SYSDATE + 1);
+
+    CURSOR donor_type_cur(p_onlineID VARCHAR2) IS
+      SELECT id_type, id, gender
+        FROM web_donor_responses_hdr
+       WHERE online_id = p_onlineID;
+
+    CURSOR gender_cur(p_donorID VARCHAR2,
+                      p_scanID  VARCHAR2,
+                      p_altID   VARCHAR2) IS
+      SELECT gender, donor_id -- Abbr SCR
+        FROM donors
+       WHERE donor_id = NVL(p_donorID, donor_id)
+         AND NVL(scan_id, '@#') = NVL(p_scanID, NVL(scan_id, '@#')) -- IM: 9512; 08/14/2013
+         AND NVL(alternate_id, '@#') =
+             NVL(p_altID, NVL(alternate_id, '@#')); --IM:9512; 08/14/2013
+
+    l_id_type          VARCHAR2(5);
+    l_id               VARCHAR2(2000);
+    l_random_flag      VARCHAR2(1);
+    l_donor_gender     VARCHAR2(1);
+    l_abbr_flag        VARCHAR2(1); -- Abbr SCR
+    l_donor_id         VARCHAR2(10); -- Abbr SCR
+    l_qtype_calc       VARCHAR2(1); -- Abbr SCR
+    l_qtype_actual     VARCHAR2(1); -- Abbr SCR
+    l_qtype_comments   VARCHAR2(1000); -- Abbr SCR
+    l_qtype_reset_flag VARCHAR2(1); -- Abbr SCR
+    l_error            VARCHAR2(2000); --Abbr SCR
+
+    -- SCR 20609; 07/15/2014
+    -- This function returns abbreviated question description if it is configured in valid_hh_questions table, otherwise returns NULL;
+    FUNCTION abbr_QDesc(qCode_in IN VARCHAR2) RETURN VARCHAR2 IS
+      CURSOR hht_cur IS
+        SELECT abbr_flag
+          FROM health_history_template
+         WHERE question_code = qCode_in
+           AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1);
+
+      CURSOR vhq_cur IS
+        SELECT question_description
+          FROM valid_hh_questions
+         WHERE question_code = qCode_in || '-A';
+
+      l_qDesc    VARCHAR2(1000) := NULL;
+      l_abbrFlag VARCHAR2(1);
+    BEGIN
+      -- check if the question is setup for abbreviated questionnaire in health_history_template.
+      OPEN hht_cur;
+      FETCH hht_cur
+        INTO l_abbrFlag;
+      CLOSE hht_cur;
+
+      IF NVL(l_abbrFlag, 'N') = 'Y' THEN
+        -- Get abbreviated question description if it is configured from valid_hh_quesetions table
+        OPEN vhq_cur;
+        FETCH vhq_cur
+          INTO l_qDesc;
+        CLOSE vhq_cur;
+      END IF;
+      RETURN l_qDesc;
+    END abbr_QDesc;
+    ------------------
+
+    PROCEDURE wdr_random_insert IS
+      /* procedure added to insert questions in random order.  Modified this logic to fix the issue where
+        child questions are displayed before parent questions
+      */
+      /* Get the sequence number and question code for parent quesiton that have child questions */
+      CURSOR wdr_cur IS
+        SELECT sort_sequence, question_code
+          FROM web_donor_responses
+         WHERE online_id = online_id_in
+           AND sub_question_flag = 'Y';
+    BEGIN
+      /* Insert only parent questions - do not insert child quesitons */
+      INSERT INTO web_donor_responses
+        (online_id,
+         template_id,
+         question_code,
+         question_description,
+         gender,
+         sub_question_flag,
+         parent_question_code,
+         parent_resp_flag,
+         insert_date,
+         sort_sequence)
+        SELECT online_id_in,
+               hht.template_id,
+               hht.question_code,
+               hht.question_description,
+               hht.gender,
+               hht.sub_question_flag,
+               hht.parent_question_code,
+               hht.parent_resp_flag,
+               systimestamp,
+               ROW_NUMBER() OVER(PARTITION BY 1 ORDER BY dbms_random.value)
+          FROM health_history_template hht
+         WHERE hht.donation_type = 'AL'
+           AND (hht.gender = 'A' OR hht.gender = l_donor_gender) -- IM 720    
+           AND NVL(abbr_flag, 'N') IN ('Y', NVL(l_abbr_flag, 'N')) -- Abbr SCR
+           AND NVL(screener_ask, 'X') = 'D'
+           AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1)
+           AND parent_question_code IS NULL;
+
+      /* For each parent question that has child questions, insert the child quesitons.  If parent question has sequence 5, child
+      question will have sequence 5.1, 5.2 ...  */
+      FOR wdr_rec IN wdr_cur LOOP
+        INSERT INTO web_donor_responses
+          (online_id,
+           template_id,
+           question_code,
+           question_description,
+           gender,
+           sub_question_flag,
+           parent_question_code,
+           parent_resp_flag,
+           insert_date,
+           sort_sequence)
+          SELECT online_id_in,
+                 hht.template_id,
+                 hht.question_code,
+                 hht.question_description,
+                 hht.gender,
+                 hht.sub_question_flag,
+                 hht.parent_question_code,
+                 hht.parent_resp_flag,
+                 systimestamp,
+                 wdr_rec.sort_sequence || '.' || ROW_NUMBER() OVER(PARTITION BY PARENT_QUESTION_CODE ORDER BY hht.sort_sequence)
+            FROM health_history_template hht
+           WHERE hht.donation_type = 'AL'
+             AND (hht.gender = 'A' OR hht.gender = l_donor_gender) -- Gender Filteration. ('A' and 'M'/'F')
+             AND NVL(abbr_flag, 'N') IN ('Y', NVL(l_abbr_flag, 'N')) -- Abbr SCR
+             AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1)
+             AND parent_question_code = wdr_rec.question_code;
+      END LOOP;
+    END wdr_random_insert;
+
+    PROCEDURE wdr_insert IS
+    BEGIN
+      INSERT INTO web_donor_responses
+        (online_id,
+         template_id,
+         question_code,
+         question_description,
+         gender,
+         sub_question_flag,
+         parent_question_code,
+         parent_resp_flag,
+         insert_date,
+         sort_sequence)
+        SELECT online_id_in,
+               hht.template_id,
+               hht.question_code,
+               hht.question_description,
+               hht.gender,
+               hht.sub_question_flag,
+               hht.parent_question_code,
+               hht.parent_resp_flag,
+               systimestamp,
+               DECODE(l_abbr_flag, 'Y', hht.abbr_disp_seq, hht.display_order) -- use abbr_disp_seq for aDHQ otherwise use display_order. -- V09
+          FROM health_history_template hht
+         WHERE hht.donation_type = 'AL'
+           AND (hht.gender = 'A' OR hht.gender = l_donor_gender) -- IM 720
+           AND NVL(abbr_flag, 'N') IN ('Y', NVL(l_abbr_flag, 'N')) -- Abbr SCR
+           AND NVL(screener_ask, 'X') = 'D'
+           AND SYSDATE BETWEEN hht.eff_date AND
+               NVL(hht.term_date, SYSDATE + 1);
+    END wdr_insert;
+
+  BEGIN
+    -- Get the gender for existing donor.
+    --For this, get the ID type, so that we can search the donors table based on the ID used.
+    l_id_type := NULL;
+    l_id      := NULL;
+    OPEN donor_type_cur(online_id_in);
+    FETCH donor_type_cur
+      INTO l_id_type, l_id, l_donor_gender;
+    CLOSE donor_type_cur;
+
+    IF l_id_type IS NOT NULL THEN
+      l_donor_gender := NULL;
+      IF l_ID_type = 'DNRID' THEN
+        -- Donor ID;
+        OPEN gender_cur(l_id, NULL, NULL);
+        FETCH gender_cur
+          INTO l_donor_gender, l_donor_id; --Abbr SCR
+        CLOSE gender_cur;
+      ELSIF l_ID_type = 'SCNID' THEN
+        -- Scan ID;
+        OPEN gender_cur(NULL, l_id, NULL);
+        FETCH gender_cur
+          INTO l_donor_gender, l_donor_id; --Abbr SCR
+        CLOSE gender_cur;
+      ELSIF l_ID_type = 'DRVID' THEN
+        -- Driver's License ID;
+        OPEN gender_cur(l_id, NULL, NULL);
+        FETCH gender_cur
+          INTO l_donor_gender, l_donor_id; --Abbr SCR
+        CLOSE gender_cur;
+      END IF;
+    END IF;
+
+    ------------------ Abbr SCR
+    IF abbr_enabled THEN
+      IF l_donor_id IS NOT NULL THEN
+        donor_questionnaire.calc_qtype(donor_id_in    => l_donor_id,
+                                       coll_date_in   => SYSDATE,
+                                       don_type_in    => 'AL', -- V04;
+                                       qtype_out      => l_qtype_calc,
+                                       comments_out   => l_qtype_comments,
+                                       reset_flag_out => l_qtype_reset_flag,
+                                       err_out        => l_error);
+        IF l_error IS NOT NULL THEN
+          l_qtype_calc     := 'F';
+          l_qtype_comments := l_error;
+        END IF;
+      ELSE
+        -- New Donor.
+        l_qtype_calc := 'F';
+      END IF;
+
+      l_qtype_actual := l_qtype_calc;
+      --
+      INSERT INTO donor_hhq_history
+        (donor_id,
+         transaction_id,
+         online_id,
+         calc_af_qtype,
+         actual_af_qtype,
+         reset_flag,
+         comments,
+         program_id,
+         insert_date,
+         insert_user,
+         audit_key)
+      VALUES
+        (l_donor_id,
+         null,
+         online_id_in,
+         l_qtype_calc,
+         l_qtype_actual,
+         l_qtype_reset_flag,
+         l_qtype_comments,
+         'FTRAK_STD',
+         SYSDATE,
+         USER,
+         NULL);
+    ELSE
+      -- abbr is not enabled
+      l_qtype_calc := 'F';
+    END IF;
+
+    IF l_qtype_calc = 'A' THEN
+      l_abbr_flag := 'Y';
+    ELSE
+      l_abbr_flag := 'N';
+    END IF;
+    ------------------------------
+
+    l_random_flag := 'N';
+
+    OPEN hh_template_cur;
+    FETCH hh_template_cur
+      INTO l_random_flag;
+    CLOSE hh_template_cur;
+
+    IF l_random_flag = 'Y' THEN
+      wdr_random_insert;
+    ELSE
+      wdr_insert;
+    END IF;
+
+    -- SCR 20609; 07/15/2014
+    IF NVL(l_abbr_flag, 'N') = 'Y' THEN
+      -- update the header table indicating the same.
+      update web_donor_responses_hdr 
+        set abbr_eligible = 'Y'
+      where online_id = online_id_in;
+
+      -- abbreviated questionnaire will be administered.
+      update web_donor_responses odr
+         set question_description =
+             (select vhq.question_description
+                from health_history_template ht, valid_hh_questions vhq
+               where ht.question_code || '-A' = vhq.question_code
+                 and ht.donation_type = 'AL'
+                 and ht.abbr_flag = 'Y'
+                 and vhq.question_code = odr.question_code || '-A'
+                 and SYSDATE between vhq.eff_date and
+                     nvl(vhq.term_date, SYSDATE + 10)
+                 and SYSDATE between ht.eff_date and
+                     nvl(ht.term_date, SYSDATE + 10)
+                 and rownum = 1)
+       where online_id = online_id_in
+         and exists
+       (select 1
+                from health_history_template ht, valid_hh_questions vhq
+               where ht.question_code || '-A' = vhq.question_code
+                 and ht.donation_type = 'AL'
+                 and ht.abbr_flag = 'Y'
+                 and vhq.question_code = odr.question_code || '-A'
+                 and SYSDATE between vhq.eff_date and
+                     nvl(vhq.term_date, SYSDATE + 10)
+                 and SYSDATE between ht.eff_date and
+                     nvl(ht.term_date, SYSDATE + 10));
+    END IF;
+
+
+    -- DELETE -A only questions for FULL QUESTIONNAIRE. -- V09
+    IF NVL(l_abbr_flag, 'N') = 'N' THEN
+        DELETE FROM web_donor_responses wdr
+          WHERE wdr.online_id = online_id_in
+            AND EXISTS (SELECT 1
+                          FROM health_history_template ht
+                         WHERE ht.donation_type = 'AL'
+                           AND SUBSTR(ht.question_code, -2)= '-A'
+                           AND ht.question_code = wdr.question_code
+                           AND ht.abbr_flag = 'Y'
+                           AND SYSDATE BETWEEN ht.eff_date and nvl(ht.term_date, SYSDATE+10)
+                       );         
+
+    END IF;
+
+    -- delete for both aDHQ and fDHQ scenarios , if sort_sequence is NULL. -- V09
+    DELETE FROM web_donor_responses
+      WHERE online_id = online_id_in
+        AND sort_sequence IS NULL;
+
+
+    -- step 5 (Update read more info if read more is enabled.)
+    DECLARE
+      nCnt NUMBER;
+    BEGIN
+      SELECT COUNT(1)
+        into nCnt
+        FROM valid_parameters
+       WHERE parameter_code = 'READ_MORE'
+         AND UPPER(parameter_value) = 'Y'
+         AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1);
+
+      IF nCnt <> 0 THEN
+        UPDATE web_donor_responses odr
+           SET (read_more_desc, read_more_flag) =
+               (SELECT vhq.question_description, read_more_flag
+                  FROM valid_hh_questions vhq
+                 WHERE vhq.question_code = odr.question_code || '-D'
+                   AND SYSDATE BETWEEN vhq.eff_date and
+                       nvl(term_date, SYSDATE + 10)
+                   AND rownum = 1)
+         WHERE online_id = online_id_in
+           AND EXISTS
+         (SELECT 1
+                  FROM valid_hh_questions vhq
+                 WHERE vhq.question_code = odr.question_code || '-D'
+                   AND SYSDATE BETWEEN vhq.eff_date and
+                       nvl(term_date, SYSDATE + 10));
+      END IF;
+    END;
+
+    COMMIT;
+
+  END gen_questions;
+
+  FUNCTION get_error(err_code_in VARCHAR2) RETURN VARCHAR2 IS
+    lv_err_type VARCHAR2(20);
+    lv_error VARCHAR2(200);
+    CURSOR error_cur IS
+      SELECT DECODE(error_type, 'E', 'Err:', 'M', 'Msg:', 'W', 'War:', null), error
+        FROM valid_errors WHERE error_code = err_code_in;
+  BEGIN
+    lv_error := NULL;
+    OPEN error_cur;
+    FETCH error_cur INTO lv_err_type, lv_error;
+    CLOSE error_cur;
+    lv_error := lv_err_type || err_code_in || ': ' || NVL(lv_error, 'Error Missing');
+    RETURN(lv_error);
+  END get_error;
+
+  PROCEDURE validate_ID(id_type_in   IN VARCHAR2, -- type if ID - Donor ID, Drivers License, Scan ID
+                        id_in        IN VARCHAR2, -- ID value
+                        id_dob_in    IN DATE, -- Date of Birth of ID to confirm the Donor.
+                        fname_out    OUT VARCHAR2,
+                        lname_out    OUT VARCHAR2,
+                        gender_out   OUT VARCHAR2,
+                        is_valid_out OUT VARCHAR2,
+                        error_out    OUT VARCHAR2)
+  -- Originally thought of using Boolean for return variable, but needs additional coding in Java
+    -- for Boolean type as it is not supported in JDBC.  Modified it to VARCHAR2.
+    -- Returns ('VALID' or 'INVALID');
+   IS
+    l_cur_found BOOLEAN;
+
+
+    FUNCTION is_valid_drvlicID(lic_id_in     IN VARCHAR2,
+                               firstName_out OUT VARCHAR2,
+                               lastName_out  OUT VARCHAR2,
+                               gender_out    OUT VARCHAR2,
+                               err_out       OUT VARCHAR2) RETURN BOOLEAN IS
+      l_err_code    VARCHAR2(20);
+      l_valid_donor BOOLEAN;
+      error_exit EXCEPTION;
+      CURSOR donorID_cur(altID_in VARCHAR2, donor_dob_in DATE) IS
+        SELECT first_name, last_name, gender
+          FROM donors
+         WHERE alternate_id = altID_in
+           AND alternate_id_type = 'DRLIC'
+           AND date_of_birth = NVL(donor_dob_in, date_of_birth);
+    BEGIN
+
+      OPEN donorID_cur(lic_id_in, id_dob_in);
+      FETCH donorID_cur
+        INTO firstName_out, lastName_out, gender_out;
+      l_valid_donor := donorID_cur%FOUND;
+      CLOSE donorID_cur;
+
+      IF NOT l_valid_donor THEN
+        err_out := get_error('21230');
+      END IF;
+
+      RETURN l_valid_donor;
+
+      /*
+           l_string := UPPER(lic_id_in);
+           l_string := REPLACE(lic_id_in, CHR(10), '');
+
+           -- get the values from package.
+           DOD_DONOR_INFO.EXTRACT_DONOR_DATA(l_string,
+                                        l_string_type,
+                                        l_last_name,
+                                        l_first_name,
+                                        l_dob,
+                                        l_ssn, --- 9 digit or 4 digits;
+                                        l_sex,
+                                        l_alt_id,
+                                        l_alt_type,
+                                        l_addr1,
+                                        l_addr2,
+                                        l_addr3,
+                                        l_city,
+                                        l_state,
+                                        l_zip,
+                                        l_country,
+                                        l_status);
+
+         IF l_status <> 'OK' OR l_alt_id IS NULL THEN
+           l_err_code := '21094';
+           RAISE error_exit;
+         ELSE
+           IF l_string_type IS NULL OR l_string_type LIKE 'CAC%' THEN
+             l_err_code := '21094';
+             RAISE error_exit;
+           ELSIF l_string_type = 'AAMVA_PDF417' THEN
+             l_valid_donor := FALSE;
+             OPEN donorID_cur(l_alt_id, id_dob_in);
+             FETCH donorID_cur INTO l_dummy;
+             l_valid_donor := donorID_cur%FOUND;
+             CLOSE donorID_cur;
+
+             IF NOT l_valid_donor THEN
+               err_out := get_error('18031');
+             END IF;
+
+             RETURN l_valid_donor;
+           END IF;
+         END IF;
+      */
+    EXCEPTION
+      WHEN error_exit THEN
+        err_out := get_error(l_err_code);
+        RETURN FALSE;
+      WHEN OTHERS then
+        err_out := 'Err: ' || SQLCODE || '-' || SUBSTR(SQLERRM, 1, 100);
+        RETURN FALSE;
+    END is_valid_drvlicID;
+
+    FUNCTION is_valid_donor(donor_id_in   IN VARCHAR2,
+                            firstName_out OUT VARCHAR2,
+                            lastName_out  OUT VARCHAR2,
+                            gender_out    OUT VARCHAR2,
+                            err_out       OUT VARCHAR2) RETURN BOOLEAN IS
+      l_valid_donor BOOLEAN;
+      CURSOR donorID_cur(donorID_in VARCHAR2, donor_dob_in DATE) IS
+        SELECT first_name, last_name, gender
+          FROM donors
+         WHERE donor_id = donorID_in
+           AND date_of_birth = NVL(donor_dob_in, date_of_birth);
+    BEGIN
+      err_out       := NULL;
+      OPEN donorID_cur(donor_id_in, id_dob_in);
+      FETCH donorID_cur
+        INTO firstName_out, lastName_out, gender_out;
+      l_valid_donor := donorID_cur%FOUND;
+      CLOSE donorID_cur;
+
+      IF NOT l_valid_donor THEN
+        err_out := get_error('21230'); -- The ID and/or Date of Birth does not match our records. Try again.
+      END IF;
+      RETURN l_valid_donor;
+    END is_valid_donor;
+
+    FUNCTION is_valid_scanID(scan_id_in    IN VARCHAR2,
+                             firstName_out OUT VARCHAR2,
+                             lastName_out  OUT VARCHAR2,
+                             gender_out    OUT VARCHAR2,
+                             err_out       OUT VARCHAR2) RETURN BOOLEAN IS
+      l_bc_scan_re  VARCHAR2(30);
+      l_cur_found   BOOLEAN;
+      l_err_code    VARCHAR2(20);
+      l_final_scan  VARCHAR2(30);
+      l_str_stream  VARCHAR2(20);
+      l_sNochkdgt   VARCHAR2(20);
+      l_chkDigit    VARCHAR2(2);
+      l_bc_scan_id  VARCHAR2(30);
+      l_valid_donor BOOLEAN;
+      error_exit EXCEPTION;
+
+      CURSOR param_cur(param_code_in VARCHAR2) IS
+        SELECT UPPER(parameter_value)
+          FROM valid_parameters
+         WHERE parameter_code = param_code_in
+           AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1);
+
+      CURSOR donors_cur(scanID_in VARCHAR2, dob_in DATE) IS
+        SELECT first_name, last_name, gender
+          FROM DONORS
+         WHERE scan_id = scanID_in
+           AND date_of_birth = NVL(dob_in, date_of_birth);
+
+      FUNCTION get_modulo_10_chkdgt(plStream in varchar2) RETURN CHAR IS
+        RefNumber    NUMBER;
+        SumRefNo     Number := 0;
+        szRemain     NUMBER;
+        szCheckDigit NUMBER;
+      BEGIN
+        --Weight (2,1) algorithm is used to calculate the checkdigit.
+        --Multiple the add numbers by 2 and the even numbers by 1
+        --For complete algorithm check www.n-barcode.com
+
+        FOR I in 1 .. Length(plStream) Loop
+          -- step 1: Get the weight either 2 or 1
+          If Mod(I, 2) <> 0 then
+            RefNumber := 2;
+          Else
+            RefNumber := 1;
+          End If;
+          sumRefNo := SumRefNo +
+                      (TO_NUMBER(substr(plstream, I, 1)) * RefNumber);
+        END LOOP;
+        --message('sum='||to_char(sumRefNo));pause;
+        szRemain     := MOD(sumRefNo, 10);
+        szCheckDigit := szRemain;
+
+        /* szCheckDigit:= 10 - szRemain;
+            If szCheckDigit = 10 then
+              szCheckDigit:=0;
+            End If;
+        */
+
+        return(to_char(szCheckDigit));
+      END get_modulo_10_chkdgt;
+
+    BEGIN
+
+      l_bc_scan_re := NULL;
+      -- BC SCAN RE Check
+      OPEN param_cur('BC_SCAN_RE');
+      FETCH param_cur
+        INTO l_bc_scan_re;
+      l_cur_found := param_cur%FOUND;
+      CLOSE param_cur;
+
+      IF NOT l_cur_found OR NVL(l_bc_scan_re, 'N') = 'N' THEN
+        l_err_code := '21088';
+        RAISE error_exit;
+      END IF;
+      ---- BC_SCAN_RE Check complete.
+
+      -- BC_SCAN_ID;
+      OPEN param_cur('BC_SCAN_ID');
+      FETCH param_cur
+        INTO l_bc_scan_id;
+      l_cur_found := param_cur%FOUND;
+      CLOSE param_cur;
+
+      IF NOT l_cur_found OR NVL(l_bc_scan_id, 'N') = 'N' THEN
+        l_err_code := '21086';
+        RAISE error_exit;
+      END IF;
+
+      -- Validate Scan ID;
+      -- Check 1
+      IF LENGTH(scan_id_in) != 15 THEN
+        l_err_code := '21085'; --Invalid scan length for donor Scan ID
+        RAISE error_exit;
+      END IF;
+
+      -- Check 2
+      IF SUBSTR(scan_id_in, 1, 1) != '*' OR
+         SUBSTR(scan_id_in, 15, 1) != '*' THEN
+        l_err_code := '21094'; -- Invalid Donor Scan ID
+        RAISE error_exit;
+      END IF;
+      --DBMS_OUTPUT.PUT_LINE('END CHECK 2');
+      -- Check 3
+      l_str_stream := SUBSTR(scan_id_in, 2, 13);
+      l_sNochkdgt  := SUBSTR(l_str_stream, 1, 8) ||
+                      SUBSTR(l_str_stream, 10, 4);
+      -- BC_DATA_CHECK_IS_OK
+      IF SUBSTR(l_str_stream, 1, 4) != LTRIM(l_bc_scan_id) THEN
+        l_err_code := '21089'; --Invalid Donor Scan ID prefix.
+        RAISE error_exit;
+      END IF;
+      --
+      --DBMS_OUTPUT.PUT_LINE('IN CHECK 3');
+      l_chkDigit := GET_MODULO_10_CHKDGT(l_sNochkdgt);
+      IF l_chkDigit = SUBSTR(l_str_stream, 9, 1) THEN
+        l_final_scan := l_str_stream;
+      ELSE
+        l_err_code := '21097';
+        RAISE error_exit;
+      END IF;
+      --DBMS_OUTPUT.PUT_LINE('END CHECK 3');
+      -- End Check 3;
+      -- End Validate Scan ID;
+
+      -- Final Check for confirmation field (DoB)
+      IF id_dob_in IS NOT NULL THEN
+        OPEN donors_cur(l_final_scan, id_dob_in);
+        FETCH donors_cur
+          INTO firstName_out, lastName_out, gender_out;
+        l_valid_donor := donors_cur%FOUND;
+        CLOSE donors_cur;
+        --DBMS_OUTPUT.PUT_LINE('SCAN ID ' ||l_final_scan || '-' || to_char(id_dob_in, 'mmddyyyy'));
+        IF NOT l_valid_donor THEN
+          err_out := get_error('21094'); -- Invalid Donor Scan ID;
+        END IF;
+
+        RETURN l_valid_donor;
+      END IF;
+
+      RETURN TRUE;
+
+    EXCEPTION
+      WHEN error_exit THEN
+        err_out := get_error(l_err_code);
+        --err_out := 'Err:' || l_err_code || ': ' || NVL(l_error, 'Error Missing');
+        RETURN FALSE;
+      WHEN OTHERS then
+        err_out := 'Err: ' || SQLCODE || '-' || SUBSTR(SQLERRM, 1, 100);
+        RETURN FALSE;
+    END is_valid_scanID;
+
+  BEGIN
+    fname_out := NULL;
+    lname_out := NULL;
+    error_out := NULL;
+    gender_out := NULL;
+    is_valid_out := 'INVALID';
+
+    IF id_type_in IS NULL OR
+      id_in IS NULL OR
+      id_dob_in IS NULL THEN
+      error_out := 'Required fields missing - ID Type OR ID OR Date of Birth  ';
+    ELSIF id_type_in = 'DNRID' THEN
+      IF is_valid_donor(id_in, fname_out, lname_out, gender_out, error_out) THEN
+        is_valid_out := 'VALID';
+      END IF;
+    ELSIF id_type_in = 'SCNID' THEN
+      IF is_valid_scanID(id_in, fname_out, lname_out, gender_out, error_out) THEN
+        is_valid_out := 'VALID';
+      END IF;
+    ELSIF id_type_in = 'DRVID' THEN
+      IF is_valid_drvlicID(id_in, fname_out, lname_out, gender_out, error_out) THEN
+        is_valid_out := 'VALID';
+      END IF;
+    END IF;
+  END validate_ID;
+
+  FUNCTION generate_key(pl_status OUT VARCHAR2) RETURN RAW IS
+  t_temp_str     VARCHAR2 (4000);
+  t_len          NUMBER;
+  t_encrypt_str  VARCHAR2 (4000);
+  t_char         VARCHAR2 (1);
+  t_new_len      NUMBER;
+  t_key_raw      RAW(2000);  -- max size of RAW is 2000 Bytes, and for LONG RAW is 2GB.
+    /*
+        ENCRYPT_AES256 is the encryption algorithem AES 256-bit algorithm.
+        CHAIN_CBC for Cipher Block Chaining, a process that hides plain text patterns
+        by XORing blocks with the previous ciphertext block, and then encrypted.
+        PAD_PKCS5 Provides padding which complies with the
+        PKCS #5 Password-Based Cryptography Standard.
+
+        The encryption key for AES256 algorithem, should be 32 bytes or more.
+     */
+  BEGIN
+    pl_status := 'OK';
+    t_temp_str    := 'IDEMERAW';
+    t_len         := LENGTH (t_temp_str);
+    t_encrypt_str := NULL;
+    FOR i IN 1 .. t_len
+    LOOP
+      t_char        := SUBSTR (t_temp_str, 1, 1);
+      t_new_len     := t_len - i;
+      t_temp_str    := SUBSTR (t_temp_str, (-1) * t_new_len);
+      t_encrypt_str := t_encrypt_str || CHR (127 - ASCII (t_char));
+    END LOOP;
+
+    -- Generate a 32 byte or more - encryption key;
+    LOOP
+      IF length(t_encrypt_str) >= 32 THEN
+        EXIT;
+      ELSE
+        t_encrypt_str := t_encrypt_str || t_encrypt_str;
+      END IF;
+    END LOOP;
+
+    t_key_raw := utl_raw.cast_to_raw(t_encrypt_str);
+
+    RETURN t_key_raw;
+  EXCEPTION
+    WHEN OTHERS THEN
+    pl_status := 'Err: ' || SQLCODE || ': ' || SUBSTR (SQLERRM, 1, 100);
+    RETURN NULL;
+  END generate_key;
+
+  FUNCTION encrypt_str(string_in IN VARCHAR2) RETURN VARCHAR2
+  AS
+   lv_encrypted_raw     RAW (2000);
+   lv_key               RAW (320);
+   lv_encryption_type   PLS_INTEGER
+      :=   DBMS_CRYPTO.DES_CBC_PKCS5;
+   --lv_iv                RAW (320);  
+   lv_status       VARCHAR2(2000);
+   key_gen_error   EXCEPTION;
+  BEGIN
+   lv_key := generate_key(lv_status);
+   IF lv_status <> 'OK' OR lv_key IS NULL THEN
+     RETURN NULL;
+   END IF;   
+   lv_encrypted_raw :=
+      DBMS_CRYPTO.encrypt (src   => UTL_I18N.STRING_TO_RAW (string_in, 'AL32UTF8'),
+                           typ   => lv_encryption_type,
+                           key   => lv_key);
+                           -- iv    => lv_iv);
+   RETURN UTL_RAW.CAST_TO_VARCHAR2 (UTL_ENCODE.base64_encode (lv_encrypted_raw));
+
+  END encrypt_str;
+
+  FUNCTION decrypt_str (string_in VARCHAR2)
+     RETURN VARCHAR2
+  AS
+     lv_decrypted_raw     RAW (2000);
+     lv_key               RAW (320);
+     lv_encryption_type   PLS_INTEGER := DBMS_CRYPTO.DES_CBC_PKCS5;
+     --lv_iv                RAW (320);
+     lv_status       VARCHAR2(2000);
+  BEGIN
+     lv_key := generate_key(lv_status);
+     IF lv_status <> 'OK' OR lv_key IS NULL THEN
+       RETURN NULL;
+     END IF;      
+     lv_decrypted_raw :=
+        DBMS_CRYPTO.DECRYPT (
+           src   => UTL_ENCODE.base64_decode (UTL_RAW.CAST_TO_RAW (string_in)),
+           typ   => lv_encryption_type,
+           key   => lv_key);
+           --iv    => v_iv);
+     RETURN UTL_I18N.RAW_TO_CHAR (lv_decrypted_raw, 'AL32UTF8');
+  EXCEPTION
+    WHEN OTHERS THEN
+      RETURN NULL;   
+  END decrypt_str;
+
+  PROCEDURE gen_barcode_string(online_id_in IN VARCHAR2,
+                               string_out   OUT VARCHAR2,
+                               status_out   OUT VARCHAR2) IS
+    lv_hdr_string VARCHAR2(2000);
+    lv_dtl_string VARCHAR2(2000);
+    lv_template_id VARCHAR2(50);
+    lv_barcode_string VARCHAR2(2000);
+    lv_dhh_reset_flag VARCHAR2(1);
+  BEGIN
+    status_out := NULL;
+    string_out := NULL;
+    IF online_id_in IS NULL THEN
+      status_out := 'Online ID is required.';
+      RETURN;
+    END IF;
+
+    -- MLT 3016
+    -- get the reset flag from donor_hhq_history to insert decrypted record into the table.
+    -- 'N' if abbr is not enabled.
+    lv_dhh_reset_flag := 'N';
+    if abbr_enabled then
+      begin
+        SELECT NVL(reset_flag, 'N') INTO lv_dhh_reset_flag
+          FROM donor_hhq_history
+         WHERE online_id = online_id_in
+           AND ROWNUM = 1;
+      exception
+        WHEN NO_DATA_FOUND THEN
+          lv_dhh_reset_flag := 'N';
+        WHEN OTHERS THEN
+          lv_dhh_reset_flag := 'N';         
+      end;
+    end if;
+    ------
+
+    -- Construct header string.(10 columns)
+    -- 11~ON011420137803~!#~!#~01012020~EN~asdoiua~poiasd~F~011420200000~N~TMPL000532
+    BEGIN
+      SELECT online_id || lv_sep || 
+             NVL(ID_TYPE, lv_null) || lv_sep || 
+             NVL(ID, lv_null) || lv_sep || 
+             TO_CHAR(date_of_birth, 'MMDDYYYY') || lv_sep || 
+             user_language || lv_sep || 
+             last_name || lv_sep || 
+             first_name || lv_sep ||  
+             NVL(gender, lv_null) || lv_sep ||  
+             to_char(insert_date, 'MMDDYYYYHH24MI') || lv_sep || 
+             NVL(abbr_eligible, 'N') || lv_sep || 
+             lv_dhh_reset_flag -- MLT 3016
+        INTO lv_hdr_string
+        FROM web_donor_responses_hdr 
+       WHERE online_id = online_id_in;
+    EXCEPTION 
+      WHEN NO_DATA_FOUND THEN
+        status_out := 'Online ID not found';  
+      WHEN OTHERS THEN
+        status_out := SUBSTR(SQLERRM, 1, 500); 
+    END;      
+
+    IF status_out IS NOT NULL THEN
+      RETURN;
+    END IF;  
+
+    lv_dtl_string := NULL;
+    lv_template_id := NULL;
+    -- Construct detail string.5 columns for each question
+    -- 05~HQ0010~Y~N~N~1~HQ0020~Y~N~N~1~HQ0030~Y~N~N~1~HQ0040~Y~N~N~1~HQ0050~Y~N~N~1      
+    FOR rec IN (SELECT question_code || lv_sep || 
+                       NVL(donor_response, lv_null) || lv_sep || 
+                       NVL(check_reqd,'N') || lv_sep || 
+                       NVL(res_cng_flg,'N') || lv_sep || 
+                       sort_sequence string_val,  
+                       template_id
+                  FROM web_donor_responses
+                 WHERE online_id = online_id_in) LOOP
+
+      IF lv_dtl_string IS NULL THEN
+        lv_dtl_string := rec.string_val;
+        lv_template_id := rec.template_id;
+      ELSE
+        lv_dtl_string := lv_dtl_string || lv_sep || rec.string_val;
+      END IF;                 
+    END LOOP;
+
+    lv_barcode_string := '@12' || lv_sep || lv_hdr_string || lv_sep || lv_template_id || '@5' || lv_sep || lv_dtl_string;
+    string_out := ENCRYPT_STR(lv_barcode_string);
+    IF string_out IS NULL THEN
+      status_out := 'Unable to generate barcode string';
+      RETURN;
+    END IF;
+
+    status_out := 'OK';
+  EXCEPTION
+    WHEN OTHERS THEN
+      status_out := SUBSTR(SQLERRM, 1, 500);
+  END gen_barcode_string;  
+
+  PROCEDURE process_barcode_string(string_in IN VARCHAR2,
+                                   online_id_out OUT VARCHAR2,
+                                   status_out   OUT VARCHAR2) IS
+    string_ctr NUMBER;      
+    lv_regex_pattern VARCHAR2(10);                             
+    lv_string VARCHAR2(2000);
+    lv_reqd_error VARCHAR2(200);
+    qindx NUMBER;
+    fieldsCnt NUMBER;
+    lv_template_id VARCHAR2(20);
+    lv_online_id   VARCHAR2(15);
+    lv_abbr_flag   VARCHAR2(1);
+    lv_hhq_reset_flag VARCHAR2(1);
+    wdr_hdr_rec web_donor_responses_hdr%ROWTYPE;
+    wdr_rec web_donor_responses%ROWTYPE;
+    TYPE tokens_aat IS TABLE OF VARCHAR2(200) INDEX BY PLS_INTEGER;
+    lv_tokens tokens_aat;  
+    -- substitutes NULL for lv_null  
+    FUNCTION null_check(str_in IN VARCHAR2) RETURN VARCHAR2 IS
+      lv_return VARCHAR2(2000);
+    BEGIN
+      IF str_in = lv_null THEN
+        lv_return := NULL;
+      ELSE
+        lv_return := str_in;
+      END IF;
+      RETURN lv_return;
+    END null_check;
+  BEGIN
+    status_out := NULL;
+    online_id_out := NULL;
+
+    lv_reqd_error := get_error('0080');
+
+    IF string_in IS NULL THEN
+      status_out := lv_reqd_error || ' - Input parameter';
+      RETURN;
+    END IF;
+
+    lv_string := decrypt_str(string_in);
+
+    IF lv_string IS NULL THEN
+      status_out := get_error('21224'); -- Invalid barcode. 
+      RETURN;
+    END IF;
+
+    string_ctr := 0;
+    FOR rec IN (SELECT regexp_substr(lv_string, '[^@]+', 1, LEVEL) token
+                  FROM dual
+                CONNECT BY regexp_substr(lv_string, '[^@]+', 1, LEVEL) IS NOT NULL) LOOP
+
+      -- dbms_output.put_line(rec.token);
+      -- 11~ON011420137803~!#~!#~01012020~EN~asdoiua~poiasd~F~011420200000~N~TMPL000532
+      -- 05~HQ0010~Y~N~N~1~HQ0020~Y~N~N~1~HQ0030~Y~N~N~1~HQ0040~Y~N~N~1~HQ0050~Y~N~N~1
+
+      -- get the tokens for each string.
+      lv_regex_pattern := '[^' || lv_sep || ']+'; -- [^~]+
+      select regexp_substr(rec.token, lv_regex_pattern, 1, level) val
+        bulk collect
+        into lv_tokens
+        from dual
+      connect by regexp_substr(rec.token, lv_regex_pattern, 1, level) is not null;
+      /*
+      for ind in lv_tokens.first .. lv_tokens.last loop
+         DBMS_OUTPUT.PUT_LINE (ind);
+         dbms_output.PUT_LINE(lv_tokens(ind));       
+      end loop;
+      */
+      string_ctr := string_ctr + 1;
+
+      -- header table string
+      if string_ctr = 1 then
+        -- first index value holds the number of fields used to construct the string. Crosscheck with collection count to make sure that 
+        -- string is properly parsed.
+        IF lv_tokens.FIRST IS NOT NULL AND lv_tokens.COUNT - 1 = lv_tokens(lv_tokens.FIRST) THEN 
+          wdr_hdr_rec.online_id          := lv_tokens(2)||'D';
+          wdr_hdr_rec.id_type            := null_check(lv_tokens(3));
+          wdr_hdr_rec.id                 := null_check(lv_tokens(4));
+          wdr_hdr_rec.date_of_birth      :=  TO_DATE(lv_tokens(5), 'MMDDYYYY');
+          wdr_hdr_rec.user_language      := lv_tokens(6);        
+          wdr_hdr_rec.last_name          := lv_tokens(7);
+          wdr_hdr_rec.first_name         := lv_tokens(8);        
+          wdr_hdr_rec.gender             := null_check(lv_tokens(9));
+          wdr_hdr_rec.insert_date        := TO_DATE(lv_tokens(10), 'MMDDYYYYHH24MI');
+          wdr_hdr_rec.abbr_eligible     := lv_tokens(11);
+          wdr_hdr_rec.download_complete := null; 
+          lv_hhq_reset_flag := lv_tokens(12); -- MLT 3016
+          lv_template_id := lv_tokens(13);
+          lv_abbr_flag := wdr_hdr_rec.abbr_eligible;
+          lv_online_id   := wdr_hdr_rec.online_id;
+
+          DELETE FROM web_donor_responses_hdr
+             WHERE online_id = wdr_hdr_rec.online_id;
+
+          DELETE FROM web_donor_responses
+             WHERE online_id = wdr_hdr_rec.online_id;
+
+          insert into web_donor_responses_hdr values wdr_hdr_rec;
+
+          if abbr_enabled then            
+            INSERT INTO donor_hhq_history
+              (donor_id,
+               transaction_id,
+               online_id,
+               calc_af_qtype,
+               actual_af_qtype,
+               reset_flag,
+               comments,
+               program_id,
+               insert_date,
+               insert_user,
+               audit_key)
+            VALUES
+              (NULL,
+               NULL,
+               wdr_hdr_rec.online_id,
+               DECODE(lv_abbr_flag, 'Y', 'A', 'F'),
+               DECODE(lv_abbr_flag, 'Y', 'A', 'F'),
+               lv_hhq_reset_flag,
+               NULL,
+               'FTRAK_STD',
+               wdr_hdr_rec.insert_date,
+               USER,
+               NULL);
+          end if;
+        ELSE
+          status_out := 'Error parsing string - web_donor_responses_hdr';
+          RETURN;
+        END IF;
+     -- detail table string   
+     elsif string_ctr = 2 then
+       IF lv_tokens.FIRST IS NOT NULL THEN
+         fieldsCnt := lv_tokens(1);
+         qindx := 2;
+         while (qindx < lv_tokens.count) loop
+           wdr_rec.online_id      := wdr_hdr_rec.online_id;
+           wdr_rec.question_code  := lv_tokens(qindx);
+           wdr_rec.donor_response := null_check(lv_tokens(qindx+1));
+           wdr_rec.check_reqd     := null_check(lv_tokens(qindx+2));
+           wdr_rec.res_cng_flg    := null_check(lv_tokens(qindx+3));
+           wdr_rec.sort_sequence  := lv_tokens(qindx+4);
+           wdr_rec.insert_date    := wdr_hdr_rec.insert_date;
+           wdr_rec.template_id    := lv_template_id;
+           qindx := qindx+fieldsCnt;
+           insert into web_donor_responses
+              values wdr_rec;
+         end loop;
+       ELSE
+         status_out := 'Error parsing string - web_donor_responses';
+         RETURN;
+       END IF;       
+     end if;
+    END LOOP;
+
+    -- Update question descriptions
+    update web_donor_responses odr
+       set question_description =
+           (select vhq.question_description
+              from health_history_template ht, valid_hh_questions vhq
+             where ht.question_code = vhq.question_code
+               and ht.donation_type = 'AL'
+               and vhq.question_code = odr.question_code
+               and SYSDATE between vhq.eff_date and
+                   nvl(vhq.term_date, SYSDATE + 10)
+               and SYSDATE between ht.eff_date and
+                   nvl(ht.term_date, SYSDATE + 10)
+               and rownum = 1)
+     where online_id = lv_online_id
+       and exists
+            (select 1
+              from health_history_template ht, valid_hh_questions vhq
+             where ht.question_code = vhq.question_code
+               and ht.donation_type = 'AL'
+               and vhq.question_code = odr.question_code
+               and SYSDATE between vhq.eff_date and
+                   nvl(vhq.term_date, SYSDATE + 10)
+               and SYSDATE between ht.eff_date and
+                   nvl(ht.term_date, SYSDATE + 10));    
+
+    -- Update abbr question descriptions
+    IF NVL(lv_abbr_flag, 'N') = 'Y' THEN
+        -- abbreviated questionnaire will be administered.
+        update web_donor_responses odr
+           set question_description =
+               (select vhq.question_description
+                  from health_history_template ht, valid_hh_questions vhq
+                 where ht.question_code || '-A' = vhq.question_code
+                   and ht.donation_type = 'AL'
+                   and ht.abbr_flag = 'Y'
+                   and vhq.question_code = odr.question_code || '-A'
+                   and SYSDATE between vhq.eff_date and
+                       nvl(vhq.term_date, SYSDATE + 10)
+                   and SYSDATE between ht.eff_date and
+                       nvl(ht.term_date, SYSDATE + 10)
+                   and rownum = 1)
+         where online_id = lv_online_id
+           and exists
+         (select 1
+                  from health_history_template ht, valid_hh_questions vhq
+                 where ht.question_code || '-A' = vhq.question_code
+                   and ht.donation_type = 'AL'
+                   and ht.abbr_flag = 'Y'
+                   and vhq.question_code = odr.question_code || '-A'
+                   and SYSDATE between vhq.eff_date and
+                       nvl(vhq.term_date, SYSDATE + 10)
+                   and SYSDATE between ht.eff_date and
+                       nvl(ht.term_date, SYSDATE + 10));    
+    END IF;
+
+    COMMIT;
+    online_id_out := lv_online_id;
+    status_out := 'OK';
+
+  EXCEPTION
+    WHEN OTHERS THEN
+      status_out := SUBSTR(SQLERRM, 1, 500);
+      online_id_out := NULL;
+      ROLLBACK;
+  END process_barcode_string;
+
+
+  FUNCTION is_valid_onlineID(onlineID_in IN VARCHAR2) RETURN BOOLEAN IS
+  /* SCR 11942*/  
+    CURSOR wdr_hdr_cur IS
+      SELECT 1 
+        FROM web_donor_responses_hdr whdr
+       WHERE whdr.online_id = onlineID_in;
+
+    l_dummy PLS_INTEGER;
+    l_cur_found BOOLEAN;
+  BEGIN
+    OPEN wdr_hdr_cur;
+    FETCH wdr_hdr_cur INTO l_dummy;
+    l_cur_found := wdr_hdr_cur%FOUND;
+    CLOSE wdr_hdr_cur;
+
+    RETURN l_cur_found;
+  END is_valid_onlineID;
+
+
+  PROCEDURE validate_donor_info(online_id_in IN VARCHAR2, transaction_id_in IN VARCHAR2, error_code_out OUT VARCHAR2) IS
+    CURSOR donor_type_cur(p_onlineID VARCHAR2) IS
+      SELECT id, id_type, last_name, first_name, date_of_birth
+        FROM web_donor_responses_hdr
+       WHERE online_id = p_onlineID;
+
+    CURSOR validate_newDonor_Cur(p_lastName VARCHAR2, p_firstName VARCHAR2, p_Dob DATE) IS
+      SELECT d.donor_id
+        FROM donors d, donations dn
+       WHERE d.donor_id = dn.donor_id
+         AND dn.transaction_id = transaction_id_in
+         AND UPPER(d.last_name) =UPPER(p_lastName)
+         AND UPPER(d.first_name) = UPPER(p_firstName)
+         AND d.date_of_birth = p_Dob;
+
+    CURSOR validate_newDonation_Cur(p_transID VARCHAR2, p_donorID VARCHAR2) IS
+      SELECT 1
+        FROM donations
+       WHERE transaction_id = p_transID
+         AND donor_id = p_donorID;
+
+    CURSOR validate_Donation_Cur(p_transID VARCHAR2, p_donorID VARCHAR2, p_scanID VARCHAR2, p_altID VARCHAR2) IS
+      SELECT 1
+        FROM donations dn, donors d
+       WHERE dn.donor_id = d.donor_id
+         AND dn.transaction_id = p_transID
+         AND d.donor_id = NVL(p_donorID, d.donor_id)
+         AND NVL(d.scan_id,'@#') = NVL(p_scanID, NVL(d.scan_id, '@#'))            -- IM:9519; 08/14/2013;
+         AND NVL(d.alternate_id,'@#') = NVL(p_altID, NVL(d.alternate_id, '@#'));   -- IM:9519; 08/14/2013;
+
+    l_IDtype VARCHAR2(5):= NULL;
+    l_Lname VARCHAR2(30):= NULL;
+    l_Fname VARCHAR2(25):= NULL;
+    l_Dob   DATE:= NULL;
+    l_DonorID VARCHAR2(10):= NULL;
+    l_donor_found BOOLEAN;
+    l_donation_found BOOLEAN;
+    l_dummy PLS_INTEGER;
+    l_ID VARCHAR2(2000):= NULL;
+  BEGIN
+    l_donor_found := FALSE;
+    l_donation_found := FALSE;
+    error_code_out := NULL;
+
+    -- Check if the donor is existing or new donor.
+    OPEN donor_type_cur(online_id_in);
+    FETCH donor_type_cur INTO l_ID, l_IDtype, l_Lname, l_Fname, l_Dob;
+    CLOSE donor_type_cur;
+
+    IF l_IDtype IS NULL THEN
+        -- New Donor;
+        -- Verify if last name, first name, dob and gender matches.
+        OPEN validate_newDonor_Cur(l_Lname, l_Fname, l_Dob);
+        FETCH validate_newDonor_Cur INTO l_DonorID;
+        l_donor_found := validate_newDonor_cur%FOUND;
+        CLOSE validate_newDOnor_Cur;
+
+        IF NOT l_donor_found THEN
+          error_code_out := '21205'; -- Donor not found in LifeTrak System.
+          RETURN;
+        END IF;
+
+        OPEN validate_newDonation_Cur(transaction_id_in, l_DonorID);
+        FETCH validate_newDonation_Cur INTO l_dummy;
+        l_donation_found := validate_newDonation_Cur%FOUND;
+        CLOSE validate_newDonation_Cur;
+
+        IF NOT l_donation_found THEN
+          error_code_out := '21206';-- Donation not found in LifeTrak System.
+          RETURN;
+        END IF;
+
+    ELSE
+        -- Existing Donor   
+        IF l_IDtype = 'DNRID' THEN -- Donor ID;
+          OPEN validate_Donation_Cur(transaction_id_in, l_id, NULL, NULL);
+          FETCH validate_Donation_Cur INTO l_dummy;
+          l_donation_found := validate_Donation_Cur%FOUND;
+          CLOSE validate_Donation_Cur;
+
+          IF NOT l_donation_found THEN
+            error_code_out := '21206';-- Donation not found in LifeTrak System.
+            RETURN;
+          END IF;         
+        ELSIF l_IDtype = 'SCNID' THEN -- Scan ID;
+          OPEN validate_Donation_Cur(transaction_id_in, NULL, l_id, NULL);
+          FETCH validate_Donation_Cur INTO l_dummy;
+          l_donation_found := validate_Donation_Cur%FOUND;
+          CLOSE validate_Donation_Cur;
+
+          IF NOT l_donation_found THEN
+            error_code_out := '21206';-- Donation not found in LifeTrak System.
+            RETURN;
+          END IF;       
+        ELSIF l_IDtype = 'DRVID' THEN -- Driver's License ID;
+          OPEN validate_Donation_Cur(transaction_id_in, NULL, NULL, l_id);
+          FETCH validate_Donation_Cur INTO l_dummy;
+          l_donation_found := validate_Donation_Cur%FOUND;
+          CLOSE validate_Donation_Cur;
+
+          IF NOT l_donation_found THEN
+            error_code_out := '21206';-- Donation not found in LifeTrak System.
+            RETURN;
+          END IF;       
+        ELSE -- Unknown ID Type.  
+          error_code_out := '21207'; -- Invalid ID type.
+          RETURN;
+        END IF;     
+    END IF; 
+  END validate_donor_info;
+
+
+  FUNCTION donor_web_responded(transaction_id_in IN VARCHAR2, online_id_in IN VARCHAR2) RETURN BOOLEAN IS
+    CURSOR lt_config_cur IS
+     SELECT web_enable_flag
+       FROM web_application_config; 
+
+     CURSOR web_responses_cur(pl_last_name VARCHAR2, pl_first_name VARCHAR2, pl_dob DATE, 
+                              pl_drive_date DATE, pl_chapter_id VARCHAR2) IS
+       SELECT 1
+         FROM web_donor_responses_hdr wdrh, web_donor_responses wdr
+        WHERE wdrh.online_id = wdr.online_id
+          AND wdr.donor_response IS NOT NULL
+          AND UPPER(wdrh.last_name) = UPPER(pl_last_name)
+          AND UPPER(wdrh.first_name) = UPPER(pl_first_name)
+          AND wdrh.date_of_birth = pl_dob
+          AND TRUNC(Lifetrack_timezone_convert.get_local_time(pl_chapter_id, wdrh.insert_date)) = pl_drive_date
+          AND wdrh.online_id = online_id_in;
+
+    l_web_enabled VARCHAR2(1) := 'N'; 
+    l_rec_found BOOLEAN;
+    l_dummy PLS_INTEGER;
+    lv_lastName VARCHAR2(50);
+    lv_firstName VARCHAR2(50);
+    lv_chapterID VARCHAR2(4);
+    ld_dob       DATE;
+    ld_collDate  DATE;
+  BEGIN
+    OPEN lt_config_cur;
+    FETCH lt_config_cur INTO l_web_enabled;
+    CLOSE lt_config_cur;
+
+    IF NVL(l_web_enabled,'N') = 'N' THEN
+      RETURN FALSE;
+    END IF;
+
+
+    SELECT d.last_name, d.first_name, d.date_of_birth, dn.coll_date, dn.chapter_id
+      INTO lv_lastName, lv_firstName,ld_dob, ld_collDate, lv_chapterID
+      FROM donors d, donations dn
+     WHERE d.donor_id = dn.donor_id
+       AND dn.transaction_id = transaction_id_in
+       AND ROWNUM = 1;
+
+    OPEN web_responses_cur(lv_lastName, lv_firstName, ld_dob, ld_collDate, lv_chapterID);
+    FETCH web_responses_cur INTO l_dummy;
+    l_rec_found := web_responses_cur%FOUND;
+    CLOSE web_responses_cur;
+
+    RETURN l_rec_found;
+  EXCEPTION
+    WHEN OTHERS THEN
+      RETURN FALSE;  
+  END donor_web_responded;
+
+  FUNCTION donor_already_responded(transaction_id_in IN VARCHAR2) RETURN BOOLEAN IS  
+    -- Cursor to check if donor responses are completed from LifeTrak application.
+    CURSOR donor_responses_cur IS
+      SELECT 1
+        FROM donor_responses
+       WHERE transaction_id = transaction_id_in;
+
+    l_dummy PLS_INTEGER;
+    l_rec_found BOOLEAN;
+
+  BEGIN
+    -- Check if responses are completed.  IF completed, it is given priority over web responses.    
+    OPEN donor_responses_cur;
+    FETCH donor_responses_cur INTO l_dummy;
+    l_rec_found := donor_responses_cur%FOUND;
+    CLOSE donor_responses_cur;      
+
+    RETURN l_rec_found; 
+  END donor_already_responded;    
+
+  FUNCTION web_responses_downloaded(transaction_id_in IN VARCHAR2) RETURN BOOLEAN IS
+   CURSOR web_responses_cur(pl_last_name VARCHAR2, pl_first_name VARCHAR2, pl_dob DATE, pl_drive_date DATE, pl_chapter_id VARCHAR2) IS
+     SELECT 1
+       FROM web_donor_responses_hdr wdrh
+      WHERE UPPER(wdrh.last_name) = UPPER(pl_last_name)
+        AND UPPER(wdrh.first_name) = UPPER(pl_first_name)
+        AND wdrh.date_of_birth = pl_dob
+        AND TRUNC(Lifetrack_timezone_convert.get_local_time(pl_chapter_id,wdrh.insert_date)) = pl_drive_date
+        AND NVL(download_complete, 'N') = 'Y';
+    l_dummy PLS_INTEGER;
+    l_rec_found BOOLEAN;   
+    lv_lastName VARCHAR2(50);
+    lv_firstName VARCHAR2(50);
+    lv_chapterID VARCHAR2(4);
+    ld_dob       DATE;
+    ld_collDate  DATE;    
+  BEGIN
+    SELECT d.last_name, d.first_name, d.date_of_birth, dn.coll_date, dn.chapter_id
+      INTO lv_lastName, lv_firstName,ld_dob, ld_collDate, lv_chapterID
+      FROM donors d, donations dn
+     WHERE d.donor_id = dn.donor_id
+       AND dn.transaction_id = transaction_id_in
+       AND ROWNUM = 1;
+
+    OPEN web_responses_cur(lv_lastName, lv_firstName, ld_dob, ld_collDate, lv_chapterID);
+    FETCH web_responses_cur INTO l_dummy;
+    l_rec_found := web_responses_cur%FOUND;
+    CLOSE web_responses_cur;
+
+    RETURN l_rec_found;
+  EXCEPTION
+    WHEN OTHERS THEN
+      RETURN FALSE;      
+  END web_responses_downloaded;
+
+
+  PROCEDURE download_responses(transaction_id_in IN VARCHAR2, 
+                               online_id_in      IN VARCHAR2, 
+                               status_out        OUT VARCHAR2) IS
+    lv_user_lang VARCHAR2(2); -- IM: 9858
+  BEGIN
+
+    -- Get template ID and User Language for inserts.
+    BEGIN
+      SELECT wdrh.user_language INTO lv_user_lang
+        FROM web_donor_responses_hdr wdrh
+       WHERE wdrh.online_id = online_id_in;
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+        status_out := get_error('21203'); -- Invalid Online ID;
+        RETURN;
+    END;
+
+    -- 1) GET RESPONSES FROM WEB_DONOR_RESPONSES TABLE.
+    -- transaction_id and online_id are input parmeters.  signoff_userid is null at this moment.
+    -- updating response completed flag to 'Y' in donor_responses table. (same as in update_into_health_history routine in onidnres.) 
+    INSERT INTO donor_responses(transaction_id, question_code, donor_response, check_reqd, res_cng_flg, signoff_userid, resp_completed_flag, donor_resp_lang) -- IM:9858
+      SELECT   transaction_id_in, wdr.question_code, wdr.donor_response, wdr.check_reqd, wdr.res_cng_flg, null, 'Y', lv_user_lang -- IM:9858
+        FROM web_donor_responses wdr
+       WHERE online_id = online_id_in;
+
+
+    -- 2) Updates check required flag to Y if donor response is null. -- IM: 9814;
+    UPDATE donor_responses dr
+      SET dr.check_reqd = 'Y'
+     WHERE dr.donor_response IS NULL
+       AND dr.transaction_id = transaction_id_in;
+
+
+    -- 3) Updates check required flag to Y if the answer is found in vha table. -- IM: 9814;
+    UPDATE donor_responses dr
+      SET dr.check_reqd = (SELECT 'Y'
+                            FROM valid_hh_answers vha
+                           WHERE vha.question_code = dr.question_code
+                             AND vha.response = dr.donor_response
+                             AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1)
+                             AND ROWNUM = 1)
+     WHERE dr.donor_response IS NOT NULL
+       AND NVL(dr.check_reqd, 'X') <> 'Y'
+       AND dr.transaction_id = transaction_id_in;
+
+    COMMIT;    
+    status_out := 'OK';
+
+  EXCEPTION
+    WHEN OTHERS THEN
+      status_out := 'Err: ' || SUBSTR(SQLERRM, 1, 480);
+      ROLLBACK;
+      RETURN;
+  END download_responses;
+
+  PROCEDURE download_web_responses(scan_in           IN VARCHAR2,
+                                   online_id_in      IN VARCHAR2,
+                                   transaction_id_in IN VARCHAR2,
+                                   screener_id_in    IN VARCHAR2,
+                                   status_out        OUT VARCHAR2) IS
+   lv_online_id VARCHAR2(20);
+   lv_donor_id  VARCHAR2(20);
+   lv_reqd_error VARCHAR2(200);
+   nCnt NUMBER;
+  BEGIN
+    status_out := NULL;
+
+    lv_reqd_error := get_error('0080');
+    -- Required fields check.
+    IF scan_in IS NULL AND online_id_in IS NULL THEN
+      status_out := lv_reqd_error || ' - Input parameter';
+      RETURN;
+    END IF;
+
+    IF transaction_id_in IS NULL THEN
+      status_out := lv_reqd_error || ' - Transaction ID';
+      RETURN;
+    END IF;
+
+    IF screener_id_in IS NULL THEN
+      status_out := lv_reqd_error || ' - Screener ID';
+      RETURN;
+    END IF;
+    -------
+
+    -- validate transaction id
+    BEGIN
+      SELECT donor_id INTO lv_donor_id 
+        FROM donations
+       WHERE transaction_id = transaction_id_in;
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+        status_out := get_error('16217'); -- Invalid transaction ID
+        RETURN;
+    END; 
+    ------------   
+
+    -- check if donor already responded
+    IF donor_already_responded(transaction_id_in) THEN
+      status_out := get_error('21032');  -- donor response was over. Use HH window to update responses
+      RETURN;
+    END IF;
+
+    -- check if web responses are downloaded.
+    IF web_responses_downloaded(transaction_id_in) THEN
+      status_out := get_error('21032');  -- donor response was over. Use HH window to update responses
+      RETURN;
+    END IF;
+
+    IF scan_in IS NOT NULL THEN
+      -- returns 'OK' for success or error message.
+      process_barcode_string(scan_in, lv_online_id, status_out);
+      IF status_out <> 'OK' THEN
+        RETURN;
+      END IF;      
+    ELSIF online_id_in IS NOT NULL THEN
+      lv_online_id := online_id_in;
+    END IF;  
+
+    -- Validate Online ID;
+    IF NOT is_valid_onlineID(lv_online_id) THEN
+      status_out := get_error('21203'); -- Invalid online id;
+      RETURN;
+    END IF;
+    --------
+
+    -- Validate donor info against ONSITE
+    DECLARE
+      lv_error_out VARCHAR2(100);
+    BEGIN
+      -- RETURNS NULL for success OR error code for any error.
+      validate_donor_info(lv_online_id, transaction_id_in, lv_error_out);
+      IF lv_error_out IS NOT NULL THEN
+        status_out := get_error(lv_error_out);
+        RETURN;
+      END IF;
+    END;
+    ----------
+
+    -- do not need this.  Mobile PC scenario will not have the online id records available at mobile drive.
+    -- added this check (for mobile pc scenario, records will be inserted from barcode)
+    IF NOT donor_web_responded(transaction_id_in, lv_online_id) THEN
+      status_out := get_error('21223'); -- 'Web responses not found for the donor'
+      RETURN;
+    END IF;
+
+    -- Download responses (Returns 'OK' for success OR error message)
+    download_responses(transaction_id_in, lv_online_id, status_out); 
+    IF status_out <> 'OK' THEN
+      RETURN;
+    END IF;  
+    -- 
+
+    -- MLT 4200 (update flag in online status that the responses are downloaded)
+    -- V10
+    UPDATE online_status
+       SET web_responses_downloaded = 'Y'
+     WHERE donor_id = (SELECT donor_id
+                         FROM donations
+                        WHERE transaction_id = transaction_id_in);        
+    ----------
+
+    -- MLT 3016 (Update transaction details to the decrypted online id ending with D)
+    IF abbr_enabled THEN
+      SELECT COUNT(1) INTO nCnt
+        FROM donor_hhq_history
+       WHERE online_id = lv_online_id;
+
+      IF nCnt <> 0 THEN
+        UPDATE donor_hhq_history 
+           SET donor_id = lv_donor_id,
+               transaction_id = transaction_id_in,
+               insert_user = screener_id_in
+         WHERE online_id = lv_online_id;
+      END IF;   
+    END IF;   
+    -----------
+
+		UPDATE web_donor_responses_hdr
+		   SET download_complete = 'Y'
+		 WHERE SUBSTR(online_id, 1, 14) = SUBSTR(lv_online_id, 1, 14); -- Online can be 15 chars for decrypted record (D added to the end of online id)
+    /* -- Not required as HH component calls this pkg when redirected from FastTrak
+    -- CALL backend routine for HH Screen. 
+    ONSITE_HH.generate_questions (p_session_id     => session_id_in,
+                                  p_transaction_id => transaction_id_in,
+                                  p_screener_id    => screener_id_in,
+                                  p_prog_name      => prog_name_in,
+                                  p_abbr_flag      => abbr_flag_out,
+                                  p_hh_comp_flag   => hh_comp_flag_out,
+                                  p_status         => status_out);
+
+    IF status_out <> 'OK' THEN
+      ROLLBACK;
+      RETURN;
+    END IF;
+    */
+    COMMIT;
+		status_out := 'OK'; -- ('21200'); -- Online responses are downloaded successfully. 
+
+  EXCEPTION
+    WHEN OTHERS THEN
+       status_out := 'Err ' || SUBSTR(SQLERRM, 1, 480);
+       ROLLBACK;
+       RETURN;
+  END download_web_responses;  
+
+  FUNCTION disable_online_button(transaction_id_in IN VARCHAR2) RETURN BOOLEAN IS
+  BEGIN
+    IF donor_already_responded(transaction_id_in) OR web_responses_downloaded(transaction_id_in) THEN
+      RETURN TRUE;
+    ELSE
+      RETURN FALSE;
+    END IF;
+  END disable_online_button;
+
+END FTRAK_STD;
+/

@@ -1,0 +1,1543 @@
+create or replace package confirm_test_results is
+
+  -- Author  : ASHOKV
+  -- Created : 9/6/2018 4:51:45 PM
+  -- Purpose : Schedule tests using test series configuration table
+  
+  -- Public type declarations
+  
+  -- Public constant declarations
+
+  -- Public variable declarations
+  
+
+  -- Public function and procedure declarations
+  PROCEDURE check_series_config(p_unit_id        IN VARCHAR2, -- mandatory
+                                p_chapter_id     IN VARCHAR2, -- mandatory
+                                p_test_series_id IN VARCHAR2, -- optional 
+                                p_program_id     IN VARCHAR2, -- mandatory
+                                p_final_flag     OUT VARCHAR2, -- final flag if test series id is passed.
+                                p_status         OUT VARCHAR2  -- status -- 'OK' or error msg.
+                                );
+
+end confirm_test_results;
+/
+create or replace package body confirm_test_results is
+  -- Author  : ASHOKV
+  -- Created : 9/6/2018 4:51:45 PM
+  -- Purpose : Schedule tests using test series configuration table
+  -- Versions:
+     -- 01: Initial Creation. 
+     -- 02: Error routines added pl and dump_output to keep track of messages.
+     -- 03: is_cnf_test routine added.
+     -- 04: get_EXT_info routine added to handle external transfer in scenario (where one unit ID is in units table)
+     -- 05: Changes to traverse_tree routine to update test series ID to tests(conf.tests or repeat tests) ordered by DTL
+     -- 06: Changes to get_CNF_info routine to handle internal transfer to same chapter.
+     -- 07: MLT 982 10/24/2018
+     -- 08: MLT 982 10/26/2018 
+     -- 09: MLT 982 10/29/2018 
+     -- 10: 10/31/2018 -- If found at test level, check for null test series id.
+     -- 11: 11/01/2018 -- Search for V11
+     -- 12: 11/09/2018 -- Search for V12
+  -- Private type declarations
+   TYPE used_aat IS TABLE OF BOOLEAN INDEX BY VARCHAR2(10);
+   TYPE lines_t IS TABLE OF VARCHAR2(20000) INDEX BY BINARY_INTEGER; 
+  -- Private constant declarations
+
+
+
+
+  -- Private variable declarations
+  gv_tests_checked used_aat;
+  output       lines_t;
+  
+  gd_sysdate DATE;
+  gv_cnfchapter_id  VARCHAR2(10);
+  gv_dtlchapter_id  VARCHAR2(10);
+  gv_contract_id VARCHAR2(10);
+  gd_coll_date  DATE;
+  gv_unit_id VARCHAR2(15);
+  gv_chp_id  VARCHAR2(10);
+  gv_program_id VARCHAR2(30);
+  gv_status_msg VARCHAR2(2000) := 'OK';
+  exit_error EXCEPTION;
+  
+  gv_final_flag VARCHAR2(1);
+  gv_notation_code VARCHAR2(10);
+  gv_notation_test VARCHAR2(10);
+  gv_test_series_id VARCHAR2(10);
+  gb_status_only BOOLEAN;
+  
+  PROCEDURE pl(str IN VARCHAR2) IS
+  BEGIN
+    output(NVL(output.LAST, 0) + 1) := str;
+  END;
+  
+  PROCEDURE dump_output IS
+    PRAGMA AUTONOMOUS_TRANSACTION;    
+
+    lv_ext_id VARCHAR2(200);
+    ld_sysdate DATE;
+
+    PROCEDURE send_output_to_file IS
+      fid UTL_FILE.file_type;
+      lv_logDir master_codes.code_desc%TYPE := NULL;
+      lv_fileName VARCHAR2(200);
+    BEGIN
+      SELECT code_desc into lv_logDir
+        FROM master_codes
+       WHERE code_type = 'LOGDR'
+         AND code = 'LOGDR'
+         AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1)
+         AND rownum = 1;
+
+      IF lv_logDir IS NULL THEN
+        pl('Error in log file location - check master codes (LOGDR, LOGDR). Exiting now.');
+      END IF;
+        
+      lv_fileName := 'CF_TR_' || TO_CHAR(SYSDATE, 'MMDDYYHH24MISS') || '.log';
+
+      fid := UTL_FILE.fopen(lv_logDir, lv_fileName, 'W');
+
+      FOR indx IN output.FIRST .. output.LAST LOOP
+        UTL_FILE.put_line(fid, output(indx));
+      END LOOP;
+
+      UTL_FILE.fclose(fid);
+    EXCEPTION
+      WHEN OTHERS THEN
+        pl('Failure to write output to ' || lv_logDir || '/' || lv_fileName);
+        UTL_FILE.fclose(fid);
+    END send_output_to_file;    
+
+  BEGIN
+    /*
+    Table: debug_controls 
+    Col: debug_mode (Y - debug enabled)
+    object_name = 'CONFIRM_TEST_RESULTS'
+    object_type = 'PKG'
+    */
+    if lab_common.is_debug_msg_displayed ('CONFIRM_TEST_RESULTS', 'PKG') then 
+      -- Send output to the specified file.
+      --send_output_to_file; -- V08
+      
+      /*  -- commented for V08     
+      -- Print output to screen.
+      FOR indx IN output.FIRST .. output.LAST LOOP
+        dbms_output.put_line(output(indx));
+      END LOOP;
+      */
+      
+      lv_ext_id := NVL(gv_unit_id,'NA') || '_' || TO_CHAR(gd_sysdate, 'MMDDYYHH24MISS');
+      ld_sysdate := SYSDATE;
+      
+      FOR indx IN output.FIRST .. output.LAST LOOP      
+        insert into lifetrak_api_log
+          (EXTERNAL_ID, INTERNAL_ID,LOG_TEXT, 
+           SOURCE_ID, INSERT_DATE, PROGRAM_ID, CHAPTER_ID)
+        values
+          (lv_ext_id, indx, output(indx),
+           'CTRES', ld_sysdate, 'CONFIRM_TEST_RESULTS.PKG', gv_chp_id);      
+      END LOOP;
+    end if;
+    
+    -- Clean output after dumping.
+    output.DELETE;
+
+    COMMIT;
+  EXCEPTION
+    when others then
+      raise_application_error('-20000', 'api log Error');    
+  END dump_output;  
+
+
+  procedure check_status_msg IS
+  begin
+    if gv_status_msg <> 'OK' then
+      raise exit_error;
+    end if;
+  end check_status_msg;
+    
+  --
+  --    Get unit information
+  --
+  procedure get_DTL_info ( p_unit_id in varchar2 ,
+                            p_dtl_chapter_id out varchar2 ,
+                            p_coll_date out date ,
+                            p_contract_id out varchar2 ) is
+  --  Get collection date and chapter id from units ***
+  begin
+    select chapter_id, coll_date, contract_id
+      into p_dtl_chapter_id, p_coll_date, p_contract_id
+      from units
+     where unit_id = p_unit_id
+       and NVL(cnf_checkin_flag,'N') <> 'Y' -- exclude conf. chapters by using this flag.
+       and rownum = 1;
+  exception
+    when no_data_found then 
+      gv_status_msg := 'ERR: Unable to locate unit in units table';
+  end get_DTL_info;
+  
+  procedure get_CNF_info ( p_unit_id in varchar2 ,
+                           p_cnf_chapter_id out varchar2 ) is
+  --  Get collection date and chapter id from units ***
+  begin
+    select chapter_id
+      into p_cnf_chapter_id
+      from units
+     where unit_id = p_unit_id
+       and NVL(cnf_checkin_flag,'N') in ('Y','S') -- include conf. chapters by using this flag.
+       and rownum = 1;
+  exception
+    when no_data_found then 
+      gv_status_msg := 'ERR: Unable to locate unit in units table';
+  end get_CNF_info;
+
+  procedure get_EXT_info ( p_unit_id in varchar2 ,
+                            p_dtl_chapter_id out varchar2 ,
+                            p_coll_date out date ,
+                            p_contract_id out varchar2 ) is
+    nExtCnt NUMBER := 0;                            
+  --  Get collection date and chapter id from units ***
+  begin
+    gv_status_msg := 'OK';
+    select COUNT(1) into nExtCnt
+      from sample_shipment_in_hdr hdr, sample_shipment_in_det dtl
+     where hdr.box_id = dtl.box_id
+       and hdr.chapter_id = dtl.chapter_id
+       and dtl.int_unit_id = p_unit_id
+       and transfer_mode = 'E'
+       and rownum = 1;    
+    if nExtCnt = 0 then
+      gv_status_msg := 'ERR: Unable to identify unit as External unit';
+    else
+      select chapter_id, coll_date, contract_id
+        into p_dtl_chapter_id, p_coll_date, p_contract_id
+        from units
+       where unit_id = p_unit_id
+         and NVL(cnf_checkin_flag,'N') = 'Y' 
+         and rownum = 1;
+     end if;
+  exception
+    when no_data_found then 
+      gv_status_msg := 'ERR: Unable to locate unit in units table';
+  end get_EXT_info;
+
+
+  FUNCTION order_test(test_in IN VARCHAR2) RETURN BOOLEAN IS
+    lb_return BOOLEAN;
+    nCnt NUMBER;
+  BEGIN
+    lb_return := FALSE;
+                           
+    SELECT COUNT(1) INTO nCnt
+      FROM utrs
+     WHERE unit_id = gv_unit_id
+          --AND chapter_id = p_chapter_id
+       AND cancel_flag IS NULL
+       AND test_id = test_in;     
+               
+    if nCnt = 0 then 
+      lb_return := TRUE; 
+      IF gb_status_only  THEN   -- no need to insert if routine is called for status only.            
+        NULL;
+      ELSE
+         pl('**Scheduling test ' || test_in );
+          begin
+            insert into utrs( unit_id,coll_date,chapter_id,
+                              test_seq_no,test_id,test_series_id,
+                              insert_dats,insert_user_id,program_id)
+            select
+              gv_unit_id, gd_coll_date, gv_cnfchapter_id,
+              nvl (max (test_seq_no), 0) + 1, test_in, gv_test_series_id,
+              sysdate,LT_USER_SESSION.get_userid, gv_program_id
+            from utrs utr1
+            where utr1.unit_id = gv_unit_id
+              and nvl(utr1.coll_date,sysdate+100) = nvl(gd_coll_date,sysdate+100)
+              and nvl(utr1.chapter_id,'NULL') = nvl(gv_cnfchapter_id,'NULL')
+              and utr1.test_id = test_in;   
+          exception
+            when dup_val_on_index then null ;
+          end;
+          pl(test_in ||' scheduled'); 
+      END IF;     
+    end if; 
+    
+    -- V07
+    if ncnt <> 0 and gv_test_series_id is null then  
+       lb_return := TRUE;
+       pl(test_in || ' already scheduled');
+    end if;
+    -----------
+
+    -- for scenarios where conf. test ID is already scheduled by test results pkg.
+    if nCnt <> 0 and gv_test_series_id is not null then -- V07 (added gv_test_series_id not null condition)
+      -- check if test id exists with test seried id.
+      SELECT COUNT(1) INTO nCnt
+        FROM utrs
+       WHERE unit_id = gv_unit_id
+            --AND chapter_id = p_chapter_id
+         AND cancel_flag IS NULL
+         AND test_id = test_in
+         AND test_series_id = gv_test_series_id;  
+      
+      if nCnt = 0 then
+          -- check if test id exists with no test series id and no result.
+          SELECT COUNT(1) INTO nCnt
+            FROM utrs
+           WHERE unit_id = gv_unit_id
+                --AND chapter_id = p_chapter_id
+             AND cancel_flag IS NULL
+             AND test_id = test_in
+             AND result_status_1 IS NULL
+             AND test_series_id IS NULL
+             AND program_id <> 'LTIMSAT'; -- V07 (this condition will ensure that we are not linking test series to a additional test   
+          -- found test ID's that have been scheduled by test results pkg.   
+          if nCnt <> 0 then
+              lb_return := TRUE; 
+              IF gb_status_only  THEN    -- No need to update if the routine is called for status only.           
+                NULL;
+              ELSE
+                 pl('*Linking test series ID ' || gv_test_series_id || ' to test ' || test_in );
+                  begin
+                
+                   UPDATE utrs
+                     SET test_series_id = gv_test_series_id
+                   WHERE audit_key = 
+                         (select max(audit_key)
+                           from utrs 
+                           where unit_id = gv_unit_id
+                           --AND chapter_id = p_chapter_id
+                           AND cancel_flag IS NULL
+                           AND test_id = test_in
+                           AND result_status_1 IS NULL
+                           AND test_series_id IS NULL
+                          );
+                    
+                  exception
+                    when dup_val_on_index then null ;
+                  end;
+                  pl(test_in ||' linked with test series.'); 
+              END IF;      
+          end if;       
+        else
+          pl('test id already scheduled');
+        end if;
+    end if;
+       
+    return lb_return;         
+  END order_test;  
+
+  -- set matched; schedule test OR if final return status and notation.
+  -- returns true if atleast one test is matched.
+  FUNCTION order_tests(test_csv_in IN VARCHAR2) RETURN BOOLEAN IS
+    lb_ordered BOOLEAN;
+    lb_return BOOLEAN;
+  BEGIN
+    lb_return := FALSE;
+    for rec in
+       (select TRIM(regexp_substr(test_csv_in,'[^,]+', 1, level)) sch_test
+          from dual
+        connect by regexp_substr(test_csv_in,'[^,]+', 1, level) is not null)
+    loop                  
+        lb_ordered := order_test(rec.sch_test);
+        
+        -- if atlease one test is ordered return TRUE;
+        if lb_ordered then
+          lb_return := TRUE;
+        end if;                    
+    end loop;
+    
+    RETURN lb_return;
+  END order_tests;
+            
+          
+  FUNCTION cancel_tests(tests_csv_in IN VARCHAR2) RETURN BOOLEAN IS
+    lb_return BOOLEAN;
+    nCnt NUMBER;
+  BEGIN
+    lb_return := FALSE;
+           
+    SELECT COUNT(1) INTO nCnt
+      FROM utrs
+     WHERE unit_id = gv_unit_id
+      --and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+      --and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+      and test_id IN (select TRIM(regexp_substr(tests_csv_in,'[^,]+', 1, level))
+                        from dual
+                      connect by regexp_substr(tests_csv_in,'[^,]+', 1, level) is not null)
+      and test_id NOT IN (select confirm_test_id --------------V08 (select query added)
+                            from valid_customer_confirm_tests
+                           where contract_id = nvl(gv_contract_id,'@')
+                            and sysdate between eff_date and nvl(term_date, sysdate+1)
+                          )                      
+      and cancel_flag is null
+      and result_status_1 is null
+      and result_status_2 is null;     
+            
+    if nCnt <> 0  then   
+      lb_return := TRUE;  
+      IF gb_status_only  THEN     -- no need to update if routine is called to get status only.                    
+        null;
+      ELSE
+        pl('Cancelling tests .. ');
+        update utrs
+         set cancel_flag = 'Y',  
+             program_id = gv_program_id, 
+             test_series_id = gv_test_series_id
+        where unit_id = gv_unit_id
+          --and nvl(coll_date,sysdate+100) = nvl(p_coll_date,sysdate+100)
+          --and nvl(chapter_id,'NULL') = nvl(p_chapter_id,'NULL')
+          and test_id IN (select regexp_substr(tests_csv_in,'[^,]+', 1, level)
+                            from dual
+                          connect by regexp_substr(tests_csv_in,'[^,]+', 1, level) is not null)
+          and test_id NOT IN (select confirm_test_id --------------V08 (select query added)
+                                from valid_customer_confirm_tests
+                               where contract_id = nvl(gv_contract_id,'@')
+                                and sysdate between eff_date and nvl(term_date, sysdate+1)
+                              )                           
+          and cancel_flag is null
+          and result_status_1 is null
+          and result_status_2 is null;
+         pl('Tests Cancelled (except for override tests).. ' || tests_csv_in); 
+       END IF;                
+     end if;
+     return lb_return;
+  END cancel_tests;
+
+  PROCEDURE mark_as_checked(test_id_in IN VARCHAR2) IS
+  BEGIN
+   gv_tests_checked(test_id_in) := TRUE;
+  END mark_as_checked;
+
+  FUNCTION test_already_checked (test_id_in IN VARCHAR2) RETURN BOOLEAN IS
+  BEGIN
+   RETURN gv_tests_checked.EXISTS(test_id_in);
+  END test_already_checked;
+  
+  PROCEDURE insert_notation IS
+    nCnt NUMBER := 0;
+  BEGIN
+   IF gv_notation_code is not null and gv_unit_id is not null and gv_notation_test is not null then
+       SELECT COUNT(1) INTO nCnt
+         FROM sample_notation_details
+        WHERE unit_id = gv_unit_id 
+          AND notation_code = gv_notation_code
+          AND test_id = gv_notation_test;
+          
+        IF nCnt = 0 THEN
+           pl('Inserting into sample_notation_details..');
+           INSERT INTO SAMPLE_NOTATION_DETAILS( UNIT_ID,
+                                                CHAPTER_ID,
+                                                NOTATION_CODE,
+                                                TEST_ID,
+                                                TEST_SERIES_ID,
+                                                PROGRAM_ID,
+                                                EFF_DATE,
+                                                TERM_DATE,
+                                                INSERT_USER,
+                                                INSERT_DATE,
+                                                AUDIT_KEY)
+                                       VALUES ( gv_unit_id,
+                                                gv_cnfchapter_id,
+                                                gv_notation_code,
+                                                gv_notation_test,
+                                                gv_test_series_id,
+                                                gv_program_id,
+                                                gd_sysdate,
+                                                null,
+                                                lt_user_session.get_userid,
+                                                SYSDATE,
+                                                NULL);
+       END IF;
+   END IF;                                          
+  END insert_notation;
+  
+  FUNCTION is_cnf_test(p_test_id IN VARCHAR2) RETURN BOOLEAN IS
+    cursor cnf_tests_cur is
+      select 1
+        from valid_tests
+       where test_id = p_test_id
+         and test_group IN --('CNFRM', 'SUPP')
+            ( SELECT mc.code
+                FROM master_codes mc
+               WHERE mc.code_type = 'TSTGP'
+                 AND gd_sysdate between mc.eff_date and nvl(mc.term_date, gd_sysdate+1)
+            )            
+         and sysdate between eff_date and nvl(term_date, sysdate+1);
+    ln_dummy PLS_INTEGER;
+    lb_rec_found BOOLEAN;
+  BEGIN
+    open cnf_tests_cur;
+    fetch cnf_tests_cur into ln_dummy;
+    lb_rec_found := cnf_tests_cur%FOUND;
+    close cnf_tests_cur;
+    
+    return lb_rec_found;
+  END is_cnf_test;
+
+  FUNCTION final_confirmation(p_unit_id IN VARCHAR2,
+                            p_test_id IN VARCHAR2,
+                            p_chp_id  IN VARCHAR2) RETURN VARCHAR2 IS
+    nReaRes    NUMBER := 0;
+    nNonReaRes NUMBER := 0;
+    pReaRes    VARCHAR2(10);
+    pNonReaRes VARCHAR2(10);
+    nNTRes     NUMBER := 0;
+    nPendTestCnt NUMBER := 0;
+
+    result_out  VARCHAR2(10);
+    exit_out EXCEPTION;
+  BEGIN
+
+    --get the reactive COUNTs
+    SELECT NVL(COUNT(*), 0)
+      INTO nPendTestCnt
+      FROM utrs
+     WHERE unit_id = p_unit_id
+       AND test_id = p_test_id
+       AND test_series_id = gv_test_series_id
+       AND cancel_flag IS NULL
+       AND result_status_1 IS NULL;
+       
+    IF nPendTestCnt > 0 THEN
+      result_out := 'IND';
+      RAISE exit_out;
+    END IF;  
+
+    --get the reactive COUNTs
+    SELECT NVL(COUNT(*), 0)
+      INTO nReaRes
+      FROM utrs
+     WHERE unit_id = p_unit_id
+       AND test_id = p_test_id
+       AND test_series_id = gv_test_series_id
+       AND cancel_flag IS NULL
+       --AND extract_date IS NOT NULL
+       AND result_status_1 IN
+           (SELECT code
+              FROM master_codes
+             WHERE code_type = 'REAC'
+               AND gd_sysdate BETWEEN eff_date AND NVL(term_date, gd_sysdate + 1));
+    --get the reactive result code for the unit
+    IF nReares >= 1 THEN
+      BEGIN
+        SELECT DISTINCT result_status_1
+          INTO pReaRes
+          FROM utrs
+         WHERE unit_id = p_unit_id
+           AND test_id = p_test_id
+           AND test_series_id = gv_test_series_id
+           AND cancel_flag IS NULL
+           --AND extract_date IS NOT NULL
+           AND result_status_1 IN
+               (SELECT code
+                  FROM master_codes
+                 WHERE code_type = 'REAC'
+                   AND gd_sysdate BETWEEN eff_date AND
+                       NVL(term_date, gd_sysdate + 1));
+      EXCEPTION
+        WHEN OTHERS THEN
+          pReaRes := 'IND';
+      END;
+    END IF;
+    --get the non reactive COUNTs
+    SELECT NVL(COUNT(*), 0)
+      INTO nNonReaRes
+      FROM utrs
+     WHERE unit_id = p_unit_id
+       AND test_id = p_test_id
+       AND test_series_id = gv_test_series_id
+       AND cancel_flag IS NULL
+       AND result_status_1 != 'NT'
+       --AND extract_date IS NOT NULL
+       AND result_status_1 NOT IN
+           (SELECT code
+              FROM master_codes
+             WHERE code_type = 'REAC'
+               AND gd_sysdate BETWEEN eff_date AND
+                   NVL(term_date, gd_sysdate + 1));
+
+    IF nNonReaRes >= 1 THEN
+      BEGIN
+        SELECT DISTINCT result_status_1
+          INTO pNonReaRes
+          FROM utrs
+         WHERE unit_id = p_unit_id
+           AND test_id = p_test_id
+           AND test_series_id = gv_test_series_id
+           AND cancel_flag IS NULL
+           AND result_status_1 NOT IN ('NT')
+           --AND extract_date IS NOT NULL
+           AND result_status_1 NOT IN
+               (SELECT code
+                  FROM master_codes
+                 WHERE code_type = 'REAC'
+                   AND gd_sysdate BETWEEN eff_date AND
+                       NVL(term_date, gd_sysdate + 1));
+      EXCEPTION
+        WHEN OTHERS THEN
+          pNonReaRes := 'IND';
+      END;
+    END IF;
+
+    IF nReaRes > nNonReaRes THEN
+      result_out := pReares;
+    ElSIF nReaRes < nNonReaRes THEN
+      result_out := pNonReaRes;
+    ElSIF nReaRes = nNonReaRes THEN
+      --check IF ther is a NT result present
+      SELECT NVL(COUNT(DISTINCT result_status_1), 0)
+        INTO nNTRes
+        FROM utrs
+       WHERE unit_id = p_unit_id
+         AND test_id = p_test_id
+         AND test_series_id = gv_test_series_id
+         AND cancel_flag IS NULL
+         AND result_status_1 = 'NT';
+         --ND extract_date IS NOT NULL;
+    
+      IF nNTRes > 0 THEN
+        result_out := pReares;
+      ELSE
+        result_out := 'IND';
+      END IF;
+    END IF;
+
+    RETURN result_out;
+  
+  EXCEPTION
+    WHEN exit_out THEN
+      RETURN result_out;
+  END final_confirmation;
+
+  
+  PROCEDURE traverse_tree(test_series_id_in IN VARCHAR2, root_test_in IN VARCHAR2, status_only_in IN BOOLEAN) IS
+    lv_csv_schedule_test VARCHAR2(100);
+    lv_root_test     VARCHAR2(10);
+    lv_test_result   VARCHAR2(4);
+    lb_set_matched BOOLEAN;
+    lv_chapter_id VARCHAR2(10);
+    nCnt NUMBER;
+    exit_tree EXCEPTION;
+    next_set EXCEPTION;
+    lb_test_ordered BOOLEAN;
+    lb_test_cancelled BOOLEAN;
+    lv_cnf_yn VARCHAR2(1) := 'N';
+    ln_max_seq_no         number;
+    ln_min_seq_no         number;
+    lb_next_level         boolean := FALSE;
+    
+    lv_cnfchp_id      VARCHAR2(10); -- V10
+    
+    -- Loop at level_code  (1, <Test ID>), (2, <Test ID>), (3, <Test ID>)   
+    CURSOR level_cur IS
+      SELECT distinct level_code
+        FROM valid_series_test_config
+       WHERE test_series_id = test_series_id_in
+         --AND schedule_test IS NOT NULL
+         AND gd_sysdate between eff_date and NVL(term_date, gd_sysdate+10)
+       ORDER BY level_code;
+
+    -- Loop at set number level (1, 1, <Test ID>, <Test ID>),    (1, 2, <Test ID>, <Test ID>), (1, 3, <Test ID>, <Test ID>)
+    CURSOR sets_cur(level_in IN NUMBER) IS
+      SELECT distinct level_code, set_no, schedule_test, cancel_test, test_id, anotation_code, final_flag
+        FROM valid_series_test_config
+       WHERE test_series_id = test_series_id_in
+         AND test_id in 
+                 (select TRIM(regexp_substr(lv_csv_schedule_test,'[^,]+', 1, level))
+                    from dual
+                  connect by regexp_substr(lv_csv_schedule_test,'[^,]+', 1, level) is not null) 
+         AND level_code = level_in
+         AND gd_sysdate between eff_date and NVL(term_date, gd_sysdate+10)
+       ORDER BY level_code, set_no;
+    
+    -- Loop at tests level (test_id, result_code at 1,1) , (test_id, result_code at 1,2)       
+    CURSOR tests_cur(level_in IN NUMBER, set_in IN NUMBER) is       
+      SELECT test_id, result_code
+        FROM valid_series_test_config
+       WHERE test_series_id = test_series_id_in
+         AND level_code = level_in
+         AND set_no = set_in
+         AND gd_sysdate between eff_date and NVL(term_date, gd_sysdate+10);
+  BEGIN
+    gv_final_flag := NULL;
+    gv_notation_code := NULL;
+    gv_notation_test := NULL;
+    gb_status_only := status_only_in;
+       
+    lv_root_test := root_test_in;
+    
+    IF lv_root_test IS NULL THEN
+      BEGIN
+        select test_id into lv_root_test
+          from valid_series_test_config
+         where test_series_id = test_series_id_in
+           and level_code = 1
+           and schedule_test is not null
+           and gd_sysdate between eff_date and nvl(term_date, gd_sysdate+10)
+           and rownum = 1;  
+         pl('Root test cacluated as ' || lv_root_test); 
+      EXCEPTION
+        WHEN no_data_found THEN
+         gv_status_msg := 'ERR: Test Series ID error. ' || SUBSTR(SQLERRM, 1, 300) ;
+         RAISE exit_tree;
+      END;      
+    END IF;   
+    
+    FOR level_rec IN level_cur LOOP
+      if level_rec.level_code = 1 then
+        lv_csv_schedule_test := lv_root_test;
+      end if;        
+      
+      lb_next_level := FALSE; -- V08 use this to exit tree if the sets are not matched at a level.
+           
+      FOR sets_rec IN sets_cur(level_rec.level_code) LOOP
+        BEGIN
+          lb_set_matched := FALSE;
+  
+          -- if lb_set_matched is TRUE after below loop, it means all the tests and their results matched with the set group in test series.
+          FOR tests_rec in tests_cur(sets_rec.level_code, sets_rec.set_no) LOOP
+              pl('Reading (' || sets_rec.level_code ||',' || sets_rec.set_no || ')' 
+                  ||' - Test: ' || tests_rec.test_id || ', Res: ' || tests_rec.result_code);
+                  
+              if is_cnf_test(tests_rec.test_id) then
+                lv_chapter_id := gv_cnfchapter_id;
+                lv_cnf_yn := 'Y';
+              else
+                lv_chapter_id := gv_dtlchapter_id;
+                lv_cnf_yn := 'N';
+                
+                -- V10 -- only for DTL.
+                lv_cnfchp_id := gv_cnfchapter_id; -- we use this in utrs queries to omit this chapter when looking at test results.
+                -- but for scenario where confirmatory chapter can be same as dtl chapter, we assign a dummy chp to lv_cnfchp_id
+                if gv_cnfchapter_id = gv_dtlchapter_id then
+                  lv_cnfchp_id := 'NUL'; -- assign a dummy chapter
+                end if;   
+                pl('ignore chapter for dtl utrs check ' || lv_cnfchp_id);               
+                ---------
+                 
+              end if;
+              
+              
+              if lv_cnf_yn = 'N' then -- DTL processing;
+                  SELECT COUNT(1) INTO nCnt
+                    FROM utrs
+                   WHERE unit_id = gv_unit_id
+                     --AND chapter_id = lv_chapter_id
+                     AND chapter_id <> lv_cnfchp_id -- V10
+                     AND test_id = tests_rec.test_id
+                     AND cancel_flag IS NULL
+                     AND result_status_1 IN
+                         (select TRIM(regexp_substr(tests_rec.result_code,'[^,]+', 1, level))
+                            from dual
+                          connect by regexp_substr(tests_rec.result_code,'[^,]+', 1, level) is not null);  
+                     
+                  IF nCnt = 0 THEN
+                    lb_set_matched := FALSE;
+                    pl('Test match not found. Goto Next Set');
+                    EXIT; -- exit tests_rec loop and look for next set;
+                  END IF;
+                  
+                  -- check for final interpretation.
+                  SELECT COUNT(1) into nCnt
+                    FROM utrs
+                   WHERE unit_id = gv_unit_id
+                     --AND chapter_id = lv_chapter_id
+                     AND chapter_id <> lv_cnfchp_id -- V10
+                     AND test_id = tests_rec.test_id
+                     AND cancel_flag IS NULL;
+                     --AND result_status_1 IS NOT NULL; -- V05
+                     
+                  IF nCnt = 1 THEN -- no need of final interpretation. only one test found
+                    pl('Test match found...');
+                    lb_set_matched := TRUE;
+                  ELSE
+                    pl('multiple test results found, checking for final interpretaion...');
+                    -- more than one test found (check for final interpration);
+                    lv_test_result := emf_util.utrs_test_result(gv_unit_id, tests_rec.test_id, lv_chapter_id);
+                      
+                    pl('Final interpretation calculated as ' || lv_test_result);
+                    -- check if final interpratation is in the list of results.
+                    SELECT COUNT(1) INTO nCnt
+                      FROM DUAL
+                     WHERE lv_test_result IN  
+                       (select TRIM(regexp_substr(tests_rec.result_code,'[^,]+', 1, level))
+                          from dual
+                        connect by regexp_substr(tests_rec.result_code,'[^,]+', 1, level) is not null);       
+                    IF nCnt = 0 THEN
+                      lb_set_matched := FALSE;
+                      pl('Test match not found. Goto Next Set.');
+                      EXIT; -- exit tests_rec loop and look for next set;   
+                    ELSE
+                      pl('Test match found...');
+                      lb_set_matched := TRUE;                                       
+                    END IF;                              
+                  END IF;              
+              
+              end if;
+              
+              
+              if lv_cnf_yn = 'Y' then -- CNF processing;
+                  -- 1) check number of tests
+                  SELECT COUNT(1) INTO nCnt
+                    FROM utrs
+                   WHERE unit_id = gv_unit_id
+                     AND chapter_id = lv_chapter_id
+                     AND test_id = tests_rec.test_id
+                     AND cancel_flag IS NULL;                    
+                    
+                    IF nCnt = 0 THEN
+                      lb_set_matched := FALSE;
+                      pl('Test match not found. Goto Next Set');
+                      EXIT; -- exit tests_rec loop and look for next set;
+                    END IF;
+                     
+                   -- one test only (no need to worry about repeats)
+                   if nCnt = 1 then
+                      -- check if that test matches the criteria in test series.
+                      SELECT COUNT(1) INTO nCnt
+                        FROM utrs
+                       WHERE unit_id = gv_unit_id
+                         AND chapter_id = lv_chapter_id
+                         AND test_id = tests_rec.test_id
+                         AND test_series_id = test_series_id_in
+                         AND cancel_flag IS NULL
+                         AND result_status_1 IN
+                             (select TRIM(regexp_substr(tests_rec.result_code,'[^,]+', 1, level))
+                                from dual
+                              connect by regexp_substr(tests_rec.result_code,'[^,]+', 1, level) is not null);  
+                              
+                        IF nCnt = 0 THEN
+                          lb_set_matched := FALSE;
+                          pl('Test match not found. Goto Next Set');
+                          EXIT; -- exit tests_rec loop and look for next set;
+                        END IF;
+                        
+                         pl('Test match found...');
+                         lb_set_matched := TRUE;
+                   end if;
+              
+                   -- More than one test found.
+                   if nCnt > 1 then  
+                   
+                      -- check if atleast one has test series id linked and result_status not null.
+                      SELECT COUNT(1) INTO nCnt
+                        FROM utrs
+                       WHERE unit_id = gv_unit_id
+                         AND chapter_id = lv_chapter_id
+                         AND test_id = tests_rec.test_id
+                         AND test_series_id = test_series_id_in
+                         AND result_status_1 IS NOT NULL
+                         AND cancel_flag IS NULL;     
+                      
+                      if nCnt = 0 then
+                          lb_set_matched := FALSE;
+                          pl('Test match not found. Goto Next Set');
+                          EXIT; -- exit tests_rec loop and look for next set;                        
+                      END IF;
+                      
+                      SELECT nvl(min(test_seq_no),0) into ln_min_seq_no
+                        FROM utrs
+                      where unit_id = gv_unit_id
+                        and chapter_id = lv_chapter_id
+                        and test_series_id = test_series_id_in
+                        and test_id = tests_rec.test_id 
+                        and result_status_1 is not null
+                        and cancel_flag is null; 
+                        
+                      SELECT nvl(max(test_seq_no),0) into ln_max_seq_no
+                        FROM utrs
+                      where unit_id = gv_unit_id
+                        and chapter_id = lv_chapter_id
+                        and test_id = tests_rec.test_id 
+                        and cancel_flag is null;                         
+                      
+                      select count(1) into nCnt
+                        from utrs
+                      where unit_id = gv_unit_id
+                        and chapter_id = lv_chapter_id
+                        and test_id = tests_rec.test_id 
+                        and cancel_flag is null
+                        and test_series_id is null
+                        and result_status_1 is null
+                        and test_seq_no between ln_min_seq_no and ln_max_seq_no;
+                      
+                      if nCnt <> 0 THEN 
+                        pl('min seq no. ' || ln_min_seq_no);
+                        pl('max seq no. ' || ln_max_seq_no);
+                        pl('updating test series id');
+                          update utrs
+                          set test_series_id= test_series_id_in
+                        where unit_id = gv_unit_id
+                          and chapter_id = lv_chapter_id
+                          and test_id = tests_rec.test_id 
+                          and cancel_flag is null
+                          and test_series_id is null
+                          and result_status_1 is null
+                          and test_seq_no between ln_min_seq_no and ln_max_seq_no;
+                      end if;           
+                      
+                      -- perform final interpretaion;   
+                    pl('multiple test results found, checking for final interpretaion...');
+                    -- more than one test found (check for final interpration);
+                    lv_test_result := final_confirmation(gv_unit_id, tests_rec.test_id, lv_chapter_id);
+                      
+                    pl('final interpretation calculated as ' || lv_test_result);
+                    -- check if final interpratation is in the list of results.
+                    SELECT COUNT(1) INTO nCnt
+                      FROM DUAL
+                     WHERE lv_test_result IN  
+                       (select TRIM(regexp_substr(tests_rec.result_code,'[^,]+', 1, level))
+                          from dual
+                        connect by regexp_substr(tests_rec.result_code,'[^,]+', 1, level) is not null);       
+                    IF nCnt = 0 THEN
+                      lb_set_matched := FALSE;
+                      pl('Test Match not found. Goto Next Set');
+                      EXIT; -- exit tests_rec loop and look for next set;   
+                    ELSE
+                      pl('Test match found...');
+                      lb_set_matched := TRUE;                                       
+                    END IF;                             
+
+                 end if;
+              end if;
+          END LOOP; -- tests cur loop
+          
+          -- all the tests and their results in this set group matched. Proceed to schedule test or if already scheduled go to next level.
+          IF NOT lb_set_matched THEN
+            RAISE next_set; -- set not matched, go to next set.
+          END IF;
+          
+          pl('Set Matched');
+          -- set matched; schedule test OR if final return status and notation.(MODIFIED IN V07)
+          begin
+            -- check schedule_test and cancel tests.
+            if sets_rec.schedule_test is not null then
+              lb_test_ordered := order_tests(sets_rec.schedule_test); -- schedule_test can be csv                     
+            end if;
+                                  
+            if sets_rec.cancel_test is not null then
+              lb_test_cancelled := cancel_tests(sets_rec.cancel_test);                      
+            end if;
+
+            if lb_test_ordered OR lb_test_cancelled OR sets_rec.final_flag is not null then
+              gv_notation_code := sets_rec.anotation_code;
+              gv_final_flag    := sets_rec.final_flag;
+              gv_notation_test := sets_rec.test_id;
+
+              pl('final Status ' || gv_final_flag); 
+              pl('Notation ' || gv_notation_code);   
+              pl('Notation test' || gv_notation_test); 
+              pl('Exiting now...');
+              
+              if gb_status_only then -- no need to insert notation if the routine is used to get status only.                          
+                 null;
+              else
+                 insert_notation;                  
+              end if;   
+              
+              raise exit_tree; -- no furhter processing (schedule OR CANCEL and exit).
+            else -- if test is not ordered or test is not cancelled (this means already completed this step, go to next level.
+              pl('*Schedule_test ' || sets_rec.schedule_test || ' already scheduled. Goto next level');
+              lv_csv_schedule_test := sets_rec.schedule_test;
+              lb_next_level := TRUE;              
+              EXIT; -- EXITS sets cur loop and goes to next level                    
+            end if;
+          exception
+            WHEN exit_tree THEN
+              RAISE;
+            WHEN OTHERS THEN
+              gv_status_msg := 'ERR: ' || SUBSTR(SQLERRM, 1, 300) ;
+              RAISE exit_tree;                         
+          end;            
+
+
+        EXCEPTION
+          WHEN next_set THEN
+            NULL;
+        END;  
+      END LOOP; -- sets cur loop
+      
+      if lb_next_level then
+        pl('Goto Next Level');
+        null;
+      else
+        exit;
+      end if;
+      
+    END LOOP; -- level_cur loop;
+  EXCEPTION
+    WHEN exit_tree THEN -- using this to exit the process.
+      NULL;
+  END traverse_tree;
+   
+  FUNCTION get_reactive_customer_level(test_id_in IN VARCHAR2) RETURN VARCHAR2 is
+    lv_test_id VARCHAR2(10);      
+  BEGIN      
+    -- get reactive test ID that caused the conf. test to be placed (at customer level)
+    select reactive_test_id into lv_test_id
+      from valid_customer_confirm_tests
+     where contract_id = gv_contract_id
+       and confirm_test_id = test_id_in
+       and gd_sysdate between eff_date and nvl(term_date, gd_sysdate+10)
+       and rownum = 1;
+         
+       return lv_test_id;
+  exception
+    when no_data_found then
+      return null;
+  END get_reactive_customer_level;
+      
+  FUNCTION get_reactive_inst_level(test_id_in IN VARCHAR2) RETURN VARCHAR2 IS
+    lv_test_id VARCHAR2(10);
+  BEGIN
+    select test_id into lv_test_id
+      from valid_test_results
+     where 
+        (confirm_test_id_1 = test_id_in
+        or confirm_test_id_2 = test_id_in
+        or confirm_test_id_3 = test_id_in
+        or confirm_test_id_4 = test_id_in
+        or confirm_test_id_5 = test_id_in
+        or confirm_test_id_6 = test_id_in)
+       and sysdate between eff_date and nvl(term_date,sysdate+365)
+       and rownum = 1;
+    return lv_test_id;
+  exception
+    when no_data_found then
+      return null;
+  END get_reactive_inst_level; 
+  
+  -- Check if the confirmatory test is defined at test level or test series level.
+  -- if defined at test level,(test_series_id, level_code, set_no, schedule_test and cancel_test fields are null)
+  FUNCTION found_at_test_level(cf_test_in IN VARCHAR2) RETURN BOOLEAN IS
+    CURSOR cf_tests_cur IS
+    SELECT test_id, schedule_test, cancel_test, result_code, anotation_code, final_flag  -- V07 (schedule_test and cancel_test added)
+     FROM valid_series_test_config
+     WHERE test_series_id IS NULL
+       AND level_code IS NULL
+       AND set_no IS NULL
+       AND test_id = cf_test_in
+       AND gd_sysdate BETWEEN eff_date AND NVL(term_date, gd_sysdate+10);
+    lb_return BOOLEAN; 
+    nCnt NUMBER;
+    lb_test_ordered BOOLEAN := FALSE; -- V07
+    lb_test_cancelled BOOLEAN := FALSE; -- V07
+    lv_chapter_id VARCHAR2(10); -- V08
+    lv_cnf_yn VARCHAR2(1); -- V08
+    lv_test_result VARCHAR2(10) ;-- V08;
+    lb_set_matched BOOLEAN; -- V08
+    next_test_record EXCEPTION; -- V08
+  BEGIN
+    lb_return := FALSE; -- Default;
+    gv_final_flag := NULL;
+    gv_notation_code := NULL;
+    gv_notation_test := NULL;
+    
+--    lb_test_ordered := FALSE; -- V07
+--    lb_test_cancelled := FALSE; -- V07
+            
+    for cf_tests_rec in cf_tests_cur 
+    loop
+           BEGIN      
+              if is_cnf_test(cf_tests_rec.test_id) then
+                lv_chapter_id := gv_cnfchapter_id;
+                lv_cnf_yn := 'Y';
+              else
+                lv_chapter_id := gv_dtlchapter_id;
+                lv_cnf_yn := 'N';
+              end if;
+              
+              
+              if lv_cnf_yn IN ('Y', 'N') then -- DTL processing;
+
+                  SELECT COUNT(1) INTO nCnt
+                    FROM utrs
+                   WHERE unit_id = gv_unit_id
+                     AND chapter_id = lv_chapter_id
+                     AND test_id = cf_tests_rec.test_id
+                     AND cancel_flag IS NULL
+                     AND result_status_1 IN
+                         (select TRIM(regexp_substr(cf_tests_rec.result_code,'[^,]+', 1, level))
+                            from dual
+                          connect by regexp_substr(cf_tests_rec.result_code,'[^,]+', 1, level) is not null);  
+
+                  IF nCnt = 0 THEN
+                    lb_set_matched := FALSE;
+                    pl('Test match not found... Goto Next Set');
+                    RAISE next_test_record; -- exit tests_rec loop and look for next set;
+                  END IF;
+                  
+                  -- check for final interpretation.
+                  SELECT COUNT(1) into nCnt
+                    FROM utrs
+                   WHERE unit_id = gv_unit_id
+                     AND chapter_id = lv_chapter_id
+                     AND test_id = cf_tests_rec.test_id
+                     AND cancel_flag IS NULL;
+                     --AND result_status_1 IS NOT NULL; -- V05
+                     
+                  IF nCnt = 1 THEN -- no need of final interpretation. only one test found
+                    pl('Test match found...');
+                    lb_set_matched := TRUE;
+                  ELSE
+                    pl('multiple test results found, checking for final interpretaion...');
+                    -- more than one test found (check for final interpration);
+                    lv_test_result := emf_util.utrs_test_result(gv_unit_id, cf_tests_rec.test_id, lv_chapter_id);
+                      
+                    pl('Final interpretation calculated as ' || lv_test_result);
+                    -- check if final interpratation is in the list of results.
+                    SELECT COUNT(1) INTO nCnt
+                      FROM DUAL
+                     WHERE lv_test_result IN  
+                       (select TRIM(regexp_substr(cf_tests_rec.result_code,'[^,]+', 1, level))
+                          from dual
+                        connect by regexp_substr(cf_tests_rec.result_code,'[^,]+', 1, level) is not null);       
+                    IF nCnt = 0 THEN
+                      lb_set_matched := FALSE;
+                      pl('Test match not found. Goto Next Set.');
+                      EXIT; -- exit tests_rec loop and look for next set;   
+                    ELSE
+                      pl('Test match found...');
+                      lb_set_matched := TRUE;                                       
+                    END IF;                              
+                  END IF;              
+              
+              end if;      
+    
+              IF lb_set_matched THEN
+                lb_return := TRUE;
+                -- check schedule_test and cancel tests. -- Added in V07
+                
+                gv_test_series_id := NULL; -- For tests defined at test level.
+                gb_status_only := FALSE;   -- inserts notation and schedules test.
+
+                pl('Criteria met at test level - checking tests to be scheduled and cancelled');        
+                if cf_tests_rec.schedule_test is not null then
+                  lb_test_ordered := order_tests(cf_tests_rec.schedule_test); -- schedule_test can be csv                     
+                end if;
+                                          
+                if cf_tests_rec.cancel_test is not null then
+                  lb_test_cancelled := cancel_tests(cf_tests_rec.cancel_test);                      
+                end if;
+
+                gv_notation_code := cf_tests_rec.anotation_code;
+                gv_final_flag    := cf_tests_rec.final_flag;
+                gv_notation_test := cf_tests_rec.test_id;
+
+
+                pl('Final Status ' || gv_final_flag); 
+                pl('Notation ' || gv_notation_code);   
+                pl('Notation test' || gv_notation_test); 
+                      
+                insert_notation;                  
+                EXIT; -- exit loop;     
+              END IF;
+            EXCEPTION
+              WHEN next_test_record THEN
+                NULL;  
+            END;    
+          END LOOP;              
+     /* -- V08
+    
+      SELECT COUNT(1) INTO nCnt
+        FROM utrs
+       WHERE unit_id = gv_unit_id
+         AND test_id = cf_test_in
+         AND cancel_flag IS NULL
+         AND test_series_id IS NULL -- V07
+         AND result_status_1 IN
+             (select regexp_substr(cf_tests_rec.result_code,'[^,]+', 1, level)
+                from dual
+              connect by regexp_substr(cf_tests_rec.result_code,'[^,]+', 1, level) is not null); 
+    
+      IF nCnt <> 0 THEN
+        -------
+        lb_return := TRUE;
+        -- check schedule_test and cancel tests. -- Added in V07
+        
+        gv_test_series_id := NULL; -- For tests defined at test level.
+        gb_status_only := FALSE;   -- inserts notation and schedules test.
+
+        pl('Criteria met at test level - checking tests to be scheduled and cancelled');        
+        if cf_tests_rec.schedule_test is not null then
+          lb_test_ordered := order_tests(cf_tests_rec.schedule_test); -- schedule_test can be csv                     
+        end if;
+                                  
+        if cf_tests_rec.cancel_test is not null then
+          lb_test_cancelled := cancel_tests(cf_tests_rec.cancel_test);                      
+        end if;
+
+        gv_notation_code := cf_tests_rec.anotation_code;
+        gv_final_flag    := cf_tests_rec.final_flag;
+        gv_notation_test := cf_tests_rec.test_id;
+
+
+        pl('Final Status ' || gv_final_flag); 
+        pl('Notation ' || gv_notation_code);   
+        pl('Notation test' || gv_notation_test); 
+              
+        insert_notation;                  
+        EXIT; -- exit loop;         
+
+      END IF;
+    end loop;    
+    */
+    RETURN lb_return;    
+    
+  END found_at_test_level;  
+
+  -- V07 new routine added.
+  procedure get_test_series_id(dtl_test_in IN VARCHAR2, series_id_out OUT VARCHAR2) is                                   
+  begin
+    series_id_out := NULL;
+            
+    select test_series_id into series_id_out
+      from valid_series_test_config
+     where test_id = dtl_test_in
+       and level_code = 1
+       and gd_sysdate between eff_date and nvl(term_date, gd_sysdate+10)
+       and rownum = 1;
+    --mark_as_checked(dtl_test_in);   -- V11        
+  exception
+    when no_data_found then
+      NULL; -- V11
+    --mark_as_checked(dtl_test_in);  -- V11
+  end get_test_series_id;
+  -----------
+
+  PROCEDURE conf_tests_series_check IS
+    -- get list of confirmatory tests.
+    CURSOR cf_tests_cur IS
+      SELECT test_id, test_series_id -- V10
+        FROM utrs
+       WHERE unit_id = gv_unit_id
+         --AND cancel_flag IS NULL
+         AND chapter_id = gv_cnfchapter_id
+         AND test_id IN
+             (SELECT test_id
+                FROM valid_tests
+               WHERE test_group IN --('CNFRM', 'SUPP')
+                              ( SELECT mc.code
+                                  FROM master_codes mc
+                                 WHERE mc.code_type = 'TSTGP'
+                                   AND gd_sysdate between mc.eff_date and nvl(mc.term_date, gd_sysdate+1)
+                              )                  
+                 AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1));   
+                 
+    lv_reactive_test VARCHAR2(10);
+    lv_test_result   VARCHAR2(4);
+    next_record EXCEPTION;
+  BEGIN
+
+    gv_tests_checked.DELETE;
+        
+    for cf_tests_rec in cf_tests_cur loop
+      --pl('in conf_tests_series_check');
+      BEGIN
+        pl('****** CNF Test ID: ' || cf_tests_rec.test_id || '*********' ); 
+        
+        -- V09
+        lv_reactive_test := get_reactive_customer_level(cf_tests_rec.test_id);        
+        pl('Reactive Test at customer level: ' || NVL(lv_reactive_test, 'Not Found.'));
+        ---
+        
+        
+        IF lv_reactive_test IS NOT NULL THEN
+          pl('Test ordered from override. Skipping test');
+          mark_as_checked(lv_reactive_test); 
+          ----- V12      
+          IF cf_tests_rec.test_series_id is null then -- V10 (Check at test level only if test series id is null)
+            IF found_at_test_level(cf_tests_rec.test_id) THEN
+               --pl('Match found at test level. No further levels for this test.');
+               pl('Test processing complete.  Goto next test.');
+               raise next_record;
+            END IF;
+          END IF;          
+          ------------------- 
+          raise next_record;
+        END IF;      
+        
+        IF cf_tests_rec.test_series_id is null then -- V10 (Check at test level only if test series id is null)
+          IF found_at_test_level(cf_tests_rec.test_id) THEN
+             --pl('Match found at test level. No further levels for this test.');
+             pl('Test processing complete.  Goto next test.');
+             raise next_record;
+          END IF;
+        END IF;
+        
+        pl('Match not found at test level. Checking Series configuration');
+        -- check override table. (confirm at customer level)
+        
+        -- V09 (moved the check to above)
+        --lv_reactive_test := get_reactive_customer_level(cf_tests_rec.test_id);        
+        --pl('Reactive Test at customer level: ' || NVL(lv_reactive_test, 'Not Found.'));
+        --
+        if lv_reactive_test is null then
+          -- check confirm at donor test center level (institutional).
+          lv_reactive_test := get_reactive_inst_level(cf_tests_rec.test_id);
+          pl('Reactive Test at donor center level: ' || NVL(lv_reactive_test, 'Not Found.'));
+        end if;
+        
+        if lv_reactive_test is not null then          
+          -- multiple confirmatory tests can have the same parent reactive test. No need to process again.
+          if test_already_checked(lv_reactive_test) then
+            pl('Reactive Test ID already processed, skipping test. Goto next test.');
+            raise next_record;
+          end if;
+          
+          -- Get final interpretation result;
+          lv_test_result := emf_util.utrs_test_result(gv_unit_id, lv_reactive_test, gv_dtlchapter_id); 
+          pl('Final Result Interpretation: ' || lv_test_result);
+          
+          if NVL(lv_test_result, 'IND') = 'IND' then
+            pl('IND result, skipping test. Goto next test.');
+            raise next_record;
+          end if;
+          
+          -- check if reactive test is in test series config table.
+          
+          get_test_series_id( dtl_test_in      => lv_reactive_test,
+                              series_id_out    => gv_test_series_id
+                             );
+          
+        
+
+          if gv_test_series_id is null then
+            pl('Test Series ID not found.  Skipping test. Goto next test.');
+            raise next_record;
+          end if;
+         
+          pl('*Test series ID found : ' || gv_test_series_id);
+          mark_as_checked(lv_reactive_test);   -- V11 (moved from get_test_series_id routine)
+          
+          pl('Reactive test id marked as checked');
+
+          pl('start tree traverse');
+          -- navigate test series tree and schedule test id.
+          traverse_tree(test_series_id_in => gv_test_series_id, 
+                         root_test_in      => lv_reactive_test, 
+                         status_only_in    => FALSE  -- Orders and cancels made.
+                         ); -- called from QC screen (populate final flag)          
+          pl('completed tree traverse');
+          ----
+          
+        end if;
+      EXCEPTION
+        WHEN next_record THEN -- using this to skip record.
+          NULL;        
+      END;      
+    end loop;          
+    
+    --dump_output; -- V08
+ EXCEPTION
+    WHEN exit_error THEN
+      dump_output;
+  END conf_tests_series_check;
+
+  -- V07 new routine added.
+  PROCEDURE dtl_tests_series_check IS
+    -- get list of dtl tests.
+    CURSOR dt_tests_cur IS
+      SELECT test_id, test_series_id -- V10 (added test series id)
+        FROM utrs
+       WHERE unit_id = gv_unit_id
+         AND cancel_flag IS NULL
+         AND chapter_id = gv_dtlchapter_id
+         AND test_id NOT IN
+             (SELECT test_id
+                FROM valid_tests
+               WHERE test_group IN --('CNFRM', 'SUPP')
+                                ( SELECT mc.code
+                                    FROM master_codes mc
+                                   WHERE mc.code_type = 'TSTGP'
+                                     AND gd_sysdate between mc.eff_date and nvl(mc.term_date, gd_sysdate+1)
+                                )                  
+                 AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE + 1))
+         AND test_id IN
+             (SELECT test_id
+                FROM valid_series_test_config
+               WHERE NVL(level_code,1) = 1
+                 AND gd_sysdate between eff_date and NVL(term_date, gd_sysdate+10) ) ;      
+    lv_reactive_test VARCHAR2(10);
+    lv_test_result   VARCHAR2(4);
+    next_record EXCEPTION;
+  BEGIN
+    for dt_tests_rec in dt_tests_cur loop
+      pl('****** DTL Test ID: ' || dt_tests_rec.test_id || '*********' ); 
+      BEGIN
+
+        -- V10 -- no need to check when the test ID is already processed.  11/1/2018         
+        if test_already_checked(dt_tests_rec.test_id) then
+          pl('Test ID already checked, Goto next test');
+          raise next_record;
+        end if;              
+      
+      
+        IF dt_tests_rec.test_series_id is null THEN  -- V10        
+          IF found_at_test_level(dt_tests_rec.test_id) THEN
+             --pl('match found at test level. No further levels for this test.');
+             pl('Test processing complete.  Goto next test.');
+             mark_as_checked(dt_tests_rec.test_id);       
+             raise next_record;
+          END IF;
+        END IF;
+        
+        pl('Match not found at test level. Checking Series');
+        -- check override table. (confirm at customer level)
+        --lv_reactive_test := get_reactive_customer_level(cf_tests_rec.test_id); -- this is for conf. test only
+        
+        /*
+        pl('**Reactive Test for conf. test (' || cf_tests_rec.test_id ||') at customer level: ' || NVL(lv_reactive_test, 'Not Found.'));
+        
+        if lv_reactive_test is null then
+          -- check confirm at donor test center level (institutional).
+          lv_reactive_test := get_reactive_inst_level(cf_tests_rec.test_id);
+          pl('**Reactive Test for conf. test (' || cf_tests_rec.test_id ||') at donor center level: ' || NVL(lv_reactive_test, 'Not Found.'));
+        end if;
+        */
+        lv_reactive_test := dt_tests_rec.test_id ;
+        if lv_reactive_test is not null then          
+          -- multiple confirmatory tests can have the same parent reactive test. No need to process again.
+          if test_already_checked(lv_reactive_test) then
+            pl('Test ID already checked, Goto next test');
+            raise next_record;
+          end if;
+          
+          -- Get final interpretation result;
+          lv_test_result := emf_util.utrs_test_result(gv_unit_id, lv_reactive_test, gv_dtlchapter_id); 
+          pl('Final Result Interpretation: ' || lv_test_result);  
+          
+          if NVL(lv_test_result, 'IND') = 'IND' then
+            pl('IND result, skipping test. Goto next test');
+            raise next_record;
+          end if;
+          
+          -- check if reactive test is in test series config table.
+          
+          get_test_series_id( dtl_test_in      => lv_reactive_test,
+                              series_id_out    => gv_test_series_id
+                             );
+          
+          if gv_test_series_id is null then
+            pl('Test Series ID not found.  Skipping test. Goto next test.');
+            raise next_record;
+          end if;
+          
+          mark_as_checked(lv_reactive_test);   -- V11 -- moved from get_test_series routine
+          pl('Reactive test id marked as checked'); 
+         
+         pl('*Test series ID found : ' || gv_test_series_id);
+           pl('start tree traverse');
+          -- navigate test series tree and schedule test id.
+          traverse_tree(test_series_id_in => gv_test_series_id, 
+                         root_test_in      => lv_reactive_test, 
+                         status_only_in    => FALSE  -- Orders and cancels made.
+                         ); -- called from QC screen (populate final flag)     
+           pl('completed tree traverse');                              
+          ----
+          
+        end if;
+      EXCEPTION
+        WHEN next_record THEN -- using this to skip record.
+          NULL;        
+      END;      
+    end loop;          
+    
+    --dump_output; -- V08;
+ EXCEPTION
+    WHEN exit_error THEN
+      dump_output;    
+  END dtl_tests_series_check;
+
+  PROCEDURE check_series_config(p_unit_id        IN VARCHAR2, -- mandatory
+                                p_chapter_id     IN VARCHAR2, -- mandatory                    
+                                p_test_series_id IN VARCHAR2, -- optional 
+                                p_program_id     IN VARCHAR2, -- mandatory
+                                p_final_flag     OUT VARCHAR2, -- final flag if test series id is passed.
+                                p_status         OUT VARCHAR2  -- status -- 'OK' or error msg.
+                                ) IS  
+    skip_unit EXCEPTION;
+    lv_default_chapter VARCHAR2(4);                            
+  BEGIN
+    gv_status_msg := 'OK'; -- default; (used this to trap error message and return as out parameter)
+    gv_test_series_id := p_test_series_id;
+    
+    if p_unit_id is null then
+      gv_status_msg := 'ERR: Missing parameter Unit ID';
+    end if;
+    if p_program_id is null then
+      gv_status_msg := 'ERR: Missing parameter program ID';
+    end if;
+    check_status_msg; -- raises exception exit_error if status msg is not 'OK'.
+  
+    lv_default_chapter := NVL(p_chapter_id, lt_user_session.get_chapter_id);
+    gd_sysdate := lifetrack_timezone_convert.get_local_time(lv_default_chapter, SYSDATE);
+    gv_program_id := p_program_id;
+    gv_unit_id   := p_unit_id; 
+    gv_chp_id    := p_chapter_id; -- V08
+    
+    get_DTL_info(p_unit_id, gv_dtlchapter_id, gd_coll_date, gv_contract_id);  
+
+    if gv_status_msg <> 'OK' then -- for external transfer in scenario, we do not have dtl unit.
+      
+      -- check if it is external transfer scenario and get details;
+      get_EXT_info(p_unit_id, gv_dtlchapter_id, gd_coll_date, gv_contract_id);
+      
+      if gv_status_msg = 'OK' then 
+        null; -- continue processing;
+      else
+        raise skip_unit; --  unable to locate unit
+      end if;
+
+    end if;
+        
+    get_CNF_info(p_unit_id, gv_cnfchapter_id);
+    
+    if gv_status_msg <> 'OK' then -- for external transfer in scenario, we do not have dtl unit.
+      raise skip_unit;
+    end if;
+    
+    
+    
+
+    pl('**************');
+    pl('Unit ID ' || p_unit_id );
+    pl('Coll Dt ' || to_char(gd_coll_date, 'MM-DD-YYYY'));
+    pl('CNF Chp ID ' || gv_cnfchapter_id);
+    pl('DTL Chp ID ' || gv_dtlchapter_id);    
+    pl('Contract ID ' || gv_contract_id);
+    pl('Local Time ' || TO_CHAR(gd_sysdate, 'MMDDYYYY HH24:MI'));
+    pl('**************'); 
+      
+    -- Checks all CF tests for the unit if test_series_id_in is null. 
+    if p_test_series_id is null then  
+      pl('starting conf. tests check...');
+      conf_tests_series_check;  -- called from STIN screen.
+      pl('starting dtl. tests check...');
+      dtl_tests_series_check;  -- V07 new routine.  
+    else
+      traverse_tree(test_series_id_in => p_test_series_id, 
+                     root_test_in      => NULL, 
+                     status_only_in    => TRUE  -- Gets status only, no orders or cancels made.
+                     ); -- called from QC screen (populate final flag)
+      p_final_flag := gv_final_flag;      
+    end if; 
+    dump_output; -- V08    
+    p_status := gv_status_msg;      
+  EXCEPTION
+    WHEN exit_error THEN
+      p_status := gv_status_msg;
+      dump_output;
+    WHEN skip_unit THEN
+      pl('skipping unit - '|| gv_unit_id);
+      p_status := 'OK'; -- allow process to continue in the calling program.
+      dump_output;
+  END check_series_config;
+  
+begin
+  -- Initialization
+  null;
+end confirm_test_results;
+/

@@ -1,0 +1,1924 @@
+CREATE OR REPLACE PACKAGE DON_CORE IS
+/* ----------------------------------------
+*
+||    Program Name                : DON_CORE
+||    Date Creation               : 10-03-97
+||    Current Version             : 03 IM# 2000, 10-06-2008
+                                  : 04 Rel 4.5.0 (SCR# 16135), 02-24-2010
+                                       digit social security number
+                                       modify check_resolved_duplicate routine
+                                  : 05 Adding the find_donor_full_ssn routine
+                                       02-16-11
+  Date Mod                        : 04/15/2011
+  Version	                  : 05 - Modified By: Hussein
+                                       - replace user by lt_sesseion_user.get_user_id
+                                  : 06 - Modified by Kishore on 08/29/2013
+                                       - Add a new procedure to compare 2 strings.
+                                  : 07 - FIND_DONOR routine modified to add alternate ID changes; SCR 11774    
+			          : 07 - Ashok; checking in the same version. no functional changes made (just re-formatted the code).
+                                  : 08 - Modified by Kishore on 10/15/2013
+                                       - Modify code so that the strings are compared using a percentage 
+                                       - that is defined in the VALID_PARAMETERS table for parameter code SIMMPER
+                                  : 09 - find_donor_full_ssn routine also modified to add alternate ID changes; 
+                                    --SCR 11774; 10/15/2013                                       
+-------------------------------------------------------
+Resetting to 01 starting from LT_2018
+
+   Current Version           : 01   SCR:151756   By: Edwin  [10/20/16]
+                             : 02   Ashok 12/13/2016 -- made few changes to
+                                     eligibility routine (weight parameter)
+                             : 03   IM: 460  LT_2018 Edwin 01/05/2017
+                             : 04   IM: 470  LT_2018 Edwin 011717
+                             : 05   ONS_FIND_DONOR added for dotnet ONSITE module - 01/11/2019
+                             : 06   ONS_FIND_DONOR routine modified (DGM_ID added to select stmt)
+                             : 07   ONS_FIND_DONOR routine modified (ALT_TYPE added to select stmt)
+                             : 08   ONS_FIND_DONOR routine modified (MLT 3782 - Username passed as parameter)
+			     : 09   MLT-7812 (fixing the resolve potentisl duplicate issue) 
+                 : 10   MLT-8064 (ONS_FIND_DONOR routine - FKSSN and SSN_MODE removed.)
+-------------------------------------------- */
+
+   PROCEDURE find_donor
+      (p_ssn                   IN      NUMBER,
+       p_last_name             IN      VARCHAR2,
+       p_date_of_birth         IN      DATE,
+       p_first_name            IN      VARCHAR2,
+       p_gender                IN      VARCHAR2,
+       p_session_id            IN      VARCHAR2,
+       p_grade                 IN      NUMBER,
+       p_chapter_id            IN      VARCHAR2,
+       p_alt_id                IN      VARCHAR2, -- SCR 11774
+       p_alt_type              IN      VARCHAR2, -- SCR 11774
+       p_total                 OUT     NUMBER ) ;
+
+   PROCEDURE find_donor_full_ssn
+      (p_ssn                   IN      NUMBER,
+       p_last_name             IN      VARCHAR2,
+       p_date_of_birth         IN      DATE,
+       p_first_name            IN      VARCHAR2,
+       p_gender                IN      VARCHAR2,
+       p_session_id            IN      VARCHAR2,
+       p_grade                 IN      NUMBER,
+       p_chapter_id            IN      VARCHAR2,
+       p_alt_id                IN      VARCHAR2, -- SCR 11774
+       p_alt_type              IN      VARCHAR2, -- SCR 11774       
+       p_total                 OUT     NUMBER ) ;
+
+PROCEDURE check_eligibility
+      (p_donor_id              IN      VARCHAR2,
+       p_procedure_code        IN      VARCHAR2,
+       p_donation_type         IN      VARCHAR2,
+       p_coll_date             IN      DATE,
+       p_donor_weight          IN      NUMBER,
+       p_elig_status           OUT     VARCHAR2,
+       p_deff_date             OUT     DATE,
+       p_inter_type            OUT     VARCHAR2,
+       p_reason                OUT     VARCHAR2);
+
+-- Added p_chapter_id parameter. Added by Kishore on 10/15/2013
+PROCEDURE compare_strings
+      (p_orig_string           IN      VARCHAR2,
+       p_comp_string           IN      VARCHAR2,
+       p_chapter_id            IN      VARCHAR2,
+       p_comp_result           OUT     VARCHAR2);
+
+PROCEDURE calc_final_grade -- SCR 11774;  10/15/2013;
+      (donor_id_in             IN VARCHAR2,  
+       chapter_id_in           IN VARCHAR2,
+       alt_type_in             IN VARCHAR2,
+       alt_id_in               IN VARCHAR2,
+       input_grade_in          IN VARCHAR2, 
+       final_grade_out         OUT VARCHAR2);   
+
+--Purpose: This wrapper routine is called from ONSITE module (C#).       
+PROCEDURE ons_find_donor
+   (p_user_id                  IN      VARCHAR2,
+    p_ssn                      IN      NUMBER,
+    p_last_name                IN      VARCHAR2,
+    p_date_of_birth            IN      DATE,
+    p_first_name               IN      VARCHAR2,
+    p_gender                   IN      VARCHAR2,
+    p_chapter_id               IN      VARCHAR2,
+    p_alt_id                   IN      VARCHAR2, 
+    p_alt_type                 IN      VARCHAR2, 
+    p_prog_name                IN      VARCHAR2,
+    p_recordset                OUT SYS_REFCURSOR ) ;       
+END DON_CORE;
+/
+
+
+CREATE OR REPLACE PACKAGE BODY DON_CORE IS
+/*
+||    Program Name                : FIND_DONOR
+||    Date Creation               : 10-03-97
+||    Current Version             : 03  IM# 2000, 10-06-2008
+                                    04 Rel 4.5.0 (SCR# 16135), 02-24-2010
+      Modification reason         : 4 digit social security number
+                                    modify check_resolved_duplicate routine
+*/
+/** Modified on 09/19/2013 to add alt ID and alt Type to find Donor routine 
+    SCR 11774
+**/
+
+PROCEDURE find_donor
+   (p_ssn                      IN      NUMBER,
+    p_last_name                IN      VARCHAR2,
+    p_date_of_birth            IN      DATE,
+    p_first_name               IN      VARCHAR2,
+    p_gender                   IN      VARCHAR2,
+    p_session_id               IN      VARCHAR2,
+    p_grade                    IN      NUMBER,
+    p_chapter_id               IN      VARCHAR2,
+    p_alt_id                   IN      VARCHAR2, -- SCR 11774
+    p_alt_type                 IN      VARCHAR2, -- SCR 11774
+    p_total                    OUT     NUMBER )
+IS
+   loc_ssn                 NUMBER;
+   loc_last_name           VARCHAR2(50);
+   loc_dob                 DATE;
+   loc_first_name          VARCHAR2(25);
+   loc_gender              VARCHAR2(1);
+   loc_str                 VARCHAR2(1000);
+   loc_fn_match            VARCHAR2(5);
+   c_p_ssn                 VARCHAR2(9);
+   c_loc_ssn               VARCHAR2(9);
+   loc_fname               VARCHAR2(25);
+   p_fname                 VARCHAR2(25);
+   found_donor             NUMBER;
+   no_of_donors            NUMBER;
+   tabcount                NUMBER;
+   call_resolve_flag       VARCHAR2(1);
+   grade1_donor            VARCHAR2(10);
+   l_final_grade           VARCHAR2(1); --SCR 11774
+
+   TYPE don_rectyp IS RECORD
+        (donor_id       varchar2(10),
+         grade          number,
+         dgm_id         number,
+         resolved_flag  varchar2(1));
+
+   TYPE don_tabtyp IS table OF don_rectyp INDEX BY binary_integer;
+
+   tabdon  don_tabtyp;
+/*
+||    The FETCH_DONORS cursor is used to search the database for donor records
+||    that have a reasonable probability of being the record requested.
+||    Modified on 08/09/08 by Edwin for LT 3.4.0 SCR# 11159
+*/
+   CURSOR FETCH_DONORS IS
+      SELECT donor_id,nvl(ssn,-1) ssn,last_name,first_name,gender,date_of_birth
+        FROM donors
+       WHERE ssn = p_ssn
+      UNION
+      SELECT donor_id,nvl(ssn,-1) ssn,last_name,first_name,gender,date_of_birth
+        FROM donors
+       WHERE date_of_birth = p_date_of_birth
+      UNION
+      SELECT donor_id,nvl(ssn,-1) ssn,last_name,first_name,gender,date_of_birth
+        FROM donors
+       WHERE soundex_key = soundex(p_last_name)
+         AND soundex(first_name) = soundex(nvl(p_first_name,first_name))
+      UNION -- SCR 11774 -- Below SQL stmt added.
+      SELECT donor_id, nvl(ssn,-1) ssn, last_name, first_name, gender, date_of_birth
+        FROM donors
+       WHERE alternate_id = p_alt_id
+         AND alternate_id_type = p_alt_type;
+/*
+||    The GRADE_DONORS cursor is used to grade each donor returned by
+||    FIND_DONORS cursor, to determine whether or not the record is an
+||    acceptable match to the entry criteria.  See tech specs for logic for
+||    calculating the dgm_id.
+*/
+   CURSOR GRADE_DONORS IS
+      SELECT dgm_id, grade
+        FROM donor_grading_matrix
+       WHERE dgm_id =
+           (108*(decode (loc_ssn, p_ssn, 0, -1, 2, nvl(p_ssn, loc_ssn), 2,
+               decode (least(instr(substr(c_p_ssn,1,1), substr(c_loc_ssn,1,1))+
+                             instr(substr(c_p_ssn,2,1), substr(c_loc_ssn,2,1))+
+                             instr(substr(c_p_ssn,3,1), substr(c_loc_ssn,3,1))+
+                             instr(substr(c_p_ssn,4,1), substr(c_loc_ssn,4,1)),
+                                3), 3, 1, 3))))+
+           (36*(decode (p_last_name, loc_last_name, 0,
+                decode (soundex(p_last_name),soundex(loc_last_name), 1,2))))+
+           (9*(decode(loc_fn_match,'SAME',0,'SIMM',1,'SNDX',2,'DIFF',3)))+
+           (3*(decode(p_date_of_birth, loc_dob, 0,
+                  decode (to_char(p_date_of_birth, 'MMYYYY'),
+                          to_char(loc_dob, 'MMYYYY'), 1,
+                  decode (to_char(p_date_of_birth, 'DDYYYY'),
+                          to_char(loc_dob, 'DDYYYY'), 1,
+                  decode (to_char(p_date_of_birth, 'MMDD'),
+                          to_char(loc_dob, 'MMDD'), 1,
+                  decode (to_char(p_date_of_birth, 'MMDDYYYY'),
+                          to_char(loc_dob, 'DDMMYYYY'), 1, 2)))))))+
+           (1*(decode (loc_gender, nvl(p_gender, loc_gender),
+                       decode (loc_gender, 'M', 1, 2), 3)));
+
+   FUNCTION check_resolve_duplicates
+      (p_first_don     IN      varchar2,
+       p_second_don    IN      varchar2)   RETURN varchar2
+   IS
+      loc_count      number;
+   BEGIN
+      IF (p_first_don = p_second_don) THEN
+         RETURN 'N';
+      END IF;
+      BEGIN
+         SELECT count(*) into loc_count
+           FROM resolved_potential_duplicates
+          WHERE (first_donor_id= p_first_don AND second_donor_id= p_second_don)
+             OR (first_donor_id= p_second_don AND second_donor_id= p_first_don);
+---
+         IF (loc_count > 0) THEN
+              RETURN 'Y';   -- MLT-7812
+           -- RETURN 'N';   --This was added for the 4.5.0 SCR# 16135
+         ELSE
+            RETURN 'N';
+         END IF;
+      EXCEPTION
+        WHEN others THEN
+           RETURN 'N';
+      END;
+   END;
+
+BEGIN
+   found_donor := 0;
+   no_of_donors := 0;
+   c_p_ssn := substr(to_char(p_ssn,'0999'),2,4);
+/*
+||    Pull out the first part of the first name that was passed to find donor
+*/
+   SELECT substr(p_first_name,1,decode(instr(p_first_name,' '),0,
+                 length(p_first_name), instr(p_first_name,' ')-1))
+     INTO p_fname
+     FROM dual;
+/*
+||    Calculate the dgm_id and grade for each potential donor returned.
+*/
+   tabcount := 1;
+   call_resolve_flag := 'N';
+   FOR c3 IN fetch_donors LOOP
+       loc_ssn        := c3.ssn;
+       loc_last_name  := c3.last_name;
+       loc_dob        := c3.date_of_birth;
+       loc_first_name := c3.first_name;
+       loc_gender     := c3.gender;
+       c_loc_ssn      := substr(to_char(c3.ssn,'0999'),2,4);
+/*
+||    Pull out the first part of the first name of each found donor
+*/
+       SELECT substr(loc_first_name,1,decode(instr(loc_first_name,' '),0,
+                    length(loc_first_name), instr(loc_first_name,' ')-1))
+         INTO loc_fname
+         FROM dual;
+/*
+||    Determine match level between first name transferred and found name.
+||    If first name is not transferred, match is equated to 'SAME'.
+*/
+       loc_fn_match := 'DIFF';
+       IF ((p_first_name is null) OR (p_first_name = loc_first_name) OR
+           (p_first_name = loc_fname) OR (p_fname = loc_first_name) OR
+           (p_fname = loc_fname)) THEN
+          loc_fn_match := 'SAME';
+       ELSE
+          IF ((soundex(p_first_name) = soundex(loc_first_name)) OR
+              (soundex(p_first_name) = soundex(loc_fname)) OR
+              (soundex(p_fname) = soundex(loc_first_name)) OR
+              (soundex(p_fname) = soundex(loc_fname))) THEN
+             loc_fn_match := 'SNDX';
+          ELSE
+             loc_fn_match := 'DIFF';
+          END IF;
+       END IF;
+/*
+||    The above logic only checks to see if name is the same or soundex match.
+||    If firstname match is still "DIFF", check to see if the first names
+||    are similar.
+*/
+       IF (loc_fn_match = 'DIFF') THEN
+          BEGIN
+             SELECT 'SIMM' INTO loc_fn_match
+               FROM NAME_MATCH
+              WHERE (rtrim(first_name) = loc_first_name AND
+                     rtrim(nick_name)  = p_first_name)
+                 OR (rtrim(first_name) = p_first_name AND
+                     rtrim(nick_name)  = loc_first_name)
+                 OR (rtrim(first_name) = p_first_name AND
+                     rtrim(nick_name)  = loc_fname)
+                 OR (rtrim(first_name) = loc_fname AND
+                     rtrim(nick_name)  = p_first_name)
+                 OR (rtrim(first_name) = p_fname AND
+                     rtrim(nick_name)  = loc_first_name)
+                 OR (rtrim(first_name) = loc_first_name AND
+                     rtrim(nick_name)  = p_fname)
+                 OR (rtrim(first_name) = p_fname AND
+                     rtrim(nick_name)  = loc_fname)
+                 OR (rtrim(first_name) = loc_fname AND
+                     rtrim(nick_name)  = p_fname);
+             EXCEPTION
+               WHEN no_data_found THEN
+                  BEGIN
+                     SELECT 'SIMM' INTO loc_fn_match
+                       FROM DUAL
+                      WHERE instr(rtrim(loc_first_name), p_first_name) != 0
+                         OR instr(rtrim(loc_first_name), p_fname) != 0
+                         OR instr(rtrim(p_first_name), loc_first_name) != 0
+                         OR instr(rtrim(p_first_name), loc_fname) != 0
+                         OR instr(rtrim(loc_fname), p_first_name) != 0
+                         OR instr(rtrim(loc_fname), p_fname) != 0
+                         OR instr(rtrim(p_fname), loc_first_name) != 0
+                         OR instr(rtrim(p_fname), loc_fname) != 0;
+                  EXCEPTION
+                    WHEN no_data_found THEN
+                       null;
+                  END;
+          END;
+       END IF;
+/*
+||    NOW WE WILL RESUME THE FIND DONOR ROUTINE ALREADY IN PROGRESS
+*/
+       FOR c4 IN grade_donors LOOP
+           IF (c4.grade <= p_grade) THEN
+              found_donor := found_donor +1;
+              tabdon(tabcount).donor_id := c3.donor_id;
+              tabdon(tabcount).grade    := c4.grade;
+              tabdon(tabcount).dgm_id   := c4.dgm_id;
+              tabdon(tabcount).resolved_flag  := 'N';  /*flag = N for insert */
+              IF (c4.grade = 1) THEN
+                 grade1_donor      := c3.donor_id;
+                 call_resolve_flag := 'Y';
+              END IF;
+              tabcount := tabcount + 1;
+           END IF;
+       END LOOP; /* grade donors */
+   END LOOP; /* c3 for loop loop ends */
+---
+   IF (found_donor > 0) THEN
+      IF (call_resolve_flag = 'Y') THEN
+         FOR i IN 1..tabdon.count  LOOP
+             tabdon(i).resolved_flag := check_resolve_duplicates(grade1_donor,
+                                                         tabdon(i).donor_id);
+         END LOOP;
+      END IF; /* resolve flag */
+      no_of_donors := 0;
+      FOR i IN 1..tabdon.count LOOP
+          IF (tabdon(i).resolved_flag = 'N') THEN
+             no_of_donors := no_of_donors + 1;
+/* Commented on 10/15/2013; moved the changes to seperate procedure (calc_final_grade)             
+             -- SCR 11774 Changes;
+             DECLARE
+                CURSOR altID_cur(pl_donor_id VARCHAR2) IS 
+                  SELECT alternate_id, alternate_id_type
+                    FROM donors
+                   WHERE donor_id = pl_donor_id;   
+                 l_alt_id VARCHAR2(20);
+                 l_alt_type VARCHAR2(5);
+                 l_altID_match VARCHAR(10);
+             BEGIN
+                l_final_grade := tabdon(i).grade; -- default
+                IF p_alt_type IS NOT NULL AND p_alt_id IS NOT NULL THEN -- for ssn mode = 9, alt_type and alt_id are null;
+                  OPEN altID_cur(tabdon(i).donor_id);
+                  FETCH altID_cur INTO l_alt_id, l_alt_type;
+                  CLOSE altID_cur;
+
+                  -- If alt type is null or alt type in db does not match with the entered alt type in find donor's block, treat the alternate ID as null.
+                  --IF l_alt_type IS NULL OR UPPER(l_alt_type) <> UPPER(p_alt_type) THEN
+                  IF l_alt_type IS NULL THEN
+                    l_alt_id := NULL;
+                  END IF;
+
+                  -- If different alternate ID is entered, no need to compare alternate ID's, just default it to 'DIFF'
+                  -- so that user is aware that different alternate ID is being used.
+                  IF l_alt_type IS NOT NULL AND UPPER(l_alt_type) <> UPPER(p_alt_type) THEN  
+                    l_altID_match := 'DIFF';
+                  ELSE
+                    don_core.compare_strings(p_orig_string => p_alt_id,
+                                             p_comp_string => l_alt_id,
+                                             p_chapter_id => p_chapter_id, -- Added by Kishore on 10/15/2013
+                                             p_comp_result => l_altID_match);
+                  END IF;
+
+                  IF l_altID_match IS NOT NULL THEN
+                    DECLARE
+                      CURSOR donor_grade_cur(pl_key_data_grade VARCHAR2, pl_altid_match VARCHAR2) IS
+                        SELECT final_grade
+                          FROM alt_id_donor_grade
+                         WHERE key_data_grade = pl_key_data_grade
+                           AND altid_match_type = pl_altid_match
+                           AND SYSDATE BETWEEN eff_date and NVL(term_date, SYSDATE+1);   
+                    BEGIN
+                      OPEN donor_grade_cur(tabdon(i).grade, l_altID_match);
+                      FETCH donor_grade_cur INTO l_final_grade;
+                      CLOSE donor_grade_cur;
+                    END;
+                  END IF;
+                END IF;
+            END;
+ */       
+             -- SCR 11774; 10/15/2013
+             don_core.calc_final_grade(donor_id_in      => tabdon(i).donor_id,
+                                       chapter_id_in    => p_chapter_id,    
+                                       alt_type_in      => p_alt_type,
+                                       alt_id_in        => p_alt_id,
+                                       input_grade_in   => tabdon(i).grade, 
+                                       final_grade_out  => l_final_grade);             
+             INSERT INTO donor_reel
+                (session_id,donor_id,grade,dgm_id,program_id,insert_user,
+                 insert_date,chapter_id, 
+                 key_data_grade) -- SCR 11774
+             VALUES
+                (p_session_id,tabdon(i).donor_id,l_final_grade, --tabdon(i).grade, -- SCR 11774
+                 tabdon(i).dgm_id,'FIND_DON',LT_USER_SESSION.get_userid,
+                 to_date(to_char(sysdate,'MM-DD-YYYY'),'MM-DD-YYYY'), p_chapter_id,
+                 tabdon(i).grade); -- SCR 11774
+          END IF;
+      END LOOP;
+   END IF;
+   p_total := no_of_donors;
+   tabdon.delete;
+END;  /*   END OF FIND DONOR ROUTINE   */
+/**/
+/*
+||    Program Name                : CHECK_ELIGIBILITY
+||    Date Creation               : 10-03-97
+||    Current Version             : 2.03.04
+*/
+PROCEDURE check_eligibility
+   (p_donor_id                 IN      VARCHAR2,
+    p_procedure_code           IN      VARCHAR2,
+    p_donation_type            IN      VARCHAR2,
+    p_coll_date                IN      DATE,
+    p_donor_weight             IN      NUMBER,
+    p_elig_status              OUT     VARCHAR2,
+    p_deff_date                OUT     DATE,
+    p_inter_type               OUT     VARCHAR2,
+    p_reason                   OUT     VARCHAR2)
+IS
+   ddr_count              NUMBER;
+   longest_span           NUMBER;
+   temp_count             NUMBER;
+   temp_donats            NUMBER;
+   temp_days              NUMBER;
+   temp_eligible          VARCHAR2(1);
+   temp_group             VARCHAR2(5);
+   temp_credit            NUMBER;
+   a_coll_date            DATE;
+   l_defrd_date           DATE;
+   l_def_thru_date        DATE;
+   cell_loss_level        NUMBER;
+   proc_rbc_loss          NUMBER;
+   proc_rbc_ecv_loss      NUMBER;
+   proc_plasma_loss       NUMBER;
+   proc_plasma_ecv_loss   NUMBER;
+   skip_cell_loss_check   VARCHAR2(1);
+   temp_cell_loss         NUMBER;
+   temp_ecv_loss          NUMBER;
+   pl_below_wt_boundary_loss NUMBER;
+   pl_above_wt_boundary_loss NUMBER;
+   pl_days_between        NUMBER;
+   pl_wt_boundary         VARCHAR2(4);
+   pl_non_elig_wt         VARCHAR2(4);
+   pl_max_plasma_loss     NUMBER:=0;
+   temp_donor_weight      NUMBER(6);
+   skip_weight_check      VARCHAR2(1);
+
+
+/*
+||    This cursor returns all temporary deferrals on the donor which were/are
+||    in effect on the date passed to the eligibility routine.
+*/
+   CURSOR donor_inter_check (cdate in date) IS
+      SELECT trunc(di.term_date)+1 term_date, di.inter_code
+        FROM donor_interdictions di, valid_interdictions vi
+       WHERE donor_id = p_donor_id
+         AND di.inter_code = vi.inter_code
+         AND vi.deferral_flag = 'Y'
+         AND di.release_date is null
+         AND di.term_date is not null
+         AND trunc(cdate) >= di.eff_date
+         AND trunc(cdate) <= trunc(di.term_date);
+/*
+||    This cursor is used to calculate all of the procedure to procedure
+||    restrictions for the donor based upon the date and the procedure
+||    code passed into the eligibility routine.
+*/
+   CURSOR too_soon_check (cdate in date) IS
+      SELECT max(coll_date + days_between)  next_elig_date
+        FROM DONATIONS don, VALID_ELIG_PROCS vep
+       WHERE don.donor_id = p_donor_id
+         AND don.coll_date between (trunc(cdate)-longest_span) and trunc(cdate)
+         AND don.procedure_code = vep.prev_procedure_code
+         AND don.donation_type != 'SM'
+         AND vep.curr_donation_type = p_donation_type
+         AND vep.procedure_code  = p_procedure_code
+         AND NOT EXISTS
+             (SELECT 'short or no blood'
+                FROM donation_attributes
+               WHERE transaction_id = don.transaction_id
+                 AND chapter_id = don.chapter_id
+                 AND attrib_code = 'VENI'
+                 AND attrib_value in
+                     (SELECT rtrim(ltrim(code))
+                        FROM valid_master_codes
+                       WHERE code_type = 'ELIGX'
+                         AND trunc(cdate) between eff_date and
+                                                  nvl(term_date, cdate+1)))
+         AND don.unit_id is not null
+         AND trunc(cdate) between vep.eff_date and nvl(vep.term_date,cdate+1);
+/*
+||    This cursor is used to check for violations of too many procedures
+||    per period restrictions. It returns the donations made during the
+||    period in question for the group, the number of credits that each
+||    donation should count for, and information about the restriction.
+*/
+   CURSOR too_many_check (cdate in date) IS
+      SELECT vep.procedure_group, don.coll_date, vep.days_between,
+             vep.max_donations, nvl(vpg.elig_credit_count,1) elig_credit_count
+        FROM DONATIONS don, VALID_ELIG_PERIODS vep, valid_proc_groups vpg
+       WHERE don.donor_id = p_donor_id
+         AND don.donation_type != 'SM'
+         AND don.coll_date between
+                       (trunc(cdate) - vep.days_between) AND trunc(cdate)
+         AND vep.procedure_group IN
+             (SELECT vpg1.procedure_group
+                FROM valid_proc_groups vpg1
+               WHERE vpg1.procedure_code = p_procedure_code
+                 AND trunc(cdate) between vpg1.eff_date and
+                                          nvl(vpg1.term_date,cdate+1))
+         AND vep.curr_donation_type = p_donation_type
+         AND NOT EXISTS
+             (SELECT 'short or no blood'
+                FROM donation_attributes da1
+               WHERE da1.transaction_id = don.transaction_id
+                 AND da1.chapter_id = don.chapter_id
+                 AND da1.attrib_code = 'VENI'
+                 AND da1.attrib_value in
+                     (SELECT rtrim(ltrim(vmc2.code))
+                        FROM valid_master_codes vmc2
+                       WHERE vmc2.code_type = 'ELIGX'
+                         AND trunc(cdate) between vmc2.eff_date and
+                                                  nvl(vmc2.term_date, cdate+1)))
+
+
+         AND don.unit_id is not null
+         AND trunc(cdate) between vep.eff_date and nvl(vep.term_date,cdate+1)
+         AND don.procedure_code in
+             (SELECT vpg1.procedure_code
+                FROM valid_proc_groups vpg1
+               WHERE vpg1.procedure_group = vep.procedure_group
+                 AND trunc(cdate) between vpg1.eff_date and
+                                          nvl(vpg1.term_date,cdate+1))
+         AND vpg.procedure_group = vep.procedure_group
+         AND vpg.procedure_code = don.procedure_code
+         AND trunc(cdate) between vpg.eff_date and nvl(vpg.term_date, cdate+1)
+      ORDER BY vep.procedure_group, vep.days_between, vep.max_donations,
+               don.coll_date desc;
+/*
+||    cursor to check for cellular loss violations per period
+*/
+   CURSOR too_much_check (cdate in date) IS
+      SELECT vecl.cell_type, vecl.days_between, vecl.maximum_loss,
+             don.coll_date, decode (vecl.cell_type, 'RBC',
+             nvl(don.actual_rbc_loss, vpc.standard_rbc_loss),
+             nvl(don.actual_plasma_loss, vpc.standard_plasma_loss)) actual_loss
+        FROM DONATIONS don, VALID_ELIG_CELL_LOSS vecl,
+             VALID_PROC_CODES vpc
+       WHERE don.donor_id = p_donor_id
+         AND vecl.cell_type='RBC'   -- this was added on 10/21/16 Edwin
+         AND don.coll_date between
+                       (trunc(cdate) - vecl.days_between) AND trunc(cdate)
+         AND don.unit_id is not null
+         AND trunc(cdate) between vecl.eff_date and nvl(vecl.term_date,cdate+1)
+         AND vpc.procedure_code = don.procedure_code
+         AND trunc(cdate) between vpc.eff_date and nvl(vpc.term_date, cdate+1)
+      ORDER BY vecl.cell_type, vecl.days_between, vecl.maximum_loss,
+               don.coll_date desc;
+
+
+/*
+|| Cursor to check the weight and plasma loss combination
+|| --added as part of LT2018 SCR: 151856 
+*/
+
+     CURSOR plasma_loss_check (cdate in date,
+                               pl_days_between in number) IS
+           SELECT don.coll_date,
+           nvl(don.actual_plasma_loss, vpc.standard_plasma_loss) actual_loss
+           FROM DONATIONS don, VALID_PROC_CODES vpc
+            WHERE don.donor_id = p_donor_id
+            AND don.coll_date between
+                    (trunc(cdate) - pl_days_between) AND trunc(cdate)
+      AND don.unit_id is not null
+      AND vpc.procedure_code = don.procedure_code
+      AND trunc(cdate) between vpc.eff_date and nvl(vpc.term_date, cdate+1)
+   ORDER BY don.coll_date desc;
+
+   CURSOR cell_loss_range (cdate in date, pl_donor_weight in number) is
+            select maximum_loss, days_between from valid_elig_cell_loss where
+            cell_type='PLASM' and 
+            pl_donor_weight between from_weight and to_weight and
+           trunc(cdate) between eff_date and nvl(term_date, cdate+1)
+           order by maximum_loss;
+
+BEGIN
+
+/*
+||    Prior to beginning Eligibility Check, initialize all output variables
+||    to null, and validate all input variables.  Verify that the donor ID
+||    is on file, and that donation type and procedure code are valid.
+||
+||    If the donor is not on file, return message stating that donor is
+||    eligible, but is not on file.
+||
+||    If either the donation type or the procedure code is invalid,  return
+||    an error after checking all permanent deferral conditions not requiring
+||    these values. If the donor is deferred by one or more condition,
+||    then return the appropriate deferral message.
+*/
+   p_elig_status := null;
+   p_deff_date   := null;
+   p_inter_type  := null;
+   p_reason      := null;
+---
+   IF (p_coll_date is null) THEN
+      a_coll_date := trunc(sysdate);
+   ELSE
+      a_coll_date := trunc(p_coll_date);
+   END IF;
+/*
+||    Verify that donor record exists in the DONORS table.
+*/
+   BEGIN
+      ddr_count := 0;
+      SELECT count(*)
+        INTO ddr_count
+        FROM donors
+       WHERE donors.donor_id = p_donor_id;
+   EXCEPTION
+      WHEN others THEN
+         ddr_count := 0;
+   END;
+---
+   IF (ddr_count = 0) THEN
+      begin
+        select parameter_value into pl_non_elig_wt from
+        valid_parameters where parameter_code='WT_MINIMUM' and
+        sysdate between eff_date and nvl(term_date,sysdate+10);
+     exception when no_data_found then
+          p_elig_status := 'N';
+         p_deff_date := NULL;
+         p_inter_type :=NULL;
+         p_reason := 'Minimum Weight is not defined in the SYSPARM table';
+         RETURN; 
+     end;
+
+     If nvl(p_donor_weight,0) < to_number(pl_non_elig_wt) then
+         p_elig_status := 'N';
+         p_deff_date := NULL;
+         p_inter_type := 'TEMPD';
+         p_reason := 'Donor is under weight';
+         return ;
+      Else
+        p_elig_status := 'Y';
+        p_deff_date := null;
+        p_inter_type := null;
+        p_reason := 'Donor is not on file';
+        RETURN;
+     End if;
+   END IF;
+/*
+||    Check in the DONOR_DEFERRAL REGISTRY
+*/
+   BEGIN
+      ddr_count := 0;
+      SELECT count(*)
+        INTO ddr_count
+        FROM donor_deferral_registry
+       WHERE center_id = p_donor_id;
+---
+      IF (ddr_count > 0) THEN
+         p_elig_status := 'N';
+         p_deff_date := NULL;
+         p_inter_type := 'PERMD';
+         p_reason := 'Donor in Regional Deferral Registry.';
+         RETURN;
+      END IF;
+   EXCEPTION
+      WHEN no_data_found THEN
+           NULL;
+      WHEN others THEN
+           NULL;
+   END;
+/*
+||    Check for indefinate deferral in DONOR INTERDICTIONS table
+*/
+   BEGIN
+      ddr_count := 0;
+      SELECT count(*) into ddr_count
+        FROM donor_interdictions di, valid_interdictions vi
+       WHERE donor_id = p_donor_id
+         AND di.inter_code = vi.inter_code
+         AND trunc(a_coll_date) >= di.eff_date
+         AND di.term_date is null
+         AND di.release_date is null
+         AND vi.deferral_flag = 'Y';
+---
+      IF (ddr_count > 0) THEN
+         p_elig_status := 'N';
+         p_deff_date := NULL;
+         p_inter_type := 'PERMD';
+         p_reason := 'Donor is indefinitely deferred.';
+         RETURN;
+      END IF;
+   EXCEPTION
+      WHEN no_data_found THEN
+           null;
+      WHEN others THEN
+           null;
+   END;
+/*
+||    Check donations for condition where an IND or 99 deferral_type is
+||    placed in the deferral type field at registration. This signifies
+||    that the donor should be permanently deferred.
+*/
+   BEGIN
+      ddr_count := 0;
+      SELECT count(*)
+        INTO ddr_count
+        FROM donations
+       WHERE donations.donor_id = p_donor_id
+         AND donations.deferred_thru_date is null
+         AND donations.coll_date < trunc(a_coll_date)
+         AND donations.deferral_type is not null
+         AND donations.deferral_type in ('IND','99');
+---
+      IF (ddr_count > 0) THEN
+         p_elig_status := 'N';
+         p_deff_date := NULL;
+         p_inter_type := 'PERMD';
+         p_reason := 'Donor deferred (Def Type in REGIS)';
+         RETURN;
+      END IF;
+   EXCEPTION
+      WHEN no_data_found THEN
+      ddr_count := 0;
+   END;
+/*
+||    Check in DONOR_INTERDICTIONS FOR any unresolved HOLDS
+*/
+   BEGIN
+      ddr_count := 0;
+      SELECT count(*)
+        INTO ddr_count
+        FROM donor_interdictions
+       WHERE donor_id = p_donor_id
+         AND trunc(a_coll_date) >= eff_date
+         AND term_date is null
+         AND release_date is null
+         AND inter_type = 'HOLDS';
+---
+      IF (ddr_count > 0) THEN
+         p_elig_status := 'N';
+         p_deff_date := NULL;
+         p_inter_type := 'HOLDS';
+         p_reason := 'Donor is on Hold.';
+         return ;
+      END IF;
+   EXCEPTION
+      WHEN no_data_found THEN
+           null;
+      WHEN others THEN
+           null;
+   END;
+/*
+||    Verify the procedure code and donation type passed into the routine
+||    are defined in the valid_procedures and valid_donation_types tables.
+*/
+   BEGIN
+      ddr_count := 0;
+      SELECT count(*)
+        INTO ddr_count
+        FROM valid_proc_codes
+       WHERE valid_proc_codes.procedure_code = p_procedure_code
+         AND trunc(a_coll_date) between valid_proc_codes.eff_date and
+             nvl(valid_proc_codes.term_date,a_coll_date+1);
+   EXCEPTION
+      WHEN others THEN
+         ddr_count := 0;
+   END;
+---
+   IF (ddr_count = 0) THEN
+      p_elig_status := 'Y';
+      p_deff_date := NULL;
+      p_inter_type := NULL;
+      p_reason := 'Procedure code not defined.';
+      return ;
+   END IF;
+---
+   BEGIN
+      ddr_count := 0;
+      SELECT count(*)
+        INTO ddr_count
+        FROM valid_donation_types
+       WHERE valid_donation_types.donation_type = p_donation_type
+         AND trunc(a_coll_date) between valid_donation_types.eff_date and
+             nvl(valid_donation_types.term_date,a_coll_date+1);
+   EXCEPTION
+      WHEN others THEN
+         ddr_count := 0;
+   END;
+---
+   IF (ddr_count = 0) THEN
+      p_elig_status := 'Y';
+      p_deff_date := NULL;
+      p_inter_type := NULL;
+      p_reason := 'Donation type not defined';
+      return ;
+   END IF;
+/*
+||    Check for the existance of an interdiction on the donor, which
+||    also exists in the VALID_PROC_EXCLUSIONS table. If a non-released
+||    interdiction does exist on the donor, and the eligibility date
+||    passed into the routine is after the effective dates of the
+||    interdiction, and the termination date is null, then the donor
+||    cannot donate using the procedure code being checked.
+*/
+   BEGIN
+      ddr_count := 0;
+      SELECT count(di.donor_id)
+        INTO ddr_count
+        FROM donor_interdictions di
+       WHERE di.donor_id = p_donor_id
+         AND trunc(a_coll_date) >= di.eff_date
+         AND di.term_date is null
+         AND di.release_date is null
+         AND EXISTS
+             (SELECT 'x'
+                FROM valid_proc_exclusions vpe
+               WHERE vpe.inter_code = di.inter_code
+                 AND vpe.donation_type = p_donation_type
+                 AND vpe.procedure_code = p_procedure_code
+                 AND trunc(a_coll_date) between vpe.eff_date and
+                                        nvl(vpe.term_date, a_coll_date+1));
+   EXCEPTION
+      WHEN others THEN
+         null;
+   END;
+---
+   IF (ddr_count > 0) THEN
+      p_elig_status := 'N';
+      p_deff_date := NULL;
+      p_inter_type := 'PERMD';
+      p_reason := 'NOT eligible for this procedure.';
+      return ;
+   END IF;
+/*
+||    Check for longest temp deferral in DONOR_INTERDICTIONS table
+||    Do not automatically return when date is set because must return
+||    greatest eligibility date whether for temp deferral or donations.
+*/
+   BEGIN
+      temp_eligible := 'Y';
+      l_defrd_date := trunc(a_coll_date) - 1;
+      FOR c1 IN donor_inter_check (trunc(a_coll_date)) LOOP
+         IF (c1.term_date > l_defrd_date) THEN
+            l_defrd_date := c1.term_date;
+         END IF;
+      END LOOP;
+      IF (l_defrd_date >= trunc(a_coll_date)) THEN
+         temp_eligible := 'T';
+      END IF;
+   EXCEPTION
+      WHEN others THEN
+         null;
+   END;
+/*
+||    Check the donations for the maximum deferred thru date.
+||    Changed 10/06/98 by JMC
+*/
+   l_def_thru_date := trunc(a_coll_date)-1;
+   BEGIN
+      SELECT max(deferred_thru_date)+1
+        INTO l_def_thru_date
+        FROM donations
+       WHERE donations.donor_id = p_donor_id
+         AND deferred_thru_date is not null
+         AND coll_date < trunc(a_coll_date);
+   EXCEPTION
+      WHEN no_data_found THEN
+           l_def_thru_date := trunc(a_coll_date)-1;
+   END;
+---
+   IF ((l_def_thru_date > l_defrd_date) AND
+       (l_def_thru_date > trunc(a_coll_date))) THEN
+      l_defrd_date := l_def_thru_date;
+      temp_eligible := 'D';
+   END IF;
+/*
+||    Check the health history for the maximum deferred thru date.
+||    Changed 11/25/98 by JMC
+*/
+   l_def_thru_date := trunc(a_coll_date)-1;
+   BEGIN
+      SELECT max(def_thru_date)+1
+        INTO l_def_thru_date
+        FROM health_history
+       WHERE transaction_id in
+             (SELECT transaction_id
+                FROM donations
+               WHERE donations.donor_id = p_donor_id
+                 AND coll_date < trunc(a_coll_date))
+         AND def_thru_date is not null;
+   EXCEPTION
+      WHEN no_data_found THEN
+           l_def_thru_date := trunc(a_coll_date)-1;
+   END;
+---
+   IF ((l_def_thru_date > l_defrd_date) AND
+       (l_def_thru_date > trunc(a_coll_date))) THEN
+      l_defrd_date := l_def_thru_date;
+      temp_eligible := 'H';
+   END IF;
+/*
+||    Find maximum donation timeframe to consider when examining
+||    whether donor is eligible because of a specific previous donation.
+*/
+   BEGIN
+      SELECT max(days_between)
+        INTO longest_span
+        FROM valid_elig_procs
+       WHERE curr_donation_type = p_donation_type
+         AND curr_donation_type != 'SM'
+         AND procedure_code = p_procedure_code
+         AND sysdate between eff_date and nvl(term_date , sysdate+1);
+   EXCEPTION
+      WHEN no_data_found THEN
+           p_reason := 'Err. No data found in Longest span query.';
+      WHEN others THEN
+           p_reason := 'Err. in Longest span query.';
+   END;
+/*
+||    Check eligibility requirements for donation to donation from the
+||    VALID_ELIG_PROCS table.  Set temp_eligible = 'S' for setting P_REASON.
+*/
+   IF (l_defrd_date < trunc(a_coll_date)) THEN
+      l_defrd_date := trunc(a_coll_date);
+   END IF;
+---
+   FOR c1_rec IN too_soon_check(trunc(a_coll_date)) LOOP
+       IF (c1_rec.next_elig_date > l_defrd_date) THEN
+          l_defrd_date := c1_rec.next_elig_date;
+          temp_eligible := 'S';
+       END IF;
+   END LOOP;
+/*
+||    Check eligibility requirements for donation by period from the
+||    VALID_ELIG_PERIODS table.
+*/
+   BEGIN
+      temp_donats := 0;
+      temp_count  := 0;
+      temp_days   := 0;
+      temp_group  := 'NONE';
+      temp_credit := 0;
+---
+      FOR c2_rec IN too_many_check(trunc(a_coll_date)) LOOP
+          IF (temp_days = 0) THEN
+             temp_days := c2_rec.days_between;
+             temp_donats := c2_rec.max_donations;
+             temp_group := c2_rec.procedure_group;
+/*
+||    Load elig_credit_count value for elig check JMC 08/17/2001
+*/
+             BEGIN
+                SELECT nvl(elig_credit_count,1)
+                  INTO temp_credit
+                  FROM valid_proc_groups
+                 WHERE procedure_group = c2_rec.procedure_group
+                   AND procedure_code = p_procedure_code
+                   AND a_coll_date between eff_date and
+                                           nvl(term_date, a_coll_date+1);
+             EXCEPTION
+                WHEN others THEN
+                   temp_credit := 1;
+             END;
+          END IF;
+---
+          IF ((c2_rec.procedure_group = temp_group) AND
+              (c2_rec.days_between = temp_days ) AND
+              (c2_rec.max_donations = temp_donats )) THEN
+             temp_count := temp_count + c2_rec.elig_credit_count;
+/*
+||    Added new check to see how many credits attempted donation should
+||    count for.  If more than 1, eligibility should be based upon
+||    different formula.  JMC 08/17/2001
+*/
+             IF (temp_credit > 1) THEN
+                IF (((temp_count+temp_credit) > c2_rec.max_donations ) AND
+                   ((c2_rec.coll_date + c2_rec.days_between) > l_defrd_date))
+                THEN
+                   l_defrd_date := c2_rec.coll_date + c2_rec.days_between;
+                   temp_eligible := 'M';
+                END IF;
+             ELSE
+                IF ((temp_count >= c2_rec.max_donations ) AND
+                   ((c2_rec.coll_date + c2_rec.days_between) > l_defrd_date))
+                THEN
+                   l_defrd_date := c2_rec.coll_date + c2_rec.days_between;
+                   temp_eligible := 'M';
+                END IF;
+             END IF;
+          ELSE
+             temp_count  := c2_rec.elig_credit_count;
+             temp_donats := c2_rec.max_donations;
+             temp_days   := c2_rec.days_between;
+             temp_group  := c2_rec.procedure_group;
+/*
+||    Load elig_credit_count value for elig check JMC 08/17/2001
+*/
+             BEGIN
+                SELECT nvl(elig_credit_count,1)
+                  INTO temp_credit
+                  FROM valid_proc_groups
+                 WHERE procedure_group = c2_rec.procedure_group
+                   AND procedure_code = p_procedure_code
+                   AND a_coll_date between eff_date and
+                                           nvl(term_date, a_coll_date+1);
+             EXCEPTION
+                WHEN others THEN
+                   temp_credit := 1;
+             END;
+---
+          END IF;
+      END LOOP;
+/*
+||    Verify that the donor is eligible based upon cell loss requirements.
+||    Added by JMC 11/19/2002
+*/
+      cell_loss_level := 0;
+      proc_rbc_loss := 0;
+      proc_rbc_ecv_loss := 0;
+      proc_plasma_loss := 0;
+      proc_plasma_ecv_loss := 0;
+      skip_cell_loss_check := 'N';
+      temp_donats := 0;
+      temp_group  := null;
+      temp_days   := 0;
+      temp_cell_loss := 0;
+      temp_ecv_loss := 0;
+/*
+||    Load the standard cellular loss for the procedure passed to the routine.
+*/
+      BEGIN
+         SELECT standard_rbc_loss, standard_plasma_loss,
+                ecv_rbc_loss, ecv_plasma_loss
+           INTO proc_rbc_loss, proc_plasma_loss,
+                proc_rbc_ecv_loss, proc_plasma_ecv_loss
+           FROM valid_proc_codes
+          WHERE valid_proc_codes.procedure_code = p_procedure_code
+            AND trunc(a_coll_date) between valid_proc_codes.eff_date and
+                nvl(valid_proc_codes.term_date,a_coll_date+1);
+      EXCEPTION
+         WHEN others THEN
+            proc_rbc_loss := 0;
+            proc_rbc_ecv_loss := 0;
+            proc_plasma_loss := 0;
+            proc_plasma_ecv_loss := 0;
+            proc_plasma_loss := 0;
+            proc_plasma_ecv_loss := 0;
+            skip_cell_loss_check := 'Y';
+      END;
+---
+      IF (skip_cell_loss_check = 'N') THEN
+         FOR c4 IN too_much_check (trunc(a_coll_date)) LOOP
+            IF (temp_days = 0) THEN
+               temp_days := c4.days_between;
+               temp_donats := c4.maximum_loss;
+               temp_group := c4.cell_type;
+               cell_loss_level := 0;
+---
+               IF (c4.cell_type = 'RBC') THEN
+                  temp_cell_loss := proc_rbc_loss;
+                  temp_ecv_loss := proc_rbc_ecv_loss;
+               ELSE
+                  temp_cell_loss := proc_plasma_loss;
+                  temp_ecv_loss := proc_plasma_ecv_loss;
+               END IF;
+            END IF;
+---
+            IF ((temp_days = c4.days_between) AND
+                (temp_donats = c4.maximum_loss) AND
+                (temp_group = c4.cell_type)) THEN
+               cell_loss_level := cell_loss_level + c4.actual_loss;
+            ELSE
+               temp_days := c4.days_between;
+               temp_donats := c4.maximum_loss;
+               temp_group := c4.cell_type;
+               cell_loss_level := c4.actual_loss;
+---
+               IF (c4.cell_type = 'RBC') THEN
+                  temp_cell_loss := proc_rbc_loss;
+                  temp_ecv_loss := proc_rbc_ecv_loss;
+               ELSE
+                  temp_cell_loss := proc_plasma_loss;
+                  temp_ecv_loss := proc_plasma_ecv_loss;
+               END IF;
+            END IF;
+---
+            IF (((cell_loss_level + temp_cell_loss + temp_ecv_loss) >
+               c4.maximum_loss) AND ((c4.coll_date + c4.days_between) >
+               l_defrd_date)) THEN
+               l_defrd_date := c4.coll_date + c4.days_between;
+               IF (c4.cell_type = 'RBC') THEN
+                  temp_eligible := 'R';
+               ELSE
+                  temp_eligible := 'P';
+               END IF;
+            END IF;
+         END LOOP;
+      END IF;
+---
+----2018 --------
+
+
+/*
+||   Verify that the donor is eligible based on weight/plasma loss requirements.
+||   Added by EdwinS 10/20/2016
+*/
+      cell_loss_level := 0;
+      proc_plasma_loss := 0;
+      proc_plasma_ecv_loss := 0;
+      skip_weight_check := 'N';
+      temp_cell_loss := 0;
+      temp_ecv_loss := 0;
+      pl_max_plasma_loss:=0;
+      temp_donor_weight:=p_donor_weight;
+
+/*
+||    Load the standard cellular loss for the plasma for the procedure
+      passed to the routine.
+*/
+      BEGIN
+         SELECT standard_plasma_loss, ecv_plasma_loss
+           INTO proc_plasma_loss, proc_plasma_ecv_loss
+           FROM valid_proc_codes
+          WHERE valid_proc_codes.procedure_code = p_procedure_code
+            AND trunc(a_coll_date) between valid_proc_codes.eff_date and
+                nvl(valid_proc_codes.term_date,a_coll_date+1);
+      EXCEPTION
+         WHEN others THEN
+            proc_plasma_loss := 0;
+            proc_plasma_ecv_loss := 0;
+            skip_weight_check := 'Y';
+            p_reason:='Err: X0-';
+      END;
+
+
+     -- If the incoming donor weight is null , read it from the donor's table
+
+       If temp_donor_weight is null then
+         select donor_weight into temp_donor_weight --V02(12/13/16-removed NVL)
+         from donors where donor_id=p_donor_id;
+      End If;
+
+
+    -- get the non eligible weight
+    If skip_weight_check='N' then
+      BEGIN
+        select parameter_value into pl_non_elig_wt from
+        valid_parameters where parameter_code='WT_MINIMUM' and
+        sysdate between eff_date and nvl(term_date,sysdate+10);
+
+        ---- V02 (12/13/2016 - Added below IF condition to consider WT_MINIMUM
+        -- if donor weight is NULL in the donors table.)
+        IF temp_donor_weight IS NULL THEN
+          temp_donor_weight := pl_non_elig_wt;
+        END IF;
+        ----
+      EXCEPTION
+        when others then
+          skip_weight_check:='Y';
+          p_reason:='Err: B0-';
+      END;
+    End If;
+
+     --dbms_output.put_line('under weight='||to_char(pl_non_elig_wt));
+
+     -- Get the allowed plasma loss based on the weight ranges 
+     -- from the table configuration 
+
+    If skip_weight_check='N' then
+      FOR Z2 in cell_loss_range(trunc(a_coll_date), temp_donor_weight) loop 
+      BEGIN
+            pl_max_plasma_loss:=Z2.maximum_loss;
+            pl_days_between:=Z2.days_between;
+
+             --dbms_output.put_line('Max='||to_char(pl_max_plasma_loss));   
+
+           cell_loss_level :=0;
+           FOR c5 IN plasma_loss_check (trunc(a_coll_date),
+                                        pl_days_between) LOOP
+               temp_cell_loss := proc_plasma_loss;
+               temp_ecv_loss := proc_plasma_ecv_loss;
+---
+               cell_loss_level := cell_loss_level + c5.actual_loss;
+---
+               IF (((cell_loss_level + temp_cell_loss + temp_ecv_loss) >
+                  pl_max_plasma_loss) AND ((c5.coll_date + pl_days_between) >
+                  l_defrd_date)) THEN
+                  l_defrd_date := c5.coll_date + pl_days_between;
+
+                  temp_eligible := 'P';
+               END IF;
+           END LOOP;   --- for c5
+      END;
+
+      If temp_eligible = 'P' then 
+        exit;
+      End If;
+
+      END LOOP;   -- for Z2
+
+        If pl_max_plasma_loss = 0 and
+           temp_donor_weight < pl_non_elig_wt then
+           temp_eligible:='U';
+        End If;
+
+    Else    -- If skip flag is Y
+         p_elig_status := 'N';
+         p_deff_date := NULL;
+         p_inter_type := 'TEMPD';
+         p_reason := p_reason|| 'Plasma weight configuration issue.';
+         RETURN;
+    End if;
+---
+
+--dbms_output.put_line('Total loss='||to_char(cell_loss_level));
+--dbms_output.put_line('Inclusive current donation='||
+                 --to_char(cell_loss_level+temp_cell_loss+temp_ecv_loss));
+----over 2018----
+/*
+||    Check for the existance of an interdiction on the donor, which
+||    also exists in the VALID_PROC_EXCLUSIONS table. If a non-released
+||    interdiction does exist on the donor, and the eligibility date
+||    passed into the routine is between the effective date and the
+||    termination date of the interdiction, then the donor cannot
+||    donate using the procedure code being checked until the
+||    interdiction has expired.
+*/
+      l_def_thru_date := trunc(a_coll_date)-1;
+      BEGIN
+         ddr_count := 0;
+         SELECT max(di.term_date)+1
+           INTO l_def_thru_date
+           FROM donor_interdictions di
+          WHERE di.donor_id = p_donor_id
+            AND trunc(a_coll_date) between di.eff_date AND
+                                           nvl(di.term_date,a_coll_date+1)
+            AND di.release_date is null
+            AND di.term_date is not null
+            AND EXISTS
+                (SELECT 'x'
+                   FROM valid_proc_exclusions vpe
+                  WHERE vpe.inter_code = di.inter_code
+                    AND vpe.donation_type = p_donation_type
+                    AND vpe.procedure_code = p_procedure_code
+                    AND trunc(a_coll_date) between vpe.eff_date and
+                                           nvl(vpe.term_date, a_coll_date+1));
+      EXCEPTION
+         WHEN others THEN
+            null;
+      END;
+---
+      IF ((l_def_thru_date > l_defrd_date) AND
+          (l_def_thru_date > trunc(a_coll_date))) THEN
+         l_defrd_date := l_def_thru_date;
+         temp_eligible := 'X';
+      END IF;
+---
+      IF (temp_eligible != 'Y') THEN
+         p_elig_status := 'N';
+         p_inter_type := 'TEMPD';
+         p_deff_date := l_defrd_date;
+---
+         IF (temp_eligible = 'S') THEN
+            p_reason := 'Attempting to donate too soon.';
+         ELSIF (temp_eligible = 'T') THEN
+            p_reason := 'Donor is temporarily deferred.';
+         ELSIF (temp_eligible = 'D') THEN
+            p_reason := 'Donor temporarily deferred. DTD';
+         ELSIF (temp_eligible = 'H') THEN
+            p_reason := 'Donor temporarily deferred. HHDTD';
+         ELSIF (temp_eligible = 'R') THEN
+            p_reason := 'Will exceed maximum RBC loss.';
+         ELSIF (temp_eligible = 'P') THEN
+            p_reason := 'Will exceed maximum Plasma loss.';
+         ELSIF (temp_eligible = 'X') THEN
+            p_reason := 'Temporarily deferred for procedure.';
+         ELSIF (temp_eligible = 'U') THEN
+           p_reason:='Donor is under weight';
+         ELSE
+            p_reason := 'Too many times for this procedure.';
+         END IF;
+         RETURN;
+      END IF;
+   END;
+   p_elig_status := temp_eligible;
+   p_deff_date   := null;
+   p_inter_type  := null;
+   p_reason      := null;
+END;
+
+/* ---------------------------------------
+ The following routine was created for the DOD
+ Date: 02/16/11
+ By:   Edwin
+------------------------------------------ */
+
+PROCEDURE find_donor_full_ssn
+   (p_ssn                      IN      NUMBER,
+    p_last_name                IN      VARCHAR2,
+    p_date_of_birth            IN      DATE,
+    p_first_name               IN      VARCHAR2,
+    p_gender                   IN      VARCHAR2,
+    p_session_id               IN      VARCHAR2,
+    p_grade                    IN      NUMBER,
+    p_chapter_id               IN      VARCHAR2,
+    p_alt_id                   IN      VARCHAR2, -- SCR 11774
+    p_alt_type                 IN      VARCHAR2, -- SCR 11774    
+    p_total                    OUT     NUMBER )
+IS
+   loc_ssn                 NUMBER;
+   loc_last_name           VARCHAR2(50);
+   loc_dob                 DATE;
+   loc_first_name          VARCHAR2(25);
+   loc_gender              VARCHAR2(1);
+   loc_str                 VARCHAR2(1000);
+   loc_fn_match            VARCHAR2(5);
+   c_p_ssn                 VARCHAR2(9);
+   c_loc_ssn               VARCHAR2(9);
+   loc_fname               VARCHAR2(25);
+   p_fname                 VARCHAR2(25);
+   found_donor             NUMBER;
+   no_of_donors            NUMBER;
+   tabcount                NUMBER;
+   call_resolve_flag       VARCHAR2(1);
+   grade1_donor            VARCHAR2(10);
+   l_final_grade           VARCHAR2(1); -- SCR 11774
+
+   TYPE don_rectyp IS RECORD
+        (donor_id       varchar2(10),
+         grade          number,
+         dgm_id         number,
+         resolved_flag  varchar2(1));
+
+   TYPE don_tabtyp IS table OF don_rectyp INDEX BY binary_integer;
+
+   tabdon  don_tabtyp;
+/*
+||    The FETCH_DONORS cursor is used to search the database for donor records
+||    that have a reasonable probability of being the record requested.
+*/
+   CURSOR FETCH_DONORS IS
+      SELECT donor_id,nvl(ssn,-1) ssn,last_name,first_name,gender,date_of_birth
+        FROM donors
+       WHERE ssn = p_ssn
+      UNION
+      SELECT donor_id,nvl(ssn,-1) ssn,last_name,first_name,gender,date_of_birth
+        FROM donors
+       WHERE date_of_birth = p_date_of_birth
+      UNION
+      SELECT donor_id,nvl(ssn,-1) ssn,last_name,first_name,gender,date_of_birth
+        FROM donors
+       WHERE soundex_key = soundex(p_last_name)
+         AND soundex(first_name) = soundex(nvl(p_first_name,first_name))
+      UNION -- SCR 11774 -- Below sql stmt added.
+      SELECT donor_id, nvl(ssn,-1) ssn, last_name, first_name, gender, date_of_birth
+        FROM donors
+       WHERE alternate_id = p_alt_id
+         AND alternate_id_type = p_alt_type;
+/*
+||    The GRADE_DONORS cursor is used to grade each donor returned by
+||    FIND_DONORS cursor, to determine whether or not the record is an
+||    acceptable match to the entry criteria.  See tech specs for logic for
+||    calculating the dgm_id.
+*/
+   CURSOR GRADE_DONORS IS
+      SELECT dgm_id, grade
+        FROM donor_grading_matrix_9
+       WHERE dgm_id =
+           (108*(decode (loc_ssn, p_ssn, 0, -1, 2, nvl(p_ssn, loc_ssn), 2,
+               decode (least(instr(substr(c_p_ssn,1,1), substr(c_loc_ssn,1,1))+
+                             instr(substr(c_p_ssn,2,1), substr(c_loc_ssn,2,1))+
+                             instr(substr(c_p_ssn,3,1), substr(c_loc_ssn,3,1))+
+                             instr(substr(c_p_ssn,4,1), substr(c_loc_ssn,4,1))+
+                             instr(substr(c_p_ssn,5,1), substr(c_loc_ssn,5,1))+
+                             instr(substr(c_p_ssn,6,1), substr(c_loc_ssn,6,1))+
+                             instr(substr(c_p_ssn,7,1), substr(c_loc_ssn,7,1))+
+                             instr(substr(c_p_ssn,8,1), substr(c_loc_ssn,8,1))+
+                             instr(substr(c_p_ssn,9,1), substr(c_loc_ssn,9,1)),
+                                7), 7, 1, 3))))+
+           (36*(decode (p_last_name, loc_last_name, 0,
+                decode (soundex(p_last_name),soundex(loc_last_name), 1,2))))+
+           (9*(decode(loc_fn_match,'SAME',0,'SIMM',1,'SNDX',2,'DIFF',3)))+
+           (3*(decode(p_date_of_birth, loc_dob, 0,
+                  decode (to_char(p_date_of_birth, 'MMYYYY'),
+                          to_char(loc_dob, 'MMYYYY'), 1,
+                  decode (to_char(p_date_of_birth, 'DDYYYY'),
+                          to_char(loc_dob, 'DDYYYY'), 1,
+                  decode (to_char(p_date_of_birth, 'MMDD'),
+                          to_char(loc_dob, 'MMDD'), 1,
+                  decode (to_char(p_date_of_birth, 'MMDDYYYY'),
+                          to_char(loc_dob, 'DDMMYYYY'), 1, 2)))))))+
+           (1*(decode (loc_gender, nvl(p_gender, loc_gender),
+                       decode (loc_gender, 'M', 1, 2), 3)));
+
+   FUNCTION check_resolve_duplicates_9
+      (p_first_don     IN      varchar2,
+       p_second_don    IN      varchar2)   RETURN varchar2
+   IS
+      loc_count      number;
+   BEGIN
+      IF (p_first_don = p_second_don) THEN
+         RETURN 'N';
+      END IF;
+      BEGIN
+         SELECT count(*) into loc_count
+           FROM resolved_potential_duplicates
+          WHERE (first_donor_id= p_first_don AND second_donor_id= p_second_don)
+             OR (first_donor_id= p_second_don AND second_donor_id= p_first_don);
+---
+         IF (loc_count > 0) THEN
+                 RETURN 'Y';
+             -- RETURN 'N';
+         ELSE
+            RETURN 'N';
+         END IF;
+      EXCEPTION
+        WHEN others THEN
+           RETURN 'N';
+      END;
+   END;
+BEGIN
+   found_donor := 0;
+   no_of_donors := 0;
+
+   c_p_ssn := substr(to_char(p_ssn,'099999999'),2,9);
+/*
+||    Pull out the first part of the first name that was passed to find donor
+*/
+   SELECT substr(p_first_name,1,decode(instr(p_first_name,' '),0,
+                 length(p_first_name), instr(p_first_name,' ')-1))
+     INTO p_fname
+     FROM dual;
+/*
+||    Calculate the dgm_id and grade for each potential donor returned.
+*/
+   tabcount := 1;
+   call_resolve_flag := 'N';
+   FOR c3 IN fetch_donors LOOP
+       loc_ssn        := c3.ssn;
+       loc_last_name  := c3.last_name;
+       loc_dob        := c3.date_of_birth;
+       loc_first_name := c3.first_name;
+       loc_gender     := c3.gender;
+       c_loc_ssn      := substr(to_char(c3.ssn,'099999999'),2,9);
+/*
+||    Pull out the first part of the first name of each found donor
+*/
+       SELECT substr(loc_first_name,1,decode(instr(loc_first_name,' '),0,
+                    length(loc_first_name), instr(loc_first_name,' ')-1))
+         INTO loc_fname
+         FROM dual;
+/*
+||    Determine match level between first name transferred and found name.
+||    If first name is not transferred, match is equated to 'SAME'.
+*/
+       loc_fn_match := 'DIFF';
+       IF ((p_first_name is null) OR (p_first_name = loc_first_name) OR
+           (p_first_name = loc_fname) OR (p_fname = loc_first_name) OR
+           (p_fname = loc_fname)) THEN
+          loc_fn_match := 'SAME';
+       ELSE
+          IF ((soundex(p_first_name) = soundex(loc_first_name)) OR
+              (soundex(p_first_name) = soundex(loc_fname)) OR
+              (soundex(p_fname) = soundex(loc_first_name)) OR
+              (soundex(p_fname) = soundex(loc_fname))) THEN
+             loc_fn_match := 'SNDX';
+          ELSE
+             loc_fn_match := 'DIFF';
+          END IF;
+       END IF;
+/*
+||    The above logic only checks to see if name is the same or soundex match.
+||    If firstname match is still "DIFF", check to see if the first names
+||    are similar.
+*/
+       IF (loc_fn_match = 'DIFF') THEN
+          BEGIN
+             SELECT 'SIMM' INTO loc_fn_match
+               FROM NAME_MATCH
+              WHERE (rtrim(first_name) = loc_first_name AND
+                     rtrim(nick_name)  = p_first_name)
+                 OR (rtrim(first_name) = p_first_name AND
+                     rtrim(nick_name)  = loc_first_name)
+                 OR (rtrim(first_name) = p_first_name AND
+                     rtrim(nick_name)  = loc_fname)
+                 OR (rtrim(first_name) = loc_fname AND
+                     rtrim(nick_name)  = p_first_name)
+                 OR (rtrim(first_name) = p_fname AND
+                     rtrim(nick_name)  = loc_first_name)
+                 OR (rtrim(first_name) = loc_first_name AND
+                     rtrim(nick_name)  = p_fname)
+                 OR (rtrim(first_name) = p_fname AND
+                     rtrim(nick_name)  = loc_fname)
+                 OR (rtrim(first_name) = loc_fname AND
+                     rtrim(nick_name)  = p_fname);
+             EXCEPTION
+               WHEN no_data_found THEN
+                  BEGIN
+                     SELECT 'SIMM' INTO loc_fn_match
+                       FROM DUAL
+                      WHERE instr(rtrim(loc_first_name), p_first_name) != 0
+                         OR instr(rtrim(loc_first_name), p_fname) != 0
+                         OR instr(rtrim(p_first_name), loc_first_name) != 0
+                         OR instr(rtrim(p_first_name), loc_fname) != 0
+                         OR instr(rtrim(loc_fname), p_first_name) != 0
+                         OR instr(rtrim(loc_fname), p_fname) != 0
+                         OR instr(rtrim(p_fname), loc_first_name) != 0
+                         OR instr(rtrim(p_fname), loc_fname) != 0;
+                  EXCEPTION
+                    WHEN no_data_found THEN
+                       null;
+                  END;
+          END;
+       END IF;
+/*
+||    NOW WE WILL RESUME THE FIND DONOR ROUTINE ALREADY IN PROGRESS
+*/
+       FOR c4 IN grade_donors LOOP
+           IF (c4.grade <= p_grade) THEN
+              found_donor := found_donor +1;
+              tabdon(tabcount).donor_id := c3.donor_id;
+              tabdon(tabcount).grade    := c4.grade;
+              tabdon(tabcount).dgm_id   := c4.dgm_id;
+              tabdon(tabcount).resolved_flag  := 'N';  /*flag = N for insert */
+              IF (c4.grade = 1) THEN
+                 grade1_donor      := c3.donor_id;
+                 call_resolve_flag := 'Y';
+              END IF;
+              tabcount := tabcount + 1;
+           END IF;
+       END LOOP; /* grade donors */
+   END LOOP; /* c3 for loop loop ends */
+---
+   IF (found_donor > 0) THEN
+      IF (call_resolve_flag = 'Y') THEN
+         FOR i IN 1..tabdon.count  LOOP
+             tabdon(i).resolved_flag := check_resolve_duplicates_9(grade1_donor,
+                                                         tabdon(i).donor_id);
+         END LOOP;
+      END IF; /* resolve flag */
+      no_of_donors := 0;
+      FOR i IN 1..tabdon.count LOOP
+          IF (tabdon(i).resolved_flag = 'N') THEN
+             no_of_donors := no_of_donors + 1;
+             -- SCR 11774; 10/15/2013
+             don_core.calc_final_grade(donor_id_in      => tabdon(i).donor_id,
+                                       chapter_id_in    => p_chapter_id,    
+                                       alt_type_in      => p_alt_type,
+                                       alt_id_in        => p_alt_id,
+                                       input_grade_in   => tabdon(i).grade, 
+                                       final_grade_out  => l_final_grade);
+
+             INSERT INTO donor_reel
+                (session_id,donor_id,grade,dgm_id,program_id,insert_user,
+                 insert_date,chapter_id,
+                 key_data_grade) -- SCR 11774
+             VALUES
+                (p_session_id,tabdon(i).donor_id, l_final_grade, --tabdon(i).grade, -- SCR 11774
+                 tabdon(i).dgm_id,'FIND_DON',LT_USER_SESSION.get_userid,
+                 to_date(to_char(sysdate,'MM-DD-YYYY'),'MM-DD-YYYY'), p_chapter_id,
+                 tabdon(i).grade); -- SCR 11774
+          END IF;
+      END LOOP;
+   END IF;
+   p_total := no_of_donors;
+   tabdon.delete;
+
+END;  /*   END OF FIND DONOR FULL SSN ROUTINE   */
+
+/* *********************************************************************************
+  Name              : COMPARE_STRINGS
+  Created By        : Kishore Gummadi
+  Date Of Creation  : 08/29/13
+  Purpose           : This procedure will compare two strings. The procedure will return
+                      SAME if both strings are identical, BLNK if the second parameter
+                      is blank, SIMM if the strings are similar, DIFF if the strings
+                      are different.
+
+  Version History
+
+  Date         Version        Description
+  ---------------------------------------------------------------------------------
+  08/29/2013   01             Initial development - Kishore
+  10/15/2013   02             Modify code so that the strings are compared using a percentage 
+                              that is defined in the VALID_PARAMETERS table for parameter code SIMMPER
+
+  *********************************************************************************   */
+-- Added p_chapter_id parameter. Added by Kishore on 10/15/2013
+PROCEDURE compare_strings
+      (p_orig_string           IN      VARCHAR2,
+       p_comp_string           IN      VARCHAR2,
+       p_chapter_id            IN      VARCHAR2,
+       p_comp_result           OUT     VARCHAR2)
+IS
+  t_orig_string           varchar2(100);
+  t_comp_string           varchar2(100);
+  t_match_flag            varchar2(1);
+  t_comp_str_len          number;
+  t_comp_str_match_len    number;
+  t_orig_str_len          number;
+  t_orig_str_match_len    number;
+  t_param_value           valid_parameters.parameter_value%type;
+  t_orig_str_match        varchar2(100);
+  t_orig_char_match       varchar2(1);
+  t_char_count            number := 0;
+  t_status                varchar2(100);
+  show_error_and_exit     exception;
+BEGIN
+  t_status := 'OK';
+
+  t_orig_string := ltrim(rtrim(p_orig_string));
+  t_comp_string := ltrim(rtrim(p_comp_string));
+
+  if t_orig_string is null then
+    t_status := 'The original string cannot be null';
+  else
+    if t_comp_string is null then
+      --dbms_output.put_line('BLNK');
+      p_comp_result := 'BLNK';
+    elsif t_comp_string = t_orig_string then
+      --dbms_output.put_line('SAME');
+      p_comp_result := 'SAME';
+    else
+      -- Added by Kishore on 10/15/2013
+      begin
+	select parameter_value
+	  into t_param_value
+	  from valid_parameters
+	 where parameter_code = 'SIMMPER'
+	   and lifetrack_timezone_convert.get_local_time(p_chapter_id, sysdate) between 
+               eff_date and nvl(term_date, sysdate + 10);
+      exception
+	when no_data_found then
+	  t_status := 'Parameter value not found for SIMMPER code';
+          raise show_error_and_exit;
+	when others then
+	  t_status := SQLCODE || ' - ' || SQLERRM;
+          raise show_error_and_exit;
+      end;
+      -- End of change
+
+      --if length(t_orig_string) = length(t_comp_string) then -- Commented by Kishore on 10/15/2013
+        --t_comp_str_len := length(t_comp_string); -- Commented by Kishore on 10/15/2013
+        --t_comp_str_match_len := ceil(t_comp_str_len / 2); -- Commented by Kishore on 10/15/2013
+
+      t_orig_str_len := length(p_orig_string); -- Added by Kishore on 10/15/2013
+      t_orig_str_match_len := ceil(t_orig_str_len * (t_param_value / 100)); -- Added by Kishore on 10/15/2013
+      t_char_count := 0; -- Added by Kishore on 10/15/2013
+      t_match_flag := 'N';
+
+      /* -- Commented by Kishore on 10/15/2013
+        for i in 1 .. t_comp_str_len loop
+          if length(substr(t_comp_string, i, t_comp_str_match_len)) = t_comp_str_match_len then
+            if instr(t_orig_string, substr(t_comp_string, i, t_comp_str_match_len)) = i then
+              t_match_flag := 'Y';
+            end if;
+          end if;
+        end loop;
+      -- End of commented section */
+
+      -- Added by Kishore on 10/15/2013
+      for i in 1 .. t_orig_str_len loop
+	t_orig_char_match := substr(p_orig_string, i, 1);
+
+	if length(substr(p_orig_string, i, t_orig_str_match_len)) = t_orig_str_match_len then
+	  t_orig_str_match := substr(p_orig_string, i, t_orig_str_match_len);
+	  --dbms_output.put_line('String to match: ' || t_orig_str_match);
+	  for j in 1 .. length(p_comp_string) loop
+	    --dbms_output.put_line('String to compare: ' || substr(p_comp_string, j, t_orig_str_match_len));
+            if substr(p_comp_string, j, t_orig_str_match_len) = t_orig_str_match then
+              t_match_flag := 'Y';
+	      --dbms_output.put_line('String to compare: ' || substr(p_comp_string, j, t_orig_str_match_len));
+            end if;
+	  end loop;
+	end if;
+
+	for j in 1 .. length(p_comp_string) loop
+	  if i = j then
+	    --dbms_output.put_line('Char to match: ' || t_orig_char_match);
+	    if substr(p_comp_string, j, 1) = t_orig_char_match then
+	      t_char_count := t_char_count + 1;
+	    end if;
+	  end if;
+	end loop;
+      end loop;
+
+      --dbms_output.put_line('No of matched characters: ' || to_char(t_char_count));
+      if t_char_count >= t_orig_str_match_len then
+	t_match_flag := 'Y';
+      end if;
+      -- End of change
+
+      if t_match_flag = 'Y' then
+        --dbms_output.put_line('SIMM');
+        p_comp_result := 'SIMM';
+      else
+        --dbms_output.put_line('DIFF');
+        p_comp_result := 'DIFF';
+      end if;
+      --else -- Commented by Kishore on 10/15/2013
+        --dbms_output.put_line('DIFF');
+        --p_comp_result := 'DIFF'; -- Commented by Kishore on 10/15/2013
+      --end if; -- if length(t_orig_string) = length(t_comp_string) then -- Commented by Kishore on 10/15/2013
+    end if; -- if t_comp_string is null then
+  end if; -- if t_orig_string is null then
+
+  if t_status = 'OK' then
+    null;
+  else
+    p_comp_result := t_status;
+    dbms_output.put_line(t_status);
+  end if;
+exception
+  when show_error_and_exit then
+    p_comp_result := t_status;
+    dbms_output.put_line(t_status);
+END compare_strings;
+
+PROCEDURE calc_final_grade(donor_id_in     IN VARCHAR2,  
+                           chapter_id_in   IN VARCHAR2,
+                           alt_type_in     IN VARCHAR2,
+                           alt_id_in       IN VARCHAR2,
+                           input_grade_in  IN VARCHAR2, 
+                           final_grade_out OUT VARCHAR2) IS
+  /* Added this routine on 10/15/2013 SCR 11774
+  -- inputs: donor_id, input_grade.
+  -- compares alternate ID in donors table with entered alternate ID and returns match type (SAME, SIMM, DIFF)
+  -- calls alt ID configuration to get final grade based on the match type.
+  -- Returns final grade;
+  */
+  CURSOR altID_cur(pl_donor_id VARCHAR2) IS 
+    SELECT alternate_id, alternate_id_type
+      FROM donors
+     WHERE donor_id = pl_donor_id;   
+   l_alt_id VARCHAR2(20);
+   l_alt_type VARCHAR2(5);
+   l_altID_match VARCHAR(10);
+   l_final_grade VARCHAR2(1);
+BEGIN
+  --l_final_grade := tabdon(i).grade; -- default
+  l_final_grade := input_grade_in;
+  IF alt_type_in IS NOT NULL AND alt_id_in IS NOT NULL THEN -- for ssn mode = 9 and not fake ssn, alt_type and alt_id are null;
+    OPEN altID_cur(donor_id_in); --(tabdon(i).donor_id);
+    FETCH altID_cur INTO l_alt_id, l_alt_type;
+    CLOSE altID_cur;
+
+    -- If alt type is null or alt type in db does not match with the entered alt type in find donor's block, treat the alternate ID as null.
+    --IF l_alt_type IS NULL OR UPPER(l_alt_type) <> UPPER(p_alt_type) THEN
+    IF l_alt_type IS NULL THEN
+      l_alt_id := NULL;
+    END IF;
+
+    -- If different alternate ID is entered, no need to compare alternate ID's, just default it to 'DIFF'
+    -- so that user is aware that different alternate ID is being used.
+    IF l_alt_type IS NOT NULL AND UPPER(l_alt_type) <> UPPER(alt_type_in) THEN  
+      l_altID_match := 'DIFF';
+    ELSE
+      don_core.compare_strings(p_orig_string => alt_id_in,
+                               p_comp_string => l_alt_id,
+                               p_chapter_id  => chapter_id_in,
+                               p_comp_result => l_altID_match);
+    END IF;
+
+    IF l_altID_match IS NOT NULL THEN
+      DECLARE
+        CURSOR donor_grade_cur(pl_key_data_grade VARCHAR2, pl_altid_match VARCHAR2) IS
+          SELECT final_grade
+            FROM alt_id_donor_grade
+           WHERE key_data_grade = pl_key_data_grade
+             AND altid_match_type = pl_altid_match
+             AND SYSDATE BETWEEN eff_date and NVL(term_date, SYSDATE+1);   
+      BEGIN
+        OPEN donor_grade_cur(input_grade_in, l_altID_match); --(tabdon(i).grade, l_altID_match);
+        FETCH donor_grade_cur INTO l_final_grade;
+        CLOSE donor_grade_cur;
+      END;
+    END IF;
+  END IF;
+  final_grade_out := l_final_grade;
+END calc_final_grade;
+
+
+/*
+Purpose: This wrapper routine is called from ONSITE module (C#). 
+Usage  : 1) Pass Find Donor block fields as input parameters 
+         2) returns records that matches the search criteria
+Dt     : 01/08/2019
+*/
+    PROCEDURE ons_find_donor (
+        p_user_id       IN VARCHAR2,
+        p_ssn           IN NUMBER,
+        p_last_name     IN VARCHAR2,
+        p_date_of_birth IN DATE,
+        p_first_name    IN VARCHAR2,
+        p_gender        IN VARCHAR2,
+        p_chapter_id    IN VARCHAR2,
+        p_alt_id        IN VARCHAR2,
+        p_alt_type      IN VARCHAR2,
+        p_prog_name     IN VARCHAR2,
+        p_recordset     OUT SYS_REFCURSOR
+    ) AS
+
+        ld_local_date    DATE;
+        lv_fk_ssn        VARCHAR2(10);
+        ln_grading_level VARCHAR2(2);
+        ln_total_donors  NUMBER;
+        lv_session_id    VARCHAR2(15);
+    BEGIN
+        ld_local_date := lifetrack_timezone_convert.get_local_time(p_chapter_id, sysdate);
+
+        -- input parameter checks.
+        IF p_prog_name IS NULL THEN
+            raise_application_error(-20000, 'P_PROG_NAME::parameter is required');
+        END IF;
+        IF p_chapter_id IS NULL THEN
+            raise_application_error(-20001, 'P_CHAPTER_ID::parameter is required');
+        END IF;  
+
+        -- DON BLOCK configuration 
+        BEGIN
+            SELECT
+                TO_NUMBER(grading_level)
+            INTO ln_grading_level
+            FROM
+                find_donor_programs
+            WHERE
+                program_name = p_prog_name;
+
+        EXCEPTION
+            WHEN no_data_found THEN
+                raise_application_error(-20002, 'DONBLOCK:: not setup for program - ' || p_prog_name);
+        END;
+
+        lv_session_id := substr(p_user_id, 1, 6)
+                         || to_char(sysdate, 'DDDHH24MiSS'); -- TO_CHAR(SYSDATE, 'MMDDYYYYHH24MISS'); -- MLT 3782
+
+        don_core.find_donor
+                      (p_ssn                   => NULL,
+                       p_last_name             => p_last_name,
+                       p_date_of_birth         => p_date_of_birth,
+                       p_first_name            => p_first_name,
+                       p_gender                => p_gender,
+                       p_session_id            => lv_session_id,
+                       p_grade                 => ln_grading_level,
+                       p_chapter_id            => p_chapter_id,
+                       p_alt_id                => p_alt_id,
+                       p_alt_type              => p_alt_type, 
+                       p_total                 => ln_total_donors
+                      );
+
+        OPEN p_recordset FOR 
+        SELECT
+            dr.dgm_id,
+            dr.grade,
+            dr.donor_id,
+            d.last_name,
+            d.first_name,
+            d.middle_name,
+            null ssn,
+            d.date_of_birth,
+            d.gender,
+            nvl(vmc.description, 'No ABO') AS abo,
+            d.alternate_id,
+            d.alternate_id_type
+        FROM
+            donor_reel         dr,
+            donors             d,
+            valid_master_codes vmc
+        WHERE
+                dr.session_id = lv_session_id
+            AND dr.grade <= ln_grading_level
+            AND dr.donor_id = d.donor_id
+            AND d.blood_type = vmc.code (+)
+            AND vmc.code_type (+) = 'ABO';
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            raise_application_error(-20005, 'ONS_FIND_DONOR:: Error-'
+                                            || substr(sqlerrm, 1, 300));
+    END ons_find_donor;
+
+
+END DON_CORE ; /*-- Package body --*/
+/

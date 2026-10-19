@@ -1,0 +1,682 @@
+create or replace PACKAGE          "ATUPRISM" IS
+  procedure add_log_entry(p_log_text in varchar2);
+  procedure main_proc(file_name in varchar2,v_inst_id in varchar2,
+                       pl_chapter_id in varchar2);
+  procedure process;
+  procedure readrecord;
+  procedure get_column(txtline in varchar2, delimit in char,strt in number,
+  endc in number,outcol out varchar2);
+  procedure read_delimiter;
+  procedure read_unit_record;
+  procedure parse_read_record;
+  procedure init_variables;
+  procedure update_batch_information;
+  procedure insert_instrument_log;
+  procedure convert_unit_id(ok_status out varchar2) ;
+  procedure update_rpt_parm;
+  procedure rollback_and_exit ;
+  temp_max_test_seq_no   NUMBER:=0;
+  temp_coll_date         DATE;
+  field_delimiter        VARCHAR2(1);
+  repeat_delimiter       VARCHAR2(1);
+  component_delimiter    VARCHAR2(1);
+  last_unit              VARCHAR2(15);
+  escape_delimiter       VARCHAR2(1);
+  logfile                UTL_FILE.FILE_TYPE;
+  instfile               UTL_FILE.FILE_TYPE;
+  LogDir                 VARCHAR2(50);
+  logfilename            VARCHAR2(50);
+  p_file_name            VARCHAR2(50);
+  read_record            VARCHAR2(500);
+  fetch_count            NUMBER:=0;
+  complete               BOOLEAN:=false;
+  plate_id               VARCHAR2(10);
+  v_tb_id                VARCHAR2(64);
+  well_count             NUMBER:=0;
+  process_date_time      VARCHAR2(25);
+  v_test_id              VARCHAR2(10);
+  cut_off                VARCHAR2(10);
+  kit_lot                VARCHAR2(30);
+  v_machine_id           VARCHAR2(5);
+  v_unit_id              VARCHAR2(15);
+  well_number            VARCHAR2(4);
+  result_status          VARCHAR2(4);
+  negative_result        VARCHAR2(4);
+  reactive_result        VARCHAR2(4);
+  ratio                  VARCHAR2(20);
+  codabar_unit_scheme    VARCHAR2(1);
+  testing_lab_code       VARCHAR2(2);
+  v_chapter_id           VARCHAR2(4);
+  od_value               VARCHAR2(10);
+  first_unit             BOOLEAN:=TRUE;
+  batch_created          BOOLEAN:=FALSE;
+  test_created           BOOLEAN:=FALSE;
+  well_type              VARCHAR2(1);
+  result_file_name       VARCHAR2(30);
+  record_count           NUMBER:=0;
+  pos_res_count          NUMBER:=0;
+  neg_res_count          NUMBER:=0;
+  upload_count           NUMBER:=0;
+  good_unit              BOOLEAN;
+  err_msg                VARCHAR2(300);
+  temp_test_id           VARCHAR2(20);
+  ncount                 NUMBER:=0;
+  no_of_units            NUMBER:=0;
+  prism_id               VARCHAR2(15);
+  g_local_time           DATE;
+  p_chp_sys_date         DATE;
+end ATUPRISM;
+/
+
+create or replace PACKAGE BODY          "ATUPRISM" is
+
+PROCEDURE add_log_entry(p_log_text varchar2) is
+BEGIN
+         UTL_FILE.putf(logfile,'%s\n',p_log_text);
+         UTL_FILE.fflush(logfile);
+END add_log_entry;
+
+procedure main_proc(file_name in varchar2, v_inst_id in varchar2,
+                    pl_chapter_id in varchar2) is
+ start_time   VARCHAR2(30);
+ end_time     VARCHAR2(30);
+Begin
+      dbms_output.enable(50000000);
+      v_machine_id:=v_inst_id;
+      result_file_name:=file_name;
+      v_chapter_id:=pl_chapter_id;
+      p_chp_sys_date:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+                                                                sysdate);
+
+      begin
+           select code_desc into LogDir from master_codes
+           where code_type='LOGDR' and code='ILOG' and p_chp_sys_date
+	   between eff_date and nvl(term_date,sysdate+10);
+      exception
+           when utl_file.invalid_path then
+               dbms_output.put_line('Invalid path or filename');
+	       raise;
+           when others then
+           dbms_output.put_line('Error in prepare_log_filename');
+	   raise;
+       end;
+
+      begin
+       p_file_name:=substr(result_file_name,1,instr(result_file_name,'.',1)-1);
+       select 'ATUPRISM_'||p_file_name||'_'||
+       LT_USER_SESSION.get_userid||'.r'
+       into logfilename from dual;
+      exception
+	  when others then
+	     dbms_output.put_line('Error in getting logfilename ... Aborting');
+	     raise;
+      end;
+
+        begin
+          g_local_time:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+          sysdate);
+	   start_time := to_char(g_local_time,'mm-dd-yy hh24:mi:ss');
+           logfile:=UTL_FILE.fopen(LogDir,logfilename, 'w');
+           instfile:=UTL_FILE.fopen(LogDir,file_name, 'r');
+           add_log_entry(' Prism Instrument Interface Log');
+           add_log_entry('----------------------------------');
+           add_log_entry(' ');
+	   add_log_entry('Prism-Read Results  start time:'||start_time);
+	   add_log_entry('File Name  : '||result_file_name);
+	   add_log_entry('Log Name   : '||logfilename);
+	   add_log_entry('----------------------------------------');
+
+       exception
+	  when utl_file.invalid_path then
+	   dbms_output.put_line('Invalid path or filename'); raise;
+        end;
+
+          init_variables;
+	  read_delimiter;
+	  loop
+	     process;
+	     exit when complete;
+	  end loop;
+	  update_rpt_parm;
+	  add_log_entry('No. of Results Read: '||to_char(no_of_units));
+	  add_log_entry('No. of results uploaded :'||to_char(upload_count));
+          add_log_entry('No. of results Rejected :'||
+	  to_char(no_of_units - upload_count));
+	  add_log_entry('Prism-Read results program successfully completed');
+
+          g_local_time:=lifetrack_timezone_convert.get_local_time(v_chapter_id,
+          sysdate);
+          end_time := to_char(g_local_time,'mm-dd-yy hh24:mi:ss');
+	  add_log_entry('Program End Time:'||end_time);
+	  add_log_entry('*********************End****************************');
+	  UTL_FILE.fclose(logfile);
+End main_proc;
+
+Procedure process is
+   rec_type  VARCHAR2(1);
+   process_exception EXCEPTION;
+Begin
+   readrecord;
+   if not complete then
+   begin
+      fetch_count:=fetch_count+1;
+      record_count:=record_count+1;
+      good_unit:=true;
+      parse_read_record;
+   end;
+   end if;
+Exception
+    When process_exception then
+	 null;
+End process;
+
+procedure readrecord is
+ begin
+   utl_file.get_line(instfile,read_record);
+ exception
+  when no_data_found then
+    complete:=TRUE;
+  when UTL_FILE.READ_ERROR then
+     add_log_entry('Error reading file '||result_file_name);
+     rollback_and_exit;
+end readrecord;
+
+Procedure get_column(txtline in varchar2, delimit in char,strt in number,
+		     endc in number,outcol out varchar2) is
+   stringend number;
+ Begin
+    if instr(txtline,delimit,1,endc) = 0 then
+       stringend:=length(txtline);
+   else
+    stringend:=instr(txtline,delimit,1,endc) - instr(txtline,delimit,1,strt)-1;
+  end if;
+  outcol := substr(txtline,instr(txtline,delimit, 1, strt)+1,stringend);
+End get_column;
+
+procedure read_delimiter is
+ read_hdr    varchar2(250);
+begin
+  field_delimiter:=',';
+  --component_delimiter:=substr(read_record,4,1);
+  -- escape_delimiter:=substr(read_record,5,1);
+
+ /* if substr(upper(read_hdr),1,7)!='PRISM' then
+   add_log_entry('Invalid Machine Description-'||
+		substr(upper(read_hdr),1,7));
+   rollback_and_exit;
+  end if;
+*/
+End read_delimiter;
+
+Procedure read_unit_record is
+  unit_details varchar2(16);
+ Begin
+   get_column(read_record,field_delimiter,14,15,unit_details);
+   v_unit_id := nvl(unit_details,' ');
+   dbms_output.put_line(v_unit_id);
+End read_unit_record;
+
+Procedure parse_read_record is
+ function_result varchar2(200);
+ rescode1   VARCHAR2(40);
+ inst_test_id VARCHAR2(20);
+ rescode2   VARCHAR2(40);
+ abs_value  VARCHAR2(20);
+ v_result  VARCHAR2(80);
+ temp_x     VARCHAR2(1);
+ v_loc_test VARCHAR2(5);
+ v_max      NUMBER:=0;
+ v_auto_sch_flag  VARCHAR2(1);
+ v_next_max NUMBER:=0;
+ result_details  varchar2(300);
+ user_exception  EXCEPTION;
+ unit_details varchar2(16);
+ c_status         VARCHAR2(300);
+ sample_type      VARCHAR2(1);
+BEGIN
+
+
+   --Get the Sample Type and process only for type 0
+
+     get_column(read_record,field_delimiter,4,5,sample_type);
+
+     If sample_type is null or sample_type=' ' then
+	sample_type:='X';
+     End If;
+
+     If LTrim(RTrim(sample_type))!='0' then
+        return;
+     End if;
+
+  --Get the Unit Information
+   begin
+     get_column(read_record,field_delimiter,2,3,unit_details);
+     v_unit_id := nvl(unit_details,' ');
+     v_unit_id:=substr(unit_details,2,length(unit_details)-2);
+     no_of_units:=no_of_units+1;
+     dbms_output.put_line(v_unit_id);
+   End;
+
+   --Get test ID
+   get_column(read_record,field_delimiter,10,11,inst_test_id);
+
+  --Get result
+  get_column(read_record,field_delimiter,22,23,rescode1);
+
+   --Get Well number
+    get_column(read_record,field_delimiter,7,8,well_number);
+
+   --Get Absorbance
+    get_column(read_record,field_delimiter,15,16,abs_value);
+
+   --Get Ratio
+
+   get_column(read_record,field_delimiter,17,18,ratio);
+   ratio:=substr(ratio,2,length(ratio)-2);
+
+  process_date_time:=to_char(p_chp_sys_date,'mm-dd-yyyy hh24:mi');
+
+ dbms_output.put_line('inst test id='||inst_test_id);
+
+ v_result:=RTrim(ltrim(rescode1));
+ v_result:=substr(v_result,2,length(v_result)-2);
+
+ dbms_output.put_line('Result='||v_result);
+
+ --If the batch id is not created ,create the id (just once)
+ -- get the sequence number from the number generation table
+ --and update the table as well
+
+ If not batch_created then
+   begin
+             SELECT nvl(max_number,0), nvl(max_number,0)+1
+	     INTO  v_max , v_next_max FROM  number_generation
+	     WHERE  chapter_id = v_chapter_id AND number_type = 'TB_ID'
+	     FOR update of max_number ;
+	     dbms_output.put_line('Seq='||to_char(v_max));
+   exception
+       when others then
+           add_log_entry('Problem in Number Generation ... Aborting');
+           rollback_and_exit;
+   end;
+
+    --construct the batch ID
+    prism_id:=substr(result_file_name,1,instr(result_file_name,'_',1)-1);
+    prism_id:=substr(prism_id,-2);
+    v_tb_id:=to_char(p_chp_sys_date,'MMDDYY')||'-'||prism_id
+             ||inst_test_id||substr(lpad(to_char(v_max),4,0),-3);
+
+    add_log_entry('Test Batch ID:'||v_tb_id);
+    batch_created:=TRUE;  --reset the value to true to not to create again
+
+    begin
+       UPDATE number_generation set max_number = v_next_max
+       where chapter_id = v_chapter_id and  number_type= 'TB_ID' ;
+    exception
+       when others then
+	   add_log_entry('Update Number Generation Problem ... Aborting');
+	   rollback_and_exit;
+    end;
+
+ End If;      --- For batch_created
+
+ --Check the Test ID
+  Begin
+      select vit.test_id, nvl(auto_schedule,'N') into
+      v_test_id,v_auto_sch_flag
+      from valid_instrument_tests vit, valid_tests vt where
+      vit.chapter_id=v_chapter_id and
+      vit.test_id = vt.test_id and machine_id=rtrim(v_machine_id) and
+      machine_test_id=rtrim(inst_test_id) and p_chp_sys_date between
+      vit.eff_date and nvl(vit.term_date,sysdate+100)
+      and p_chp_sys_date between vt.eff_date and nvl(vt.term_date,sysdate+100);
+   Exception
+     when no_data_found then
+         v_auto_sch_flag := 'N';
+	 add_log_entry('Invalid test ID '||inst_test_id||' in file for '||
+	 v_machine_id || '..Aborting');
+         good_unit:=FALSE;
+	 rollback_and_exit;
+   End;
+
+    If not test_created then
+       test_created:=TRUE;
+       add_log_entry('Test ID: '||v_test_id);
+    End If;
+
+ --Check the result code
+  Begin
+     select result_status into result_status from
+     valid_instrument_test_results where test_id=v_test_id and
+     chapter_id=v_chapter_id and
+     machine_id=v_machine_id and machine_result_status=v_result and
+    p_chp_sys_date between eff_date and nvl(term_date,sysdate+100);
+  Exception when others then
+    good_unit:=FALSE;
+    err_msg:='Error translating result code '||v_result||
+	     ' for unit '||v_unit_id||sqlerrm;
+     raise user_exception;
+  End;
+
+  --Check the unit id length
+  If length(v_unit_id)=6 then
+     If ASCII(substr(v_unit_id,1,1)) not between 65 and 90 then
+        err_msg:='Invalid Unit ';
+        good_unit:=FALSE;
+        raise user_exception;
+     Else
+       v_unit_id:=' '||v_unit_id;
+     End If;
+  End If;
+
+  If length(v_unit_id) not in (7,13) then
+     err_msg:='Invalid Unit Length';
+     good_unit:=FALSE;
+     raise user_exception;
+  End if;
+
+   If length(v_unit_id) in (6,7) then
+    if codabar_unit_scheme='A' and ltrim(v_unit_id,'0123456789') is null then
+       convert_unit_id(c_status);
+       if nvl(c_status,' ')!='OK' then
+          err_msg:=c_status;
+	  good_unit:=FALSE;
+	  raise user_exception;
+       end if;
+    end if;
+   End If;
+
+  If good_unit then
+   begin
+       If first_unit then
+    	 update_batch_information;
+         first_unit:=FALSE;
+         temp_test_id:=v_test_id;
+       End if;
+
+       last_unit:=v_unit_id;
+
+      If temp_test_id!=v_test_id then
+         add_log_entry('Multiple tests in file ... ');
+	 good_unit:=FALSE;
+	 rollback_and_exit;
+       End if;
+
+       -------insert into UTRS table --------
+       If v_auto_sch_flag = 'Y' then
+        Begin
+            temp_coll_date := null;
+            select max(coll_date) into temp_coll_date
+	    from units where unit_id =v_unit_id
+            and  not exists
+		   (select 'x' from utrs
+                    where unit_id = units.unit_id
+                    and coll_date = units.coll_date
+	            And test_id = v_test_id
+	            and cancel_flag is null);
+
+	    If temp_coll_date is not null then
+              Begin
+	        temp_max_test_seq_no := 0;
+	        begin
+	             select nvl(max(nvl(test_seq_no,0)),0)
+		      into temp_max_test_seq_no
+		      from utrs where unit_id = v_unit_id
+                      and coll_date = temp_coll_date
+    		      and test_id = v_test_id;
+ 	              dbms_output.put_line('M='||to_char(temp_max_test_seq_no));
+	      exception
+		    when others then
+	   	        temp_max_test_seq_no :=0;
+										                end;
+												 begin
+                      insert into utrs
+			   (unit_id, coll_date, chapter_id,
+		            test_id, test_seq_no, program_id, insert_dats,
+		            insert_user_id, test_mode,
+			    test_chapter_id, tb_id)
+			values
+			     (v_unit_id, temp_coll_date, v_chapter_id,
+			      v_test_id, temp_max_test_seq_no +1,
+			      'ATUPRISM', sysdate, LT_USER_SESSION.get_userid,
+			      'M', v_chapter_id, null);
+                 exception
+	           when others then
+		   add_log_entry('unit='||v_unit_id);
+		   add_log_entry('coll='||to_char(temp_coll_date,
+						  'mm-dd-yyyy hh24:mi'));
+                   add_log_entry(v_chapter_id);
+		   add_log_entry(v_test_id);
+		   add_log_entry(to_char(temp_max_test_seq_no+1));
+		   add_log_entry(v_chapter_id);
+		   add_log_entry(sqlerrm);
+		   add_log_entry('Error in inserting into utrs....Aborting');
+	           rollback_and_exit;
+	  	end;
+	      End;
+	      end if;
+	  Exception
+	     when others then
+		  temp_coll_date := null;
+         End;
+      end if;
+       --------------------------------------
+
+       function_result := sbclib.load_holding_tests
+				(v_unit_id,
+				v_test_id,
+				well_number,
+				abs_value,
+				ratio,
+				result_status,
+				v_tb_id,
+				v_machine_id,
+				null,
+				null,
+				'ATUPRISM',
+                               to_date(process_date_time,
+				      'MM-DD-YYYY HH24:MI'),
+                                 v_chapter_id);
+		upload_count:=upload_count+1;
+           if rtrim(function_result)!='0' then
+               add_log_entry('Error in load_holding_tests for unit'||v_unit_id);
+               add_log_entry(function_result);
+           end if;
+     End;
+   Else
+	add_log_entry('Failed: '||v_unit_id||'-'||err_msg);
+    End if;
+
+EXCEPTION When user_exception then
+  add_log_entry('Error on '||v_unit_id||' '||err_msg);
+  when others then
+ add_log_entry('Error on '||v_unit_id||' '||sqlerrm);
+END parse_read_record;
+
+Procedure init_variables is
+ v_prism_id    varchar2(10);
+Begin
+   begin
+      SELECT testing_lab_code into testing_lab_code
+      from system_users where user_id = user and sysdate between eff_date and
+      nvl(term_date,sysdate);
+   exception when no_data_found then
+      testing_lab_code:='99';
+      --v_chapter_id:='WAD';
+   end;
+
+   begin
+       select nvl(codabar_unit_scheme,'*') into  codabar_unit_scheme
+       from institutions where sysdate between eff_date and
+       nvl(term_date,sysdate);
+   exception when no_data_found then
+     add_log_entry('No institution data available .... Aborting');
+     rollback_and_exit;
+   end;
+
+    begin
+       select code into v_prism_id from master_codes where
+       code_type='INSTR' and code='PRISM' and
+       p_chp_sys_date between eff_date and nvl(term_date,sysdate+100);
+    exception
+	when no_data_found then
+	   add_log_entry('Machine code not defined in the master codes');
+	   rollback_and_exit;
+    end;
+End init_variables;
+
+Procedure update_batch_information is
+function_result varchar2(100);
+temp_x varchar2(1);
+Begin
+     select distinct 'x'  into temp_x
+		  from test_batch_hdr
+		  where tb_id = v_tb_id
+		  and test_chapter_id = v_chapter_id
+		  and group_test_id = v_test_id;
+	add_log_entry('Duplicate batch '||v_tb_id||' ... Aborting');
+	rollback_and_exit;
+Exception when no_data_found then
+   Begin
+       select 'x'  into temp_x from dual
+		where exists (select 'x' from utrs
+			      where tb_id = v_tb_id
+			      and test_id = v_test_id
+			      and test_chapter_id = v_chapter_id)  or
+		      exists (select 'x' from unit_test_base
+			      where tb_id = v_tb_id
+			      and test_id = v_test_id
+			      and test_chapter_id = v_chapter_id)  or
+		      exists (select 'x' from holding_tests
+			      where tb_id = v_tb_id
+			      and test_id = v_test_id
+			      and test_chapter_id = v_chapter_id)  or
+		      exists (select 'x' from test_voids
+			      where tb_id = v_tb_id
+			      and test_id = v_test_id
+			      and test_chapter_id = v_chapter_id);
+         add_log_entry('Duplicate batch '||v_tb_id||' ...Aborting');
+         rollback_and_exit;
+   Exception when no_Data_found then
+     begin
+         begin
+             insert into test_batch_hdr( tb_id, test_chapter_id, group_test_id,
+  	                                 first_unit_id, insert_dats, user_id)
+             values (v_tb_id, v_chapter_id, v_test_id, v_unit_id, sysdate,
+		     LT_USER_SESSION.get_userid);
+	 exception when others then
+	     add_log_entry('Problem inserting into test_batch_hdr... Aborting');
+	     rollback_and_exit;
+         end;
+
+	 begin
+             insert into test_batch_det(tb_id, test_chapter_id,
+	     testing_lab_code, test_id, test_type, cut_off_value, station_no,
+	     kit_lot_number)
+	     values (v_tb_id, v_chapter_id, testing_lab_code, v_test_id, 'A',
+	  	     cut_off, null, kit_lot);
+       exception when others then
+            add_log_entry('Problem inserting into test_batch_det.. Aborting');
+            rollback_and_exit;
+       end;
+
+       begin
+            function_result := sbclib.insert_test_parms (v_chapter_id,
+                            v_test_id, v_tb_id, v_machine_id, 'ATUPGALI');
+       end;
+        if rtrim(function_result)!='0' then
+        add_log_entry('Error inserting test parameters ... Aborting');
+	add_log_entry(function_result);
+	rollback_and_exit;
+        end if;
+    end;
+  End;
+    insert_instrument_log;
+End;
+
+Procedure insert_instrument_log is
+temp_x varchar2(1);
+Begin
+ begin
+    select 'x' into temp_x from instrument_log where
+    file_name=substr(result_file_name,instr(result_file_name,'/',-1)+1);
+    add_log_entry('File '||substr(result_file_name,
+    instr(result_file_name,'/',-1)+1)||' already uploaded ..Aborting');
+    rollback_and_exit;
+ exception
+    when no_data_found then
+       null;
+    when too_many_rows then
+     begin
+        add_log_entry('File '||substr(result_file_name,
+	instr(result_file_name,'/',-1)+1)||' already uploaded ..Aborting');
+        rollback_and_exit;
+     end;
+    when others then
+     begin
+        add_log_entry('Error verifying instrument_log ...Aborting');
+        rollback_and_exit;
+     end;
+ end;
+
+ begin
+    insert into instrument_log ( tb_id, test_chapter_id, test_id, read_dats,
+		           machine_id, station_no, xmt_status, status_dats,
+			   file_name)
+    values (v_tb_id, v_chapter_id,v_test_id,
+	    to_date(process_date_time,'MM-DD-YYYY HH24:MI') ,v_machine_id,
+	    ' ', '70', sysdate, substr(result_file_name,
+	    instr(result_file_name,'/',-1)+1));
+  exception when others then
+      add_log_entry('Error creating instrument log ... Aborting');
+      add_log_entry(sqlerrm);
+      rollback_and_exit;
+  end;
+End insert_instrument_log;
+
+procedure convert_unit_id(ok_status out varchar2) is
+Begin
+    select eye_read_trns||substr(v_unit_id,3) into
+    v_unit_id from bar_code_prefixes where
+    machine_code=substr(v_unit_id,1,2) and sysdate between
+    eff_date and nvl(term_date,sysdate);
+    ok_status:='OK';
+Exception
+    when others then
+    ok_status:='bar code translation'||sqlerrm;
+End convert_unit_id;
+
+procedure rollback_and_exit is
+end_time  varchar2(30);
+Begin
+rollback;
+add_log_entry('Aborting');
+UTL_FILE.fclose(logfile);
+raise_application_error('-20000','Aborting');
+End rollback_and_exit;
+
+procedure update_rpt_parm is
+Begin
+
+begin
+update test_batch_hdr set last_unit_id=last_unit where tb_id=v_tb_id;
+exception
+   when others  then
+	add_log_entry('Error updating test_batch_hdr');
+end;
+
+begin
+   insert into rpt_parm (appl_id, user_name, report_name, parm_id,
+			 parm_date, submit_date,report_status)
+	values ('SBC', LT_USER_SESSION.get_userid,
+                'ATUPRISM', substr(rtrim(p_file_name),1,20),
+		sysdate, sysdate, 'C');
+    exception
+	when others then
+	add_log_entry('Error inserting into rpt_parm');
+	add_log_entry(sqlerrm);
+end;
+End update_rpt_parm;
+
+END ATUPRISM;
+/

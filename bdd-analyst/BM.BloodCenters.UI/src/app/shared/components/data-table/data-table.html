@@ -1,0 +1,318 @@
+<div class="data-table-wrapper">
+  <!-- Loading State -->
+  <div *ngIf="loading" class="data-table__loading" role="alert" aria-live="polite">
+    <mat-spinner diameter="48" aria-hidden="true"></mat-spinner>
+    <p class="data-table__loading-text">
+      {{ config.loadingMessage || 'Loading data...' }}
+    </p>
+  </div>
+
+  <!-- Data Table -->
+  <div *ngIf="!loading" class="data-table-container" [class.data-table-container--sticky-header]="config.stickyHeader"
+    [class.data-table-container--sticky-actions]="config.stickyActionsColumn"
+    [class.data-table--has-actions]="config.rowActions && config.rowActions.length > 0">
+
+    <!-- Empty State (icon + message) - shown when showTableOnEmpty is false/undefined -->
+    <div *ngIf="shouldShowEmptyState" class="data-table__empty" [class.data-table__empty--no-results]="!config.emptySubMessage" role="status">
+      <mat-icon class="data-table__empty-icon" aria-hidden="true">
+        {{ config.noDataIcon || 'inbox' }}
+      </mat-icon>
+      <p class="data-table__empty-message">
+        {{ config.emptyMessage || 'No data available' }}
+      </p>
+      <p *ngIf="config.emptySubMessage" class="data-table__empty-sub-message">
+        {{ config.emptySubMessage }}
+      </p>
+    </div>
+
+    <!-- Table with Data OR Headers Only (when showTableOnEmpty is true) -->
+    <div *ngIf="shouldShowTable" class="data-table-scroll-wrapper">
+      <table mat-table [dataSource]="dataSource" class="data-table" role="table"
+        [multiTemplateDataRows]="!!expandTemplate">
+
+      <!-- Table Caption for Screen Readers -->
+      <caption class="cdk-visually-hidden">
+        {{ config.caption ? config.caption + ' — ' + data.length + ' records' : 'Data table with ' + data.length + ' records' }}
+      </caption>
+
+      <!-- Checkbox Selection Column -->
+      <ng-container matColumnDef="select" *ngIf="config.enableSelection">
+        <th mat-header-cell *matHeaderCellDef class="data-table__checkbox-header">
+          <mat-checkbox
+            (change)="toggleSelectAll()"
+            [checked]="isAllSelected"
+            [indeterminate]="selectedRows.length > 0 && !isAllSelected"
+            [attr.aria-label]="isAllSelected ? 'Deselect all rows' : 'Select all rows'">
+          </mat-checkbox>
+        </th>
+        <td mat-cell *matCellDef="let row; let i = index" class="data-table__checkbox-cell">
+          <mat-checkbox *ngIf="isRowSelectable(row)"
+            (click)="$event.stopPropagation()"
+            (change)="toggleRowSelection(row)"
+            [checked]="isRowSelected(row)"
+            [attr.aria-label]="'Select ' + getRowAriaLabel(row, i)">
+          </mat-checkbox>
+        </td>
+      </ng-container>
+
+      <!-- Expand Column (only when expandTemplate is provided) -->
+      @if (expandTemplate) {
+        <ng-container matColumnDef="expand">
+          <th mat-header-cell *matHeaderCellDef class="data-table__expand-header">
+            <button *ngIf="!config.hideExpandAllInHeader" mat-icon-button class="data-table__expand-button"
+              (click)="toggleExpandAll($event)"
+              [attr.aria-label]="allRowsExpanded ? 'Collapse all rows' : 'Expand all rows'">
+              <mat-icon aria-hidden="true">{{ allRowsExpanded ? 'keyboard_arrow_up' : 'keyboard_arrow_down' }}</mat-icon>
+            </button>
+          </th>
+          <td mat-cell *matCellDef="let row" class="data-table__expand-cell">
+            <button mat-icon-button class="data-table__expand-button"
+              (click)="toggleRowExpand($event, row)"
+              [attr.aria-label]="isRowExpanded(row) ? 'Collapse row' : 'Expand row'">
+              <mat-icon aria-hidden="true">{{ isRowExpanded(row) ? 'keyboard_arrow_up' : 'keyboard_arrow_down' }}</mat-icon>
+            </button>
+          </td>
+        </ng-container>
+      }
+
+      <!-- Dynamic Column Definitions -->
+      <ng-container *ngFor="let column of config.columns" [matColumnDef]="column.key">
+
+        <!-- Header Cell -->
+        <th mat-header-cell *matHeaderCellDef [class]="column.headerClass"
+          [class.data-table__header--sortable]="column.sortable" [class.data-table__header--sticky]="column.sticky"
+          [style.width]="column.width" [style.min-width]="column.minWidth" [style.max-width]="column.maxWidth"
+          role="columnheader" scope="col">
+
+          <!-- Sortable Header -->
+          <button *ngIf="column.sortable" class="data-table__sort-button"
+            [class.data-table__sort-button--active]="isSortActive(column)" [attr.aria-label]="getSortAriaLabel(column)"
+            [attr.aria-pressed]="isSortActive(column)" (click)="toggleSort(column)"
+            (keydown.space)="$event.preventDefault(); toggleSort(column)">
+            <!-- Icon Header -->
+            <mat-icon *ngIf="column.headerIcon" class="data-table__header-icon" aria-hidden="true">
+              {{ column.headerIcon }}
+            </mat-icon>
+            <!-- Text Header -->
+            <span *ngIf="!column.headerIcon" class="data-table__sort-text">{{ column.header }}</span>
+            <mat-icon class="data-table__sort-icon"
+              [class.data-table__sort-icon--active]="isSortActive(column)"
+              aria-hidden="true">
+              {{ getSortIcon(column) }}
+            </mat-icon>
+          </button>
+
+          <!-- Non-sortable Header -->
+          <ng-container *ngIf="!column.sortable">
+            <!-- Icon Header -->
+            <mat-icon *ngIf="column.headerIcon" class="data-table__header-icon" aria-hidden="true">
+              {{ column.headerIcon }}
+            </mat-icon>
+            <!-- Text + optional info icon -->
+            <div *ngIf="!column.headerIcon" class="data-table__header-content">
+              <span class="data-table__header-text">{{ column.header }}</span>
+              <mat-icon *ngIf="column.headerTooltip"
+                class="data-table__header-info-icon"
+                [matTooltip]="column.headerTooltip"
+                matTooltipPosition="above"
+                aria-hidden="true">info_outline</mat-icon>
+            </div>
+          </ng-container>
+        </th>
+
+        <!-- Data Cell -->
+        <td mat-cell *matCellDef="let row" [class]="column.cellClass"
+          [class.data-table__cell--truncate]="column.truncate" [class.data-table__cell--sticky]="column.sticky"
+          [style.width]="column.width" [style.min-width]="column.minWidth" [style.max-width]="column.maxWidth"
+          role="cell">
+
+          <!-- Custom Template -->
+          <ng-container *ngIf="column.cellTemplate">
+            <ng-container *ngTemplateOutlet="column.cellTemplate; context: { $implicit: row, column: column }">
+            </ng-container>
+          </ng-container>
+
+          <!-- Default Cell Content -->
+          <ng-container *ngIf="!column.cellTemplate">
+            <span #cellContent class="data-table__cell-content"
+              #tooltip="matTooltip"
+              [matTooltip]="getCellValue(column, row)"
+              [matTooltipShowDelay]="300"
+              matTooltipPosition="above"
+              matTooltipClass="data-table-cell-tooltip"
+              (mouseenter)="showTooltipIfOverflowing(cellContent, tooltip)"
+              [attr.aria-label]="column.truncate ? getCellValue(column, row) : null">
+              {{ column.truncate ? truncateText(column, row) : getCellValue(column, row) }}
+            </span>
+          </ng-container>
+        </td>
+      </ng-container>
+
+      <!-- Actions Column -->
+      <ng-container *ngIf="config.rowActions && config.rowActions.length > 0" matColumnDef="actions">
+
+        <th mat-header-cell *matHeaderCellDef class="data-table__actions-header"
+          [class.data-table__header--sticky-right]="config.stickyActionsColumn" role="columnheader" scope="col">
+          {{ config.actionsColumnHeader || '' }}
+        </th>
+
+        <td mat-cell *matCellDef="let row" class="data-table__actions-cell"
+          [class.data-table__cell--sticky-right]="config.stickyActionsColumn" role="cell">
+
+          <!-- Actions as Menu (Three-Dot Menu) -->
+          <div *ngIf="config.showActionsAsMenu" class="data-table__actions data-table__actions--menu">
+            <button mat-icon-button
+              [matMenuTriggerFor]="actionsMenu"
+              [attr.aria-label]="'Row actions'"
+              [matTooltip]="config.hideActionsTooltip ? '' : 'Row actions'"
+              [matTooltipDisabled]="config.hideActionsTooltip"
+              (click)="$event.stopPropagation()"
+              (menuOpened)="onMenuOpened(row)"
+              (menuClosed)="onMenuClosed()"
+              [class.menu-active]="isMenuActive(row)"
+              class="data-table__action-button data-table__action-button--menu">
+              <mat-icon aria-hidden="true">more_vert</mat-icon>
+            </button>
+            <mat-menu #actionsMenu="matMenu" xPosition="before">
+              <ng-container *ngFor="let action of config.rowActions">
+                <button mat-menu-item
+                  [disabled]="isRowActionDisabled(action, row)"
+                  [attr.aria-label]="getActionAriaLabel(action, row)"
+                  (click)="onRowActionClick(action.action, row)"
+                  *ngIf="isRowActionVisible(action, row)">
+                  <span>{{ action.label }}</span>
+                </button>
+              </ng-container>
+            </mat-menu>
+          </div>
+
+          <!-- Actions as Individual Buttons (Default) -->
+          <div *ngIf="!config.showActionsAsMenu" class="data-table__actions">
+            <ng-container *ngFor="let action of config.rowActions">
+              <button mat-icon-button
+                [class]="'data-table__action-button data-table__action-button--' + (action.color || 'default')"
+                [disabled]="isRowActionDisabled(action, row)" [attr.aria-label]="getActionAriaLabel(action, row)"
+                [matTooltip]="getActionAriaLabel(action, row)"
+                (click)="$event.stopPropagation(); onRowActionClick(action.action, row)"
+                *ngIf="isRowActionVisible(action, row)">
+
+                <img *ngIf="action.iconSvg" [src]="action.iconSvg" [alt]="action.label" class="action-icon-svg"
+                  aria-hidden="true">
+
+                <mat-icon *ngIf="!action.iconSvg" aria-hidden="true">{{ action.icon }}</mat-icon>
+              </button>
+            </ng-container>
+          </div>
+        </td>
+      </ng-container>
+
+      <!-- Group Header Column Definitions -->
+      <ng-container *ngFor="let groupCol of groupHeaderColumns" [matColumnDef]="groupCol.key">
+        <th mat-header-cell *matHeaderCellDef
+          [attr.colspan]="groupCol.colspan"
+          class="data-table__group-header-cell"
+          [class.data-table__group-header-cell--labeled]="groupCol.label">
+          {{ groupCol.label }}
+        </th>
+      </ng-container>
+
+      <!-- Group Header Row (above column headers, only if columnGroups configured) -->
+      <tr mat-header-row *matHeaderRowDef="groupHeaderColumnDefs; sticky: config.stickyHeader"
+        class="data-table__group-header-row"
+        [style.display]="groupHeaderColumnDefs.length > 0 ? '' : 'none'"
+        role="row">
+      </tr>
+
+      <!-- Table Header Row -->
+      <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: config.stickyHeader" role="row"
+        [style.display]="config.hideHeader ? 'none' : ''">
+      </tr>
+
+      <!-- Expanded Detail Column (only when expandTemplate is provided) -->
+      @if (expandTemplate) {
+        <ng-container matColumnDef="expandedDetail">
+          <td mat-cell *matCellDef="let row" [attr.colspan]="displayedColumns.length">
+            <div class="data-table__detail-content"
+              [@detailExpand]="isRowExpanded(row) ? 'expanded' : 'collapsed'">
+              @if (isRowExpanded(row)) {
+                <ng-container *ngTemplateOutlet="expandTemplate; context: { $implicit: row }"></ng-container>
+              }
+            </div>
+          </td>
+        </ng-container>
+      }
+
+      <!-- Table Body Rows -->
+      <tr mat-row *matRowDef="let row; columns: displayedColumns; let i = index;"
+        class="data-table__row" [class.data-table__row--selected]="isRowActive(row)"
+        (click)="onRowClick(row)"
+        (keydown.enter)="onRowClick(row)"
+        (keydown.space)="$event.preventDefault(); onRowClick(row)"
+        [attr.aria-label]="getRowAriaLabel(row, i)" [attr.aria-selected]="isRowActive(row)" role="row" tabindex="0">
+      </tr>
+
+      <!-- Expanded Detail Row (only when expandTemplate is provided) -->
+      @if (expandTemplate) {
+        <tr mat-row *matRowDef="let row; columns: ['expandedDetail']"
+          class="data-table__detail-row"
+          [class.data-table__detail-row--collapsed]="!isRowExpanded(row)">
+        </tr>
+      }
+    </table>
+
+
+      <!-- Empty State Below Headers (when showTableOnEmpty is true) -->
+      <div *ngIf="config.showTableOnEmpty && dataSource.data.length === 0" class="data-table__empty" [class.data-table__empty--no-results]="!config.emptySubMessage" role="status">
+        <mat-icon class="data-table__empty-icon" aria-hidden="true">
+          {{ config.noDataIcon || 'inbox' }}
+        </mat-icon>
+        <p class="data-table__empty-message">
+          {{ config.emptyMessage || 'No data available' }}
+        </p>
+        <p *ngIf="config.emptySubMessage" class="data-table__empty-sub-message">
+          {{ config.emptySubMessage }}
+        </p>
+      </div>
+    </div>
+
+    <!-- Table Footer (Outside Scroll Area) -->
+    <table *ngIf="config.showFooter && dataSource.data.length > 0" mat-table class="data-table data-table--footer-only" role="table">
+      <!-- Checkbox Selection Column Footer -->
+      <ng-container matColumnDef="select" *ngIf="config.enableSelection">
+        <td mat-footer-cell *matFooterCellDef class="data-table__footer-cell">
+        </td>
+      </ng-container>
+
+      <!-- Dynamic Column Definitions for Footer -->
+      <ng-container *ngFor="let column of config.columns" [matColumnDef]="column.key">
+        <td mat-footer-cell *matFooterCellDef [class]="column.cellClass + ' data-table__footer-cell'"
+          [style.width]="column.width" [style.min-width]="column.minWidth" [style.max-width]="column.maxWidth">
+          <span class="data-table__footer-content">
+            {{ getFooterValue(column.key) }}
+          </span>
+        </td>
+      </ng-container>
+
+      <!-- Actions Column Footer -->
+      <ng-container *ngIf="config.rowActions && config.rowActions.length > 0" matColumnDef="actions">
+        <td mat-footer-cell *matFooterCellDef class="data-table__footer-cell">
+        </td>
+      </ng-container>
+
+      <tr mat-footer-row *matFooterRowDef="displayedColumns" class="data-table__footer-row" role="row"></tr>
+    </table>
+  </div>
+
+  <!-- Pagination -->
+  <nav *ngIf="!loading && config.showPagination !== false && config.pagination && (config.pagination.totalRecords > 0 || data.length > 0)" class="data-table__pagination"
+    aria-label="Table pagination navigation">
+    <mat-paginator
+      [length]="config.pagination.totalRecords || data.length"
+      [pageSize]="config.pagination.pageSize"
+      [pageSizeOptions]="config.pagination.pageSizeOptions"
+      [pageIndex]="config.pagination.pageIndex"
+      [showFirstLastButtons]="config.pagination.showFirstLastButtons !== false"
+      (page)="onPageChange($event)">
+    </mat-paginator>
+  </nav>
+</div>

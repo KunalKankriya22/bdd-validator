@@ -1,0 +1,227 @@
+<div class="dialog-container" aria-labelledby="dialog-title">
+  <!-- Dialog Header -->
+  <div class="dialog-header">
+    <div class="dialog-header-content">
+      <h2 id="dialog-title" class="dialog-title">{{ dialogTitle }}</h2>
+      @if (!isAddMode && lastModified) {
+        <p class="dialog-subtitle">{{ lastModified }}</p>
+      }
+    </div>
+    <button
+      type="button"
+      mat-icon-button
+      class="dialog-close-button"
+      (click)="onCancel()"
+      aria-label="Close dialog">
+      <mat-icon>close</mat-icon>
+    </button>
+  </div>
+
+  <!-- Dialog Body -->
+  <div class="dialog-body">
+    <form [formGroup]="form" class="dialog-form">
+
+      <!-- Row 1: R Type and Control Indicator -->
+      <div class="form-row">
+        <mat-form-field appearance="fill" class="form-field" hideRequiredMarker>
+          <mat-label>R Type <span class="required-marker" aria-hidden="true">*</span></mat-label>
+          <mat-select formControlName="reagentType" required>
+            <mat-option *ngIf="isLoadingDropdowns()" disabled>Loading...</mat-option>
+            <mat-option *ngFor="let type of reagentTypes" [value]="type.code">
+              {{ type.code }} - {{ type.description }}
+            </mat-option>
+          </mat-select>
+          <mat-error *ngIf="form.get('reagentType')?.hasError('required')">
+            R Type is required
+          </mat-error>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label>Control Indicator</mat-label>
+          <mat-select formControlName="controlFlag">
+            <mat-option *ngIf="isLoadingDropdowns()" disabled>Loading...</mat-option>
+            <mat-option *ngFor="let flag of controlFlags" [value]="flag.code">
+              {{ flag.description }}
+            </mat-option>
+          </mat-select>
+          <mat-error *ngIf="form.get('controlFlag')?.hasError('required')">
+            Control Indicator is required when R Type is C-Control
+          </mat-error>
+        </mat-form-field>
+      </div>
+
+      <!-- Row 2: Reagent Code and Reagent Name -->
+      <div class="form-row">
+        <!-- Reagent Code (ADD: editable, EDIT: read-only display) -->
+        @if (isAddMode) {
+          <mat-form-field appearance="fill" class="form-field" hideRequiredMarker>
+            <mat-label>Reagent Code <span class="required-marker" aria-hidden="true">*</span></mat-label>
+            <input
+              matInput
+              formControlName="reagentCode"
+              maxlength="5"
+              autocomplete="off"
+              (input)="onReagentCodeInput($event)">
+            <mat-error *ngIf="form.get('reagentCode')?.hasError('required')">
+              Reagent Code is required
+            </mat-error>
+            <mat-error *ngIf="form.get('reagentCode')?.hasError('maxlength')">
+              Reagent Code cannot exceed 5 characters
+            </mat-error>
+          </mat-form-field>
+        } @else {
+          <div class="field-display-card" role="group" aria-label="Reagent Code">
+            <div class="field-label" id="reagent-code-label">Reagent Code</div>
+            <div class="field-value" aria-labelledby="reagent-code-label">{{ data?.reagentCode || '-' }}</div>
+          </div>
+        }
+
+        <mat-form-field appearance="fill" class="form-field" hideRequiredMarker>
+          <mat-label>Reagent Name <span class="required-marker" aria-hidden="true">*</span></mat-label>
+          <input
+            matInput
+            formControlName="reagentName"
+            maxlength="50"
+            autocomplete="off"
+            required>
+          <mat-error *ngIf="form.get('reagentName')?.hasError('required')">
+            Reagent Name is required
+          </mat-error>
+          <mat-error *ngIf="form.get('reagentName')?.hasError('maxlength')">
+            Reagent Name cannot exceed 50 characters
+          </mat-error>
+        </mat-form-field>
+      </div>
+
+      <!-- Row 3: Kit (Master Lot Required) -->
+      <div class="form-row">
+        <mat-form-field appearance="fill" class="form-field" hideRequiredMarker>
+          <mat-label>Kit <span class="required-marker" aria-hidden="true">*</span></mat-label>
+          <mat-select formControlName="masterLotRequired" required>
+            <mat-option *ngFor="let option of yesNoOptions" [value]="option.value">
+              {{ option.label }}
+            </mat-option>
+          </mat-select>
+          <mat-error *ngIf="form.get('masterLotRequired')?.hasError('required')">
+            Kit is required
+          </mat-error>
+        </mat-form-field>
+      </div>
+
+      <!-- Row 4: Effective Date and Termination Date -->
+      <div class="form-row">
+        <!-- Effective Date (editable when not in past, display-only when in past) -->
+        @if (form.get('effDate')?.disabled) {
+          <div class="field-display-card" role="group" aria-label="Effective Date">
+            <div class="field-label" id="eff-date-label">Effective Date</div>
+            <div class="field-value" aria-labelledby="eff-date-label">{{ form.get('effDate')?.value | date:'dd-MMM-yyyy' }}</div>
+          </div>
+        } @else {
+          <mat-form-field appearance="fill" class="form-field" hideRequiredMarker [class.has-error]="getEffectiveDateError()">
+            <mat-label>Effective Date <span class="required-marker" aria-hidden="true">*</span></mat-label>
+            <input
+              matInput
+              [matDatepicker]="effPicker"
+              formControlName="effDate"
+              [matDatepickerFilter]="effectiveDateFilter"
+              [errorStateMatcher]="effDateErrorMatcher"
+              required
+              aria-required="true"
+              (input)="onEffectiveDateInput($event)"
+              autocomplete="off">
+            <mat-datepicker-toggle matSuffix [for]="effPicker" aria-label="Open effective date calendar"></mat-datepicker-toggle>
+            <mat-datepicker #effPicker></mat-datepicker>
+            <mat-error *ngIf="getEffectiveDateError()">
+              {{ getEffectiveDateError() }}
+            </mat-error>
+          </mat-form-field>
+        }
+
+        <!-- Termination Date -->
+        <mat-form-field appearance="fill" class="form-field" [class.has-error]="getTerminationDateError()">
+          <mat-label>Termination Date</mat-label>
+          <input
+            matInput
+            [matDatepicker]="termPicker"
+            formControlName="termDate"
+            [matDatepickerFilter]="terminationDateFilter"
+            [errorStateMatcher]="termDateErrorMatcher"
+            (input)="onTerminationDateInput($event)"
+            autocomplete="off">
+          <mat-datepicker-toggle matSuffix [for]="termPicker" aria-label="Open termination date calendar"></mat-datepicker-toggle>
+          <mat-datepicker #termPicker></mat-datepicker>
+          <mat-error *ngIf="getTerminationDateError()">
+            {{ getTerminationDateError() }}
+          </mat-error>
+        </mat-form-field>
+      </div>
+
+      <!-- Row 5: Prep and Qual -->
+      <div class="form-row">
+        <mat-form-field appearance="fill" class="form-field" hideRequiredMarker>
+          <mat-label>Prep <span class="required-marker" aria-hidden="true">*</span></mat-label>
+          <mat-select formControlName="preparationFlag" required>
+            <mat-option *ngIf="isLoadingDropdowns()" disabled>Loading...</mat-option>
+            <mat-option *ngFor="let flag of preparationFlags" [value]="flag.code">
+              {{ flag.code }} - {{ flag.description }}
+            </mat-option>
+          </mat-select>
+          <mat-error *ngIf="form.get('preparationFlag')?.hasError('required')">
+            Prep is required
+          </mat-error>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field" hideRequiredMarker>
+          <mat-label>Qual <span class="required-marker" aria-hidden="true">*</span></mat-label>
+          <mat-select formControlName="prequalificationFlag" required>
+            <mat-option *ngFor="let option of yesNoOptions" [value]="option.value">
+              {{ option.label }}
+            </mat-option>
+          </mat-select>
+          <mat-error *ngIf="form.get('prequalificationFlag')?.hasError('required')">
+            Qual is required
+          </mat-error>
+        </mat-form-field>
+      </div>
+
+    </form>
+  </div>
+
+  <!-- Dialog Footer -->
+  <div class="dialog-footer">
+    <button
+      type="button"
+      mat-button
+      class="cancel-btn"
+      (click)="onCancel()"
+      [disabled]="saving">
+      CANCEL
+    </button>
+    <button
+      type="button"
+      mat-button
+      class="cancel-btn"
+      *ngIf="!isAddMode"
+      (click)="onClearAll()"
+      [disabled]="saving">
+      CLEAR ALL
+    </button>
+    <button
+      type="button"
+      mat-stroked-button
+      class="add-another-btn"
+      *ngIf="isAddMode"
+      (click)="onAddAndCreateAnother()"
+      [disabled]="!form.valid || saving || savingAddAnother">
+      {{ savingAddAnother ? 'SAVING...' : 'SAVE AND ADD ANOTHER' }}
+    </button>
+    <button
+      type="button"
+      mat-raised-button
+      color="primary"
+      (click)="onSave()"
+      [disabled]="!form.valid || saving || savingAddAnother || (!isAddMode && form.pristine)">
+      {{ saving ? 'SAVING...' : 'SAVE' }}
+    </button>
+  </div>
+</div>

@@ -1,0 +1,118 @@
+CREATE OR REPLACE PACKAGE  User_Session_Mgmt
+/*-----------------------------------------------------------------------------
+PACKAGE		:	User_Session_Mgmt
+PURPOSE   	:	To enable DBA to identify user sessions, in the absence of 
+				individual DB users
+DEVELOPER 	:	Arun Samuel
+DEV. DATE 	:	28 May 2011
+NOTES     	:	Initial version.
+Ver       	:	01
+
+Modification History
+-------------------------------------------------------------------------------
+Modified by		on		Version	Remarks
+-------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------*/
+AS
+	PROCEDURE grab_session_info;
+	PROCEDURE  kill_user_session(
+									i_sid 		IN NUMBER
+									,i_serno	IN NUMBER
+									,i_Rks		IN VARCHAR2
+								) 
+	;
+END user_session_mgmt;
+/
+
+
+
+
+
+
+CREATE OR REPLACE PACKAGE BODY user_session_mgmt
+/*-----------------------------------------------------------------------------
+PACKAGE		:	User_Session_Mgmt
+PURPOSE   	:	To enable DBA to identify user sessions, in the absence of 
+				individual DB users
+DEVELOPER 	:	Arun Samuel
+DEV. DATE 	:	28 May 2011
+NOTES     	:	Initial version.
+Ver       	:	01
+
+Modification History
+-------------------------------------------------------------------------------
+Modified by		on		Version	Remarks
+-------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------*/
+AS
+	PROCEDURE grab_session_info
+	AS 
+		sqlscript	VARCHAR2(600);
+	BEGIN
+		sqlscript	:=	'INSERT INTO user_session_info '||
+						'SELECT	lt_user_session.get_userid '||
+						'	,vs.logtime '||
+						'	,USERENV(''SESSIONID'') '||
+						'	,vs.serno '||
+						'	,NULL '||
+						'FROM	DUAL d, ( '||
+						'	SELECT 	logon_time logtime '||
+						'	,serial# serno '||
+						'	FROM 	v$session '||
+						'	WHERE 	audsid	=	USERENV(''SESSIONID'') '||
+						') vs '
+		;
+
+		EXECUTE IMMEDIATE sqlscript;
+		
+		COMMIT;
+		
+	END grab_session_info;
+	
+	PROCEDURE  kill_user_session(
+									i_sid 		IN NUMBER
+									,i_serno	IN NUMBER
+									,i_Rks		IN VARCHAR2
+								) 
+	AS
+		cursor_name     pls_integer default dbms_sql.open_cursor;
+	    ignore          pls_integer;
+	    v_sid				number;
+	    v_sql_str		varchar2(100);
+	BEGIN
+		SELECT 	sid
+		INTO	v_sid
+		FROM 	v$session
+		WHERE	audsid	=	i_sid
+			AND serial#	=	i_serno
+		;
+		
+		v_sql_str	:=	'ALTER SYSTEM KILL SESSION '''||v_sid||','||i_serno||'''';
+		dbms_output.put_line(v_sql_str);
+		UPDATE 	user_session_info
+		SET 	remarks		=	i_rks
+		WHERE	session_id	=	i_sid
+			AND	serno		=	i_serno
+		;
+
+		EXECUTE IMMEDIATE v_sql_str;
+
+		COMMIT;
+
+		dbms_output.put_line('Session '||i_sid||' killed successfully.');
+
+	EXCEPTION
+		WHEN OTHERS THEN
+			ROLLBACK;
+			dbms_output.put_line(sqlerrm);
+			dbms_output.put_line('Session '||i_sid||' could not be killed ! Please investigate....');
+			
+	END kill_user_session;
+
+END user_session_mgmt;
+/
+
+Create Or Replace Public Synonym user_session_mgmt for user_session_mgmt;
+

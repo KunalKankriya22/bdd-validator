@@ -1,0 +1,299 @@
+<div class="add-edit-link-dialog" role="dialog" aria-labelledby="dialog-title" aria-modal="true">
+
+  <!-- Dialog Header -->
+  <div class="dialog-header">
+    <div class="dialog-header__titles">
+      <h2 class="dialog-title" id="dialog-title">{{ dialogTitle }}</h2>
+      <p *ngIf="isEditMode && lastModified" class="dialog-subtitle">{{ lastModifiedText }}</p>
+    </div>
+    <button
+      mat-icon-button
+      type="button"
+      class="dialog-close"
+      aria-label="Close dialog"
+      (click)="onCancel()">
+      <mat-icon aria-hidden="true">close</mat-icon>
+    </button>
+  </div>
+
+  <!-- Dialog Content — form id used by footer submit button (button sits outside this form) -->
+  <div class="dialog-content">
+    <form
+      id="addEditLinkForm"
+      [formGroup]="linkForm"
+      (ngSubmit)="onSave()">
+
+      <!-- Row 1: Group ID | Category Code — add: editable gray fill; edit: read-only white (sponsor-name-field) -->
+      <div class="form-row form-row--two">
+        <mat-form-field
+          appearance="fill"
+          class="form-field"
+          [class.sponsor-name-field]="isEditMode"
+          subscriptSizing="dynamic">
+          <mat-label>
+            Group ID <span *ngIf="!isEditMode" class="add-edit-link-dialog__required-star" aria-hidden="true">*</span>
+          </mat-label>
+          <input
+            matInput
+            formControlName="groupId"
+            (input)="onGroupIdInput($event)"
+            maxlength="5"
+            [readonly]="isEditMode"
+            autocomplete="off"
+            [attr.aria-required]="!isEditMode"
+            aria-label="Group ID">
+          <mat-error *ngIf="hasError('groupId', 'required')">
+            Group ID is required
+          </mat-error>
+          <mat-error *ngIf="hasError('groupId', 'whitespaceOnly')">
+            Group ID cannot contain only spaces
+          </mat-error>
+          <mat-error *ngIf="hasError('groupId', 'maxlength')">
+            Group ID cannot be more than 5 characters
+          </mat-error>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label>Category Code</mat-label>
+          <mat-select
+            formControlName="categoryCode"
+            (selectionChange)="onCategoryCodeChange($event.value)"
+            required
+            aria-required="true"
+            aria-label="Select category code"
+            panelClass="add-edit-link-category-code-overlay">
+            @if (isLoadingCategoryCodes) {
+              <mat-option
+                [value]="selectPanelLoadingValue"
+                disabled
+                class="add-edit-link-dialog__panel-option--status">
+                <span class="add-edit-link-dialog__panel-loading">
+                  <mat-spinner diameter="20" class="add-edit-link-dialog__field-spinner" aria-hidden="true"></mat-spinner>
+                  <span>Loading...</span>
+                </span>
+              </mat-option>
+            } @else if (categoryCodes.length === 0) {
+              <mat-option
+                [value]="selectPanelEmptyValue"
+                disabled
+                class="add-edit-link-dialog__panel-option--status">
+                No data available
+              </mat-option>
+            } @else {
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="categoryCodeSearchControl"
+                  placeholderLabel="Search category codes..."
+                  noEntriesFoundLabel="No matching category codes">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (code of filteredCategoryCodes; track code.code) {
+                <mat-option [value]="code.code">
+                  {{ code.code }}{{ code.description ? ' - ' + code.description : '' }}
+                </mat-option>
+              }
+              @if (filteredCategoryCodes.length === 0) {
+                <mat-option
+                  disabled
+                  class="add-edit-link-dialog__panel-option--status">
+                  No Data Available
+                </mat-option>
+              }
+            }
+          </mat-select>
+          <mat-error *ngIf="hasError('categoryCode', 'required')">
+            Category Code is required
+          </mat-error>
+        </mat-form-field>
+      </div>
+
+      <!-- Row 2: Category Values (full width) — chips in trigger -->
+      <div class="form-row form-row--full">
+        <mat-form-field appearance="fill" class="form-field full-width" subscriptSizing="dynamic">
+          <mat-label>Category Values</mat-label>
+          <mat-select
+            formControlName="categoryValues"
+            multiple
+            (selectionChange)="onCategoryValuesChange($event.value)"
+            [disabled]="isCategoryValueDisabled"
+            panelClass="add-edit-link-category-values-overlay"
+            aria-label="Select category values">
+            <mat-select-trigger>
+              <div class="category-values-trigger">
+                <ng-container *ngIf="selectedCategoryValues.length === 0">
+                  <span class="category-values-trigger__placeholder"></span>
+                </ng-container>
+                <ng-container *ngIf="selectedCategoryValues.length > 0">
+                  <div class="category-values-trigger__inner">
+                    <span class="category-values-trigger__chips">
+                      <ng-container *ngFor="let code of displayedCategoryChips">
+                        <span class="category-values-trigger__chip">
+                          <span class="category-values-trigger__chip-text">
+                            {{ code }}
+                          </span>
+                          <button type="button"
+                            class="category-values-trigger__chip-remove"
+                            [attr.aria-label]="'Remove ' + code"
+                            (click)="removeCategoryValue(code, $event)">
+                            <mat-icon aria-hidden="true">cancel</mat-icon>
+                          </button>
+                        </span>
+                      </ng-container>
+                    </span>
+                    <span
+                      *ngIf="overflowCategoryCount > 0"
+                      class="category-values-trigger__more"
+                      [attr.aria-label]="'+' + overflowCategoryCount + ' more selected'">
+                      +{{ overflowCategoryCount }}
+                    </span>
+                  </div>
+                </ng-container>
+              </div>
+            </mat-select-trigger>
+            @if (isLoadingCategoryValues) {
+              <mat-option
+                [value]="selectPanelLoadingValue"
+                disabled
+                class="add-edit-link-dialog__panel-option--status">
+                <span class="add-edit-link-dialog__panel-loading">
+                  <mat-spinner diameter="20" class="add-edit-link-dialog__field-spinner" aria-hidden="true"></mat-spinner>
+                  <span>Loading...</span>
+                </span>
+              </mat-option>
+            } @else if (categoryValues.length === 0) {
+              <mat-option
+                [value]="selectPanelEmptyValue"
+                disabled
+                class="add-edit-link-dialog__panel-option--status">
+                No data available
+              </mat-option>
+            } @else {
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="categoryValuesSearchControl"
+                  placeholderLabel="Search category values..."
+                  noEntriesFoundLabel="No matching category values">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (value of filteredCategoryValues; track value.code) {
+                <mat-option [value]="value.code">
+                  {{ value.code }}{{ value.description ? ' - ' + value.description : '' }}
+                </mat-option>
+              }
+              @if (filteredCategoryValues.length === 0) {
+                <mat-option
+                  disabled
+                  class="add-edit-link-dialog__panel-option--status">
+                  No Data Available
+                </mat-option>
+              }
+            }
+          </mat-select>
+        </mat-form-field>
+      </div>
+
+      <!-- Row 3: Effective Date | Termination Date (validation aligned with Add Territories) -->
+      <div class="form-row form-row--two">
+        @if (isEditMode) {
+          <mat-form-field
+            appearance="fill"
+            class="form-field"
+            [class.sponsor-name-field]="isEditMode"
+            subscriptSizing="dynamic">
+            <mat-label>
+              Effective Date
+            </mat-label>
+            <input
+              matInput
+              [value]="formattedEffDateForEdit"
+              readonly
+              aria-required="true"
+              aria-label="Effective Date">
+          </mat-form-field>
+        } @else {
+          <mat-form-field appearance="fill" class="form-field" [class.has-error]="getEffectiveDateError()">
+            <mat-label>
+              Effective Date
+            </mat-label>
+            <input
+              matInput
+              [matDatepicker]="effDatePicker"
+              formControlName="effDate"
+              [min]="minDate"
+              [matDatepickerFilter]="effectiveDateFilterFn"
+              placeholder="DD-MMM-YYYY"
+              [errorStateMatcher]="effDateErrorMatcher"
+              (input)="onEffectiveDateInput($event)"
+              aria-required="true"
+              aria-label="Select effective date">
+            <mat-datepicker-toggle matIconSuffix [for]="effDatePicker"></mat-datepicker-toggle>
+            <mat-datepicker #effDatePicker></mat-datepicker>
+            @if (getEffectiveDateError()) {
+              <mat-error>{{ getEffectiveDateError() }}</mat-error>
+            }
+          </mat-form-field>
+        }
+
+        <mat-form-field appearance="fill" class="form-field" [class.has-error]="getTerminationDateError()">
+          <mat-label>Termination Date</mat-label>
+          <input
+            matInput
+            [matDatepicker]="termDatePicker"
+            formControlName="termDate"
+            [matDatepickerFilter]="terminationDateFilter"
+            [errorStateMatcher]="termDateErrorMatcher"
+            placeholder="DD-MMM-YYYY"
+            (input)="onTerminationDateInput($event)"
+            aria-label="Select termination date">
+          <mat-datepicker-toggle matIconSuffix [for]="termDatePicker"></mat-datepicker-toggle>
+          <mat-datepicker #termDatePicker></mat-datepicker>
+          @if (getTerminationDateError()) {
+            <mat-error>{{ getTerminationDateError() }}</mat-error>
+          }
+        </mat-form-field>
+      </div>
+
+    </form>
+  </div>
+
+  <!-- Dialog Actions -->
+  <div class="dialog-actions">
+    <button
+      mat-button
+      type="button"
+      color="accent"
+      class="dialog-actions__cancel"
+      (click)="onCancel()">
+      CANCEL
+    </button>
+
+    @if (!isEditMode) {
+      <button
+        mat-stroked-button
+        color="accent"
+        type="button"
+        class="dialog-actions__secondary"
+        (click)="onSaveAndCreateAnother()"
+        [disabled]="!canSave">
+        @if (isAddAnotherButtonSubmitting) {
+          <mat-spinner diameter="16" class="dialog-actions__spinner" aria-hidden="true"></mat-spinner>
+        }
+        {{ isAddAnotherButtonSubmitting ? 'SAVING...' : 'ADD AND CREATE ANOTHER' }}
+      </button>
+    }
+
+    <button
+      mat-raised-button
+      color="accent"
+      type="submit"
+      form="addEditLinkForm"
+      class="dialog-actions__primary"
+      [disabled]="!canSave">
+      @if (isPrimaryButtonSubmitting) {
+        <mat-spinner diameter="16" class="dialog-actions__spinner" aria-hidden="true"></mat-spinner>
+      }
+      {{ isPrimaryButtonSubmitting ? 'SAVING...' : (isEditMode ? 'SAVE' : 'ADD') }}
+    </button>
+  </div>
+
+</div>

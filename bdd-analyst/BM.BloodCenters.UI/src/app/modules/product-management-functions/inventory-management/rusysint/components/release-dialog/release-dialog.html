@@ -1,0 +1,185 @@
+<div class="release-dialog-container">
+  <h2 mat-dialog-title [id]="elementId('title')">
+    Release {{ data.quarantineType === 'QU' ? 'Quarantine' : 'Return' }} Product
+  </h2>
+
+  <mat-dialog-content>
+    <!-- Product Information -->
+    <div class="product-info-section">
+      <h3>Product Information</h3>
+      <div class="info-grid">
+        <div class="info-item">
+          <span class="label">Unit ID:</span>
+          <span class="value">{{ data.product.unitId }}</span>
+        </div>
+        <div class="info-item">
+          <span class="label">Product Code:</span>
+          <span class="value">{{ data.product.productCode }}</span>
+        </div>
+        <div class="info-item">
+          <span class="label">Product Description:</span>
+          <span class="value">{{ data.product.productDesc || '-' }}</span>
+        </div>
+        <div class="info-item">
+          <span class="label">Aliquot:</span>
+          <span class="value">{{ data.product.aliquot }}</span>
+        </div>
+        <div class="info-item">
+          <span class="label">Blood Type:</span>
+          <span class="value">{{ data.product.bloodType || '-' }}</span>
+        </div>
+        <div class="info-item">
+          <span class="label">Collection Date:</span>
+          <span class="value">{{ formatDate(data.product.collDate) }}</span>
+        </div>
+        <div class="info-item">
+          <span class="label">Expiration Date:</span>
+          <span class="value" [class.expired]="isExpired">
+            {{ formatDate(data.product.expDate) }}
+            @if (isExpired) {
+              <mat-icon class="expired-icon" aria-hidden="true">warning</mat-icon>
+            }
+          </span>
+        </div>
+        <div class="info-item">
+          <span class="label">Current Location:</span>
+          <span class="value">{{ data.product.locationId || '-' }}</span>
+        </div>
+      </div>
+
+      @if (isExpired) {
+        <div class="warning-message" role="alert">
+          <mat-icon aria-hidden="true">warning</mat-icon>
+          <span>This product is expired and cannot be restocked. You must reject it.</span>
+        </div>
+      }
+    </div>
+
+    <!-- Release Form -->
+    <form [formGroup]="form" class="release-form">
+      <!-- Release Action Selection -->
+      <mat-radio-group
+        [id]="elementId('release-action')"
+        formControlName="releaseAction"
+        class="release-action-group"
+        [attr.aria-labelledby]="labelId('release-action')">
+        <label [id]="labelId('release-action')" class="group-label">
+          Select Action <span class="required-marker">*</span>
+        </label>
+
+        <mat-radio-button value="restock" [disabled]="!canRestock">
+          <div class="radio-option">
+            <span class="radio-label">Restock to Inventory</span>
+            <span class="radio-description">Return product to available inventory</span>
+          </div>
+        </mat-radio-button>
+
+        <mat-radio-button value="reject">
+          <div class="radio-option">
+            <span class="radio-label">Reject Product</span>
+            <span class="radio-description">Remove product from inventory permanently</span>
+          </div>
+        </mat-radio-button>
+      </mat-radio-group>
+
+      <!-- Restock Section -->
+      @if (isRestock) {
+        <div class="restock-section">
+          <h4>Storage Location</h4>
+
+          @if (selectedLocation) {
+            <div class="selected-location">
+              <div class="location-info">
+                <mat-icon>place</mat-icon>
+                <div class="location-details">
+                  <div class="location-id">{{ selectedLocation.locationId }}</div>
+                  <div class="location-desc">
+                    {{ selectedLocation.warehouseDesc || selectedLocation.warehouseId }} -
+                    {{ selectedLocation.deviceDesc || selectedLocation.deviceNumber }}
+                  </div>
+                  <div class="location-capacity">
+                    Capacity: {{ selectedLocation.currentCount || 0 }} / {{ selectedLocation.trayCapacity || 0 }}
+                  </div>
+                </div>
+              </div>
+              <button
+                mat-icon-button
+                type="button"
+                (click)="onClearLocation()"
+                aria-label="Clear selected location">
+                <mat-icon>close</mat-icon>
+              </button>
+            </div>
+          } @else {
+            <button
+              mat-raised-button
+              type="button"
+              color="primary"
+              (click)="onSelectLocation()"
+              [id]="elementId('select-location-btn')">
+              <mat-icon>search</mat-icon>
+              Select Storage Location
+            </button>
+            @if (submitted() && f['locationId'].invalid) {
+              <div class="error-message" role="alert" [id]="errorId('location')">
+                Storage location is required for restocking
+              </div>
+            }
+          }
+        </div>
+      }
+
+      <!-- Reject Section -->
+      @if (isReject) {
+        <div class="reject-section">
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label [id]="labelId('reject-code')">
+              Reject Reason <span class="required-marker">*</span>
+            </mat-label>
+            <mat-select
+              [id]="elementId('reject-code')"
+              formControlName="rejectCode"
+              [attr.aria-labelledby]="labelId('reject-code')"
+              [attr.aria-describedby]="f['rejectCode'].invalid && (f['rejectCode'].touched || submitted()) ? errorId('reject-code') : null">
+              @for (code of rejectCodes; track code.rejectCode) {
+                <mat-option [value]="code.rejectCode">
+                  {{ formatRejectCode(code) }}
+                </mat-option>
+              }
+            </mat-select>
+            @if (f['rejectCode'].invalid && (f['rejectCode'].touched || submitted())) {
+              <mat-error [id]="errorId('reject-code')">
+                Reject reason is required
+              </mat-error>
+            }
+          </mat-form-field>
+        </div>
+      }
+    </form>
+  </mat-dialog-content>
+
+  <mat-dialog-actions align="end">
+    <button
+      mat-button
+      type="button"
+      (click)="onCancel()"
+      [disabled]="processing()"
+      [id]="elementId('cancel-btn')">
+      Cancel
+    </button>
+    <button
+      mat-raised-button
+      color="primary"
+      type="button"
+      (click)="onRelease()"
+      [disabled]="processing()"
+      [id]="elementId('release-btn')">
+      @if (processing()) {
+        <mat-spinner diameter="20" style="display: inline-block; margin-right: 8px;"></mat-spinner>
+        Processing...
+      } @else {
+        {{ isRestock ? 'Restock' : 'Reject' }} Product
+      }
+    </button>
+  </mat-dialog-actions>
+</div>

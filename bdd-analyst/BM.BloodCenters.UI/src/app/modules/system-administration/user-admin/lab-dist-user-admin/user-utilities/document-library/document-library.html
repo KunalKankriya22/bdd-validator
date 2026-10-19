@@ -1,0 +1,303 @@
+<div class="document-library-page">
+  <!-- Loading Overlay -->
+  <div *ngIf="isDownloading || isDeleting || isUnlinking" class="loading-overlay" role="status" aria-live="polite" aria-atomic="true">
+    <mat-spinner diameter="50" aria-label="Processing"></mat-spinner>
+    <p class="loading-text">
+      {{ isUnlinking ? 'Unlinking document...' : (isDeleting ? 'Deleting document...' : 'Downloading document...') }}
+    </p>
+  </div>
+
+  <div class="page-wrapper">
+    <!-- Visually hidden h1 for proper heading hierarchy -->
+    <h1 class="cdk-visually-hidden">Document Library</h1>
+
+    <!-- PAGE HEADER WITH BREADCRUMB -->
+    <app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+    <!-- FILTER CARD -->
+    <div class="filter-card">
+      <form [formGroup]="filterForm" (ngSubmit)="onRetrieve()" class="filter-form">
+        <div class="filter-field-wrapper filter-field-wrapper--table">
+          <mat-form-field appearance="fill" class="filter-field filter-field--table">
+            <mat-label>Table</mat-label>
+            <mat-select
+              formControlName="table"
+              aria-label="Table"
+              panelClass="document-library-table-overlay">
+              @if (isLoadingFilters) {
+                <mat-option
+                  [value]="selectPanelLoadingValue"
+                  disabled
+                  class="filter-panel__option--status">
+                  <span class="filter-panel__loading">
+                    <mat-spinner diameter="20" class="filter-panel__spinner" aria-hidden="true"></mat-spinner>
+                    <span>Loading...</span>
+                  </span>
+                </mat-option>
+              } @else if (tableOptions.length === 0) {
+                <mat-option
+                  [value]="selectPanelEmptyValue"
+                  disabled
+                  class="filter-panel__option--status">
+                  No data available
+                </mat-option>
+              } @else {
+                @if (tableOptions.length >= 3) {
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="tableSearchControl"
+                      placeholderLabel="Search tables..."
+                      noEntriesFoundLabel="No matching tables">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                }
+                @for (table of filteredTableOptions; track table) {
+                  <mat-option [value]="table">
+                    {{ table }}
+                  </mat-option>
+                }
+                @if (filteredTableOptions.length === 0) {
+                  <mat-option
+                    disabled
+                    class="filter-panel__option--status">
+                    No Data Available
+                  </mat-option>
+                }
+              }
+            </mat-select>
+          </mat-form-field>
+        </div>
+
+        <div class="filter-field-wrapper filter-field-wrapper--column">
+          <mat-form-field appearance="fill" class="filter-field filter-field--column">
+            <mat-label>Column</mat-label>
+            <mat-select
+              formControlName="column"
+              aria-label="Column"
+              panelClass="document-library-column-overlay">
+              @if (isLoadingFilters) {
+                <mat-option
+                  [value]="selectPanelLoadingValue"
+                  disabled
+                  class="filter-panel__option--status">
+                  <span class="filter-panel__loading">
+                    <mat-spinner diameter="20" class="filter-panel__spinner" aria-hidden="true"></mat-spinner>
+                    <span>Loading...</span>
+                  </span>
+                </mat-option>
+              } @else if (columnOptions.length === 0) {
+                <mat-option
+                  [value]="selectPanelEmptyValue"
+                  disabled
+                  class="filter-panel__option--status">
+                  No data available
+                </mat-option>
+              } @else {
+                @if (columnOptions.length >= 3) {
+                  <mat-option>
+                    <ngx-mat-select-search
+                      [formControl]="columnSearchControl"
+                      placeholderLabel="Search columns..."
+                      noEntriesFoundLabel="No matching columns">
+                    </ngx-mat-select-search>
+                  </mat-option>
+                }
+                @for (column of filteredColumnOptions; track column) {
+                  <mat-option [value]="column">
+                    {{ column }}
+                  </mat-option>
+                }
+                @if (filteredColumnOptions.length === 0) {
+                  <mat-option
+                    disabled
+                    class="filter-panel__option--status">
+                    No Data Available
+                  </mat-option>
+                }
+              }
+            </mat-select>
+          </mat-form-field>
+        </div>
+
+        <div class="filter-field-wrapper filter-field-wrapper--value">
+          <mat-form-field appearance="fill" class="filter-field filter-field--value">
+            <mat-label>Value</mat-label>
+            <input matInput formControlName="value" aria-label="Filter by value" maxlength="30">
+          </mat-form-field>
+        </div>
+
+        <div class="filter-field-wrapper filter-field-wrapper--doc-id">
+          <mat-form-field appearance="fill" class="filter-field filter-field--doc-id">
+            <mat-label>Document ID</mat-label>
+            <input matInput formControlName="docId" aria-label="Filter by document ID" maxlength="30"
+                   (blur)="filterForm.get('docId')?.markAsTouched()">
+          </mat-form-field>
+          @if (getFilterDocIdError()) {
+            <div class="error-message">{{ getFilterDocIdError() }}</div>
+          }
+        </div>
+
+        <div class="from-date-wrapper">
+          <mat-form-field appearance="fill" class="date-field">
+            <mat-label>From Date</mat-label>
+            <input matInput
+              [matDatepicker]="fromPicker"
+              formControlName="fromDate"
+              [max]="maxToDate()"
+              [errorStateMatcher]="fromDateErrorMatcher"
+              (input)="onFromDateInput($event)"
+              (dateChange)="onFromDateChange()"
+              maxlength="11"
+              required
+              aria-label="From Date">
+            <mat-datepicker-toggle matIconSuffix [for]="fromPicker"
+              aria-label="Open from date calendar"></mat-datepicker-toggle>
+            <mat-datepicker #fromPicker (closed)="onDatePickerClosed()"></mat-datepicker>
+          </mat-form-field>
+          @if (getFromDateError()) {
+            <div class="error-message">{{ getFromDateError() }}</div>
+          }
+        </div>
+
+        <div class="to-date-wrapper">
+          <mat-form-field appearance="fill" class="date-field">
+            <mat-label>To Date</mat-label>
+            <input matInput
+              [matDatepicker]="toPicker"
+              formControlName="toDate"
+              [max]="maxToDate()"
+              [errorStateMatcher]="toDateErrorMatcher"
+              (input)="onToDateInput($event)"
+              (dateChange)="onToDateChange()"
+              maxlength="11"
+              required
+              aria-label="To Date">
+            <mat-datepicker-toggle matIconSuffix [for]="toPicker"
+              aria-label="Open to date calendar"></mat-datepicker-toggle>
+            <mat-datepicker #toPicker (closed)="onDatePickerClosed()"></mat-datepicker>
+          </mat-form-field>
+          @if (getToDateError()) {
+            <div class="error-message">{{ getToDateError() }}</div>
+          }
+        </div>
+
+        <div class="filter-actions">
+          <button mat-raised-button type="submit" class="btn-retrieve"
+            [disabled]="isLoading || !hasFilterValues || filterForm.invalid" aria-label="Retrieve documents">
+            RETRIEVE
+          </button>
+          <button mat-button type="button" class="btn-clear"
+            [disabled]="isClearAllDisabled" (click)="onClearAll()" aria-label="Clear all filters">
+            CLEAR ALL
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <!-- INITIAL EMPTY STATE (Before any retrieval) -->
+    <div *ngIf="!hasDocuments && !isLoading && documents.length === 0" class="initial-empty-state">
+      <div class="empty-state-icon" aria-hidden="true">
+        <mat-icon>edit</mat-icon>
+      </div>
+      <h3 class="empty-state-title">Get Started</h3>
+      <p class="empty-state-message">
+        Enter the required details above to view and print the uploaded documents.
+      </p>
+    </div>
+
+    <!-- SPLIT VIEW PANEL (After retrieval) -->
+    <div class="split-view-panel" *ngIf="hasDocuments || isLoading || documents.length > 0">
+      <!-- LEFT: DOCUMENTS LIST -->
+      <div class="documents-section">
+        <div class="section-header">
+          <h2 class="section-title">Documents{{ hasDocuments ? ' (' + uniqueDocuments.length + ')' : '' }}</h2>
+        </div>
+
+        <!-- EMPTY STATE -->
+        <div *ngIf="!hasDocuments && !isLoading" class="empty-state">
+          <div class="empty-state-icon" aria-hidden="true">
+            <mat-icon>edit</mat-icon>
+          </div>
+          <h3 class="empty-state-title">Get Started</h3>
+          <p class="empty-state-message">
+            Enter the required details above to view and print the uploaded documents.
+          </p>
+        </div>
+
+        <!-- DOCUMENTS LIST -->
+        <div class="documents-list" *ngIf="hasDocuments || isLoading">
+          <div *ngIf="isLoading" class="loading-state" role="status" aria-live="polite">
+            <mat-spinner diameter="40" aria-label="Loading documents"></mat-spinner>
+          </div>
+          @for (doc of uniqueDocuments; track doc.sessionId) {
+            <div class="document-item"
+                 [class.selected]="isDocumentSelected(doc)"
+                 role="button"
+                 tabindex="0"
+                 [attr.aria-pressed]="isDocumentSelected(doc)"
+                 (click)="onSelectDocument(doc)"
+                 (keydown.enter)="onSelectDocument(doc)"
+                 (keydown.space)="onSelectDocument(doc); $event.preventDefault()">
+              <mat-icon class="file-icon" [class.file-icon-pdf]="isPdfDocument(doc)" [class.file-icon-doc]="isDocDocument(doc)" [class.file-icon-xls]="isXlsDocument(doc)">
+                {{ getDocumentIcon(doc) }}
+              </mat-icon>
+              <div class="document-info">
+                <span #docNameElement
+                      class="document-name"
+                      [matTooltip]="doc.docName"
+                      #docNameTooltip="matTooltip"
+                      matTooltipPosition="below"
+                      matTooltipClass="document-tooltip"
+                      (mouseenter)="showTooltipIfOverflowing(docNameElement, docNameTooltip)">{{ doc.docName }}</span>
+                <span #docTypeElement
+                      class="document-type"
+                      [matTooltip]="doc.docType + ' / ' + doc.docId"
+                      #docTypeTooltip="matTooltip"
+                      matTooltipPosition="below"
+                      matTooltipClass="document-tooltip"
+                      (mouseenter)="showTooltipIfOverflowing(docTypeElement, docTypeTooltip)">{{ doc.docType }} / {{ doc.docId }}</span>
+              </div>
+              <button mat-icon-button class="btn-delete-doc" (click)="onDeleteDocumentClick($event, doc)" aria-label="Delete document">
+                <mat-icon>delete</mat-icon>
+              </button>
+            </div>
+          }
+        </div>
+      </div>
+
+      <!-- RIGHT: LINKED VALUES -->
+      <div class="linked-values-section">
+        <div class="section-header">
+          <h2 class="section-title">Linked Values{{ selectedDocumentLinkedValues.length > 0 ? ' (' + selectedDocumentLinkedValues.length + ')' : '' }}</h2>
+          <div class="header-actions" *ngIf="selectedDocument">
+            <button *ngIf="hasSelectedLinkedValues" mat-stroked-button class="btn-detach" (click)="onDetachClick()" aria-label="Detach selected values">
+              <mat-icon svgIcon="neg-circle" aria-hidden="true"></mat-icon>
+              DETACH
+            </button>
+            <button mat-stroked-button class="btn-link-document" (click)="onLinkDocumentClick()" aria-label="Link document">
+              <mat-icon>link</mat-icon>
+              LINK DOCUMENT
+            </button>
+          </div>
+        </div>
+
+        <!-- LINKED VALUES TABLE -->
+        <div class="linked-values-table-wrapper" *ngIf="selectedDocument && selectedDocumentLinkedValues.length > 0">
+          <app-data-table #linkedValuesTable
+            [config]="linkedValuesTableConfig"
+            [data]="selectedDocumentLinkedValues"
+            [loading]="isLoading"
+            (selectionChange)="onLinkedValuesSelectionChange($event)"
+            (rowAction)="onRowAction($event)"
+            (sortChange)="onLinkedValuesSortChange($event)">
+          </app-data-table>
+        </div>
+
+        <!-- EMPTY STATE -->
+        <div class="empty-linked-values" *ngIf="!selectedDocument || selectedDocumentLinkedValues.length === 0">
+          <p class="empty-message">{{ selectedDocument ? 'No linked values for this document' : 'Select a document to view linked values' }}</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

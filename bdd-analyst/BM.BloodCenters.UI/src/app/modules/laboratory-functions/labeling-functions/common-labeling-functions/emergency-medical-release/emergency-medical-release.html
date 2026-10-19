@@ -1,0 +1,278 @@
+<div class="layout-wrapper">
+
+  <main class="emergency-medical-release main-content" role="main">
+    <h1 class="cdk-visually-hidden">Emergency Medical Release</h1>
+    <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+    @if (error()) {
+      <div class="error-container" role="alert" aria-live="assertive">
+        <mat-icon aria-hidden="true">error</mat-icon>
+        <p>{{ error() }}</p>
+      </div>
+    }
+
+    <div class="emergency-medical-release__body">
+
+      <!-- CARD 1: Form Card (full width) -->
+      <div class="section-card">
+
+        <!-- Row 1: Unit Identification -->
+        <div class="section-card__content section-card__content--row1">
+          <div class="form-row form-row--row1">
+            <app-unit-id-field
+              #primaryUnitIdField
+              [validateFfValue]="'N'"
+              [showBarcodeIcon]="true"
+              [required]="true"
+              [label]="'Unit ID'"
+              [placeholder]="'Scan or type unit ID'"
+              [scanPatterns]="SCAN_PATTERNS.UNIT_ID"
+              (validated)="onUnitValidated($event)"
+              (cleared)="onUnitCleared()"
+              class="form-field"
+            />
+
+            <div class="readonly-field">
+              <span class="readonly-field__label">Collection Date/Time</span>
+              <span class="readonly-field__value">{{ formatBleedStartTime(componentData()?.bleedStartTime ?? null) }}</span>
+            </div>
+
+            <app-scan-select-field
+              #row1ProductCodeField
+              [label]="'Product Code'"
+              [placeholder]="'Scan or select product code'"
+              [showBarcodeIcon]="true"
+              [disabled]="row1ProductCodeDisabled()"
+              [scanPatterns]="SCAN_PATTERNS.PRODUCT"
+              [options]="productCodeOptions()"
+              [parseFn]="parseProductCode"
+              (valueChanged)="onRow1ProductCodeChanged($event)"
+              class="form-field"
+            />
+
+            <div class="readonly-field">
+              <span class="readonly-field__label">Description</span>
+              <span class="readonly-field__value">{{ selectedProductDescription() }}</span>
+            </div>
+          </div>
+
+          @if (componentLoading()) {
+            <div class="inline-loading">
+              <mat-spinner diameter="18"></mat-spinner>
+              <span>Loading component data...</span>
+            </div>
+          }
+        </div>
+
+        <!-- Rows 2-4: Verification Fields -->
+        <div class="section-card__content section-card__content--verify" [formGroup]="verificationForm">
+
+          <!-- Row 2: Scan Unit/ABO + Emergency Label + Tested ABO -->
+          <div class="form-row form-row--row2">
+            <mat-form-field appearance="fill" class="form-field">
+              <mat-label>Scan Unit/ABO</mat-label>
+              <input #scanUnitAboInput matInput formControlName="scanUnitAbo"
+                     (blur)="onScanUnitAboBlur()" (input)="onAutoScan($event, SCAN_PATTERNS.UNIT_ABO)" aria-label="Scan Unit/ABO" />
+              @if (fieldProcessing['scanUnitAbo']) { <mat-hint class="field-validating">Validating scan...</mat-hint> }
+              <img matSuffix src="assets/images/icons/ScanOnly.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+
+            <app-unit-id-field
+              #verifyUnitIdField
+              [validateFfValue]="'N'"
+              [showBarcodeIcon]="true"
+              [required]="false"
+              [disabled]="phase() !== 'labeled'"
+              [label]="'Unit ID'"
+              [placeholder]="'Scan or type unit ID'"
+              [scanPatterns]="SCAN_PATTERNS.UNIT_ID"
+              [skipDoubleEntry]="true"
+              (validated)="onVerifyUnitValidated($event)"
+              (cleared)="onVerifyUnitCleared()"
+              class="form-field verify-unit-id"
+            />
+
+            <app-scan-select-field
+              #emergencyLabelField
+              [label]="'Emergency Label'"
+              [placeholder]="'Scan or select'"
+              [showBarcodeIcon]="true"
+              [uppercase]="false"
+              [disabled]="row2Disabled()"
+              [scanPatterns]="SCAN_PATTERNS.ABO"
+              [options]="aboLovOptions()"
+              [parseFn]="parseAbo"
+              (valueChanged)="onEmergencyLabelChanged($event)"
+              (cleared)="onEmergencyLabelCleared()"
+              class="form-field"
+            />
+
+            <div class="readonly-field">
+              <span class="readonly-field__label">Description</span>
+              <span class="readonly-field__value">{{ scannedAboDescription() }}</span>
+            </div>
+
+            <div class="readonly-field">
+              <span class="readonly-field__label">Tested ABO</span>
+              <span class="readonly-field__value">{{ componentData()?.testedAboFromUtrs || componentData()?.testedAbo }}</span>
+            </div>
+
+            <div class="readonly-field">
+              <span class="readonly-field__label">Description</span>
+              <span class="readonly-field__value">{{ componentData()?.testedAboDescription || componentData()?.aboDescription }}</span>
+            </div>
+          </div>
+
+          <!-- Row 3: Scan Product/Expiry -->
+          <div class="form-row form-row--row3">
+            <mat-form-field appearance="fill" class="form-field">
+              <mat-label>Scan Product/Expiration</mat-label>
+              <input #scanProdExpInput matInput formControlName="scanProdExp"
+                     (blur)="onScanProdExpBlur()" (input)="onAutoScan($event, SCAN_PATTERNS.PRODUCT_EXPIRY)" aria-label="Scan Product/Expiration" />
+              @if (fieldProcessing['scanProdExp']) { <mat-hint class="field-validating">Validating scan...</mat-hint> }
+              <img matSuffix src="assets/images/icons/ScanOnly.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" class="form-field">
+              <mat-label>Product Code</mat-label>
+              <input matInput formControlName="scanProductCode"
+                     (blur)="onScanProductCodeBlur()" (input)="onAutoScan($event, SCAN_PATTERNS.PRODUCT)" aria-label="Scan Product Code" />
+              @if (fieldProcessing['scanProductCode']) { <mat-hint class="field-validating">Validating...</mat-hint> }
+              <img matSuffix src="assets/images/icons/ScanOnly.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+
+            <div class="readonly-field">
+              <span class="readonly-field__label">Description</span>
+              <span class="readonly-field__value">{{ verifyProductDescription() }}</span>
+            </div>
+
+            <mat-form-field appearance="fill" class="form-field">
+              <mat-label>Expiration Date</mat-label>
+              <input matInput formControlName="scanExpDate"
+                     (blur)="onScanExpDateBlur()" (input)="onAutoScan($event, SCAN_PATTERNS.EXPIRY)" aria-label="Scan Expiration Date" />
+              @if (fieldProcessing['scanExpDate']) { <mat-hint class="field-validating">Validating...</mat-hint> }
+              <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+            </mat-form-field>
+          </div>
+
+          <!-- Row 4: Override Code -->
+          <div class="form-row form-row--row4">
+            <app-scan-select-field
+              #overrideCodeField
+              [label]="'Override Code'"
+              [placeholder]="'Select override code'"
+              [showBarcodeIcon]="false"
+              [disabled]="row4OverrideDisabled()"
+              [options]="overrideCodeOptions()"
+              (valueChanged)="onOverrideCodeChanged($event)"
+              (cleared)="onOverrideCodeCleared()"
+              class="form-field"
+            />
+
+            <div class="readonly-field">
+              <span class="readonly-field__label">Description</span>
+              <span class="readonly-field__value">{{ selectedOverrideDescription() }}</span>
+            </div>
+          </div>
+
+          <div class="clear-all-wrapper">
+            <button mat-button type="button" (click)="onClearAll()" [disabled]="phase() === 'init' || phase() === 'ready'">
+              CLEAR ALL
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- CARD 2: Comments Card (full width, fills remaining space) -->
+      <div class="section-card section-card--comments">
+        <div class="section-card__content">
+          <h3 class="section-card__title">Comments</h3>
+          @if (overrideNote()) {
+            <p class="comments-text">{{ overrideNote() }}</p>
+          } @else {
+            <p class="comments-placeholder">No comment entered. Select an Override Code to add a comment.</p>
+          }
+        </div>
+      </div>
+
+      <!-- CARD 3: Footer Card -->
+      <div class="section-card section-card--footer">
+        <div class="card-footer">
+          <div class="card-footer__spacer"></div>
+          <div class="card-footer__right">
+            <div class="printer-info">
+              <span class="printer-info__label">Current Label Printer</span>
+              <span class="printer-info__value">{{ currentLabelPrinter() || '--' }}</span>
+            </div>
+            <div class="card-footer__divider"></div>
+            <button mat-stroked-button type="button" class="btn-reprint"
+                    [disabled]="!labelProcessed() || saveCompleted()" (click)="onReprint()">
+              REPRINT
+            </button>
+            <button mat-raised-button color="primary" type="button"
+                    [disabled]="!saveEnabled()" (click)="onSave()">
+              @if (saving()) {
+                <mat-spinner diameter="20"></mat-spinner>
+              } @else {
+                SAVE
+              }
+            </button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- Comments Side Panel -->
+  @if (showCommentsPanel()) {
+    <div class="panel-backdrop" (click)="onCloseCommentsPanel()"></div>
+    <div class="comments-side-panel" role="dialog" aria-modal="true">
+      <div class="panel-header">
+        <h2 class="panel-title">Comments</h2>
+        <button mat-icon-button (click)="onCloseCommentsPanel()" aria-label="Close comments panel">
+          <mat-icon>close</mat-icon>
+        </button>
+      </div>
+      <div class="panel-body">
+        <mat-form-field appearance="fill" class="panel-comments-field">
+          <mat-label>Comments</mat-label>
+          <textarea
+            matInput
+            [value]="panelNote()"
+            (input)="onPanelNoteInput($event)"
+            rows="6"
+            maxlength="240">
+          </textarea>
+        </mat-form-field>
+        <p class="panel-char-count">Characters Remaining: {{ 240 - panelNoteLength() }}/240</p>
+      </div>
+      <div class="panel-footer">
+        <button mat-button (click)="onCloseCommentsPanel()">CANCEL</button>
+        <button mat-raised-button color="primary" (click)="onSaveCommentsPanel()">SAVE</button>
+      </div>
+    </div>
+  }
+
+  <!-- Warning Override Dialog (inline overlay, same pattern as change-label-printer) -->
+  @if (showWarningDialog()) {
+    <div class="dialog-overlay" role="dialog" aria-modal="true" aria-label="Warning">
+      <div class="confirm-panel">
+        <div class="confirm-header">
+          <h2 class="confirm-title">{{ warningDialogTitle() }}</h2>
+        </div>
+        <div class="confirm-body">
+          @for (w of warningDialogWarnings(); track w.code) {
+            <p class="confirm-message"><strong>[{{ w.code }}]</strong> {{ w.message }}</p>
+          }
+          <p class="confirm-message" style="margin-top: 12px; font-weight: 500;">Do you want to proceed?</p>
+        </div>
+        <div class="confirm-footer">
+          <button mat-button class="panel-action-btn" (click)="onWarningCancel()">No</button>
+          <button mat-flat-button class="panel-ok-btn" (click)="onWarningProceed()">Yes</button>
+        </div>
+      </div>
+    </div>
+  }
+
+</div>

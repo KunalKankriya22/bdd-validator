@@ -1,0 +1,54 @@
+--------------------------------------------------------
+--  DDL for Trigger VSERV_CONTRACTS_BU
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "VSERV_CONTRACTS_BU" before update on VSERV_CONTRACTS for each row
+begin
+  insert into VSERV_CONTRACTS_AUDIT
+  (	CONTRACT_ID,
+	CHAPTER_ID,
+	CUSTOMER_ID,
+	CREDIT_LIMIT,
+	AGREED_AMOUNT,
+	DISCOUNT,
+	USED_CREDIT,
+	HOSPITAL_LEVEL,
+	START_TERM,
+	END_TERM,
+	EFF_DATE,
+	TERM_DATE,
+	LAST_MODIFIED_DATE,
+	MAX_DISCOUNT_PCT,
+	ROTATION_FLAG,
+	PO_NUMBER,
+	SUBSTITUTE_FLAG,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  (	:new.CONTRACT_ID,
+	:new.CHAPTER_ID,
+	:new.CUSTOMER_ID,
+	:new.CREDIT_LIMIT,
+	:new.AGREED_AMOUNT,
+	:new.DISCOUNT,
+	:new.USED_CREDIT,
+	:new.HOSPITAL_LEVEL,
+	:new.START_TERM,
+	:new.END_TERM,
+	:new.EFF_DATE,
+	:new.TERM_DATE,
+	:new.LAST_MODIFIED_DATE,
+	:new.MAX_DISCOUNT_PCT,
+	:new.ROTATION_FLAG,
+	:new.PO_NUMBER,
+	:new.SUBSTITUTE_FLAG,
+	:new.AUDIT_KEY,
+	'UPDATE',LT_USER_SESSION.GET_USERID,
+    sysdate
+  ) ;
+  end ;
+/
+ALTER TRIGGER "VSERV_CONTRACTS_BU" ENABLE;

@@ -1,0 +1,512 @@
+-- Changed by Kishore on 04/23/2012. IM 8448
+-- Version: 02 - Applied time zone changes to "is_access_allowed" procedure
+CREATE OR REPLACE PACKAGE DON_COMMON_PACK IS
+
+TYPE tblLetterId IS TABLE OF valid_letters.letter_id%TYPE
+     INDEX BY BINARY_INTEGER;
+  FUNCTION IS_ACCESS_ALLOWED(c_user_id varchar2,c_code_type varchar2,c_code varchar2) RETURN BOOLEAN  ;
+  FUNCTION IS_ACCESS_ALLOWED_0OR1(c_user_id varchar2,c_code_type varchar2,c_code varchar2) RETURN NUMBER  ;
+  PROCEDURE GENERATE_NEW_ID (PARAM_ID_TYPE IN VARCHAR2,
+                           NEW_ID OUT VARCHAR2,
+                           ERR_FLAG OUT VARCHAR2,
+                           ERR_MSG OUT VARCHAR2) ;
+  FUNCTION RPT_VALIDATE(LOC_REF_TABLE  in  VARCHAR2,
+                        LOC_REF_COLUMN in VARCHAR2,
+                        LOC_PARM_SELECT in VARCHAR2,
+                        LOC_WILDCARD_IND  in VARCHAR2) RETURN varchar2 ;
+  PROCEDURE write_user_error(
+                           p_INSERT_DATS         IN     DATE,
+                           p_USER_ID             IN     VARCHAR2,
+                           p_PROGRAM_NAME        IN     VARCHAR2,
+                           p_ERROR_CODE          IN     VARCHAR2,
+                           p_UNIT_ID             IN     VARCHAR2,
+                           p_COLL_DATE           IN     DATE,
+                           p_CHAPTER_ID          IN     VARCHAR2,
+                           p_COMPONENT_PREFIX    IN     NUMBER,
+                           p_PRODUCT_CODE        IN     VARCHAR2,
+                           p_status             OUT     varchar2) ;
+   PROCEDURE edit_letter( psaLetterId   in  tblLetterId,
+                          pnCount       in  number := 0,
+                          psSearch      in  varchar2,
+                          psReplace     in  varchar2,
+                          psErrorNo     out varchar2,
+                          psErrorMsg    out varchar2 );
+
+   FUNCTION user_name_for_sorting ( p_user_id IN VARCHAR2 ) RETURN VARCHAR2 ;
+   PRAGMA RESTRICT_REFERENCES(user_name_for_sorting, WNDS,WNPS);
+
+--PRAGMA RESTRICT_REFERENCES(is_access_allowed,WNDS,WNPS);
+PRAGMA RESTRICT_REFERENCES(is_access_allowed_0or1,WNDS,WNPS);
+
+END DON_COMMON_PACK ;
+/
+
+CREATE OR REPLACE PACKAGE BODY DON_COMMON_PACK IS
+ 
+FUNCTION IS_ACCESS_ALLOWED(c_user_id varchar2,c_code_type varchar2,c_code varchar2) RETURN BOOLEAN IS
+
+  c_view_level      number;
+  c_inter_level     number := NULL;
+  chk_all           number;
+  t_chapter_id      chapters.chapter_id%type;
+  t_local_date      date;
+BEGIN
+     -- Added by Kishore on 04/23/2012. IM 8448
+     begin
+       select chapter_id
+         into t_chapter_id
+         from system_users
+        where user_id = c_user_id
+          and sysdate between eff_date and nvl(term_date, sysdate + 10);
+     exception
+       when no_data_found then
+         return FALSE;
+       when others then
+         return FALSE;
+     end;
+
+     t_local_date := lifetrack_timezone_convert.get_local_time(t_chapter_id, sysdate);
+     -- End of change
+     
+   /* Check whether user has ALL access */
+
+     /* check whether the given code and type has been defined in one of
+     the access classes of the user */
+        
+     begin
+       select max(b.inter_level)
+         into c_inter_level
+         from valid_acl_codes a , valid_user_access_classes b
+        where b.user_id = c_user_id
+        --and sysdate between b.eff_date and nvl(b.term_date,sysdate+1) -- Commented by Kishore on 04/23/2012. IM 8448
+          and t_local_date between b.eff_date and nvl(b.term_date, sysdate + 10) -- Added by Kishore on 04/23/2012. IM 8448
+          and a.access_class=b.access_class
+          and a.access_code_type=c_code_type
+          and a.access_code_value = 'ALL'
+        --and sysdate between a.eff_date and nvl(a.term_date,sysdate+1); -- Commented by Kishore on 04/23/2012. IM 8448
+          and t_local_date between a.eff_date and nvl(a.term_date, sysdate + 10); -- Added by Kishore on 04/23/2012. IM 8448
+     exception
+       when no_data_found then
+            NULL ;
+     end;
+     if  c_inter_level is null then
+
+        begin
+           select max(b.inter_level)
+             into c_inter_level
+             from valid_acl_codes a , valid_user_access_classes b
+            where b.user_id = c_user_id
+            --and sysdate between b.eff_date and nvl(b.term_date,sysdate+1) -- Commented by Kishore on 04/23/2012. IM 8448
+              and t_local_date between b.eff_date and nvl(b.term_date, sysdate + 10) -- Added by Kishore on 04/23/2012. IM 8448
+              and a.access_class=b.access_class
+              and a.access_code_type=c_code_type
+              and a.access_code_value = c_code
+            --and sysdate between a.eff_date and nvl(a.term_date,sysdate+1); -- Commented by Kishore on 04/23/2012. IM 8448
+              and t_local_date between a.eff_date and nvl(a.term_date, sysdate + 10); -- Added by Kishore on 04/23/2012. IM 8448
+       exception
+          when no_data_found then
+             return FALSE ;
+       end;
+     end if;
+
+   if c_code_type = 'INTER' then
+      begin
+         select view_level
+           into c_view_level
+           from valid_interdictions
+          where inter_code=c_code
+          --and sysdate between eff_date and nvl(term_date,sysdate+1) -- Commented by Kishore on 04/23/2012. IM 8448
+            and t_local_date between eff_date and nvl(term_date, sysdate + 10) -- Added by Kishore on 04/23/2012. IM 8448
+            and inter_type in (select code
+                                 from valid_master_codes
+                                where code_type='INTUD');
+          
+         if c_view_level <= c_inter_level then
+             return TRUE;
+         else
+             return FALSE;
+         end if;
+      exception
+         when others then
+           return FALSE;       
+      end;
+    elsif c_code_type='PROPR' then
+       begin
+         select view_level
+           into c_view_level
+           from valid_interdictions
+          where inter_code=c_code
+          --and sysdate between eff_date and nvl(term_date,sysdate+1) -- Commented by Kishore on 04/23/2012. IM 8448
+            and t_local_date between eff_date and nvl(term_date, sysdate + 10) -- Added by Kishore on 04/23/2012. IM 8448
+            and inter_type in (select code
+                                 from valid_master_codes
+                                where code_type='PROPR');
+          
+         if c_view_level <= c_inter_level then
+             return TRUE;
+         else
+             return FALSE;
+         end if;
+       exception
+         when others then
+           return FALSE;
+       end;
+   elsif c_code_type in ('LETTR','MSTCD') then /* for Letters and master codes viewlevel is NA */
+       return TRUE;
+   end if;
+
+END;
+ 
+FUNCTION IS_ACCESS_ALLOWED_0OR1(c_user_id varchar2,c_code_type varchar2,c_code varchar2) RETURN NUMBER IS
+
+c_view_level number;
+c_inter_level number := NULL;
+chk_all number;
+
+BEGIN
+
+   /* Check whether user has ALL access */
+
+     /* check whether the given code and type has been defined in one of
+     the access classes of the user */
+        
+      begin
+       select  max(b.inter_level)
+       into  c_inter_level
+       from valid_acl_codes a , valid_user_access_classes b
+       where b.user_id = c_user_id
+         and sysdate between b.eff_date and nvl(b.term_date,sysdate+1)
+         and a.access_class=b.access_class
+         and a.access_code_type=c_code_type
+         and a.access_code_value = 'ALL'
+         and sysdate between a.eff_date and nvl(a.term_date,sysdate+1);
+     exception
+       when no_data_found then
+            NULL ;
+     end;
+     if  c_inter_level is null then
+
+        begin
+           select  max(b.inter_level)
+             into  c_inter_level
+             from valid_acl_codes a , valid_user_access_classes b
+            where b.user_id = c_user_id
+              and sysdate between b.eff_date and nvl(b.term_date,sysdate+1)
+              and a.access_class=b.access_class
+              and a.access_code_type=c_code_type
+              and a.access_code_value = c_code
+         and sysdate between a.eff_date and nvl(a.term_date,sysdate+1);
+       exception
+          when no_data_found then
+             return 0 ;
+       end;
+     end if;
+
+   if c_code_type = 'INTER' then
+      begin
+         select view_level
+         into   c_view_level
+         from valid_interdictions
+         where inter_code=c_code
+           and sysdate between eff_date and nvl(term_date,sysdate+1)
+           and inter_type in (select code
+                              from   valid_master_codes
+                              where  code_type='INTUD');
+          
+         if c_view_level <= c_inter_level then
+             return 1;
+         else
+             return 0;
+         end if;
+      exception
+         when others then
+           return 0;       
+      end;
+    elsif c_code_type='PROPR' then
+       begin
+         select view_level
+         into   c_view_level
+         from valid_interdictions
+         where inter_code=c_code
+           and sysdate between eff_date and nvl(term_date,sysdate+1)
+           and inter_type  in (select code
+                               from   valid_master_codes
+                               where  code_type='PROPR');
+          
+         if c_view_level <= c_inter_level then
+             return 1;
+         else
+             return 0;
+         end if;
+       exception
+         when others then
+           return 0;
+       end;
+   elsif c_code_type in ('LETTR','MSTCD') then /* for Letters and master codes viewlevel is NA */
+       return 1;
+   end if;
+
+END;
+
+PROCEDURE               generate_new_id (param_id_type in varchar2,
+                           new_id out varchar2,
+                           err_flag out varchar2,
+                           err_msg out varchar2) IS
+  string_len number ;
+  new_sequence number ;
+BEGIN
+  select nvl(last_sequence,0) + 1 
+  into new_sequence
+  from all_donor_ids
+  where id_type = param_id_type 
+  for update of last_sequence ;
+
+  string_len := length(param_id_type) ;
+  new_id := param_id_type||lpad(to_char(new_sequence),10-string_len,'0') ;
+  begin
+    update all_donor_ids
+    set last_sequence = new_sequence,
+        last_modified_date = sysdate
+    where id_type = param_id_type ;
+    commit ;
+    exception
+      when others then 
+            if  sqlcode != -100501
+            then
+               err_flag := 'Y' ;
+               err_msg  := substr(sqlerrm,1,75) ;
+            end if;
+  end ;
+
+  exception
+     when no_data_found then 
+          err_flag := 'Y' ;
+          err_msg  := 'ID type not found in ALL_DONOR_IDS, contact IS' ;
+     when others then
+       if  sqlcode != -100501
+       then
+          err_flag := 'Y' ;
+          err_msg  := substr(sqlerrm,1,75) ;
+       end if;
+
+END generate_new_id;
+
+/*  Program Name                : RPT_VALIDATE
+    Date Creation       : 10/03/97
+    Program Author      : Chandra
+    
+    Modified By		: Arun 
+    on			: 01/25/2012
+    Reason		: IM 6313 (Field size of PARM_SELECT increased to 50
+    			  hence increasing size of sql_stat1 and sql_stat2)
+*/
+FUNCTION rpt_validate(loc_ref_table  IN  varchar2,
+                      loc_ref_column IN varchar2,
+                      loc_parm_select IN varchar2,
+                      loc_wildcard_ind  IN varchar2)
+                        RETURN varchar2
+  IS
+   cur_handle  integer;
+   loc_chk    integer;
+   ret_val    varchar2(100);
+err_num number;
+err_msg varchar2(100);
+my_error  varchar2(100);
+--sql_stat1  varchar2(100);
+--sql_stat2 varchar2(100);
+sql_stat1  varchar2(135);
+sql_stat2 varchar2(135);
+my_exception  exception;
+ BEGIN
+    cur_handle := DBMS_SQL.OPEN_CURSOR;
+   sql_stat1 := 'SELECT  * FROM '||loc_ref_table||'  WHERE '||loc_ref_column||'
+like '||' '''||loc_parm_select||''' ';
+   sql_stat2 := 'SELECT  * FROM '||loc_ref_table||'  WHERE '||loc_ref_column||'
+ =  '||' '''||loc_parm_select||''' ';
+ --  ret_val :=  sql_stat;
+--raise my_exception;
+ if loc_wildcard_ind = 'Y' then
+        DBMS_SQL.PARSE(cur_handle,sql_stat1,DBMS_SQL.V7);
+     else
+        DBMS_SQL.PARSE(cur_handle,sql_stat2,DBMS_SQL.V7);
+  end if;
+--    return('inexception'||ret_val);
+loc_chk := DBMS_SQL.EXECUTE(cur_handle);
+if DBMS_SQL.FETCH_ROWS(cur_handle) = 0  then
+       ret_val := 'FAILURE';
+   else
+       ret_val := 'SUCCESS';
+end if;
+DBMS_SQL.CLOSE_CURSOR(cur_handle);
+return(ret_val);
+exception
+when my_exception then
+              DBMS_SQL.CLOSE_CURSOR(cur_handle);
+              return('inmyexception'||ret_val);
+when   others   then
+    DBMS_SQL.CLOSE_CURSOR(cur_handle);
+     err_num := SQLCODE;
+     err_msg  := substr(SQLERRM,1,100);
+      my_error := to_char(err_num)||'  '||err_msg;
+      return('inothersexception'||ret_val||my_error);
+END   rpt_validate;
+
+PROCEDURE write_user_error(
+                           p_INSERT_DATS         IN     DATE,
+                           p_USER_ID             IN     VARCHAR2,
+                           p_PROGRAM_NAME        IN     VARCHAR2,
+                           p_ERROR_CODE          IN     VARCHAR2,
+                           p_UNIT_ID             IN     VARCHAR2,
+                           p_COLL_DATE           IN     DATE,
+                           p_CHAPTER_ID          IN     VARCHAR2,
+                           p_COMPONENT_PREFIX    IN     NUMBER,
+                           p_PRODUCT_CODE        IN     VARCHAR2,
+                           p_status             OUT     varchar2)
+ IS
+ errf_handle UTL_FILE.FILE_TYPE;  
+ error_file  varchar2(30);
+ error_dir   varchar2(50);
+ input_str   varchar2(250);
+BEGIN
+  dbms_output.put_line('In write error procedure');
+  begin
+    SELECT parameter_value INTO error_dir
+      FROM VALID_PARAMETERS 
+     WHERE parameter_code = 'ERROR_DIR' and
+           chapter_id  = p_chapter_id and
+           sysdate between eff_date and nvl(term_date,sysdate+1);
+  exception
+     When no_data_found then
+          p_status := 'Err1. Parameter ERROR_DIR not defined.'
+                      ||substr(sqlerrm,1,100);
+          return;
+  end;
+  begin
+    SELECT parameter_value INTO error_file
+      FROM VALID_PARAMETERS 
+     WHERE parameter_code = 'ERROR_LOG' and
+           chapter_id  = p_chapter_id and
+           sysdate between eff_date and nvl(term_date,sysdate+1);
+  exception
+     When no_data_found then
+          p_status := 'Err2. Parameter ERROR_LOG not defined.'
+                      ||substr(sqlerrm,1,100);
+          return;
+  end;
+  /* /tmp directory is defined in UTL_FILE_DIR parameter in init.ora */ 
+  Begin
+       errf_handle := UTL_FILE.FOPEN(error_dir,error_file,'A');
+  Exception
+       When others then
+            errf_handle := UTL_FILE.FOPEN(error_dir,error_file,'w');
+  End;
+  input_str := to_char(p_INSERT_DATS,'MM-DD-YYYY')||','||
+               p_USER_ID||','||
+               p_PROGRAM_NAME||','||
+               p_ERROR_CODE||','||
+               p_UNIT_ID||','||
+               to_char(p_COLL_DATE,'MM-DD-YYYY')||','||
+               p_CHAPTER_ID||','||
+               to_char(p_COMPONENT_PREFIX)||','||
+               p_PRODUCT_CODE;
+  
+  if input_str is not null then
+     UTL_FILE.PUT_LINE(errf_handle,input_str);
+  end if;
+  UTL_FILE.FCLOSE(errf_handle);
+  p_status := 'OK';
+EXCEPTION
+ When others then
+   p_status := 'Err2. others exception- '||substr(sqlerrm,1,100);
+   return;
+END;
+
+PROCEDURE edit_letter( psaLetterId   in  tblLetterId,
+                       pnCount       in  number := 0,
+                       psSearch      in  varchar2,
+                       psReplace     in  varchar2,
+                       psErrorNo     out varchar2,
+                       psErrorMsg    out varchar2 ) IS
+   sLetterId  valid_letters.letter_id%TYPE;
+   lContent   long;
+   sContent   varchar2(30000);
+   sSearch    varchar2(100);
+   sReplace   varchar2(100);
+BEGIN
+   psErrorNo  := '00000';
+   psErrorMsg := '';
+   if psSearch is null then
+      psErrorNo  := '00001';
+      psErrorMsg := 'Search variable cannot be null';
+      return;
+   end if;
+   if pnCount is null or pnCount <= 0 then
+      psErrorNo  := '00002';
+      psErrorMsg := 'No Letters to be edited';
+      return;
+   end if;
+   sSearch := '&&' || psSearch  || '&&';
+   sReplace := '&&' || psReplace || '&&';
+   for i in 1 .. pnCount loop
+      begin
+         select letter_id, letter_content
+         into   sLetterId, lContent
+         from   valid_letters
+         where  letter_id = psaLetterId(i)
+           and  sysdate between eff_date and nvl( term_date, sysdate +1);
+      exception
+         when no_data_found then
+            psErrorNo  := '00003';
+            psErrorMsg := 'Letter Id not found';
+            return;
+         when others then
+            psErrorNo  := '99999';
+            psErrorMsg := substr( SQLCODE || '-' || SQLERRM, 1, 100 );
+            return;
+      end;
+      sContent := lContent;
+      sContent := replace( sContent, psSearch, nvl( psReplace, ' ' ) );
+      update valid_letters
+      set    letter_content = sContent
+      where  letter_id = sLetterId;
+   end loop;
+   commit;
+EXCEPTION
+   when others then
+      psErrorNo  := '99999';
+      psErrorMsg := substr( SQLCODE || '-' || SQLERRM, 1, 100 );
+      return;
+END;
+
+
+/* Written by : Dinesh Makked
+           on : 06-30-98 
+          for : This function is being used in query program named UTQALOGS. 
+                The abovementioned program requires the sorting in a data block based on an
+                item which is not a base table item (User_Name). So this function takes in 
+                USER_ID and simply returns the user name (last_name || first_name). This function
+                alongwith required parameters is used in ORDER_BY property of data block.
+*/               
+
+FUNCTION user_name_for_sorting ( p_user_id IN VARCHAR2 ) 
+RETURN VARCHAR2 IS
+    CURSOR user_name_cur IS SELECT user_last_name || ', ' ||
+                                   user_first_name user_name
+                              FROM system_users
+                             WHERE user_id = p_user_id ;
+    ret_val VARCHAR2(70) ;
+
+BEGIN
+    FOR user_name_rec IN user_name_cur LOOP 
+        ret_val := user_name_rec.user_name ;
+    END LOOP ;
+    RETURN ret_val ;
+END user_name_for_sorting ;
+
+
+END DON_COMMON_PACK;
+/
+CREATE OR REPLACE PUBLIC SYNONYM DON_COMMON_PACK FOR DON_COMMON_PACK;
+/
+GRANT EXECUTE ON DON_COMMON_PACK TO PUBLIC;
+/

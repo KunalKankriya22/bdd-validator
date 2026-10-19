@@ -1,0 +1,300 @@
+<app-page-header-with-breadcrumb [config]="headerConfig" />
+
+<!-- Report Selection Section -->
+<div class="run-id-section">
+  <!-- Report Type Dropdown -->
+  <mat-form-field appearance="fill" class="run-id-field">
+    <mat-label>Report Type</mat-label>
+    <mat-select [value]="selectedReportType()" (selectionChange)="onReportTypeChange($event.value)">
+      <mat-option>
+        <ngx-mat-select-search
+          [formControl]="reportTypeSearchControl"
+          placeholderLabel="Search report types..."
+          noEntriesFoundLabel="No matching types">
+        </ngx-mat-select-search>
+      </mat-option>
+
+      @if (filteredReportTypes().length === 0) {
+        <mat-option disabled>No data available</mat-option>
+      }
+
+      @for (type of filteredReportTypes(); track type.code) {
+        <mat-option [value]="type.code">{{ type.description }}</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+
+  <!-- Report Name Dropdown -->
+  <mat-form-field appearance="fill" class="run-id-field">
+    <mat-label>Report Name</mat-label>
+    <mat-select [value]="selectedReportName()" [disabled]="!selectedReportType() || isLoadingReportNames()" (selectionChange)="onReportNameChange($event.value)">
+      <mat-option>
+        <ngx-mat-select-search
+          [formControl]="reportNameSearchControl"
+          placeholderLabel="Search report names..."
+          noEntriesFoundLabel="No matching reports">
+        </ngx-mat-select-search>
+      </mat-option>
+
+      @if (isLoadingReportNames()) {
+        <mat-option disabled>Loading...</mat-option>
+      } @else if (filteredReportNames().length === 0) {
+        <mat-option disabled>No data available</mat-option>
+      }
+
+      @for (option of filteredReportNames(); track option.reportName) {
+        <mat-option [value]="option.reportName">{{ option.reportName }} - {{ option.title }}</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+
+  <!-- Report Run ID Display -->
+  <div class="field-display-card report-id-display">
+    <div class="field-label">Report Run ID</div>
+    <div class="field-value">
+      {{ generatedReportId() || '-' }}
+    </div>
+  </div>
+
+  <!-- Retrieve Button -->
+  <button
+    mat-stroked-button
+    color="accent"
+    class="retrieve-btn"
+    [disabled]="!selectedReportType() || !selectedReportName() || isLoading() || isSubmitting() || (showRecentParmIds && !selectedRecentParmId())"
+    (click)="onRetrieve()">
+    RETRIEVE
+  </button>
+</div>
+
+<!-- Empty State -->
+@if (!isRetrieved() && !isLoading()) {
+  <div class="empty-state">
+    <div class="empty-state-icon">
+      <mat-icon>edit</mat-icon>
+    </div>
+    <h3>No Report Selected</h3>
+    <p>Select a Report using the fields above to view its parameters.</p>
+  </div>
+}
+
+<!-- Loading State -->
+@if (isLoading()) {
+  <div class="empty-state">
+    <p>Loading...</p>
+  </div>
+}
+
+<!-- Parameter Section -->
+@if (isRetrieved() && !isLoading() && reportDetail()) {
+  <div class="parameter-section">
+    <!-- Title Section with Controls -->
+    <div class="title-section">
+      <div class="title-content">
+        <h3 class="report-title">{{ reportDetail()!.reportName }}</h3>
+        <span class="report-subtitle">{{ reportDetail()!.reportDescription }}</span>
+      </div>
+
+      <div class="title-controls">
+        <!-- Checkbox to toggle dropdown -->
+        <mat-checkbox
+          [(ngModel)]="showRecentParmIds"
+          (ngModelChange)="onUseRecentParmIdToggle($event)"
+          [disabled]="recentParmIds().length === 0"
+          class="header-checkbox">
+          Use Recent Report ID
+        </mat-checkbox>
+
+        <!-- Recent Report IDs Dropdown - Always visible, disabled when checkbox unchecked -->
+        <mat-form-field appearance="fill" class="header-field">
+          <mat-label>Recent Report IDs</mat-label>
+          <mat-select
+            [value]="selectedRecentParmId()"
+            [disabled]="!showRecentParmIds || recentParmIds().length === 0"
+            (selectionChange)="onRecentParmIdChange($event.value)">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="recentParmIdSearchControl"
+                placeholderLabel="Search recent report IDs..."
+                noEntriesFoundLabel="No matching report IDs">
+              </ngx-mat-select-search>
+            </mat-option>
+
+            @if (filteredRecentParmIds().length === 0) {
+              <mat-option disabled>No data available</mat-option>
+            }
+
+            @for (parmId of filteredRecentParmIds(); track parmId.parmId) {
+              <mat-option [value]="parmId.parmId">
+                {{ parmId.parmId }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+      </div>
+    </div>
+
+    <!-- Parameter Table -->
+    <div class="parameter-table-wrapper">
+      <app-data-table
+        [config]="tableConfig"
+        [data]="reportDetail()!.parameters"
+        [loading]="isLoading()">
+      </app-data-table>
+    </div>
+
+    <!-- Bottom Section -->
+    <div class="bottom-section">
+      <div class="checkboxes-and-options">
+        <div class="checkboxes">
+          <mat-checkbox [(ngModel)]="printHeaderTrailer">Print Header and Trailer</mat-checkbox>
+        </div>
+      </div>
+      <div class="actions">
+        <!-- Disable buttons while submitting OR when all parameters are not filled -->
+        <button mat-stroked-button color="primary" class="schedule-btn"
+                [disabled]="isSubmitting() || !areAllParametersFilled()"
+                (click)="onScheduleSubmit()">
+          SCHEDULE SUBMIT
+        </button>
+        <button mat-raised-button color="primary" class="submit-btn"
+                [disabled]="isSubmitting() || !areAllParametersFilled()"
+                (click)="onSubmitNow()">
+          @if (isSubmitting()) {
+            SUBMITTING...
+          } @else {
+            SUBMIT NOW
+          }
+        </button>
+      </div>
+    </div>
+  </div>
+}
+
+<!-- Cell Template for Prompt with Required Asterisk -->
+<ng-template #promptTemplate let-row let-column="column">
+  <span>
+    {{ row.parmPrompt }}<span class="required-asterisk">*</span>
+  </span>
+</ng-template>
+
+<!-- Cell Template for Parameter Value -->
+<ng-template #parameterValueTemplate let-row let-column="column">
+  @switch (getInputType(row)) {
+    @case ('text') {
+      <!-- Plain text input (NO chips) -->
+      <mat-form-field appearance="fill" class="param-field">
+        <input matInput [(ngModel)]="row.value" />
+      </mat-form-field>
+    }
+    @case ('select') {
+      <app-smart-dropdown
+        [placeholder]="''"
+        [staticItems]="row.options"
+        [fetchFn]="getLovFetchFn(row)"
+        [(value)]="row.value"
+        (selectionChange)="onSingleSelectChange(row, $event)">
+      </app-smart-dropdown>
+    }
+    @case ('date') {
+      <!-- DATE: MM-DD-YYYY -->
+      <mat-form-field appearance="fill" class="param-field">
+        <mat-label>MM-DD-YYYY</mat-label>
+        <input
+          matInput
+          [matDatepicker]="datePicker"
+          [(ngModel)]="row.value"
+          placeholder="MM-DD-YYYY"
+          (blur)="validateDate(row)" />
+        <mat-datepicker-toggle matSuffix [for]="datePicker"></mat-datepicker-toggle>
+        <mat-datepicker #datePicker></mat-datepicker>
+      </mat-form-field>
+    }
+    @case ('datetime') {
+      <!-- DATETM: MM-DD-YYYY HH:MI -->
+      <mat-form-field appearance="fill" class="param-field">
+        <mat-label>MM-DD-YYYY HH:MI</mat-label>
+        <input
+          matInput
+          [(ngModel)]="row.value"
+          placeholder="MM-DD-YYYY HH:MI"
+          (blur)="validateDateTime(row)" />
+      </mat-form-field>
+    }
+    @case ('odate') {
+      <!-- ODATE: DD-MON-YYYY -->
+      <mat-form-field appearance="fill" class="param-field">
+        <mat-label>DD-MON-YYYY</mat-label>
+        <input
+          matInput
+          [matDatepicker]="odatePicker"
+          [(ngModel)]="row.value"
+          placeholder="DD-MON-YYYY"
+          (blur)="validateODate(row)" />
+        <mat-datepicker-toggle matSuffix [for]="odatePicker"></mat-datepicker-toggle>
+        <mat-datepicker #odatePicker></mat-datepicker>
+      </mat-form-field>
+    }
+    @case ('multiselect') {
+      <!-- Dropdown selection only -->
+      <app-smart-dropdown
+        [placeholder]="''"
+        [multiple]="true"
+        [showSelectAll]="row.listEntryFlag === 'Y'"
+        [staticItems]="row.options"
+        [fetchFn]="getLovFetchFn(row)"
+        [(value)]="row.value"
+        (selectionChange)="onMultiSelectChange(row, $event)"
+        (selectionModeChange)="row.selectionMode = $event">
+      </app-smart-dropdown>
+    }
+    @case ('searchable-text') {
+      <!-- LOV count > 1000: Single-select text input -->
+      <mat-form-field appearance="fill" class="param-field">
+        <input
+          matInput
+          [(ngModel)]="row.value" />
+      </mat-form-field>
+    }
+    @case ('searchable-multiselect') {
+      <!-- LOV count === 0 or > 1000: Multi-select chip input -->
+      @if (shouldShowChips(row)) {
+        <mat-form-field appearance="fill" class="param-field chip-input-field">
+          <mat-chip-grid #chipGrid aria-label="Enter codes">
+            @for (code of getChipValues(row).slice(0, 1); track code) {
+              <mat-chip-row (removed)="removeChipValue(row, code)">
+                {{ code }}
+                <button matChipRemove aria-label="Remove code">
+                  <mat-icon>cancel</mat-icon>
+                </button>
+              </mat-chip-row>
+            }
+            @if (getChipValues(row).length > 1) {
+              <span
+                class="more-chips-badge"
+                [matTooltip]="getChipValuesTooltip(row)"
+                matTooltipPosition="above"
+                matTooltipClass="multiselect-chips-tooltip">
+                +{{ getChipValues(row).length - 1 }}
+              </span>
+            }
+          </mat-chip-grid>
+          <input
+            placeholder="Type code and press comma or enter"
+            [matChipInputFor]="chipGrid"
+            [matChipInputSeparatorKeyCodes]="separatorKeysCodes"
+            (matChipInputTokenEnd)="addChipValue(row, $event)"
+            (blur)="onChipInputBlur(row, $event)" />
+        </mat-form-field>
+      } @else {
+        <!-- LOV count 1-1000: Plain text input for comma-separated values -->
+        <mat-form-field appearance="fill" class="param-field">
+          <input
+            matInput
+            [(ngModel)]="row.value"
+            placeholder="Enter codes separated by commas" />
+        </mat-form-field>
+      }
+    }
+  }
+</ng-template>

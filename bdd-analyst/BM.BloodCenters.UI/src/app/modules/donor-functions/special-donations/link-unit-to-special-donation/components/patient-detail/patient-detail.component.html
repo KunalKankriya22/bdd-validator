@@ -1,0 +1,236 @@
+<div class="page-container">
+  <!-- Header Card (Breadcrumb + Patient Info) -->
+  <div class="header-card">
+    <!-- Breadcrumb -->
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="/home" class="breadcrumb-link">Home</a>
+      <mat-icon class="breadcrumb-separator" aria-hidden="true">chevron_right</mat-icon>
+      <a href="/donor-functions/special-donations/link-unit-to-special-donation" class="breadcrumb-link">Link Unit to Special Donation</a>
+      <mat-icon class="breadcrumb-separator" aria-hidden="true">chevron_right</mat-icon>
+      <span class="breadcrumb-current" aria-current="page">{{ patient()?.patientId }}</span>
+    </nav>
+
+    <!-- Patient Header -->
+    <div *ngIf="!isLoading() && !hasError() && patient()" class="patient-header">
+      <div class="patient-header-top">
+        <button mat-icon-button (click)="onBack()" class="back-icon-button" aria-label="Go back to patient list">
+          <mat-icon>arrow_back</mat-icon>
+        </button>
+        <h1 class="patient-name">{{ patient()?.patientName }}</h1>
+      </div>
+      <div class="patient-info-row">
+        <div class="patient-info-left">
+          <span>{{ patient()?.patientId }}</span>
+          <span class="separator" aria-hidden="true">|</span>
+          <span>{{ formatDate(patient()?.dateOfBirth || '') }}</span>
+          <span class="separator" aria-hidden="true">|</span>
+          <span class="sex-value">{{ formatSex(patient()?.sex || '') }}</span>
+          <ng-container *ngIf="patient()?.phoneNumber">
+            <span class="separator" aria-hidden="true">|</span>
+            <mat-icon class="phone-icon" aria-hidden="true">call</mat-icon>
+            <span>{{ patient()?.phoneNumber }}</span>
+          </ng-container>
+        </div>
+        <div class="patient-info-right">
+          <span>{{ patient()?.surgId }}</span>
+          <span class="separator" aria-hidden="true">|</span>
+          <span>{{ formatDate(patient()?.surgeryDate || '') }} - {{ formatDayOfWeek(patient()?.surgeryDate || '') }}</span>
+          <span class="separator" aria-hidden="true">|</span>
+          <span>{{ patientDetail()?.patTypeDescription || '-' }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading State -->
+  <div *ngIf="isLoading()" class="loading-container">
+    <mat-spinner diameter="50" aria-label="Loading patient data"></mat-spinner>
+    <p class="loading-text">Loading patient data...</p>
+  </div>
+
+  <!-- Main Content — always visible after initial load -->
+  <div *ngIf="!isLoading()" class="detail-content">
+    <!-- Link Unit Form -->
+    <div class="link-form-card">
+      <form [formGroup]="linkForm" class="link-form">
+        <div class="form-row form-row--5col">
+          <!-- Gap 3.1: Donor Last Name (editable autocomplete dropdown) -->
+          <mat-form-field appearance="fill" subscriptSizing="dynamic">
+            <mat-label>Donor Last Name</mat-label>
+            <input matInput
+              formControlName="donorLastName"
+              [matAutocomplete]="donorAuto"
+              #donorAutoTrigger="matAutocompleteTrigger"
+              (input)="onDonorLastNameInput()"
+              required>
+            <mat-icon matSuffix class="dropdown-arrow"
+              (click)="donorAutoTrigger.openPanel()"
+              aria-hidden="true"
+              tabindex="-1">arrow_drop_down</mat-icon>
+            <mat-autocomplete #donorAuto="matAutocomplete"
+              [displayWith]="displayDonorLastName"
+              (optionSelected)="onDonorAutoSelected($event)">
+              @for (donor of filteredDonors(); track donor.donorNumber) {
+                <mat-option [value]="donor">
+                  {{ donor.lastName }}, {{ donor.firstName }}
+                </mat-option>
+              }
+            </mat-autocomplete>
+            @if (linkForm.get('donorLastName')?.hasError('required') && linkForm.get('donorLastName')?.touched) {
+              <mat-error>Donor Last Name is required</mat-error>
+            }
+          </mat-form-field>
+
+          <!-- Gap 3.1: Donor First Name (editable text) -->
+          <mat-form-field appearance="fill" subscriptSizing="dynamic">
+            <mat-label>Donor First Name</mat-label>
+            <input matInput formControlName="donorFirstName" required>
+            @if (linkForm.get('donorFirstName')?.hasError('required') && linkForm.get('donorFirstName')?.touched) {
+              <mat-error>Donor First Name is required</mat-error>
+            }
+          </mat-form-field>
+
+          <!-- Gap 3.2: Phone (editable, area code + phone combined) -->
+          <mat-form-field appearance="fill" subscriptSizing="dynamic">
+            <mat-label>Phone</mat-label>
+            <input matInput formControlName="phone">
+          </mat-form-field>
+
+          <!-- Gap 3.2: International Phone (editable) -->
+          <mat-form-field appearance="fill" subscriptSizing="dynamic">
+            <mat-label>International Phone</mat-label>
+            <input matInput formControlName="internationalPhone">
+          </mat-form-field>
+
+          <div class="unit-field-wrapper">
+            <app-unit-id-field
+              label="Unit ID"
+              [required]="true"
+              [validateFfValue]="'DONOR'"
+              hintDefault=""
+              (postValidate)="onPostValidate($event)"
+              (validated)="onUnitValidated($event)"
+              (cleared)="onUnitCleared()"
+              class="unit-id-input"
+            ></app-unit-id-field>
+            <img src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-indicator" />
+          </div>
+        </div>
+
+        <!-- Donor Info Display -->
+        <div class="donor-info-display">
+          <!-- Gap 3.8: Collection Date as datepicker -->
+          <mat-form-field appearance="fill" subscriptSizing="dynamic" class="date-field">
+            <mat-label>Collection Date</mat-label>
+            <input matInput
+              [matDatepicker]="collDatePicker"
+              formControlName="collectionDate"
+              placeholder="DD-MMM-YYYY"
+              required
+              [readonly]="unitRegistrationInfo()?.isRegistered === true">
+            <mat-datepicker-toggle matIconSuffix [for]="collDatePicker"
+              [disabled]="unitRegistrationInfo()?.isRegistered === true"></mat-datepicker-toggle>
+            <mat-datepicker #collDatePicker
+              [disabled]="unitRegistrationInfo()?.isRegistered === true"></mat-datepicker>
+            @if (linkForm.get('collectionDate')?.hasError('required') && linkForm.get('collectionDate')?.touched) {
+              <mat-error>Collection Date is required</mat-error>
+            }
+          </mat-form-field>
+          <div class="donor-info-item">
+            <span class="info-label" [id]="elementId('donor-id-label')">Donor ID</span>
+            <span class="info-value" [attr.aria-labelledby]="elementId('donor-id-label')">{{ donorDemographics()?.donorId || '-' }}</span>
+          </div>
+          <div class="donor-info-item">
+            <span class="info-label" [id]="elementId('donor-name-label')">Name</span>
+            <span class="info-value" [attr.aria-labelledby]="elementId('donor-name-label')">{{ donorDemographics()?.donorName || '-' }}</span>
+          </div>
+          <div class="donor-info-item">
+            <span class="info-label" [id]="elementId('donor-dob-label')">Date of Birth</span>
+            <span class="info-value" [attr.aria-labelledby]="elementId('donor-dob-label')">{{ donorDemographics() ? formatDate(donorDemographics()!.dateOfBirth) : '-' }}</span>
+          </div>
+          <div class="donor-info-item">
+            <span class="info-label" [id]="elementId('donor-sex-label')">Sex</span>
+            <span class="info-value" [attr.aria-labelledby]="elementId('donor-sex-label')">{{ donorDemographics() ? formatSex(donorDemographics()!.gender) : '-' }}</span>
+          </div>
+          <button
+            mat-raised-button
+            color="primary"
+            type="button"
+            (click)="onLinkUnit()"
+            [disabled]="isLinkDisabled"
+            [attr.aria-label]="isLinking() ? 'Linking unit in progress' : 'Link unit'"
+            [attr.aria-busy]="isLinking()"
+            class="link-button">
+            @if (isLinking()) {
+              <mat-spinner diameter="20" color="accent"></mat-spinner>
+            } @else {
+              LINK
+            }
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Tables Section -->
+    <div class="tables-section-card">
+      <div class="tables-grid">
+        <!-- Special Donors Table -->
+        <div class="table-section table-section-left">
+          <h2 class="section-title">Special Donors</h2>
+          <div *ngIf="isDonorsLoading()" class="section-loading">
+            <mat-spinner diameter="30" aria-label="Loading"></mat-spinner>
+          </div>
+          <ng-container *ngIf="!isDonorsLoading()">
+            <div *ngIf="specialDonors().length > 0" class="table-wrapper">
+              <app-data-table
+                [config]="donorTableConfig"
+                [data]="specialDonors()"
+                (sortChange)="onDonorSortChange($event)">
+              </app-data-table>
+            </div>
+            <div *ngIf="specialDonors().length === 0" class="empty-state">
+              <div class="empty-state-icon-wrapper" aria-hidden="true">
+                <mat-icon>edit</mat-icon>
+              </div>
+              <p class="empty-state-text">No special donors available to display.</p>
+            </div>
+          </ng-container>
+        </div>
+
+        <!-- Linked Units Table -->
+        <div class="table-section table-section-right">
+          <h2 class="section-title">Linked Units of {{ getPatientFirstName() }} Person</h2>
+          <div *ngIf="isLinkedUnitsLoading()" class="section-loading">
+            <mat-spinner diameter="30" aria-label="Loading"></mat-spinner>
+          </div>
+          <div *ngIf="linkedUnitsError() && !isLinkedUnitsLoading()" class="section-error" role="alert">
+            <span class="section-error-text">{{ linkedUnitsError() }}</span>
+            <button mat-button class="section-retry-btn" (click)="loadLinkedUnits()">Retry</button>
+          </div>
+          <ng-container *ngIf="!isLinkedUnitsLoading() && !linkedUnitsError()">
+            <div class="linked-units-list">
+              <div *ngFor="let unit of linkedUnits()" class="linked-unit-item">
+                <div class="unit-details">
+                  <div class="unit-id">{{ unit.displayUnitId || unit.unitId }}</div>
+                  <div class="unit-date"><ng-container *ngIf="unit.seqNo > 0">Don#{{ unit.seqNo }}<span class="separator" aria-hidden="true">|</span></ng-container>Collected on {{ formatDate(unit.collectionDate) }}</div>
+                </div>
+                <button
+                  mat-icon-button
+                  (click)="onUnlinkUnit(unit)"
+                  [attr.aria-label]="'Unlink unit ' + unit.unitId"
+                  title="Unlink unit"
+                  class="unlink-button">
+                  <mat-icon class="unlink-icon">remove_circle_outline</mat-icon>
+                </button>
+              </div>
+              <div *ngIf="linkedUnits().length === 0" class="empty-state">
+                <mat-icon class="empty-state-icon" aria-hidden="true">link</mat-icon>
+                <p class="empty-state-text">No Linked Units to Display</p>
+              </div>
+            </div>
+          </ng-container>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

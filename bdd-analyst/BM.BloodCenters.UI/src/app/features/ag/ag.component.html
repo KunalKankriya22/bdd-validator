@@ -1,0 +1,276 @@
+<div class="ag-page">
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <a [href]="'#' + elementId('results-heading')" class="skip-link">
+    Skip to test results
+  </a>
+
+  <div class="page-wrapper">
+    <!-- Search Card -->
+    <div class="search-card">
+      <form [formGroup]="worksheetForm" class="search-form">
+        <!-- Worksheet ID Dropdown (mandatory) -->
+        <mat-form-field appearance="fill" class="form-field" subscriptSizing="dynamic">
+          <mat-label>Worksheet ID</mat-label>
+          <mat-select formControlName="worksheetId" aria-label="Worksheet ID"
+                     [attr.aria-describedby]="(worksheetError() || (f['worksheetId'].hasError('required') && f['worksheetId'].touched)) ? errorId('worksheetId') : null"
+                     (selectionChange)="onWorksheetSelect($event.value)"
+                     (openedChange)="onDropdownOpened($event)">
+            <mat-select-trigger>
+              <span #worksheetTrigger class="select-trigger-text"
+                    (mouseenter)="checkWorksheetTruncation(worksheetTrigger)"
+                    [matTooltip]="selectedWorksheetDisplay()"
+                    [matTooltipDisabled]="!isWorksheetTruncated"
+                    matTooltipPosition="above">
+                {{ selectedWorksheetDisplay() }}
+              </span>
+            </mat-select-trigger>
+            @if (isLoadingWorksheets) {
+              <mat-option disabled>
+                <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+                <span>Loading...</span>
+              </mat-option>
+            } @else if (worksheetOptions().length === 0) {
+              <mat-option disabled>No data available</mat-option>
+            } @else if (worksheetOptions().length <= 3) {
+              @for (ws of worksheetOptions(); track ws.tbId) {
+                <mat-option [value]="ws.tbId">
+                  {{ ws.tbId }}{{ ws.description ? ' - ' + ws.description : '' }}
+                </mat-option>
+              }
+            } @else {
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="worksheetSearchControl"
+                  placeholderLabel="Search worksheet IDs"
+                  noEntriesFoundLabel="No worksheets found">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (ws of filteredWorksheets(); track ws.tbId) {
+                <mat-option [value]="ws.tbId">
+                  {{ ws.tbId }}{{ ws.description ? ' - ' + ws.description : '' }}
+                </mat-option>
+              }
+              @if (filteredWorksheets().length === 0) {
+                <mat-option disabled>No data available</mat-option>
+              }
+            }
+          </mat-select>
+          @if (worksheetError()) {
+            <mat-error [id]="errorId('worksheetId')" role="alert">
+              {{ worksheetError() }}
+            </mat-error>
+          }
+          @if (f['worksheetId'].hasError('required') && f['worksheetId'].touched) {
+            <mat-error [id]="errorId('worksheetId')" role="alert">Worksheet ID is required</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- CLEAR Button (outlined) -->
+        <button
+          mat-stroked-button
+          type="button"
+          class="clear-button"
+          aria-label="Clear worksheet selection"
+          (click)="onClearWorksheet()"
+          [disabled]="loading() || !worksheetId()">
+          CLEAR
+        </button>
+      </form>
+    </div>
+
+    <!-- Loading State -->
+    @if (loading()) {
+      <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+        <mat-spinner diameter="40" aria-label="Loading worksheet"></mat-spinner>
+      </div>
+    }
+
+    <!-- Empty State (before worksheet selected) -->
+    @if (!loading() && isEmpty() && !worksheetId()) {
+      <div class="empty-state-container empty-state-container--standalone" role="status">
+        <div class="empty-state-icon">
+          <mat-icon aria-hidden="true">search</mat-icon>
+        </div>
+        <h2 class="empty-state-title">No Results to Display</h2>
+        <p class="empty-state-message">
+          Please enter search criteria to view Results
+        </p>
+      </div>
+    }
+
+    <!-- Split Panel (qa-library pattern) -->
+    @if (!loading() && !isEmpty() && worksheetId()) {
+      <div class="ag-content">
+        <!-- LEFT PANEL (sidebar) -->
+        <aside class="ag-sidebar" aria-label="Pending units">
+          <div class="sidebar-header">
+            <app-search-bar
+              [config]="searchConfig"
+              (search)="onSearch($event)">
+            </app-search-bar>
+          </div>
+
+          @if (loadingUnits()) {
+            <div class="unit-list-loading" role="status" aria-live="polite">
+              <mat-spinner diameter="30" aria-label="Loading units"></mat-spinner>
+            </div>
+          }
+
+          <mat-list class="unit-list" role="listbox"
+                    [attr.aria-label]="'List of ' + filteredUnits().length + ' pending units'">
+            @for (unit of filteredUnits(); track unit.unitId; let idx = $index) {
+              <mat-list-item
+                class="unit-item"
+                role="option"
+                [class.active]="unit.isSelected"
+                [tabIndex]="unit.isSelected || (!selectedUnit() && idx === 0) ? 0 : -1"
+                (click)="onUnitSelect(unit)"
+                (keydown.enter)="onUnitSelect(unit)"
+                (keydown.space)="$event.preventDefault(); onUnitSelect(unit)"
+                (keydown.arrowdown)="$event.preventDefault(); onUnitKeyNav($event, idx, 1)"
+                (keydown.arrowup)="$event.preventDefault(); onUnitKeyNav($event, idx, -1)"
+                (keydown.home)="$event.preventDefault(); onUnitKeyNav($event, idx, -idx)"
+                (keydown.end)="$event.preventDefault(); onUnitKeyNav($event, idx, filteredUnits().length - 1 - idx)"
+                [attr.aria-selected]="unit.isSelected"
+                [attr.aria-label]="'Unit ' + unit.displayText + (unit.collectionDate ? ', collected ' + unit.collectionDate : '')">
+                <div class="item-row">
+                  <div class="unit-number" aria-hidden="true">{{ idx + 1 }}.</div>
+                  <div class="item-text">
+                    <div class="unit-id">{{ unit.displayText }}</div>
+                    @if (unit.collectionDate) {
+                      <div class="unit-date">{{ unit.collectionDate }}</div>
+                    }
+                  </div>
+                </div>
+              </mat-list-item>
+            }
+          </mat-list>
+
+          @if (filteredUnits().length === 0 && !loadingUnits()) {
+            <div class="no-units-found" role="status" aria-live="polite">
+              No units found matching "{{ searchTerm() }}"
+            </div>
+          }
+        </aside>
+
+        <!-- RIGHT PANEL (main) -->
+        <main class="ag-main">
+          @if (selectedUnit()) {
+            @if (loadingTests()) {
+              <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+                <mat-spinner diameter="30" aria-label="Loading tests"></mat-spinner>
+              </div>
+            } @else {
+            <div class="results-container">
+              <h2 class="results-title" [id]="elementId('results-heading')" tabindex="-1">
+                Test Results of unit {{ selectedUnit()!.displayText }}
+              </h2>
+
+              <!-- Data Table (shared component) -->
+              @if (tableConfig) {
+                <app-data-table
+                  [config]="tableConfig"
+                  [data]="testResults()"
+                  (sortChange)="onSortChange($event)">
+                </app-data-table>
+              }
+            </div>
+
+            <!-- Bottom Action Buttons -->
+            <div class="bottom-action-buttons" role="group" aria-label="Form actions">
+              <div class="right-actions">
+                <button
+                  mat-button
+                  type="button"
+                  class="btn-action"
+                  aria-label="Cancel and clear worksheet"
+                  (click)="onCancel()"
+                  [disabled]="saving() || saved()">
+                  CANCEL
+                </button>
+                <button
+                  mat-button
+                  type="button"
+                  class="btn-action"
+                  aria-label="Clear all entered results"
+                  (click)="onClearAll()"
+                  [disabled]="saving() || !selectedUnit()">
+                  CLEAR ALL
+                </button>
+                <button
+                  mat-stroked-button
+                  type="button"
+                  class="btn-save"
+                  [attr.aria-label]="saving() ? 'Saving results' : 'Save results'"
+                  [attr.aria-busy]="saving()"
+                  (click)="onSave()"
+                  [disabled]="!canSave()">
+                  @if (saving()) {
+                    <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+                  } @else {
+                    SAVE
+                  }
+                </button>
+                <button
+                  mat-raised-button
+                  color="primary"
+                  type="button"
+                  class="btn-save-close"
+                  [attr.aria-label]="saving() ? 'Closing worksheet' : 'Save and close worksheet'"
+                  [attr.aria-busy]="saving()"
+                  (click)="onSaveAndCloseWorksheet()"
+                  [disabled]="!canCloseWorksheet()">
+                  @if (saving()) {
+                    <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+                  } @else {
+                    SAVE AND CLOSE WORKSHEET
+                  }
+                </button>
+              </div>
+            </div>
+            }
+          } @else {
+            <div class="no-unit-selected" role="status" aria-live="polite">
+              <p>Select a unit from the list to view and enter test results</p>
+            </div>
+          }
+        </main>
+      </div>
+    }
+  </div>
+</div>
+
+<!-- Result column cell template for data-table -->
+<ng-template #resultTemplate let-row>
+  <mat-form-field appearance="fill" class="result-select"
+                  [class.result-select--completed]="row.hasExistingResult"
+                  subscriptSizing="dynamic">
+    <mat-select
+      [value]="row.resultStatus1"
+      [disabled]="row.hasExistingResult"
+      (selectionChange)="onResultChange(row, $event.value)"
+      (openedChange)="onResultDropdownOpened($event)"
+      [matTooltip]="row.hasExistingResult ? 'Result already entered' : ''"
+      [attr.aria-label]="'Result for test ' + row.testId + (row.hasExistingResult ? ', already entered' : row.resultStatus1 ? ', currently ' + row.resultStatus1 : '')">
+      @if (row.validResults?.length > 0) {
+        <mat-option>
+          <ngx-mat-select-search
+            [formControl]="resultSearchControl"
+            placeholderLabel="Search results"
+            noEntriesFoundLabel="No results found">
+          </ngx-mat-select-search>
+        </mat-option>
+      }
+      @for (result of filterResults(row.validResults); track result.code) {
+        <mat-option [value]="result.code"
+                    [matTooltip]="result.code + ' - ' + result.description"
+                    matTooltipPosition="above">
+          {{ result.code }} - {{ result.description }}
+        </mat-option>
+      } @empty {
+        <mat-option disabled>No data available</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+</ng-template>

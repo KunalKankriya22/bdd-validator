@@ -1,0 +1,193 @@
+<div class="manage-errors-tab">
+  <!-- Get Started State - Before selecting chapter/instrument -->
+  @if (!chapterId || !instrumentId) {
+    <div class="empty-state" role="status">
+      <mat-icon class="empty-state__icon" aria-hidden="true">edit</mat-icon>
+      <p class="empty-state__title">Get Started</p>
+      <p class="empty-state__message">
+        Select a Chapter ID and Instrument ID to access instrument interface functions.
+      </p>
+    </div>
+  }
+
+  <!-- Toolbar - Only show when data has been loaded -->
+  @if (chapterId && instrumentId && hasLoadedData()) {
+    <div class="toolbar">
+    <div class="toolbar__controls-left">
+      <button mat-button class="filter-button" cdkOverlayOrigin #filterOrigin="cdkOverlayOrigin"
+              (click)="toggleFilter()" [class.filter-button--active]="isFilterOpen"
+              aria-label="Toggle filter panel">
+        <mat-icon aria-hidden="true">filter_list</mat-icon>
+        FILTER
+      </button>
+
+      <!-- Filter overlay -->
+      <ng-template cdkConnectedOverlay [cdkConnectedOverlayOrigin]="filterOrigin"
+                   [cdkConnectedOverlayOpen]="isFilterOpen" [cdkConnectedOverlayHasBackdrop]="true"
+                   cdkConnectedOverlayBackdropClass="cdk-overlay-transparent-backdrop"
+                   (backdropClick)="onFilterClose()">
+        <app-manage-errors-filter-panel
+          [currentFilters]="currentFilters()"
+          [machineTestIds]="machineTestIdStrings()"
+          (apply)="onFilterApply($event)"
+          (close)="onFilterClose()">
+        </app-manage-errors-filter-panel>
+      </ng-template>
+
+      <!-- Inline Filter Chips -->
+      @if (filterChips.length > 0) {
+        <app-filter-chips
+          [chips]="filterChips"
+          [maxVisible]="3"
+          (removeChip)="removeFilterChip($event)"
+          (clearAll)="clearAllFilters()">
+        </app-filter-chips>
+      }
+    </div>
+
+    <div class="toolbar-right">
+      <button
+        mat-stroked-button
+        (click)="openAddErrorDialog()"
+        class="add-button"
+        aria-label="Add new error">
+        <mat-icon aria-hidden="true">add</mat-icon>
+        ADD NEW ERROR
+      </button>
+
+      <app-search-bar
+        [config]="searchConfig"
+        (search)="onSearch($event)"
+        class="search-bar" />
+    </div>
+  </div>
+  }
+
+  <!-- Table Container - Show when chapter and instrument are selected -->
+  @if (chapterId && instrumentId) {
+    <!-- Loading State -->
+    @if (loading()) {
+      <div class="loading-container" role="alert" aria-live="polite">
+        <mat-spinner diameter="48" aria-label="Loading error codes"></mat-spinner>
+        <p>Loading error codes...</p>
+      </div>
+    }
+
+    <!-- Empty State - No data loaded yet -->
+    @if (!loading() && !hasLoadedData()) {
+      <div class="empty-state" role="status">
+        <mat-icon class="empty-state__icon" aria-hidden="true">edit</mat-icon>
+        <p class="empty-state__message">
+          Click RETRIEVE to load error codes for the selected Chapter ID and Instrument ID.
+        </p>
+      </div>
+    }
+
+    <!-- Data Table - Always show when data has been loaded -->
+    @if (!loading() && hasLoadedData()) {
+      <div class="table-container">
+        <div class="table-wrapper">
+          <table mat-table [dataSource]="paginatedData()" class="data-table" aria-label="Error codes table">
+          <!-- Machine Test ID Column -->
+          <ng-container matColumnDef="machineTestId">
+            <th mat-header-cell *matHeaderCellDef [attr.aria-sort]="sortColumn() === 'machineTestId' ? (sortDirection() === 'asc' ? 'ascending' : 'descending') : 'none'">
+              <button mat-button class="column-header column-header--sortable" (click)="onSort('machineTestId')" aria-label="Sort by Machine Test ID">
+                <span>Machine Test ID</span>
+                <mat-icon aria-hidden="true">{{ getSortIcon('machineTestId') }}</mat-icon>
+              </button>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.machineTestId || '-' }}</td>
+          </ng-container>
+
+          <!-- Error Code Column -->
+          <ng-container matColumnDef="errorCode">
+            <th mat-header-cell *matHeaderCellDef>
+              <div class="column-header-static">Error Code</div>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.errorCode || '-' }}</td>
+          </ng-container>
+
+          <!-- Error Description Column -->
+          <ng-container matColumnDef="errorDescription">
+            <th mat-header-cell *matHeaderCellDef>
+              <div class="column-header-static">Error Description</div>
+            </th>
+            <td mat-cell *matCellDef="let row"
+                [matTooltip]="row.errorDesc?.length > 50 ? row.errorDesc : ''"
+                matTooltipClass="error-desc-tooltip">
+              {{ row.errorDesc?.length > 50 ? (row.errorDesc | slice:0:50) + '...' : (row.errorDesc || '-') }}
+            </td>
+          </ng-container>
+
+          <!-- Skip/Abort Column -->
+          <ng-container matColumnDef="skipAbort">
+            <th mat-header-cell *matHeaderCellDef>
+              <div class="column-header-static">Skip/Abort</div>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.skipLevel === 'S' ? 'Single Unit' : (row.skipLevel === 'A' ? 'Abort' : row.skipLevel || '-') }}</td>
+          </ng-container>
+
+          <!-- Effective Date Column -->
+          <ng-container matColumnDef="effectiveDate">
+            <th mat-header-cell *matHeaderCellDef>
+              <div class="column-header-static">Effective Date</div>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.effDate ? (row.effDate | date: 'dd-MMM-yyyy' | uppercase) : '-' }}</td>
+          </ng-container>
+
+          <!-- Termination Date Column -->
+          <ng-container matColumnDef="terminationDate">
+            <th mat-header-cell *matHeaderCellDef>
+              <div class="column-header-static">Termination Date</div>
+            </th>
+            <td mat-cell *matCellDef="let row">{{ row.termDate ? (row.termDate | date: 'dd-MMM-yyyy' | uppercase) : '-' }}</td>
+          </ng-container>
+
+          <!-- Actions Column -->
+          <ng-container matColumnDef="actions">
+            <th mat-header-cell *matHeaderCellDef><span class="cdk-visually-hidden">Actions</span></th>
+            <td mat-cell *matCellDef="let row">
+              <button
+                mat-icon-button
+                (click)="openEditErrorDialog(row)"
+                aria-label="Edit error code"
+                matTooltip="Edit error code">
+                <mat-icon aria-hidden="true">edit</mat-icon>
+              </button>
+            </td>
+          </ng-container>
+
+          <!-- Header and Row Definitions -->
+          <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+          <tr
+            mat-row
+            *matRowDef="let row; columns: displayedColumns"
+            class="table-row"></tr>
+        </table>
+        </div>
+
+        <!-- Empty State Overlay - Show when no data -->
+        @if (paginatedData().length === 0) {
+          <div class="table-empty-state">
+            <mat-icon class="empty-icon" aria-hidden="true">edit</mat-icon>
+            <p class="empty-title">No Data Available</p>
+            <p class="empty-message">No data found for the selected Instrument ID.</p>
+          </div>
+        }
+
+        <!-- Paginator -->
+        <nav class="paginator-nav" aria-label="Table pagination navigation">
+          <mat-paginator
+            [length]="totalItems()"
+            [pageSize]="pageSize()"
+            [pageIndex]="pageIndex()"
+            [pageSizeOptions]="[10, 25, 50, 100]"
+            (page)="onPageChange($event)"
+            showFirstLastButtons
+            aria-label="Select page">
+          </mat-paginator>
+        </nav>
+      </div>
+    }
+  }
+</div>

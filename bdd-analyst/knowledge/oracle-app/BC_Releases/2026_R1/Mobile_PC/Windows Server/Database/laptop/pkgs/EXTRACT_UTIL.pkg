@@ -1,0 +1,623 @@
+CREATE OR REPLACE package extract_util as
+	/*
+	----------------------------------------------------------------------------   
+	PACKAGE  : EXTRACT_UTIL
+	PURPOSE: Generic utility function to extract table data to files. 
+
+	-------------------------------------------------------------------------------
+    Date      	 |   Ver |  Remarks
+	-------------------------------------------------------------------------------
+	01/27/2023   |   01  | Took original version from refcursor-to-csv William Robertson 2018
+						 |  and applied changes on top of it.
+						 |  prepare_cursor routine modified to use desc_tab2 instead of desc_tab.
+						 | describe_column2 used instead of describe_columns
+						 | quote routine modified.
+	-----------------------------------------------------------------------------
+	
+	-- William Robertson 2018, http://www.williamrobertson.net/documents/refcursor-to-csv.shtml
+
+    -- Lines > 4K require a custom collection type to support CLOBs (also grant EXECUTE on the type to suitable roles and/or users):
+    -- create or replace type clob_tt as table of clob;
+
+    -- Returns cursor results in character-delimited format with optional header, data label and rowcount.
+    --
+    --     select column_value
+    --     from   table(csv.report(cursor(
+    --                select * from dept
+    --            )));
+    --
+    --     COLUMN_VALUE
+    --     ----------------------------------------------
+    --     10,ACCOUNTING,NEW YORK
+    --     20,RESEARCH,DALLAS
+    --     30,SALES,CHICAGO
+    --     40,OPERATIONS,BOSTON
+    --
+    --     4 rows selected.
+	*/
+
+
+
+    g_dflt_separator   varchar2(10) := ',';
+    g_label_in_header  boolean := true;
+    g_label_in_footer  boolean := true;
+
+
+
+    function report
+        ( p_dataset    in sys_refcursor
+        , p_separator  in varchar2 default g_dflt_separator
+        , p_label      in varchar2 default null
+        , p_heading    in varchar2 default 'N'
+        , p_rowcount   in varchar2 default 'N')
+        return sys.ku$_vcnt  -- generic string array: use your own if you prefer
+        pipelined;
+
+    -- Write output to a file
+    procedure write_file
+        ( p_dataset    in sys_refcursor
+        , p_separator  in varchar2 default g_dflt_separator
+        , p_label      in varchar2 default null
+        , p_heading    in varchar2 default 'N'
+        , p_rowcount   in varchar2 default 'N'
+        , p_directory  in all_directories.directory_name%type
+        , p_filename   in varchar2
+        , p_encrypt    in varchar2 DEFAULT 'N');
+
+    PROCEDURE blob_to_file (  p_blob      IN  BLOB,
+                              p_dir       IN  VARCHAR2,
+                              p_filename  IN  VARCHAR2,
+                              p_encrypt   IN VARCHAR2 DEFAULT 'N');
+
+    FUNCTION file_to_blob (
+            p_dir_name   VARCHAR2,
+            p_file_name  VARCHAR2
+        ) RETURN BLOB;
+
+end extract_util;
+
+/
+
+
+CREATE OR REPLACE package body extract_util as
+    -- William Robertson 2018, http://www.williamrobertson.net/documents/refcursor-to-csv.shtml
+
+    g_typenames        dbms_utility.name_array;
+    g_supported_types  dbms_utility.name_array;
+
+    k_format_dateonly  constant varchar2(10) := 'MM/DD/YYYY';
+    k_format_datetime  constant varchar2(21) := 'MM/DD/YYYY hh24miss';
+
+    k_heading_label    constant varchar2(50) := 'HEADING';
+    k_footer_label     constant varchar2(50) := 'ROW_COUNT';
+
+    -- Record for parsing a column's value:
+    type column_data is record
+        ( stringval    long
+        , clobval      clob
+        , numval       number
+        , dateval      date
+        , rowidval     rowid );
+
+
+    encryption_type    PLS_INTEGER := DBMS_CRYPTO.ENCRYPT_AES256
+                                 + DBMS_CRYPTO.CHAIN_CBC
+                                 + DBMS_CRYPTO.PAD_PKCS5;                                 
+    encryption_key_string   VARCHAR2(32) := 'IDEMERAWIDEMERAWIDEMERAWIDEMERAW';
+    encryption_key          RAW (32) := UTL_RAW.cast_to_raw(encryption_key_string);
+
+     -- The encryption key should be 8 bytes or more for DES algorithm. 
+     FUNCTION encrypt (p_plainText VARCHAR2) RETURN RAW DETERMINISTIC
+     IS
+        encrypted_raw      RAW (2000);
+     BEGIN
+        encrypted_raw := DBMS_CRYPTO.ENCRYPT
+        (
+           src => UTL_RAW.CAST_TO_RAW (p_plainText),
+           typ => encryption_type,
+           key => encryption_key
+        );
+       RETURN encrypted_raw;
+     END encrypt;
+
+     FUNCTION encrypt (p_blob BLOB) RETURN BLOB IS
+        temp_blob        BLOB := empty_blob;
+     BEGIN
+        IF p_blob IS NULL THEN
+            RETURN empty_blob();
+        END IF;
+
+        dbms_lob.createtemporary(temp_blob, true, dbms_lob.call);
+
+        dbms_crypto.encrypt(dst => temp_blob, 
+                            src => p_blob, 
+                            typ => encryption_type,
+                            key => encryption_key);        
+
+        RETURN temp_blob;
+     END encrypt;
+
+     FUNCTION decrypt (p_encryptedText RAW) RETURN VARCHAR2 DETERMINISTIC
+     IS
+        decrypted_raw      RAW (2000);
+     BEGIN
+        decrypted_raw := DBMS_CRYPTO.DECRYPT
+        (
+            src => p_encryptedText,
+            typ => encryption_type,
+            key => encryption_key
+        );
+        RETURN (UTL_RAW.CAST_TO_VARCHAR2 (decrypted_raw));
+     END decrypt;
+
+     FUNCTION decrypt (p_blob BLOB) RETURN BLOB IS
+        temp_blob        BLOB := empty_blob;
+     BEGIN
+        IF p_blob IS NULL THEN
+            RETURN empty_blob();
+        END IF;
+
+        dbms_lob.createtemporary(temp_blob, true, dbms_lob.call);
+
+        dbms_crypto.decrypt(dst => temp_blob, 
+                            src => p_blob, 
+                            typ => encryption_type,
+                            key => encryption_key);        
+
+        RETURN temp_blob;
+     END decrypt;
+
+    -- Utility for parsing ref cursor. Pass in ref cursor, get back DBMS_SQL cursor number, column list.
+    procedure prepare_cursor
+        ( p_dataset         in  sys_refcursor
+        , p_cursor_id       out integer
+        , p_cursor_columns  out nocopy dbms_sql.desc_tab2 )
+    is
+        l_extract_query   sys_refcursor := p_dataset;
+        l_col_count       integer;
+
+        l_dummy_number    number;
+        l_dummy_date      date;
+        l_dummy_string    varchar2(4000);
+        l_dummy_clob      clob;
+        l_dummy_rowid     rowid;
+    begin
+        p_cursor_id := dbms_sql.to_cursor_number(l_extract_query);
+        dbms_sql.describe_columns2(p_cursor_id, l_col_count, p_cursor_columns);
+
+        -- Define columns to be selected from the cursor
+        -- (third parameter passed to dbms_sql.define_column is just to provide datatype - no actual value is used here)
+        for i in 1 .. p_cursor_columns.count loop
+            begin
+                if not g_supported_types.exists(p_cursor_columns(i).col_type) then
+                    -- Datatype is known but will not work in this extract e.g. BLOB, BFILE:
+                    raise_application_error(-20001, 'Unsupported datatype ' || g_typenames(p_cursor_columns(i).col_type) || ' for column ' || p_cursor_columns(i).col_name, false);
+                elsif p_cursor_columns(i).col_type = dbms_types.typecode_number then
+                    dbms_sql.define_column(p_cursor_id, i, l_dummy_number );
+                elsif g_typenames(p_cursor_columns(i).col_type) like '%CHAR%' then
+                    dbms_sql.define_column(p_cursor_id, i, l_dummy_string, 4000 );
+                elsif g_typenames(p_cursor_columns(i).col_type) like '%ROWID' then
+                    dbms_sql.define_column_rowid(p_cursor_id, i, l_dummy_rowid);
+                elsif regexp_like(g_typenames(p_cursor_columns(i).col_type), '^(DATE|TIME)') then
+                    dbms_sql.define_column(p_cursor_id, i, l_dummy_date );
+                elsif g_typenames(p_cursor_columns(i).col_type) = 'CLOB' then
+                    dbms_sql.define_column(p_cursor_id, i, l_dummy_clob);
+                else
+                    -- Attempt default implicit string conversion for anything else:
+                    dbms_sql.define_column(p_cursor_id, i, l_dummy_string, 4000 );
+                end if;
+            exception
+                when no_data_found then
+                    -- Datatype is not in list - we should probably add it, but will need to test whether DBMS_SQL handles it:
+                    raise_application_error(-20002, 'Unknown datatype ' || p_cursor_columns(i).col_type || ' for column ' || p_cursor_columns(i).col_name, false);
+            end;
+        end loop;
+    end prepare_cursor;
+
+    -- Close DBMS_SQL cursor by cursor ID, suppressing any 'invalid cursor' exception.
+    procedure close_dbms_sql_cursor
+        ( p_cursor_id in out integer )
+    is
+    begin
+        if dbms_sql.is_open(p_cursor_id) then
+            dbms_sql.close_cursor(p_cursor_id);
+        end if;
+    exception
+        when invalid_cursor then null;
+    end close_dbms_sql_cursor;
+
+    function quote
+        ( p_text        in varchar2
+        , p_separator   in varchar2 )
+        return varchar2
+    is
+        quoted_text long ;
+    begin
+        return replace(trim(p_text),p_separator,'@#@#'); -- Escape separator as @#@#
+    end quote;
+    /*
+    function quote
+        ( p_text        in varchar2
+        , p_separator   in varchar2 )
+        return varchar2
+    is
+        quoted_text long := replace(trim(p_text),'"','\"');  -- Escape any doublequote
+    begin
+        return
+            case
+                when instr(p_text,p_separator) > 0 or instr(p_text,chr(10)) > 0
+                then  '"'||quoted_text||'"'
+                else quoted_text
+            end;
+    end quote;
+    */
+
+    -- Append one column value from dbms_sql.column_value to result according to its datatype:
+    procedure append_value
+        ( p_cursor_id   in pls_integer
+        , p_colnum      in pls_integer
+        , p_col_type    in pls_integer
+        , p_separator   in varchar2 default g_dflt_separator
+        , p_result_row  in out nocopy long )
+    is
+        k_typename constant varchar2(40) := g_typenames(p_col_type);
+        l_column_values column_data;
+    begin
+        if k_typename like '%CHAR%' or k_typename like '%ROWID' then
+            dbms_sql.column_value(p_cursor_id, p_colnum, l_column_values.stringval);
+            pragma inline (quote, 'YES');
+            p_result_row := p_result_row || quote(l_column_values.stringval, p_separator);
+
+        elsif k_typename = 'NUMBER' then
+            dbms_sql.column_value(p_cursor_id, p_colnum, l_column_values.numval);
+            p_result_row := p_result_row || rtrim(to_char(l_column_values.numval,'fm9999999999999999999999999990.999999999999'),'.');
+
+        elsif regexp_like(k_typename, '^(DATE|TIME)') then
+            dbms_sql.column_value(p_cursor_id, p_colnum, l_column_values.dateval);
+            if l_column_values.dateval = trunc(l_column_values.dateval) then
+                p_result_row := p_result_row || to_char(l_column_values.dateval,k_format_dateonly);
+            else
+                p_result_row := p_result_row || to_char(l_column_values.dateval,k_format_datetime);
+            end if;
+
+        elsif k_typename = 'ROWID' then
+            dbms_sql.column_value(p_cursor_id, p_colnum, l_column_values.rowidval);
+            p_result_row := p_result_row || rowidtochar(l_column_values.rowidval);
+
+        elsif k_typename = 'CLOB' then
+            dbms_sql.column_value(p_cursor_id, p_colnum, l_column_values.clobval);
+            p_result_row := p_result_row || quote(l_column_values.clobval, p_separator);
+        else
+            -- For anything else attempt to dump into a long string:
+            dbms_sql.column_value(p_cursor_id, p_colnum, l_column_values.stringval);
+            p_result_row := p_result_row ||l_column_values.stringval;
+        end if;
+
+        if length(p_result_row) > 4000 then
+            raise_application_error(-20005, 'Output line beginning "' || substr(p_result_row,1,50) ||'" is too long (max: 4000, actual: ' || length(p_result_row) );
+        end if;
+
+    end append_value;
+
+    -- Reusable extract function -
+    -- Handles delimiting and date formatting automatically, just pass in a normal cursor
+    function report
+        ( p_dataset    in sys_refcursor
+        , p_separator  in varchar2 default g_dflt_separator
+        , p_label      in varchar2 default null
+        , p_heading    in varchar2 default 'N'
+        , p_rowcount   in varchar2 default 'N')
+        return sys.ku$_vcnt
+        pipelined
+    is
+        l_rowcount        integer := 0;
+        l_cursor_id       integer;
+        l_cursor_columns  dbms_sql.desc_tab2;
+        l_heading         long;
+        l_result_row      long;
+    begin
+        if regexp_like(p_separator,'^[A-Z0-9"]$') then
+            raise_application_error(-20003, 'Invalid separator "'||p_separator||'"', false);
+        elsif p_label in (k_heading_label, k_footer_label) then
+            raise_application_error(-20004, 'Data label cannot be same as header label ("'||k_heading_label||'") or footer label ("'||k_footer_label||'")', false);
+        end if;
+
+        -- Convert the ref cursor into a DBMS_SQL cursor number and parse the columns
+        prepare_cursor(p_dataset, l_cursor_id, l_cursor_columns);
+
+        -- Print header row
+        if regexp_like(p_heading,'^Y(ES)?$', 'i') then
+            for i in 1 .. l_cursor_columns.count loop
+                l_heading := l_heading || l_cursor_columns(i).col_name || p_separator;
+            end loop;
+
+            l_heading := rtrim(l_heading,p_separator);
+
+            if p_label is not null and g_label_in_header then
+                l_heading := k_heading_label || p_separator || p_label || p_separator || l_heading;
+            end if;
+
+            pipe row(l_heading);
+        end if;
+
+        -- Fetch and print the rows:
+        while dbms_sql.fetch_rows(l_cursor_id) > 0 loop
+            if p_label is not null then
+                l_result_row := p_label || p_separator;
+            else
+                l_result_row := null;
+            end if;
+
+            for i in 1 .. l_cursor_columns.count loop
+                pragma inline(append_value, 'YES');
+                append_value(l_cursor_id, i, l_cursor_columns(i).col_type, p_separator, l_result_row );
+
+                if i < l_cursor_columns.count then
+                    l_result_row := l_result_row || p_separator;
+                end if;
+            end loop;
+
+            l_rowcount := l_rowcount +1;
+
+            pipe row(l_result_row);
+        end loop;
+
+        close_dbms_sql_cursor(l_cursor_id);
+
+        /* -- Do not pipe row if there are no rows.
+        -- If no rows, return a row with null values e.g. 'THELABEL|||'
+        if l_rowcount = 0 then
+            if p_label is not null then
+                pipe row(p_label || rpad(p_separator, l_cursor_columns.count, p_separator));
+            else
+                pipe row(rpad(p_separator, l_cursor_columns.count -1, p_separator));
+            end if;
+        end if;
+        */
+
+        -- Print footer
+        if regexp_like(p_rowcount,'^Y(ES)?$', 'i') then
+            pipe row(k_footer_label|| p_separator || case when p_label is not null and g_label_in_footer then p_label || p_separator end || l_rowcount);
+        end if;
+
+        return;
+
+    exception
+        -- Logger captures error details so you don't have to
+        when no_data_needed then
+            -- Fetching was cancelled before end of cursor
+            close_dbms_sql_cursor(l_cursor_id);
+            return;
+    end report;
+
+    function directory_path
+        ( p_directory all_directories.directory_name%type )
+        return all_directories.directory_path%type
+    is
+        l_path all_directories.directory_path%type;
+    begin
+        select d.directory_path into l_path
+        from   all_directories d
+        where  d.directory_name = p_directory;
+
+        return l_path;
+    exception
+        when no_data_found then return null;
+    end directory_path;
+
+    -- Write output to a file
+    procedure write_file
+        ( p_dataset    in sys_refcursor
+        , p_separator  in varchar2 default g_dflt_separator
+        , p_label      in varchar2 default null
+        , p_heading    in varchar2 default 'N'
+        , p_rowcount   in varchar2 default 'N'
+        , p_directory  in all_directories.directory_name%type
+        , p_filename   in varchar2
+        , p_encrypt    in varchar2)
+    is
+        l_file utl_file.file_type;
+        k_dir_path constant all_directories.directory_path%type := directory_path(p_directory);
+        l_recs_found BOOLEAN;
+    begin
+        if k_dir_path is null then
+            raise_application_error(-20006, 'Directory object '''||p_directory||''' is not defined.');
+        end if;
+
+        begin
+            l_file :=
+                utl_file.fopen
+                ( filename => p_filename
+                , location => p_directory
+                , open_mode => 'w'
+                , max_linesize => 4000 );
+        exception
+            when utl_file.invalid_operation then
+                raise_application_error(-20007, 'File '''||p_filename||''' could not be opened in directory '||p_directory||' ('||k_dir_path||')', true);
+            when utl_file.invalid_path then
+                raise_application_error(-20008, 'File location '||p_directory||' ('||k_dir_path||') is invalid.', true);
+            when utl_file.invalid_filename then
+                raise_application_error(-20009, 'Filename '''||p_filename||''' is invalid.', true);
+        end;
+
+        l_recs_found := FALSE;
+
+        for r in (
+            select column_value
+            from   table(extract_util.report(p_dataset, p_separator, p_label, p_heading, p_rowcount))
+        )
+        loop
+            begin
+                if p_encrypt = 'Y' then
+                    utl_file.put_line(l_file, encrypt(r.column_value));
+                else
+                    utl_file.put_line(l_file, r.column_value);
+                end if;
+                l_recs_found := TRUE;
+            exception
+                when utl_file.write_error then
+                    raise_application_error(-20010, 'Operating system error occurred writing to file '''||p_filename||'''.');
+            end;
+        end loop;
+
+        utl_file.fclose(l_file);
+
+        if p_dataset%isopen then
+            begin
+                close p_dataset;
+            exception
+                when invalid_cursor then null;
+            end;
+        end if;
+
+        if not l_recs_found then
+            utl_file.fremove(p_directory, p_filename);
+        end if;
+
+    end write_file;
+
+    PROCEDURE blob_to_file (  p_blob      IN  BLOB,
+                              p_dir       IN  VARCHAR2,
+                              p_filename  IN  VARCHAR2,
+                              p_encrypt   IN VARCHAR2 DEFAULT 'N')
+    -- -----------------------------------------------------------------------------------
+    -- File Name    : https://oracle-base.com/dba/miscellaneous/blob_to_file.sql
+    -- Author       : Tim Hall
+    -- Description  : Writes the contents of a BLOB to a file.
+    -- Last Modified: 26/02/2019 - Taken from 2005 article.
+    --                22/05/2020 - BLOB parameter switched from IN OUT NOCOPY to IN.
+    -- -----------------------------------------------------------------------------------
+    AS
+      l_file      UTL_FILE.FILE_TYPE;
+      l_buffer    RAW(32767);
+      l_amount    BINARY_INTEGER := 32767;
+      l_pos       INTEGER := 1;
+      l_blob_len  INTEGER;
+      temp_blob   BLOB := EMPTY_BLOB();
+    BEGIN
+
+        IF p_encrypt = 'Y' THEN
+            temp_blob :=   encrypt(p_blob);  
+        ELSE
+            temp_blob := p_blob;
+        END IF;
+
+        l_blob_len := DBMS_LOB.getlength(temp_blob);
+
+        -- Open the destination file.
+        l_file := UTL_FILE.fopen(p_dir, p_filename,'wb', 32767);
+
+        -- Read chunks of the BLOB and write them to the file until complete.
+        WHILE l_pos <= l_blob_len LOOP
+            DBMS_LOB.read(temp_blob, l_amount, l_pos, l_buffer);
+            UTL_FILE.put_raw(l_file, l_buffer, TRUE);
+            l_pos := l_pos + l_amount;
+        END LOOP;
+
+        -- Close the file.
+        UTL_FILE.fclose(l_file);
+
+    EXCEPTION
+      WHEN OTHERS THEN
+        -- Close the file if something goes wrong.
+        IF UTL_FILE.is_open(l_file) THEN
+          UTL_FILE.fclose(l_file);
+        END IF;
+        RAISE;
+    END blob_to_file;
+
+    FUNCTION file_to_blob (
+        p_dir_name   VARCHAR2,
+        p_file_name  VARCHAR2
+    ) RETURN BLOB AS
+        dest_loc  BLOB := empty_blob();
+        src_loc   BFILE := bfilename(p_dir_name, p_file_name);
+    BEGIN
+    -- Open source binary file from OS
+        dbms_lob.open(src_loc, dbms_lob.lob_readonly);
+
+    -- Create temporary LOB object
+        dbms_lob.createtemporary(lob_loc => dest_loc, cache => true, dur => dbms_lob.session);
+
+    -- Open temporary lob
+        dbms_lob.open(dest_loc, dbms_lob.lob_readwrite);
+
+    -- Load binary file into temporary LOB
+        dbms_lob.loadfromfile(dest_lob => dest_loc, src_lob => src_loc, amount => dbms_lob.getlength(src_loc));
+
+    -- Close lob objects
+        dbms_lob.close(dest_loc);
+        dbms_lob.close(src_loc);
+
+    -- Return temporary LOB object
+        RETURN dest_loc;
+    END file_to_blob;
+begin
+    -- Copied from dbms_types/dbms_sql:
+    -- See also https://docs.oracle.com/database/121/LNOCI/oci03typ.htm#LNOCI16266 - does not exactly match dbms_types.
+    -- We can also test examples using dump e.g. "select dump(dummy) from dual" shows type = 1
+    g_typenames(1)   := 'VARCHAR2';          -- dbms_types.typecode_varchar - but use    dbms_sql.varchar2_type
+    g_typenames(2)   := 'NUMBER';            -- dbms_types.typecode_number;              dbms_sql.number_type
+    g_typenames(8)   := 'LONG';              --                                          dbms_sql.long_type
+    g_typenames(9)   := 'VARCHAR2';          -- dbms_types.typecode_varchar2
+    g_typenames(11)  := 'ROWID';             --                                          dbms_sql.rowid_type
+    g_typenames(12)  := 'DATE';              -- dbms_types.typecode_date (Stored date);  dbms_sql.date_type
+    g_typenames(13)  := 'DATE';              -- Generated date e.g. SYSDATE
+    g_typenames(23)  := 'RAW';               --                                          dbms_sql.raw_type
+    g_typenames(24)  := 'LONGRAW';           --                                          dbms_sql.long_raw_type
+    g_typenames(58)  := 'OPAQUE';            -- dbms_types.typecode_opaque
+    g_typenames(95)  := 'RAW';               -- dbms_types.typecode_raw
+    g_typenames(96)  := 'CHAR';              -- dbms_types.typecode_char;                dbms_sql.char_type
+    g_typenames(100) := 'BFLOAT';            -- dbms_types.typecode_bfloat;              dbms_sql.binary_float_type
+    g_typenames(101) := 'BDOUBLE';           -- dbms_types.typecode_bdouble              dbms_sql.binary_double_type
+    g_typenames(104) := 'UROWID';            -- dbms_types.typecode_urowid
+    g_typenames(105) := 'MLSLABEL';          -- dbms_types.typecode_mlslabel
+    g_typenames(106) := 'MLSLABEL';          --                                          dbms_sql.mlslabel_type
+    g_typenames(108) := 'OBJECT';            -- dbms_types.typecode_object
+    g_typenames(109) := 'UDT';               --                                          dbms_sql.user_defined_type
+    g_typenames(110) := 'REF';               -- dbms_types.typecode_ref
+    g_typenames(111) := 'REF';               --                                          dbms_sql.ref_type
+    g_typenames(112) := 'CLOB';              -- dbms_types.typecode_clob                 dbms_sql.clob_type
+    g_typenames(113) := 'BLOB';              -- dbms_types.typecode_blob                 dbms_sql.blob_type
+    g_typenames(114) := 'BFILE';             -- dbms_types.typecode_bfile
+    g_typenames(115) := 'CFILE';             -- dbms_types.typecode_cfile
+    g_typenames(122) := 'NAMEDCOLLECTION';   -- dbms_types.typecode_namedcollection
+    g_typenames(180) := 'TIMESTAMP';         --                                          dbms_sql.timestamp_type
+    g_typenames(181) := 'TIMESTAMP_TZ';      --                                          dbms_sql.timestamp_with_tz_type
+    g_typenames(182) := 'INTERVAL YM';       --                                          dbms_sql.interval_year_to_month_type
+    g_typenames(183) := 'INTERVAL';          --                                          dbms_sql.interval_day_to_second_type
+    g_typenames(187) := 'TIMESTAMP';         -- dbms_types.typecode_timestamp
+    g_typenames(188) := 'TIMESTAMP_TZ';      -- dbms_types.typecode_timestamp_tz (Generated timestamp with timezone e.g. SYSTIMESTAMP)
+    g_typenames(189) := 'INTERVAL_YM';       -- dbms_types.typecode_interval_ym
+    g_typenames(190) := 'INTERVAL_DS';       -- dbms_types.typecode_interval_ds
+    g_typenames(208) := 'UROWID';            --                                          dbms_sql.urowid_type
+    g_typenames(231) := 'TIMESTAMP_LTZ';     --                                          dbms_sql.timestamp_with_local_tz_type
+    g_typenames(232) := 'TIMESTAMP_LTZ';     -- dbms_types.typecode_timestamp_ltz
+    g_typenames(247) := 'VARRAY';            -- dbms_types.typecode_varray
+    g_typenames(248) := 'TABLE';             -- dbms_types.typecode_table
+    g_typenames(286) := 'NCHAR';             -- dbms_types.typecode_nchar
+    g_typenames(287) := 'NVARCHAR2';         -- dbms_types.typecode_nvarchar2
+    g_typenames(288) := 'NCLOB';             -- dbms_types.typecode_nclob
+
+    -- The types from the above list we can handle:
+    -- (only checked after processing '%CHAR%' etc - this list is to exclude the more exotic datatypes)
+    g_supported_types(1)   := g_typenames(1);    -- VARCHAR2
+    g_supported_types(2)   := g_typenames(2);    -- NUMBER
+    g_supported_types(9)   := g_typenames(9);    -- VARCHAR2
+    g_supported_types(11)  := g_typenames(11);   -- ROWID
+    g_supported_types(12)  := g_typenames(12);   -- DATE (stored)
+    g_supported_types(13)  := g_typenames(13);   -- DATE (generated)
+    g_supported_types(96)  := g_typenames(96);   -- CHAR what is it good for, absolutely nothing
+    g_supported_types(104) := g_typenames(104);  -- UROWID
+    g_supported_types(112) := g_typenames(112);  -- CLOB
+    g_supported_types(180) := g_typenames(180);  -- TIMESTAMP (dbms_sql.timestamp_type)
+    g_supported_types(181) := g_typenames(181);  -- TIMESTAMP_TZ (dbms_sql.timestamp_with_tz_type)
+    g_supported_types(187) := g_typenames(187);  -- TIMESTAMP (dbms_types.typecode_timestamp)
+    g_supported_types(188) := g_typenames(188);  -- TIMESTAMP_TZ (dbms_types.typecode_timestamp_tz)
+    g_supported_types(231) := g_typenames(231);  -- TIMESTAMP_LTZ (dbms_sql.timestamp_with_local_tz_type)
+    g_supported_types(232) := g_typenames(232);  -- TIMESTAMP_LTZ (dbms_types.typecode_timestamp_ltz)
+    g_supported_types(286) := g_typenames(286);  -- NCHAR what is it ngood for etc
+    g_supported_types(287) := g_typenames(287);  -- NVARCHAR2
+
+end extract_util;
+/

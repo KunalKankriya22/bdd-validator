@@ -1,0 +1,732 @@
+<!-- Page Header -->
+<div class="page-header">
+  <app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+  <div class="header-actions">
+    <button mat-stroked-button class="holds-button"
+            [disabled]="!showUpdateForm()"
+            (click)="onManualHolds()">
+      MANUAL/AUTOMATIC HOLDS
+    </button>
+  </div>
+</div>
+
+<!-- Search Bar -->
+<div class="search-bar">
+  <form [formGroup]="searchForm" class="search-form">
+    <mat-form-field appearance="fill" class="search-field">
+      <mat-label>Deferral ID</mat-label>
+      <input matInput formControlName="deferralId" id="deferralIdInput"
+             maxlength="10"
+             (blur)="onDeferralIdBlur($event)"
+             (keydown.enter)="onDeferralIdEnter($event)"
+             (keydown.tab)="onDeferralIdTab($event)"
+             required
+             aria-label="Deferral ID" aria-required="true">
+      @if (deferralIdDoubleEntry === 'pending') {
+        <mat-hint>Re-enter Deferral ID</mat-hint>
+      }
+      @if (searchForm.get('deferralId')?.hasError('serverError')) {
+        <mat-error>{{ searchForm.get('deferralId')?.getError('serverError') }}</mat-error>
+      } @else if (searchForm.get('deferralId')?.hasError('required')) {
+        <mat-error>Deferral ID is required</mat-error>
+      } @else if (searchForm.get('deferralId')?.hasError('pattern')) {
+        <mat-error>Invalid Deferral ID</mat-error>
+      }
+    </mat-form-field>
+
+    <div class="entered-by-display search-field">
+      <span class="display-label">Entered By</span>
+      <span class="display-value">{{ enteredByText }}</span>
+    </div>
+
+    <button mat-stroked-button type="button" class="retrieve-button"
+            (click)="onRetrieve()" [disabled]="isLoading()">
+      RETRIEVE
+    </button>
+  </form>
+</div>
+
+<!-- Loading State (before retrieve) -->
+@if (!showUpdateForm() && isLoading()) {
+  <div class="empty-state">
+    <app-loading-spinner size="large" message="Loading deferral data..." color="#228189"></app-loading-spinner>
+  </div>
+}
+
+<!-- Empty State -->
+@if (!showUpdateForm() && !isLoading()) {
+  <div class="empty-state">
+    <div class="empty-state-icon">
+      <mat-icon>edit_note</mat-icon>
+    </div>
+    <h3>No Deferral Selected</h3>
+    <p>Please enter a Deferral ID and click Retrieve to view and update deferral records.</p>
+  </div>
+}
+
+<!-- Update Form -->
+@if (showUpdateForm()) {
+  <div class="page-content" #scrollContainer>
+    @if (isLoading()) {
+      <div class="loading-overlay-wrapper">
+        <div class="loading-overlay">
+          <app-loading-spinner size="large" message="Loading..." color="#228189"></app-loading-spinner>
+        </div>
+      </div>
+    }
+    <div class="form-content">
+      <form [formGroup]="updateForm">
+
+        <!-- Deferral & Donor Information -->
+        <div id="deferral-donor-info">
+          <div class="section-header">
+            <h2>Deferral & Donor Information</h2>
+          </div>
+          <div class="donor-grid-3">
+            <div class="field-display donor-field">
+              <span class="display-label">Deferral ID</span>
+              <span class="display-value">{{ selectedDeferralId() || '--' }}</span>
+            </div>
+
+            <div class="field-display donor-field">
+              <span class="display-label">Donor ID</span>
+              <span class="display-value">{{ donorId() || '--' }}</span>
+            </div>
+
+            <div class="field-display donor-field">
+              <span class="display-label">ABO</span>
+              <span class="display-value">{{ aboDescription() }}</span>
+            </div>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Drive ID</mat-label>
+              <mat-select formControlName="driveId" (selectionChange)="onDriveSelected($event.value)">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="driveFilterCtrl"
+                                         placeholderLabel="Search drives..."
+                                         noEntriesFoundLabel="No drives found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (drive of filteredDrives(); track drive.driveId) {
+                  <mat-option [value]="drive.driveId">{{ drive.driveId }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+          </div>
+
+          <div class="donor-grid-3">
+            <div class="field-display">
+              <span class="display-label">Drive Date</span>
+              <span class="display-value">{{ driveDate() || '--' }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Personal Information -->
+        <div id="personal-info">
+          <div class="section-header">
+            <h2>Personal Information</h2>
+          </div>
+
+          <div class="grid-4">
+            <div class="field-display">
+              <span class="display-label">Last Name</span>
+              <span class="display-value" style="text-transform: uppercase">{{ updateForm.get('lastName')?.value || '--' }}</span>
+            </div>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Suffix</mat-label>
+              <input matInput formControlName="suffix" maxlength="5"
+                     style="text-transform: uppercase"
+                     aria-label="Suffix">
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>First Name</mat-label>
+              <input matInput formControlName="firstName" maxlength="50"
+                     style="text-transform: uppercase"
+                     aria-label="First Name">
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Middle Name</mat-label>
+              <input matInput formControlName="middleName" maxlength="25"
+                     style="text-transform: uppercase"
+                     aria-label="Middle Name">
+            </mat-form-field>
+          </div>
+
+          <div class="grid-4">
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>DOB</mat-label>
+              <input matInput [matDatepicker]="dobPicker" formControlName="dob"
+                     aria-label="Date of Birth">
+              <mat-datepicker-toggle matIconSuffix [for]="dobPicker"
+                                     aria-label="Open date of birth calendar"></mat-datepicker-toggle>
+              <mat-datepicker #dobPicker></mat-datepicker>
+            </mat-form-field>
+
+            <div class="field-display">
+              <span class="display-label">Sex</span>
+              <span class="display-value">{{ sexDisplay() }}</span>
+            </div>
+
+            <div class="field-display">
+              <span class="display-label">Height</span>
+              <span class="display-value">{{ heightDisplay() }}</span>
+            </div>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Weight</mat-label>
+              <input matInput formControlName="weight" type="number" inputmode="numeric"
+                     maxlength="6" required
+                     (keypress)="onlyNumbers($event)" (paste)="onPasteNumbers($event)"
+                     aria-label="Weight" aria-required="true">
+              @if (updateForm.get('weight')?.hasError('required') && updateForm.get('weight')?.touched) {
+                <mat-error>Weight is required</mat-error>
+              }
+              @if (updateForm.get('weight')?.hasError('min') && updateForm.get('weight')?.touched) {
+                <mat-error>Weight must be at least 1</mat-error>
+              }
+              @if (updateForm.get('weight')?.hasError('pattern') && updateForm.get('weight')?.touched) {
+                <mat-error>Weight must be a whole number</mat-error>
+              }
+            </mat-form-field>
+          </div>
+
+          <div class="grid-3">
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Alternate ID</mat-label>
+              <input matInput formControlName="alternateId" maxlength="20"
+                     aria-label="Alternate ID">
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Alternate Type</mat-label>
+              <mat-select formControlName="alternateType" aria-label="Alternate Type"
+                          (selectionChange)="validateAlternateIdTypeField()">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="alternateTypeFilterCtrl"
+                                         placeholderLabel="Search..."
+                                         noEntriesFoundLabel="No types found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (type of filteredAlternateTypes(); track type.code) {
+                  <mat-option [value]="type.code">{{ type.description }} ({{ type.code }})</mat-option>
+                }
+              </mat-select>
+              @if (updateForm.get('alternateType')?.hasError('serverError')) {
+                <mat-error>{{ updateForm.get('alternateType')?.getError('serverError') }}</mat-error>
+              }
+            </mat-form-field>
+
+          </div>
+        </div>
+
+        <!-- Address Information -->
+        <div id="address-info">
+          <div class="section-header">
+            <h2>Address Information</h2>
+            <div class="section-actions">
+              <button mat-stroked-button color="primary" type="button"
+                      (click)="onInternationalAddress()">
+                INTERNATIONAL ADDRESS
+              </button>
+              <button mat-stroked-button color="primary" type="button"
+                      (click)="onAlternateAddress()">
+                ALTERNATE ADDRESS
+              </button>
+            </div>
+          </div>
+
+          <div class="grid-1">
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Home Address</mat-label>
+              <input matInput formControlName="homeAddress" maxlength="50"
+                     aria-label="Home Address">
+              @if (updateForm.get('homeAddress')?.hasError('required')) {
+                <mat-error>Home Address is required</mat-error>
+              }
+            </mat-form-field>
+          </div>
+
+          <div class="grid-4">
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Apartment No.</mat-label>
+              <input matInput formControlName="apartmentNo" maxlength="10"
+                     aria-label="Apartment Number">
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>City</mat-label>
+              <mat-select formControlName="city" aria-label="City"
+                          (selectionChange)="validateCityField()">
+                <mat-select-trigger>{{ updateForm.get('city')?.value }}</mat-select-trigger>
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="citySearchCtrl"
+                                         placeholderLabel="Type 3+ chars to search..."
+                                         noEntriesFoundLabel="No cities found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (c of filteredCities(); track c.uspsId) {
+                  <mat-option [value]="c.city" (click)="onCitySelected(c)">
+                    {{ c.city }} ({{ c.state }}, {{ c.zip }})
+                  </mat-option>
+                }
+              </mat-select>
+              @if (updateForm.get('city')?.hasError('serverError')) {
+                <mat-error>{{ updateForm.get('city')?.getError('serverError') }}</mat-error>
+              } @else if (updateForm.get('city')?.hasError('required')) {
+                <mat-error>City is required</mat-error>
+              }
+            </mat-form-field>
+
+            <div class="field-display">
+              <span class="display-label">State</span>
+              <span class="display-value">{{ stateDisplay() }}</span>
+            </div>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Zip</mat-label>
+              <input matInput formControlName="zip" maxlength="6" aria-label="Zip"
+                     (blur)="validateZipField(); onZipBlur()">
+              @if (updateForm.get('zip')?.hasError('serverError')) {
+                <mat-error>{{ updateForm.get('zip')?.getError('serverError') }}</mat-error>
+              } @else if (updateForm.get('zip')?.hasError('required')) {
+                <mat-error>Zip is required</mat-error>
+              }
+            </mat-form-field>
+          </div>
+        </div>
+
+        <!-- Contact Information -->
+        <div id="contact-info">
+          <div class="section-header">
+            <h2>Contact Information</h2>
+          </div>
+
+          <div class="contact-grid">
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Home Phone Number</mat-label>
+              <input matInput formControlName="homePhoneNumber" maxlength="14"
+                     (input)="formatPhoneInput('homePhoneNumber')"
+                     aria-label="Home Phone Number">
+            </mat-form-field>
+            <mat-radio-group formControlName="preferredPhone" class="preferred-radio-inline">
+              <mat-radio-button value="home">Preferred?</mat-radio-button>
+            </mat-radio-group>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Work Phone Number</mat-label>
+              <input matInput formControlName="workPhoneNumber" maxlength="14"
+                     (input)="formatPhoneInput('workPhoneNumber')"
+                     aria-label="Work Phone Number">
+            </mat-form-field>
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="ext-field">
+              <mat-label>Ext.</mat-label>
+              <input matInput formControlName="workPhoneExtension" maxlength="6"
+                     aria-label="Work Phone Extension">
+            </mat-form-field>
+            <mat-radio-group formControlName="preferredPhone" class="preferred-radio-inline">
+              <mat-radio-button value="work">Preferred?</mat-radio-button>
+            </mat-radio-group>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Mobile Phone Number</mat-label>
+              <input matInput formControlName="mobilePhoneNumber" maxlength="14"
+                     (input)="formatPhoneInput('mobilePhoneNumber')"
+                     aria-label="Mobile Phone Number">
+            </mat-form-field>
+            <mat-radio-group formControlName="preferredPhone" class="preferred-radio-inline">
+              <mat-radio-button value="mobile">Preferred?</mat-radio-button>
+            </mat-radio-group>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Email</mat-label>
+              <input matInput formControlName="email" maxlength="128" aria-label="Email">
+              @if (updateForm.get('email')?.hasError('email')) {
+                <mat-error>Enter a valid email</mat-error>
+              }
+            </mat-form-field>
+            <div></div>
+          </div>
+        </div>
+
+        <!-- Employer/School Information -->
+        <div id="employer-info">
+          <div class="section-header">
+            <h2>Employer/School Information</h2>
+            <div class="section-actions">
+              <button mat-stroked-button color="primary" type="button"
+                      (click)="openAddEmployerDialog()">
+                ADD NEW EMPLOYER
+              </button>
+              <button mat-stroked-button color="primary" type="button"
+                      (click)="onEmployerInternationalAddress()">
+                INTERNATIONAL ADDRESS
+              </button>
+            </div>
+          </div>
+
+          <div class="grid-4">
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Employer/School Name</mat-label>
+              <mat-select formControlName="employerName" aria-label="Employer School Name"
+                          (selectionChange)="onEmployerSelected($event.value)">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="employerFilterCtrl"
+                                         placeholderLabel="Search employers..."
+                                         noEntriesFoundLabel="No employers found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (employer of filteredEmployers(); track employer.employerId) {
+                  <mat-option [value]="employer.employerId">{{ employer.employerName }}</mat-option>
+                }
+              </mat-select>
+              @if (showCreateEmployer()) {
+                <mat-hint>
+                  <button mat-button type="button" color="primary" class="create-employer-btn" (click)="createNewEmployer()">
+                    + Create "{{ pendingEmployerName() }}" as new employer
+                  </button>
+                </mat-hint>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>City</mat-label>
+              <mat-select formControlName="employerCity" aria-label="Employer City">
+                <mat-select-trigger>{{ updateForm.get('employerCity')?.value }}</mat-select-trigger>
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="employerCitySearchCtrl"
+                                         placeholderLabel="Type 3+ chars to search..."
+                                         noEntriesFoundLabel="No cities found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (c of filteredEmployerCities(); track c.uspsId) {
+                  <mat-option [value]="c.city" (click)="onEmployerCitySelected(c)">
+                    {{ c.city }} ({{ c.state }}, {{ c.zip }})
+                  </mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+
+            <div class="field-display">
+              <span class="display-label">State</span>
+              <span class="display-value">{{ employerStateDisplay() }}</span>
+            </div>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Zip</mat-label>
+              <input matInput formControlName="employerZip" maxlength="6"
+                     (blur)="onEmployerZipBlur()"
+                     aria-label="Employer Zip">
+            </mat-form-field>
+          </div>
+        </div>
+
+        <!-- Donation Information -->
+        <div id="donation-info">
+          <div class="section-header">
+            <h2>Donation Information</h2>
+          </div>
+
+          <div class="grid-5">
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Ethnic Group</mat-label>
+              <mat-select formControlName="ethnicGroup" required
+                          (selectionChange)="validateEthnicGroupField()"
+                          aria-label="Ethnic Group" aria-required="true">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="ethnicGroupFilterCtrl"
+                                         placeholderLabel="Search..."
+                                         noEntriesFoundLabel="No groups found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (group of filteredEthnicGroups(); track group.code) {
+                  <mat-option [value]="group.code">{{ group.description }} ({{ group.code }})</mat-option>
+                }
+              </mat-select>
+              @if (updateForm.get('ethnicGroup')?.hasError('serverError')) {
+                <mat-error>{{ updateForm.get('ethnicGroup')?.getError('serverError') }}</mat-error>
+              } @else if (updateForm.get('ethnicGroup')?.hasError('required') && updateForm.get('ethnicGroup')?.touched) {
+                <mat-error>Ethnic Group is required</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Lookup ID</mat-label>
+              <mat-select formControlName="lookupId" aria-label="Lookup ID"
+                          (selectionChange)="validateStaffField('lookupId')">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="employeeFilterCtrl"
+                                         placeholderLabel="Search staff..."
+                                         noEntriesFoundLabel="No staff found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (emp of filteredEmployees(); track emp.staffNo) {
+                  <mat-option [value]="emp.staffNo">{{ emp.staffName }} ({{ emp.staffNo }})</mat-option>
+                }
+              </mat-select>
+              @if (updateForm.get('lookupId')?.hasError('serverError')) {
+                <mat-error>{{ updateForm.get('lookupId')?.getError('serverError') }}</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Donation</mat-label>
+              <mat-select formControlName="donationType" required
+                          (selectionChange)="onDonationTypeChange(); validateDonationTypeField()"
+                          aria-label="Donation" aria-required="true">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="donationTypeFilterCtrl"
+                                         placeholderLabel="Search..."
+                                         noEntriesFoundLabel="No types found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (type of filteredDonationTypes(); track type.code) {
+                  <mat-option [value]="type.code">{{ type.description }} ({{ type.code }})</mat-option>
+                }
+              </mat-select>
+              @if (updateForm.get('donationType')?.hasError('required') && updateForm.get('donationType')?.touched) {
+                <mat-error>Donation is required</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Procedure</mat-label>
+              <mat-select formControlName="procedureCode" required
+                          (selectionChange)="validateProcedureCodeField()"
+                          aria-label="Procedure" aria-required="true">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="procedureCodeFilterCtrl"
+                                         placeholderLabel="Search..."
+                                         noEntriesFoundLabel="No procedures found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (proc of filteredProcedureCodes(); track proc.code) {
+                  <mat-option [value]="proc.code">{{ proc.description }} ({{ proc.code }})</mat-option>
+                }
+              </mat-select>
+              @if (updateForm.get('procedureCode')?.hasError('required') && updateForm.get('procedureCode')?.touched) {
+                <mat-error>Procedure is required</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Physical ID</mat-label>
+              <mat-select formControlName="physicalId"
+                          (selectionChange)="validateStaffField('physicalId')"
+                          aria-label="Physical ID">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="physicalIdFilterCtrl"
+                                         placeholderLabel="Search staff..."
+                                         noEntriesFoundLabel="No staff found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (emp of filteredEmployees(); track emp.staffNo) {
+                  <mat-option [value]="emp.staffNo">{{ emp.staffName }} ({{ emp.staffNo }})</mat-option>
+                }
+              </mat-select>
+              @if (updateForm.get('physicalId')?.hasError('serverError')) {
+                <mat-error>{{ updateForm.get('physicalId')?.getError('serverError') }}</mat-error>
+              }
+            </mat-form-field>
+          </div>
+
+          <div class="grid-5">
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Deferral</mat-label>
+              <mat-select formControlName="deferral" required
+                          (selectionChange)="validateDeferralReasonField()"
+                          aria-label="Deferral" aria-required="true">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="deferralReasonFilterCtrl"
+                                         placeholderLabel="Search..."
+                                         noEntriesFoundLabel="No reasons found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (reason of filteredDeferralReasons(); track reason.code) {
+                  <mat-option [value]="reason.code">{{ reason.code}}</mat-option>
+                }
+              </mat-select>
+              @if (updateForm.get('deferral')?.hasError('serverError')) {
+                <mat-error>{{ updateForm.get('deferral')?.getError('serverError') }}</mat-error>
+              } @else if (updateForm.get('deferral')?.hasError('required') && updateForm.get('deferral')?.touched) {
+                <mat-error>Deferral is required</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Deferred Thru</mat-label>
+              <input matInput [matDatepicker]="deferredThruPicker" formControlName="deferredThru"
+                     [min]="minDeferredThruDate()"
+                     (dateChange)="validateDeferredThruDate()"
+                     (input)="onDeferredThruInput($event)"
+                     (blur)="onDeferredThruBlur($event)"
+                     aria-label="Deferred Thru">
+              <mat-datepicker-toggle matIconSuffix [for]="deferredThruPicker"
+                                     aria-label="Open deferred thru calendar"></mat-datepicker-toggle>
+              <mat-datepicker #deferredThruPicker></mat-datepicker>
+              @if (updateForm.get('deferredThru')?.hasError('matDatepickerMin')) {
+                <mat-error>Deferred Thru Date must be on or after Drive Date</mat-error>
+              }
+              @if (updateForm.get('deferredThru')?.hasError('invalidDateFormat') || updateForm.get('deferredThru')?.hasError('invalidDate') || updateForm.get('deferredThru')?.hasError('matDatepickerParse')) {
+                <mat-error>Deferred Thru date is invalid</mat-error>
+              }
+              @if (updateForm.get('deferredThru')?.hasError('serverError')) {
+                <mat-error>{{ updateForm.get('deferredThru')?.getError('serverError') }}</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Deferral Type</mat-label>
+              <mat-select formControlName="deferralType" required
+                          aria-label="Deferral Type" aria-required="true">
+                @for (type of deferralTypes; track type.code) {
+                <mat-option [value]="type.code">{{ type.description }} ({{ type.code }})</mat-option>
+                }
+              </mat-select>
+              @if (updateForm.get('deferralType')?.hasError('serverError')) {
+                <mat-error>{{ updateForm.get('deferralType')?.getError('serverError') }}</mat-error>
+              } @else if (updateForm.get('deferralType')?.hasError('required') && updateForm.get('deferralType')?.touched) {
+                <mat-error>Deferral Type is required</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Historian ID</mat-label>
+              <mat-select formControlName="historianId"
+                          (selectionChange)="validateStaffField('historianId')"
+                          aria-label="Historian ID">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="historianIdFilterCtrl"
+                                         placeholderLabel="Search staff..."
+                                         noEntriesFoundLabel="No staff found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (emp of filteredEmployees(); track emp.staffNo) {
+                  <mat-option [value]="emp.staffNo">{{ emp.staffName }} ({{ emp.staffNo }})</mat-option>
+                }
+              </mat-select>
+              @if (updateForm.get('historianId')?.hasError('serverError')) {
+                <mat-error>{{ updateForm.get('historianId')?.getError('serverError') }}</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Reviewer ID</mat-label>
+              <mat-select formControlName="reviewerId"
+                          (selectionChange)="validateStaffField('reviewerId')"
+                          aria-label="Reviewer ID">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="reviewerIdFilterCtrl"
+                                         placeholderLabel="Search staff..."
+                                         noEntriesFoundLabel="No staff found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (emp of filteredEmployees(); track emp.staffNo) {
+                  <mat-option [value]="emp.staffNo">{{ emp.staffName }} ({{ emp.staffNo }})</mat-option>
+                }
+              </mat-select>
+              @if (updateForm.get('reviewerId')?.hasError('serverError')) {
+                <mat-error>{{ updateForm.get('reviewerId')?.getError('serverError') }}</mat-error>
+              }
+            </mat-form-field>
+          </div>
+
+          <div class="grid-5">
+            <mat-form-field appearance="fill" subscriptSizing="dynamic">
+              <mat-label>Equipment Type</mat-label>
+              <mat-select formControlName="equipmentType" aria-label="Equipment Type"
+                          (selectionChange)="validateEquipmentTypeField()">
+                <mat-option>
+                  <ngx-mat-select-search [formControl]="equipmentTypeFilterCtrl"
+                                         placeholderLabel="Search..."
+                                         noEntriesFoundLabel="No types found">
+                  </ngx-mat-select-search>
+                </mat-option>
+                @for (equip of filteredEquipmentTypes(); track equip.code) {
+                  <mat-option [value]="equip.code">{{ equip.description }} ({{ equip.code }})</mat-option>
+                }
+              </mat-select>
+              @if (updateForm.get('equipmentType')?.hasError('serverError')) {
+                <mat-error>{{ updateForm.get('equipmentType')?.getError('serverError') }}</mat-error>
+              }
+            </mat-form-field>
+          </div>
+        </div>
+
+      </form>
+    </div>
+
+    <!-- Content Navigation Sidebar -->
+    <aside class="content-nav">
+      <div class="content-title">CONTENT</div>
+      <div class="content-section">
+        <a (click)="scrollToSection('deferral-donor-info')"
+           [class.active]="activeSection() === 'deferral-donor-info'"
+           role="button" tabindex="0"
+           (keydown.enter)="scrollToSection('deferral-donor-info')">
+          Deferral & Donor Information
+        </a>
+        <a (click)="scrollToSection('personal-info')"
+           [class.active]="activeSection() === 'personal-info'"
+           role="button" tabindex="0"
+           (keydown.enter)="scrollToSection('personal-info')">
+          Personal Information
+        </a>
+        <a (click)="scrollToSection('address-info')"
+           [class.active]="activeSection() === 'address-info'"
+           role="button" tabindex="0"
+           (keydown.enter)="scrollToSection('address-info')">
+          Address Information
+        </a>
+        <a (click)="scrollToSection('contact-info')"
+           [class.active]="activeSection() === 'contact-info'"
+           role="button" tabindex="0"
+           (keydown.enter)="scrollToSection('contact-info')">
+          Contact Information
+        </a>
+        <a (click)="scrollToSection('employer-info')"
+           [class.active]="activeSection() === 'employer-info'"
+           role="button" tabindex="0"
+           (keydown.enter)="scrollToSection('employer-info')">
+          Employer/School Information
+        </a>
+        <a (click)="scrollToSection('donation-info')"
+           [class.active]="activeSection() === 'donation-info'"
+           role="button" tabindex="0"
+           (keydown.enter)="scrollToSection('donation-info')">
+          Donation Information
+        </a>
+      </div>
+    </aside>
+
+    <!-- Final Deferral Footer -->
+    <div class="final-deferral-footer" [formGroup]="updateForm">
+      <mat-form-field appearance="fill" subscriptSizing="dynamic">
+        <mat-label>Deferral ID</mat-label>
+        <input matInput formControlName="finalDeferralId" maxlength="10"
+               required
+               (blur)="onFinalDeferralIdEntered()"
+               (keydown.enter)="$event.preventDefault(); onFinalDeferralIdEntered()"
+               aria-label="Final Deferral ID" aria-required="true">
+        @if (finalDeferralIdDoubleEntry === 'pending') {
+          <mat-hint>Re-enter Deferral ID</mat-hint>
+        }
+        @if (updateForm.get('finalDeferralId')?.hasError('serverError')) {
+          <mat-error>{{ updateForm.get('finalDeferralId')?.getError('serverError') }}</mat-error>
+        } @else if (updateForm.get('finalDeferralId')?.hasError('required')) {
+          <mat-error>Final Deferral ID is required</mat-error>
+        } @else if (updateForm.get('finalDeferralId')?.hasError('pattern')) {
+          <mat-error>Invalid Deferral ID</mat-error>
+        }
+      </mat-form-field>
+
+      <div class="field-display">
+        <span class="display-label">Last Transaction ID</span>
+        <span class="display-value">{{ transactionId() }}</span>
+      </div>
+    </div>
+  </div>
+}

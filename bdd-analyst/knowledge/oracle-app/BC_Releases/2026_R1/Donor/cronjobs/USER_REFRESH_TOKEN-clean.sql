@@ -1,0 +1,5 @@
+
+DELETE from UTIL.USER_REFRESH_TOKEN where EXPIRES_DATE < SYSDATE;
+commit;
+exit;
+

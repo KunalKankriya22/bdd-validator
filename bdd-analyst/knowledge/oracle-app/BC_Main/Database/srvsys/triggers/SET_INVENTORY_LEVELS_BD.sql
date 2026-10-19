@@ -1,0 +1,48 @@
+--------------------------------------------------------
+--  DDL for Trigger SET_INVENTORY_LEVELS_BD
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "SET_INVENTORY_LEVELS_BD" before delete on
+SET_INVENTORY_LEVELS
+for each row
+begin
+  insert into SET_INVENTORY_LEVELS_AUDIT
+  (	INVENTORY_CLASS,
+	INVENTORY_TYPE,
+	CHAPTER_ID,
+	PRODUCT_TYPE,
+	BLOOD_TYPE,
+	QTY,
+	EFF_DATE,
+	LAST_MODIFIED_DATE,
+	CUSTOMER_ID,
+	TIER,
+	TERM_DATE,
+	ATTRIB_CODE,
+	ATTRIB_GROUP,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+  values
+  (	:old.INVENTORY_CLASS,
+	:old.INVENTORY_TYPE,
+	:old.CHAPTER_ID,
+	:old.PRODUCT_TYPE,
+	:old.BLOOD_TYPE,
+	:old.QTY,
+	:old.EFF_DATE,
+	:old.LAST_MODIFIED_DATE,
+	:old.CUSTOMER_ID,
+	:old.TIER,
+	:old.TERM_DATE,
+	:old.ATTRIB_CODE,
+	:old.ATTRIB_GROUP,
+	:old.AUDIT_KEY,
+	'DELETE',LT_USER_SESSION.GET_USERID,
+    sysdate
+  ) ;
+  end ;
+/
+ALTER TRIGGER "SET_INVENTORY_LEVELS_BD" ENABLE;

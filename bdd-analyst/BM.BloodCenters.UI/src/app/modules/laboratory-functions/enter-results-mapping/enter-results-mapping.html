@@ -1,0 +1,394 @@
+<div class="page-container">
+  <div class="layout-wrapper">
+    <div class="main-content">
+      <h1 class="cdk-visually-hidden">Enter Results Mapping</h1>
+      <app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+      <!-- ── Filter card (contract and test selection) ── -->
+      <div class="search-card">
+        <form [formGroup]="filterForm" class="search-card__form">
+          <div class="search-card__fields">
+            <div class="search-card__fields-inner">
+              <!-- Contract ID -->
+              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="search-card__field search-card__field--contract">
+                <mat-label>Contract ID</mat-label>
+                <mat-select formControlName="contractId"
+                            (selectionChange)="onContractChanged()"
+                            (openedChange)="onContractSelectOpened($event)"
+                            aria-label="Contract ID"
+                            [attr.aria-required]="true">
+
+                  <mat-select-trigger>
+                    {{ filterForm.get('contractId')?.value || '' }}
+                  </mat-select-trigger>
+
+                  @if (loadingDropdowns()) {
+                    <mat-option [value]="selectPanelLoadingValue" disabled class="panel-option--status">
+                      <span class="panel-loading" role="status" aria-live="polite" aria-atomic="true">
+                        <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+                        <span>Loading...</span>
+                      </span>
+                    </mat-option>
+                  } @else if (contracts().length === 0) {
+                    <mat-option [value]="selectPanelEmptyValue" disabled class="panel-option--status">
+                      No Data Available
+                    </mat-option>
+                  } @else if (contracts().length <= 3) {
+                    @for (contract of filteredContracts(); track contract.contractId) {
+                      <mat-option [value]="contract.contractId">
+                        {{ contract.display }}
+                      </mat-option>
+                    }
+                  } @else {
+                    <mat-option>
+                      <ngx-mat-select-search [formControl]="contractSearchControl"
+                        placeholderLabel="Search..." noEntriesFoundLabel="No contracts found"
+                        [autofocus]="false"
+                        aria-label="Search contracts">
+                      </ngx-mat-select-search>
+                    </mat-option>
+                    @for (contract of filteredContracts(); track contract.contractId) {
+                      <mat-option [value]="contract.contractId">
+                        {{ contract.display }}
+                      </mat-option>
+                    }
+                    @if (filteredContracts().length === 0) {
+                      <mat-option disabled class="panel-option--status">No Data Available</mat-option>
+                    }
+                  }
+
+                </mat-select>
+                <mat-error>Contract ID is required</mat-error>
+              </mat-form-field>
+
+              <!-- Description (readonly) -->
+              <div class="search-card__description">
+                <span id="contract-desc-label" class="search-card__description-label">Description</span>
+                <div class="search-card__description-value"
+                     role="text"
+                     aria-labelledby="contract-desc-label">{{ contractDescription() || '-' }}</div>
+              </div>
+
+              <!-- Test ID -->
+              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="search-card__field">
+                <mat-label>Test ID</mat-label>
+                <mat-select formControlName="testId"
+                            (openedChange)="onTestSelectOpened($event)"
+                            aria-label="Test ID">
+
+                  @if (loadingDropdowns()) {
+                    <mat-option [value]="selectPanelLoadingValue" disabled class="panel-option--status">
+                      <span class="panel-loading" role="status" aria-live="polite" aria-atomic="true">
+                        <mat-spinner diameter="20" aria-hidden="true"></mat-spinner>
+                        <span>Loading...</span>
+                      </span>
+                    </mat-option>
+                  } @else if (tests().length === 0) {
+                    <mat-option [value]="selectPanelEmptyValue" disabled class="panel-option--status">
+                      No Data Available
+                    </mat-option>
+                  } @else if (tests().length <= 3) {
+                    @for (test of filteredTests(); track test.testId) {
+                      <mat-option [value]="test.testId">
+                        {{ test.display }}
+                      </mat-option>
+                    }
+                  } @else {
+                    <mat-option>
+                      <ngx-mat-select-search [formControl]="testSearchControl"
+                        placeholderLabel="Search..." noEntriesFoundLabel="No tests found"
+                        [autofocus]="false"
+                        aria-label="Search tests">
+                      </ngx-mat-select-search>
+                    </mat-option>
+                    @for (test of filteredTests(); track test.testId) {
+                      <mat-option [value]="test.testId">
+                        {{ test.display }}
+                      </mat-option>
+                    }
+                    @if (filteredTests().length === 0) {
+                      <mat-option disabled class="panel-option--status">No Data Available</mat-option>
+                    }
+                  }
+
+                </mat-select>
+              </mat-form-field>
+
+              <!-- CBC Test ID (readonly) -->
+              <div class="search-card__description">
+                <span id="cbc-test-id-label" class="search-card__description-label">CBC Test ID</span>
+                <div class="search-card__description-value"
+                     role="text"
+                     aria-labelledby="cbc-test-id-label">{{ cbcTestId() || '-' }}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="search-card__actions">
+            <button type="button" class="btn-retrieve"
+                    [disabled]="!canRetrieve() || loading()"
+                    (click)="onRetrieve()"
+                    aria-label="Retrieve data">
+              RETRIEVE
+            </button>
+            <button type="button" mat-button class="btn-clear"
+                    [disabled]="!canClearFilters()"
+                    (click)="onClearAllFilters()"
+                    aria-label="Clear all filters">
+              CLEAR ALL
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <!-- ── Table card (after retrieve) ── -->
+      @if (hasData()) {
+        <div class="table-card">
+          <div class="table-toolbar">
+            <button type="button" mat-button class="btn-clear" (click)="onClearAllTable()"
+                    [disabled]="!hasDirtyRows()"
+                    aria-label="Clear all table changes">
+              CLEAR ALL
+            </button>
+            <button type="button" class="btn-save" (click)="onSave()"
+                    [disabled]="!canSave()"
+                    aria-label="Save changes">
+              SAVE
+            </button>
+          </div>
+
+          <div class="table-wrapper">
+            @if (loading()) {
+              <div class="data-table__loading" role="status" aria-live="polite" aria-label="Loading data">
+                <mat-spinner diameter="36" aria-hidden="true"></mat-spinner>
+              </div>
+            } @else {
+              <div class="data-table-scroll-wrapper">
+                <table class="mat-mdc-table" role="grid">
+                  <thead>
+                    <tr class="mat-mdc-header-row">
+                      <th scope="col" class="mat-mdc-header-cell col-test-id" [attr.aria-sort]="getSortAriaValue()">
+                        <button class="data-table__sort-button" (click)="toggleSort()" [attr.aria-label]="getSortButtonLabel()">
+                          <span>Test ID <span class="required" aria-label="required">*</span></span>
+                          <mat-icon class="sort-icon">
+                            {{ sortDirection === 'default' ? 'unfold_more' : (sortDirection === 'asc' ? 'arrow_upward' : 'arrow_downward') }}
+                          </mat-icon>
+                        </button>
+                      </th>
+                      <th scope="col" class="mat-mdc-header-cell col-local-result">Local Result <span class="required" aria-label="required">*</span></th>
+                      <th scope="col" class="mat-mdc-header-cell col-description">Description</th>
+                      <th scope="col" class="mat-mdc-header-cell col-cbc-result">CBC Result <span class="required" aria-label="required">*</span></th>
+                      <th scope="col" class="mat-mdc-header-cell col-eff-date">Effective Date <span class="required" aria-label="required">*</span></th>
+                      <th scope="col" class="mat-mdc-header-cell col-term-date">Termination Date</th>
+                      <th scope="col" class="mat-mdc-header-cell col-mod-date">Modified Date</th>
+                      <th scope="col" class="mat-mdc-header-cell col-actions"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (row of mappings(); track trackByRow($index, row)) {
+                      @if (!row.isDeleted) {
+                        <tr class="mat-mdc-row" [class.template-row]="row.isNew">
+                          <!-- Test ID (dropdown on new rows, readonly on existing) -->
+                          <td class="mat-mdc-cell col-test-id">
+                            @if (row.isNew) {
+                              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field"
+                                              [class.mat-form-field-invalid]="getTestIdError(row)">
+                                <mat-select [(ngModel)]="row.testId"
+                                            (ngModelChange)="onRowChange(row, 'testId', $event)"
+                                            (openedChange)="onTestIdDropdownOpened($event, row)"
+                                            [matTooltip]="getTestTooltip(row)" matTooltipPosition="right"
+                                            [errorStateMatcher]="getTestIdMatcher(row)"
+                                            [disabled]="isTestIdFilterSelected()"
+                                            required
+                                            [attr.aria-required]="true"
+                                            aria-label="Test ID">
+
+                                  @if (tests().length === 0) {
+                                    <mat-option [value]="selectPanelEmptyValue" disabled class="panel-option--status">
+                                      No Data Available
+                                    </mat-option>
+                                  } @else if (tests().length <= 3) {
+                                    @for (test of filteredTests(); track test.testId) {
+                                      <mat-option [value]="test.testId" [matTooltip]="test.testId + ' - ' + test.description + (test.cbcTestId ? ' (CBC: ' + test.cbcTestId + ')' : '')" matTooltipPosition="right">
+                                        {{ test.testId }} - {{ test.description }}@if (test.cbcTestId) { <span class="cbc-test-id-inline"> (CBC: {{ test.cbcTestId }})</span>}
+                                      </mat-option>
+                                    }
+                                  } @else {
+                                    <mat-option>
+                                      <ngx-mat-select-search [formControl]="testSearchControl"
+                                        placeholderLabel="Search..." noEntriesFoundLabel="No tests found"
+                                        aria-label="Search tests">
+                                      </ngx-mat-select-search>
+                                    </mat-option>
+                                    @for (test of filteredTests(); track test.testId) {
+                                      <mat-option [value]="test.testId" [matTooltip]="test.testId + ' - ' + test.description + (test.cbcTestId ? ' (CBC: ' + test.cbcTestId + ')' : '')" matTooltipPosition="right">
+                                        {{ test.testId }} - {{ test.description }}@if (test.cbcTestId) { <span class="cbc-test-id-inline"> (CBC: {{ test.cbcTestId }})</span>}
+                                      </mat-option>
+                                    }
+                                    @if (filteredTests().length === 0) {
+                                      <mat-option disabled class="panel-option--status">No Data Available</mat-option>
+                                    }
+                                  }
+
+                                </mat-select>
+                                <mat-error>{{ getTestIdError(row) }}</mat-error>
+                              </mat-form-field>
+                            } @else {
+                              <div class="readonly-cell" [matTooltip]="getTestTooltip(row)" matTooltipPosition="right">{{ row.testId }}</div>
+                            }
+                          </td>
+
+                          <!-- Local Result (dropdown on new rows, readonly on existing) -->
+                          <td class="mat-mdc-cell col-local-result">
+                            @if (row.isNew) {
+                              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field"
+                                              [class.mat-form-field-invalid]="getResultStatusError(row)">
+                                <mat-select [(ngModel)]="row.resultStatus"
+                                            (ngModelChange)="onRowChange(row, 'resultStatus', $event)"
+                                            (openedChange)="onResultStatusDropdownOpened($event, row)"
+                                            [matTooltip]="getLocalResultTooltip(row)" matTooltipPosition="right"
+                                            [errorStateMatcher]="getResultStatusMatcher(row)"
+                                            required
+                                            [attr.aria-required]="true"
+                                            aria-label="Local Result">
+                                  <mat-select-trigger>{{ row.resultStatus || '' }}</mat-select-trigger>
+
+                                  @if (localResults().length === 0) {
+                                    <mat-option [value]="selectPanelEmptyValue" disabled class="panel-option--status">
+                                      No Data Available
+                                    </mat-option>
+                                  } @else if (localResults().length <= 3) {
+                                    @for (status of filteredLocalResults(); track status.resultStatus) {
+                                      <mat-option [value]="status.resultStatus" [matTooltip]="status.resultStatus + ' - ' + status.description" matTooltipPosition="right">
+                                        {{ status.resultStatus }} - {{ status.description }}
+                                      </mat-option>
+                                    }
+                                  } @else {
+                                    <mat-option>
+                                      <ngx-mat-select-search [formControl]="localResultSearchControl"
+                                        placeholderLabel="Search..." noEntriesFoundLabel="No results found"
+                                        aria-label="Search local results">
+                                      </ngx-mat-select-search>
+                                    </mat-option>
+                                    @for (status of filteredLocalResults(); track status.resultStatus) {
+                                      <mat-option [value]="status.resultStatus" [matTooltip]="status.resultStatus + ' - ' + status.description" matTooltipPosition="right">
+                                        {{ status.resultStatus }} - {{ status.description }}
+                                      </mat-option>
+                                    }
+                                    @if (filteredLocalResults().length === 0) {
+                                      <mat-option disabled class="panel-option--status">No Data Available</mat-option>
+                                    }
+                                  }
+
+                                </mat-select>
+                                <mat-error>{{ getResultStatusError(row) }}</mat-error>
+                              </mat-form-field>
+                            } @else {
+                              <div class="readonly-cell" [matTooltip]="getLocalResultTooltip(row)" matTooltipPosition="right">{{ row.resultStatus }}</div>
+                            }
+                          </td>
+
+                          <!-- Description (readonly) -->
+                          <td class="mat-mdc-cell col-description">
+                            <div class="readonly-cell">{{ row.resultStatusDescription || '-' }}</div>
+                          </td>
+
+                          <!-- CBC Result (text input, max 4 chars, uppercase) - editable on all rows -->
+                          <td class="mat-mdc-cell col-cbc-result">
+                            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field"
+                                            [class.mat-form-field-invalid]="getCbcResultError(row)">
+                              <input matInput
+                                     [(ngModel)]="row.cbcResultStatus"
+                                     (ngModelChange)="onCbcResultChange(row)"
+                                     (blur)="onCbcResultBlur(row)"
+                                     [errorStateMatcher]="getCbcResultStatusMatcher(row)"
+                                     maxlength="4"
+                                     [required]="!!row.isNew"
+                                     style="text-transform: uppercase"
+                                     [attr.aria-required]="!!row.isNew"
+                                     aria-label="CBC Result">
+                              <mat-error>{{ getCbcResultError(row) }}</mat-error>
+                            </mat-form-field>
+                          </td>
+
+                          <!-- Effective Date - editable on new rows, readonly on existing rows -->
+                          <td class="mat-mdc-cell col-eff-date">
+                            @if (row.isNew) {
+                              <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field date-cell"
+                                              [class.mat-form-field-invalid]="getEffDateError(row)">
+                                <input matInput [matDatepicker]="effPicker"
+                                       [(ngModel)]="row.effDate"
+                                       [matDatepickerFilter]="effDateFilter"
+                                       [errorStateMatcher]="getEffDateMatcher(row)"
+                                       (input)="onEffDateInput($event, row)"
+                                       (blur)="onEffDateBlur(row)"
+                                       (dateChange)="onEffDateChange(row, $event.value)"
+                                       placeholder="DD-MMM-YYYY"
+                                       [attr.aria-required]="!!row.isNew"
+                                       aria-label="Effective Date">
+                                <mat-datepicker-toggle matIconSuffix [for]="effPicker" aria-label="Open effective date calendar"></mat-datepicker-toggle>
+                                <mat-datepicker #effPicker></mat-datepicker>
+                                <mat-error>{{ getEffDateError(row) }}</mat-error>
+                              </mat-form-field>
+                            } @else {
+                              <div class="readonly-cell">{{ formatDate(row.effDate) }}</div>
+                            }
+                          </td>
+
+                          <!-- Termination Date - editable on all rows -->
+                          <td class="mat-mdc-cell col-term-date">
+                            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="cell-field date-cell"
+                                            [class.mat-form-field-invalid]="getTermDateError(row)">
+                              <input matInput [matDatepicker]="termPicker"
+                                     [(ngModel)]="row.termDate"
+                                     [errorStateMatcher]="getTermDateMatcher(row)"
+                                     [matDatepickerFilter]="getTermDateFilter(row)"
+                                     (input)="onTermDateInput($event, row)"
+                                     (blur)="onTermDateBlur(row)"
+                                     (dateChange)="onTermDateChange(row, $event.value)"
+                                     placeholder="DD-MMM-YYYY"
+                                     aria-label="Termination Date">
+                              <mat-datepicker-toggle matIconSuffix [for]="termPicker" aria-label="Open termination date calendar"></mat-datepicker-toggle>
+                              <mat-datepicker #termPicker></mat-datepicker>
+                              <mat-error>{{ getTermDateError(row) }}</mat-error>
+                            </mat-form-field>
+                          </td>
+
+                          <!-- Modified Date (readonly) -->
+                          <td class="mat-mdc-cell col-mod-date">
+                            <div class="readonly-cell">{{ formatDate(row.lastModifiedDateLocal) }}</div>
+                          </td>
+
+                          <!-- Delete -->
+                          <td class="mat-mdc-cell col-actions">
+                            @if (row.testId && row.resultStatus) {
+                              <button mat-icon-button (click)="onDeleteRow(row)"
+                                      [attr.aria-label]="'Delete mapping for ' + row.testId + ' - ' + row.resultStatus">
+                                <mat-icon>delete</mat-icon>
+                              </button>
+                            }
+                          </td>
+                        </tr>
+                      }
+                    }
+                  </tbody>
+                </table>
+              </div>
+            }
+          </div>
+        </div>
+      } @else {
+        <!-- ── Empty state before retrieve ── -->
+        <div class="table-card">
+          <div class="empty-state-container" role="status" aria-live="polite">
+            <div class="empty-state-icon" aria-hidden="true">
+              <mat-icon>search</mat-icon>
+            </div>
+            <p class="empty-state-title">No Results to Display</p>
+            <p class="empty-state-message">Please enter search criteria to view results</p>
+          </div>
+        </div>
+      }
+    </div>
+  </div>
+</div>

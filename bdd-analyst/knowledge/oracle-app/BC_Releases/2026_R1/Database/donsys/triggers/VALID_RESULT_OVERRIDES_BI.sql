@@ -1,0 +1,57 @@
+--------------------------------------------------------
+--  DDL for Trigger VALID_RESULT_OVERRIDES_BI
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "DONSYS"."VALID_RESULT_OVERRIDES_BI" 
+ BEFORE INSERT
+ ON VALID_RESULT_OVERRIDES
+ FOR EACH ROW
+DECLARE
+	temp_audit_key	  number(23);
+	nCount number;
+begin
+	select nvl(count(*),0) into nCount from institution_tables
+   	where table_name='VALID_RESULT_OVERRIDES' and sysdate between nvl(eff_date,sysdate)
+   	and nvl(term_date,sysdate+1);
+    select decode(substr(lt_user_session.get_userid,1,3),'OPS',substr(lt_user_session.get_userid,5),lt_user_session.get_userid)
+    into :new.insert_user from dual ;
+    :new.insert_date := sysdate ;
+    select audit_seq.nextval into temp_audit_key from dual;
+    :new.audit_key := temp_audit_key;
+    :new.program_id := nvl(:new.program_id,'MANUAL');
+    If nCount > 0 then
+       :new.chapter_id:='ALL';
+    End If;
+    insert into VALID_RESULT_OVERRIDES_audit
+	(
+		audit_key,
+		audit_insert_dats,
+		program_id,
+		user_id,
+		test_id	,
+		chapter_id,
+		current_result_status,
+		new_result_status,
+		override_flag,
+		inter_code,
+		eff_date,
+		term_date
+	)
+	values
+	(
+		:new.audit_key,
+		sysdate,
+		:new.program_id,
+		decode(substr(lt_user_session.get_userid,1,3),'OPS',substr(lt_user_session.get_userid,5),lt_user_session.get_userid),
+		:new.test_id,
+		:new.chapter_id,
+		:new.current_result_status,
+		:new.new_result_status,
+		:new.override_flag,
+		:new.inter_code,
+		:new.eff_date,
+		:new.term_date
+	);
+end;
+/
+ALTER TRIGGER "DONSYS"."VALID_RESULT_OVERRIDES_BI" ENABLE;

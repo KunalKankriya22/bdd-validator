@@ -1,0 +1,366 @@
+<div class="site-collection-statistics-dialog" role="dialog" aria-modal="true" [attr.aria-labelledby]="elementId('title')">
+
+  <!-- Header -->
+  <div class="dialog-header">
+    <h2 [id]="elementId('title')" class="dialog-title">Site Collection Statistics</h2>
+    <button
+      type="button"
+      mat-icon-button
+      class="close-btn"
+      (click)="onClose()"
+      aria-label="Close Site Collection Statistics dialog">
+      <mat-icon>close</mat-icon>
+    </button>
+  </div>
+
+  <!-- Filter Form -->
+  <div class="search-form-wrapper">
+    <form [formGroup]="filterForm" class="search-form">
+      <div class="form-row">
+        <!-- Site ID Dropdown -->
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label>Site ID</mat-label>
+          <mat-select
+            #siteSelect
+            cdkFocusInitial
+            formControlName="siteId"
+            (openedChange)="onSiteDropdownOpenedChange($event)">
+            <mat-select-trigger>{{ filterForm.get('siteId')?.value || '' }}</mat-select-trigger>
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="siteSearchCtrl"
+                placeholderLabel="Search sites..."
+                noEntriesFoundLabel="No data available">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (site of filteredSites(); track site.siteId) {
+              <mat-option [value]="site.siteId">{{ site.siteId }} - {{ site.locationName }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Name (Read-only) -->
+        <mat-form-field appearance="fill" class="form-field name-field">
+          <mat-label>Name</mat-label>
+          <input matInput [value]="getFilterSiteName()" readonly tabindex="-1" aria-readonly="true">
+          <span
+            #nameContent
+            class="name-overlay"
+            #nameTooltip="matTooltip"
+            [matTooltip]="getFilterSiteName()"
+            [matTooltipShowDelay]="300"
+            matTooltipPosition="above"
+            (mouseenter)="showTooltipIfOverflowing(nameContent, nameTooltip)">
+            {{ getFilterSiteName() }}
+          </span>
+        </mat-form-field>
+
+        <!-- From Date -->
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label>From Date</mat-label>
+          <input
+            #fromDateInput
+            matInput
+            [matDatepicker]="fromDatePicker"
+            formControlName="fromDate"
+            placeholder="DD-MMM-YYYY"
+            [max]="filterForm.get('toDate')?.value"
+            [errorStateMatcher]="fromDateErrorMatcher"
+            (input)="onDateInput($event, 'fromDate')"
+            (keydown.enter)="onRetrieve()">
+          <mat-datepicker-toggle matIconSuffix [for]="fromDatePicker"></mat-datepicker-toggle>
+          <mat-datepicker #fromDatePicker></mat-datepicker>
+          @if (getFromDateError()) {
+            <mat-error>{{ getFromDateError() }}</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- To Date -->
+        <mat-form-field appearance="fill" class="form-field">
+          <mat-label>To Date</mat-label>
+          <input
+            #toDateInput
+            matInput
+            [matDatepicker]="toDatePicker"
+            formControlName="toDate"
+            placeholder="DD-MMM-YYYY"
+            [min]="filterForm.get('fromDate')?.value"
+            [errorStateMatcher]="toDateErrorMatcher"
+            (input)="onDateInput($event, 'toDate')"
+            (keydown.enter)="onRetrieve()">
+          <mat-datepicker-toggle matIconSuffix [for]="toDatePicker"></mat-datepicker-toggle>
+          <mat-datepicker #toDatePicker></mat-datepicker>
+          @if (getToDateError()) {
+            <mat-error>{{ getToDateError() }}</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Action Buttons -->
+        <div class="form-actions">
+          <button
+            type="button"
+            mat-stroked-button
+            class="action-btn retrieve-btn"
+            (click)="onRetrieve()"
+            [disabled]="loading() || filterForm.invalid || filterForm.disabled">
+            RETRIEVE
+          </button>
+          <button
+            type="button"
+            mat-button
+            class="clear-all-link"
+            (click)="onClearAll()"
+            [disabled]="!hasAnyFilterValue()">
+            CLEAR ALL
+          </button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <!-- Results Area -->
+  <div class="results-area">
+    @if (loading()) {
+      <div class="loading-state" role="status" aria-label="Loading statistics">
+        <mat-spinner diameter="40"></mat-spinner>
+      </div>
+    } @else if (isEmpty()) {
+      <div class="empty-state" role="status" aria-label="No results to display">
+        <mat-icon class="empty-icon" aria-hidden="true">bar_chart</mat-icon>
+        <p class="empty-title">No Results to Display</p>
+        <p class="empty-subtitle">Enter filter criteria and click Retrieve to view statistics</p>
+      </div>
+    } @else {
+
+      <!-- Full-Width Units View (triggered by SHOW UNITS button) -->
+      @if (showFullUnits()) {
+        <div class="units-full-view">
+          @if (loadingUnits()) {
+            <div class="loading-state" role="status" aria-label="Loading unit details">
+              <mat-spinner diameter="40"></mat-spinner>
+            </div>
+          } @else if (hasUnits()) {
+            <div class="table-wrapper">
+              <table mat-table [dataSource]="unitDetails()" class="results-table units-table" aria-label="Unit details">
+                <ng-container matColumnDef="displayUnitId">
+                  <th mat-header-cell *matHeaderCellDef>Unit ID</th>
+                  <td mat-cell *matCellDef="let row">{{ row.displayUnitId }}</td>
+                </ng-container>
+                <ng-container matColumnDef="collectionDate">
+                  <th mat-header-cell *matHeaderCellDef>Collection Date</th>
+                  <td mat-cell *matCellDef="let row">{{ formatDate(row.collectionDate) }}</td>
+                </ng-container>
+                <ng-container matColumnDef="donationType">
+                  <th mat-header-cell *matHeaderCellDef>Donation Type</th>
+                  <td mat-cell *matCellDef="let row">{{ row.donationType }}</td>
+                </ng-container>
+                <ng-container matColumnDef="procedureCode">
+                  <th mat-header-cell *matHeaderCellDef>Procedure Type</th>
+                  <td mat-cell *matCellDef="let row">{{ row.procedureCode }}</td>
+                </ng-container>
+                @for (col of venipunctureColumns; track col.code) {
+                  <ng-container [matColumnDef]="col.key">
+                    <th mat-header-cell *matHeaderCellDef [attr.aria-label]="col.description">{{ col.code }}</th>
+                    <td mat-cell *matCellDef="let row">{{ formatVeniAttribute(row.attributes[col.key]) }}</td>
+                  </ng-container>
+                }
+                <tr mat-header-row *matHeaderRowDef="unitDetailsColumns; sticky: true"></tr>
+                <tr mat-row *matRowDef="let row; columns: unitDetailsColumns;"></tr>
+              </table>
+            </div>
+          } @else {
+            <div class="empty-state" role="status" aria-label="No unit details available">
+              <p class="empty-title">No unit details available</p>
+            </div>
+          }
+        </div>
+      } @else {
+
+        <!-- Two-Panel Master-Detail Layout -->
+        <div class="two-panel-layout">
+          <!-- Left Panel: Site Statistics Table -->
+          <div class="left-panel">
+            <div class="table-wrapper">
+              <table mat-table [dataSource]="siteStatistics()" class="results-table site-stats-table" aria-label="Site collection statistics">
+                <ng-container matColumnDef="siteId">
+                  <th mat-header-cell *matHeaderCellDef>Site ID</th>
+                  <td mat-cell *matCellDef="let row">{{ row.siteId }}</td>
+                  <td mat-footer-cell *matFooterCellDef class="total-label">Total</td>
+                </ng-container>
+
+                <ng-container matColumnDef="locationName">
+                  <th mat-header-cell *matHeaderCellDef>Name</th>
+                  <td mat-cell *matCellDef="let row">{{ row.locationName }}</td>
+                  <td mat-footer-cell *matFooterCellDef class="total-label-merged"></td>
+                </ng-container>
+
+                <ng-container matColumnDef="collectionDate">
+                  <th mat-header-cell *matHeaderCellDef>Collection Date</th>
+                  <td mat-cell *matCellDef="let row">{{ formatDate(row.collectionDate) }}</td>
+                  <td mat-footer-cell *matFooterCellDef class="total-label-merged"></td>
+                </ng-container>
+
+                <ng-container matColumnDef="actualDraws">
+                  <th mat-header-cell *matHeaderCellDef>Actual Draw</th>
+                  <td mat-cell *matCellDef="let row">{{ row.actualDraws }}</td>
+                  <td mat-footer-cell *matFooterCellDef class="total-value">{{ totalActualDraws() }}</td>
+                </ng-container>
+
+                <ng-container matColumnDef="actualDeferrals">
+                  <th mat-header-cell *matHeaderCellDef>Actual Deferral</th>
+                  <td mat-cell *matCellDef="let row">{{ row.actualDeferrals }}</td>
+                  <td mat-footer-cell *matFooterCellDef class="total-value">{{ totalActualDeferrals() }}</td>
+                </ng-container>
+
+                <tr mat-header-row *matHeaderRowDef="siteStatsColumns; sticky: true"></tr>
+                <tr mat-row *matRowDef="let row; columns: siteStatsColumns;"
+                    class="clickable-row"
+                    tabindex="0"
+                    (click)="onSiteRowClick(row)"
+                    (keydown.enter)="onSiteRowClick(row)"
+                    (keydown.space)="$event.preventDefault(); onSiteRowClick(row)"
+                    [class.selected-row]="isRowSelected(row)"
+                    [attr.aria-selected]="isRowSelected(row)">
+                <tr mat-footer-row *matFooterRowDef="siteStatsColumns; sticky: true" class="total-row"></tr>
+              </table>
+            </div>
+          </div>
+
+          <!-- Right Panel: Tabs + Content -->
+          <div class="right-panel">
+            <app-dialog-tabs
+              [tabs]="tabs"
+              [activeTab]="activeTab()"
+              (tabChange)="onTabChange($event)">
+            </app-dialog-tabs>
+
+            <!-- General Tab Content -->
+            @if (activeTab() === 'general') {
+              @if (selectedSiteRow()) {
+                <div class="panel-header">
+                  <h3 class="panel-title">Site ID: {{ selectedSiteName() }}</h3>
+                </div>
+
+                @if (loadingBreakdown()) {
+                  <div class="loading-state small" role="status" aria-label="Loading donation breakdown">
+                    <mat-spinner diameter="30"></mat-spinner>
+                  </div>
+                } @else if (hasBreakdown()) {
+                  <div class="table-wrapper">
+                    <table mat-table [dataSource]="donationBreakdown()" class="results-table breakdown-table" aria-label="Donation breakdown">
+                      <ng-container matColumnDef="donationType">
+                        <th mat-header-cell *matHeaderCellDef>Donation Type</th>
+                        <td mat-cell *matCellDef="let row">{{ row.donationType }}</td>
+                      </ng-container>
+                      <ng-container matColumnDef="procedureCode">
+                        <th mat-header-cell *matHeaderCellDef>Procedure Code</th>
+                        <td mat-cell *matCellDef="let row">{{ row.procedureCode }}</td>
+                      </ng-container>
+                      <ng-container matColumnDef="count">
+                        <th mat-header-cell *matHeaderCellDef>Count</th>
+                        <td mat-cell *matCellDef="let row">{{ row.count }}</td>
+                      </ng-container>
+                      <tr mat-header-row *matHeaderRowDef="donationBreakdownColumns; sticky: true"></tr>
+                      <tr mat-row *matRowDef="let row; columns: donationBreakdownColumns;"
+                          (click)="onBreakdownRowClick(row)"
+                          (keydown.enter)="onBreakdownRowClick(row)"
+                          (keydown.space)="$event.preventDefault(); onBreakdownRowClick(row)"
+                          tabindex="0"
+                          class="clickable-row"
+                          [class.selected-row]="selectedBreakdownRow()?.donationType === row.donationType && selectedBreakdownRow()?.procedureCode === row.procedureCode"
+                          [attr.aria-selected]="selectedBreakdownRow()?.donationType === row.donationType && selectedBreakdownRow()?.procedureCode === row.procedureCode"></tr>
+                    </table>
+                  </div>
+                } @else {
+                  <div class="empty-state inline" role="status" aria-label="No donation breakdown data available">
+                    <p class="empty-title">No donation breakdown data available</p>
+                  </div>
+                }
+              } @else {
+                <div class="empty-state inline" role="status" aria-label="Select a site row to view donation breakdown">
+                  <p class="empty-title">Select a site row to view donation breakdown</p>
+                </div>
+              }
+            }
+
+            <!-- Units Tab Content -->
+            @if (activeTab() === 'units') {
+              @if (loadingUnits()) {
+                <div class="loading-state small" role="status" aria-label="Loading unit details">
+                  <mat-spinner diameter="30"></mat-spinner>
+                </div>
+              } @else if (hasUnits()) {
+                <div class="table-wrapper">
+                  <table mat-table [dataSource]="unitDetails()" class="results-table units-table" aria-label="Unit details">
+                    <ng-container matColumnDef="displayUnitId">
+                      <th mat-header-cell *matHeaderCellDef>Unit ID</th>
+                      <td mat-cell *matCellDef="let row">{{ row.displayUnitId }}</td>
+                    </ng-container>
+                    <ng-container matColumnDef="collectionDate">
+                      <th mat-header-cell *matHeaderCellDef>Collection Date</th>
+                      <td mat-cell *matCellDef="let row">{{ formatDate(row.collectionDate) }}</td>
+                    </ng-container>
+                    <ng-container matColumnDef="donationType">
+                      <th mat-header-cell *matHeaderCellDef>Donation Type</th>
+                      <td mat-cell *matCellDef="let row">{{ row.donationType }}</td>
+                    </ng-container>
+                    <ng-container matColumnDef="procedureCode">
+                      <th mat-header-cell *matHeaderCellDef>Procedure Type</th>
+                      <td mat-cell *matCellDef="let row">{{ row.procedureCode }}</td>
+                    </ng-container>
+                    @for (col of venipunctureColumns; track col.code) {
+                      <ng-container [matColumnDef]="col.key">
+                        <th mat-header-cell *matHeaderCellDef [attr.aria-label]="col.description">{{ col.code }}</th>
+                        <td mat-cell *matCellDef="let row">{{ formatVeniAttribute(row.attributes[col.key]) }}</td>
+                      </ng-container>
+                    }
+                    <tr mat-header-row *matHeaderRowDef="unitDetailsColumns; sticky: true"></tr>
+                    <tr mat-row *matRowDef="let row; columns: unitDetailsColumns;"></tr>
+                  </table>
+                </div>
+              } @else {
+                <div class="empty-state inline" role="status" aria-label="Select a site row and click Show Units to load data">
+                  <p class="empty-title">Select a site row and click "SHOW UNITS" to load data</p>
+                </div>
+              }
+            }
+          </div>
+        </div>
+      }
+    }
+  </div>
+
+  <!-- Footer -->
+  <div class="dialog-footer">
+    <div class="footer-actions">
+      <button
+        type="button"
+        mat-stroked-button
+        class="action-btn"
+        (click)="onClear()"
+        aria-label="Clear results">
+        CLEAR
+      </button>
+      <button
+        type="button"
+        mat-stroked-button
+        class="action-btn"
+        (click)="onClose()"
+        aria-label="Close dialog">
+        CLOSE
+      </button>
+      @if (!isEmpty()) {
+        <button
+          type="button"
+          mat-stroked-button
+          class="action-btn"
+          (click)="onToggleUnits()"
+          [disabled]="!selectedSiteRow() && !showFullUnits()"
+          [attr.aria-label]="showFullUnits() ? 'Hide unit details' : 'Show unit details'">
+          {{ showFullUnits() ? 'HIDE UNITS' : 'SHOW UNITS' }}
+        </button>
+      }
+    </div>
+  </div>
+
+</div>

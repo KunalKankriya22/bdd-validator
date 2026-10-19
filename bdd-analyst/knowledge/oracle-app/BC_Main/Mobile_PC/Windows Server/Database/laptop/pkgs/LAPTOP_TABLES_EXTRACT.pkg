@@ -1,0 +1,2098 @@
+create or replace PACKAGE "LAPTOP_TABLES_EXTRACT"
+/*
+----------------------------------------------------------------------------
+PACKAGE  : LT_TABLE_EXTRACT
+PURPOSE: Used to extract mobile PC data and generate text files or dat files
+based on encryption.
+
+-------------------------------------------------------------------------------
+By      |     Date      |   Ver |  Remarks
+-------------------------------------------------------------------------------
+Ashok   |  11/27/2022   |   01  |
+Ashok   |  01/03/2023   |   02  | set_debug_mode added. Merged TWO extract pkgs to one pkg.
+Ashok   |  01/22/2023   |   03  | use table_insert_date for script or screen extract.
+Ashok   |  01/30/2023   |   04  | do not count bdr files as part of extract count.
+Ashok   |  02/08/2023   |   05  | get_extract_jobs INPUT parameters modified.
+Ashok   |  02/14/2023   |   06  | get_extract_jobs query updated.
+                                | bdr files processing issue. check V06
+Ashok   |  04/15/2025   |   07  | gd_sysdate value modified to use sysdate - 2 seconds
+                                | Added table_insert_Date condition for Delete from download_monitor table.
+-----------------------------------------------------------------------------
+
+
+Create or replace public synonym LAPTOP_TABLES_EXTRACT for LAPTOP.LAPTOP_TABLES_EXTRACT;
+GRANT EXECUTE ON LAPTOP.LAPTOP_TABLES_EXTRACT TO DBADMN;
+
+LAPTOP_TABLES_EXTRACT statuses
+--  NULL - Job submitted.
+-- 'Q'   - IN QUEUE - Job is in queue to be run
+-- 'C'   - Completed.
+-- 'E'   - Error.
+*/
+IS
+    PROCEDURE start_job(shipment_id_in  IN VARCHAR2,
+                        user_id_in      IN VARCHAR2,
+                        upload_id_out   OUT VARCHAR2,
+                        status_out      OUT VARCHAR2);
+
+    PROCEDURE start_job(upload_id_out   OUT VARCHAR2,
+                        status_out      OUT VARCHAR2);
+
+    PROCEDURE insert_extract_job(   shipment_id_in IN VARCHAR2,
+                                    user_id_in IN VARCHAR2,
+                                    status_out OUT VARCHAR2);
+    PROCEDURE insert_extract_job_script(   shipment_id_in IN VARCHAR2,
+                                            user_id_in  IN VARCHAR2,
+                                            status_out  OUT VARCHAR2);
+    PROCEDURE run_extract_job;
+
+    PROCEDURE run_extract_job_async(p_user_in IN VARCHAR2 DEFAULT NULL);
+
+    TYPE strings_aat IS TABLE OF VARCHAR2(100)  INDEX BY PLS_INTEGER;
+
+    FUNCTION get_upload_id RETURN VARCHAR2;
+
+    PROCEDURE set_dubug_mode;
+
+    PROCEDURE get_extract_jobs( p_user_in IN VARCHAR2,
+                                p_drive_id_in IN VARCHAR2,
+                                p_drive_date_in IN VARCHAR2,
+                                p_recordset_out OUT SYS_REFCURSOR);
+
+
+END LAPTOP_TABLES_EXTRACT;
+
+
+/
+
+
+create or replace PACKAGE BODY "LAPTOP_TABLES_EXTRACT" IS
+
+    gc_extract_dir      CONSTANT VARCHAR2(10) := 'UTL_DIR';
+    gc_extract_arch_dir CONSTANT VARCHAR2(10) := 'EXT_ARCH';
+
+    gt_start            PLS_INTEGER;
+    gv_enc_flag         VARCHAR2(1);
+    gv_upload_id        VARCHAR2(100);
+    gv_laptop_id        VARCHAR2(10);
+    gv_genbdr_flag      VARCHAR2(1);
+    gd_sysdate          DATE;
+    gv_drive_id         VARCHAR2(20);
+    gv_shipment_extract VARCHAR2(1);
+    gv_status           VARCHAR2(2000);
+
+    g_laptop_extracts_rec  laptop_extracts%ROWTYPE;
+
+
+    g_transaction_ids_aa  DBMS_UTILITY.maxname_array;
+    g_donor_ids_aa        DBMS_UTILITY.maxname_array;
+    g_unit_ids_aa         DBMS_UTILITY.maxname_array;
+    g_shipment_ids_aa     DBMS_UTILITY.maxname_array;
+    g_employer_ids_aa     DBMS_UTILITY.maxname_array;
+    g_survey_ids_aa       DBMS_UTILITY.maxname_array;
+    g_note_ids_aa         DBMS_UTILITY.maxname_array;
+    g_drive_ids_aa        DBMS_UTILITY.maxname_array;
+    g_audit_keys_aa       DBMS_UTILITY.NUMBER_ARRAY;
+
+    g_empty_name_aa        DBMS_UTILITY.maxname_array;
+    g_empty_number_aa        DBMS_UTILITY.NUMBER_ARRAY;
+    gb_print_hdr         BOOLEAN;
+    gb_debug_mode       BOOLEAN := FALSE;
+
+    TYPE laptop_details_rt IS RECORD (
+        laptop_id           laptop_id_details.laptop_id%TYPE,
+        extract_in_progress laptop_id_details.extract_in_progress%TYPE
+    );
+    g_laptop_details_rec laptop_details_rt;
+
+
+    TYPE shipment_hdr_rt IS RECORD (
+        shipper_no  VARCHAR2(100),
+        ship_status VARCHAR2(10),
+        ship_type   VARCHAR2(10),
+        drive_id    VARCHAR2(10),
+        insert_user VARCHAR2(30)
+    );
+   g_shipment_hdr_row shipment_hdr_rt;
+
+
+    TYPE mobile_server_tables_aat IS TABLE OF mobile_server_tables%ROWTYPE
+        INDEX BY PLS_INTEGER;
+    g_tables_aa  mobile_server_tables_aat;
+
+    FUNCTION get_upload_id RETURN VARCHAR2 IS
+    BEGIN
+        RETURN gv_upload_id;
+    END get_upload_id;
+
+    PROCEDURE set_dubug_mode IS
+    BEGIN
+        gb_debug_mode := TRUE;
+    END set_dubug_mode;
+
+    FUNCTION error_msg(loc_in IN VARCHAR2) RETURN VARCHAR2 IS
+    BEGIN
+        RETURN    loc_in
+                    || ':: '
+                    || SUBSTR(SQLERRM, 1, 200)
+                    ||  '::Error BackTrace:: '
+                    ||DBMS_UTILITY.format_error_backtrace;
+    END error_msg;
+
+    PROCEDURE log_msg(msg_in IN VARCHAR2) IS
+    BEGIN
+        IF gb_debug_mode THEN
+            DBMS_OUTPUT.PUT_LINE(msg_in);
+        END IF;
+    END log_msg;
+
+    PROCEDURE log_error(msg_in IN VARCHAR2, file_name_in IN VARCHAR2 DEFAULT NULL) IS
+        rc SYS_REFCURSOR;
+        lv_fileName VARCHAR2(200);
+    BEGIN
+        OPEN rc FOR 'SELECT ''' || msg_in || ''' FROM DUAL';
+
+        log_msg('LOG_ERROR : ' || msg_in);
+
+        IF file_name_in IS NOT NULL THEN
+            lv_fileName := file_name_in;
+        ELSIF gv_upload_id IS NOT NULL THEN
+            lv_fileName := 'err_file'
+                           || '-'
+                           || NVL(gv_laptop_id, 'XX')
+                           || '_'
+                           || gv_upload_id
+                           || '_'
+                           || TO_CHAR(SYSDATE, 'mmddyyhh24miss')
+                           || '.log';
+        ELSE
+            lv_fileName := 'err_file'
+                           || '-'
+                           || NVL(gv_laptop_id, 'XX')
+                           || '_'
+                           || TO_CHAR(SYSDATE, 'mmddyyhh24miss')
+                           || '.log';
+        END IF;
+
+        extract_util.write_file(
+            p_dataset   => rc,
+            p_separator => CHR(124),
+            p_label     => '',
+            p_heading   => 'N',
+            p_rowcount  => 'N',
+            p_directory => gc_extract_dir,
+            p_filename  => lv_fileName);
+
+    END log_error;
+
+    PROCEDURE mark_start
+    IS
+    BEGIN
+      gt_start := DBMS_UTILITY.get_cpu_time;
+    END mark_start;
+
+    PROCEDURE show_elapsed (NAME_IN IN VARCHAR2)
+    IS
+    BEGIN
+      log_msg (
+            '"'
+         || NAME_IN
+         || '" elapsed CPU time: '
+         || TO_CHAR ( (DBMS_UTILITY.get_cpu_time - gt_start) / 100)
+         || ' seconds');
+    END show_elapsed;
+
+    FUNCTION get_param_value (
+        p_param_code IN VARCHAR2
+    ) RETURN VARCHAR2 IS
+        lv_param_value VARCHAR2(10);
+    BEGIN
+        SELECT
+            decode(COUNT(1), 0, 'N', MAX(parameter_value))
+        INTO lv_param_value
+        FROM
+            valid_parameters
+        WHERE
+            parameter_code = p_param_code;
+
+        RETURN lv_param_value;
+    END get_param_value;
+
+    FUNCTION get_header_row(drive_id_in IN VARCHAR2, upload_id_in IN VARCHAR2) RETURN laptop_extracts%ROWTYPE IS
+        temp_rec laptop_extracts%ROWTYPE;
+        lnExtractSeq NUMBER;
+    BEGIN
+
+        SELECT
+            MAX(extract_seq)
+        INTO
+            lnExtractSeq
+        FROM
+            laptop_extracts
+        WHERE
+            drive_id = drive_id_in;
+
+        temp_rec.upload_id    := upload_id_in;
+        temp_rec.files_count  := 0; -- this is set after all files are extracted and before inserting
+        temp_rec.drive_id     := drive_id_in;
+        temp_rec.extract_seq  := NVL(lnExtractSeq, 0) + 1;
+        temp_rec.insert_date  := SYSDATE;
+        temp_rec.insert_user  := 'LAPTOP';
+
+        RETURN temp_rec;
+    END get_header_row;
+
+    FUNCTION drive_chapter(drive_id_in IN VARCHAR2) RETURN VARCHAR2 IS
+        lv_chapter VARCHAR2(10);
+    BEGIN
+        SELECT chapter_id into lv_chapter
+          FROM drives
+         WHERE drive_id = drive_id_in;
+
+        RETURN lv_chapter;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN 'ALL';
+    END drive_chapter;
+
+    PROCEDURE init_global_arrays IS
+
+        FUNCTION get_employer_ids(donor_ids_aa_in IN DBMS_UTILITY.maxname_array)
+            RETURN DBMS_UTILITY.maxname_array IS
+            l_string_ids_aa DBMS_UTILITY.maxname_array;
+        BEGIN
+            SELECT distinct employer_id
+                BULK COLLECT INTO l_string_ids_aa
+              FROM donors
+             WHERE donor_id IN (SELECT COLUMN_VALUE FROM TABLE(donor_ids_aa_in));
+
+             RETURN l_string_ids_aa;
+        END get_employer_ids;
+
+        FUNCTION get_survey_ids(donor_ids_aa_in IN DBMS_UTILITY.maxname_array, drive_id_in IN VARCHAR2)
+            RETURN DBMS_UTILITY.maxname_array IS
+            l_string_ids_aa DBMS_UTILITY.maxname_array;
+        BEGIN
+            SELECT survey_id
+                BULK COLLECT INTO l_string_ids_aa
+              FROM donor_survey_resp_hdr
+             WHERE donor_id IN (SELECT COLUMN_VALUE FROM TABLE(donor_ids_aa_in))
+               AND drive_id = drive_id_in;
+
+            RETURN l_string_ids_aa;
+        END get_survey_ids;
+
+        FUNCTION get_note_ids(donor_ids_aa_in IN DBMS_UTILITY.maxname_array, transaction_ids_aa_in IN DBMS_UTILITY.maxname_array)
+            RETURN DBMS_UTILITY.maxname_array IS
+            l_string_ids_aa DBMS_UTILITY.maxname_array;
+        BEGIN
+            SELECT note_id
+             BULK COLLECT INTO l_string_ids_aa
+              FROM (
+                    -- donor interdiction note ids.
+                    SELECT di.note_id
+                      FROM donor_interdictions di
+                     WHERE di.donor_id IN (SELECT COLUMN_VALUE FROM TABLE(donor_ids_aa_in))
+                       AND di.note_id IS NOT NULL
+                    UNION
+                    -- donations note ids.
+                    SELECT dn.note_id
+                      FROM donations dn
+                     WHERE dn.transaction_id IN (SELECT COLUMN_VALUE FROM TABLE(transaction_ids_aa_in))
+                       AND dn.note_id IS NOT NULL
+                    UNION
+                    -- donors note ids
+                    SELECT dn.note_id
+                      FROM donors dn
+                     WHERE dn.donor_id IN (SELECT COLUMN_VALUE FROM TABLE(donor_ids_aa_in))
+                       AND dn.note_id IS NOT NULL
+                    );
+
+            RETURN l_string_ids_aa;
+        END get_note_ids;
+
+    BEGIN
+        g_employer_ids_aa.DELETE;
+        g_survey_ids_aa.DELETE;
+        g_note_ids_aa.DELETE;
+        g_shipment_ids_aa.DELETE;
+        g_drive_ids_aa.DELETE;
+
+        g_employer_ids_aa       := get_employer_ids(g_donor_ids_aa);
+        g_survey_ids_aa         := get_survey_ids(g_donor_ids_aa, g_shipment_hdr_row.drive_id);
+        g_note_ids_aa           := get_note_ids(g_donor_ids_aa, g_transaction_ids_aa);
+        g_shipment_ids_aa(1)    := g_shipment_hdr_row.shipper_no;
+        g_drive_ids_aa(1)       := g_shipment_hdr_row.drive_id;
+
+    END init_global_arrays;
+
+    PROCEDURE initialize IS
+    BEGIN
+        gv_enc_flag     := get_param_value('ENCRPT_REQ');
+        gv_genbdr_flag  := get_param_value('GENBDR');
+        gd_sysdate      := SYSDATE - INTERVAL '2' SECOND;
+        gb_print_hdr    := TRUE;
+
+        gv_upload_id := gv_laptop_id
+                        || '_'
+                        || TO_CHAR(gd_sysdate, 'mmddyyhh24miss')
+                        || '_'
+                        || drive_chapter(gv_drive_id);
+
+        g_laptop_extracts_rec :=  get_header_row(gv_drive_id, gv_upload_id);
+    END initialize;
+
+    PROCEDURE set_extract_progress (
+        laptop_id_in IN VARCHAR2,
+        status_in IN VARCHAR2
+    ) IS
+    BEGIN
+        UPDATE laptop_id_details
+        SET
+            extract_in_progress = status_in
+        WHERE
+            laptop_id = laptop_id_in;
+
+        COMMIT;
+    END set_extract_progress;
+
+    FUNCTION get_audit_keys(dataset_in IN DBMS_UTILITY.maxname_array,
+                              table_name_in IN VARCHAR2,
+                              key_col_in IN VARCHAR2) RETURN DBMS_UTILITY.NUMBER_ARRAY IS
+        lv_query VARCHAR2(2000);
+        t_audit_keys_aa DBMS_UTILITY.NUMBER_ARRAY;
+    BEGIN
+      lv_query := 'SELECT audit_key ' ||
+                   ' FROM ' || table_name_in ||
+                   ' WHERE ' || key_col_in || ' IN ( SELECT COLUMN_VALUE FROM TABLE(:P_1))';
+
+      EXECUTE IMMEDIATE lv_query BULK COLLECT INTO t_audit_keys_aa USING dataset_in;
+
+      RETURN t_audit_keys_aa;
+    END get_audit_keys;
+
+    FUNCTION get_query(table_name_in IN VARCHAR2, key_col_in IN VARCHAR2 DEFAULT NULL, order_by_in IN VARCHAR2 DEFAULT NULL) RETURN VARCHAR2 IS
+        lv_query VARCHAR2(2000);
+
+        FUNCTION get_select_cols RETURN VARCHAR2 IS
+            lv_select_cols VARCHAR2(1000);
+        BEGIN
+            -- tables with BLOB type have to be handled differently.
+            -- TODO - move to global constants.
+            IF table_name_in IN ('DONOR_CONSENTS','DONOR_PICTURES', 'DONOR_CONSENTS_ADT') THEN
+                SELECT
+                    LISTAGG(decode(data_type, 'BLOB', 'NULL', 'tb.' || column_name), ',') WITHIN GROUP(
+                    ORDER BY
+                        column_id
+                    )
+                INTO lv_select_cols
+                FROM
+                    all_tab_columns
+                WHERE
+                    table_name = table_name_in;
+            ELSE
+                lv_select_cols := 'tb.*';
+            END IF;
+
+            RETURN lv_select_cols;
+        END get_select_cols;
+
+        FUNCTION get_order_by_clause RETURN VARCHAR2 IS
+            lv_order_by VARCHAR2(1000);
+        BEGIN
+            IF order_by_in IS NULL THEN
+                lv_order_by := '';
+            ELSE
+                lv_order_by := 'ORDER BY ' || order_by_in;
+            END IF;
+            RETURN lv_order_by;
+        END get_order_by_clause;
+    BEGIN
+        IF gv_shipment_extract = 'Y' THEN
+            lv_query := 'SELECT ' || get_select_cols|| ' , dm.transaction_mode ' ||
+                          'FROM ' || table_name_in || ' tb, download_monitor dm ' ||
+                         'WHERE tb.audit_key = dm.table_audit_key ' ||
+                           'AND dm.table_name = :P_1 ' ||
+                           'AND ' || key_col_in || ' IN (SELECT column_value FROM TABLE(:P_2)) '||
+                           get_order_by_clause;
+        ELSE
+            lv_query := 'SELECT ' || get_select_cols|| ' , dm.transaction_mode ' ||
+                          'FROM ' || table_name_in || ' tb, download_monitor dm ' ||
+                         'WHERE tb.audit_key = dm.table_audit_key ' ||
+                           'AND dm.table_name = :P_1 ' ||
+                           'AND dm.table_insert_date <= :P_2 ' ||
+                           get_order_by_clause;
+        END IF;
+
+        RETURN lv_query;
+    END get_query;
+
+
+    PROCEDURE clear_download_monitor(   table_name_in   IN VARCHAR2,
+                                        key_col_in      IN VARCHAR2,
+                                        dataset_in     IN DBMS_UTILITY.MAXNAME_ARRAY)
+    IS
+        lv_query VARCHAR2(2000);
+        temp_dataset_in strings_t;
+    BEGIN
+        SELECT column_value
+         BULK COLLECT INTO temp_dataset_in
+         FROM TABLE(dataset_in);
+
+        lv_query := 'DELETE FROM download_monitor dm ' ||
+                    ' WHERE dm.table_name = :P_1' ||
+                    '   AND EXISTS (SELECT 1 ' ||
+                                     'FROM ' || table_name_in || ' tb ' ||
+                                     'WHERE tb.audit_key = dm.table_audit_key ' ||
+                                     'AND ' || key_col_in || ' IN (SELECT column_value FROM TABLE(:P_2)) )';
+
+        EXECUTE IMMEDIATE lv_query
+                    USING table_name_in, temp_dataset_in;
+
+        log_msg('--CDM--');
+        log_msg('Query      : ' ||lv_query);
+        log_msg('Deleted    : ' || table_name_in || ':' || SQL%ROWCOUNT ||  ' Rows');
+        log_msg('-------');
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := error_msg('CLEAR_DOWNLOAD_MONITOR');
+    END clear_download_monitor;
+
+    PROCEDURE clear_download_monitor(   table_name_in   IN VARCHAR2,
+                                        key_col_in      IN VARCHAR2,
+                                        dataset_in     IN DBMS_UTILITY.NUMBER_ARRAY)
+    IS
+        lv_query VARCHAR2(2000);
+        temp_dataset_in numbers_t;
+    BEGIN
+        SELECT column_value
+         BULK COLLECT INTO temp_dataset_in
+         FROM TABLE(dataset_in);
+
+        lv_query := 'DELETE FROM download_monitor dm ' ||
+                    ' WHERE dm.table_name = :P_1' ||
+                    '   AND EXISTS (SELECT 1 ' ||
+                                     'FROM ' || table_name_in || ' tb ' ||
+                                     'WHERE tb.audit_key = dm.table_audit_key ' ||
+                                     'AND ' || key_col_in || ' IN (SELECT column_value FROM TABLE(:P_2)) )';
+
+        EXECUTE IMMEDIATE lv_query
+                    USING table_name_in, temp_dataset_in;
+
+        log_msg('--CDM--');
+        log_msg('Query      : ' ||lv_query);
+        log_msg('Deleted    : ' || table_name_in || ':' || SQL%ROWCOUNT ||  ' Rows');
+        log_msg('-------');
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := error_msg('CLEAR_DOWNLOAD_MONITOR2');
+    END clear_download_monitor;
+
+    PROCEDURE write_tab_blob_to_file(   table_name_in IN VARCHAR2,
+                                        key_col_in IN VARCHAR2,
+                                        dataset_in IN DBMS_UTILITY.MAXNAME_ARRAY,
+                                        order_by_in IN VARCHAR2 DEFAULT NULL) IS
+        cv sys_refcursor;
+        lv_query CLOB;
+        temp_blob BLOB;
+        lv_auditKey VARCHAR2(100);
+        lv_fileName VARCHAR2(500);
+
+    BEGIN
+        FOR rec IN  (  SELECT table_name, column_name
+                              FROM all_tab_columns
+                             WHERE table_name = table_name_in
+                               AND data_type = 'BLOB')
+        LOOP
+
+            lv_query := ' SELECT ' || rec.column_name || ' , dm.table_audit_key ' ||
+                          ' FROM ' || rec.table_name || ' tb, download_monitor dm ' ||
+                         ' WHERE tb.audit_key = dm.table_audit_key ' ||
+                           ' AND dm.table_name = :P_1 ' ||
+                           ' AND LENGTH( ' || rec.column_name || ' ) <> 0' ||
+                           ' AND ' || key_col_in || ' IN (SELECT column_value FROM TABLE(:P_2)) ';
+
+
+            OPEN cv FOR lv_query USING table_name_in, dataset_in;
+            LOOP
+                FETCH cv INTO temp_blob, lv_auditKey;
+                EXIT WHEN cv%NOTFOUND;
+
+                IF LENGTH(temp_blob) > 0 THEN
+                    SELECT lv_auditKey
+                                   || '-'
+                                   || rec.table_name
+                                   || '-'
+                                   || rec.column_name
+                                   || '-'
+                                   || gv_upload_id
+                                   || DECODE(gv_enc_flag, 'Y', '.enc', '.tif')
+                      INTO lv_fileName
+                      FROM DUAL;
+
+                    extract_util.blob_to_file(  p_blob      => temp_blob,
+                                                p_dir       => gc_extract_dir,
+                                                p_filename  => lv_fileName,
+                                                p_encrypt   => gv_enc_flag);
+                END IF;
+            END LOOP;
+            CLOSE cv;
+
+        END LOOP;
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := error_msg('WRITE_TAB_BLOB_TO_FILE1');
+
+            if cv%isopen then
+                begin
+                    close cv;
+                exception
+                    when invalid_cursor
+                        then null;
+                end;
+            end if;
+    END write_tab_blob_to_file;
+
+    PROCEDURE write_tab_blob_to_file(   table_name_in IN VARCHAR2) IS
+        cv sys_refcursor;
+        lv_query CLOB;
+        temp_blob BLOB;
+        lv_auditKey VARCHAR2(100);
+        lv_fileName VARCHAR2(500);
+
+    BEGIN
+        FOR rec IN  (  SELECT table_name, column_name
+                              FROM all_tab_columns
+                             WHERE table_name = table_name_in
+                               AND data_type = 'BLOB')
+        LOOP
+
+            lv_query := ' SELECT ' || rec.column_name || ' , dm.table_audit_key ' ||
+                          ' FROM ' || rec.table_name || ' tb, download_monitor dm ' ||
+                         ' WHERE tb.audit_key = dm.table_audit_key ' ||
+                           ' AND dm.table_name = :P_1 ' ||
+                           ' AND dm.table_insert_date <= :P_2 ' ||
+                           ' AND LENGTH( ' || rec.column_name || ' ) <> 0';
+
+
+            OPEN cv FOR lv_query USING table_name_in, gd_sysdate;
+            LOOP
+                FETCH cv INTO temp_blob, lv_auditKey;
+                EXIT WHEN cv%NOTFOUND;
+
+                IF LENGTH(temp_blob) > 0 THEN
+                    SELECT lv_auditKey
+                                   || '-'
+                                   || rec.table_name
+                                   || '-'
+                                   || rec.column_name
+                                   || '-'
+                                   || gv_upload_id
+                                   || DECODE(gv_enc_flag, 'Y', '.enc', '.tif')
+                      INTO lv_fileName
+                      FROM DUAL;
+
+                    extract_util.blob_to_file(  p_blob      => temp_blob,
+                                                p_dir       => gc_extract_dir,
+                                                p_filename  => lv_fileName,
+                                                p_encrypt   => gv_enc_flag);
+                END IF;
+            END LOOP;
+            CLOSE cv;
+
+        END LOOP;
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := error_msg('WRITE_TAB_BLOB_TO_FILE2');
+
+            if cv%isopen then
+                begin
+                    close cv;
+                exception
+                    when invalid_cursor
+                        then null;
+                end;
+            end if;
+    END write_tab_blob_to_file;
+
+
+    PROCEDURE write_consent_audit_blob_to_file(
+                                table_name_in IN VARCHAR2,
+                                key_col_in IN VARCHAR2 DEFAULT NULL,
+                                dataset_in IN DBMS_UTILITY.NUMBER_ARRAY DEFAULT g_empty_number_aa,
+                                order_by_in IN VARCHAR2 DEFAULT NULL) IS
+        lv_fileName VARCHAR2(500);
+    BEGIN
+
+        -- Extract donor consents old_blob column
+        FOR rec IN (SELECT
+                        dca.column_name,
+                        TO_CHAR(dca.audit_insert_dats,'MMDDYYHH24MISS') audit_date,
+                        dca.old_blob,
+                        b.table_audit_key
+                    FROM
+                        donor_consents_adt dca,
+                        download_monitor b
+                    WHERE
+                            b.table_name = 'DONOR_CONSENTS_ADT'
+                        AND dca.audit_key = b.table_audit_key
+                        AND dca.column_name
+                            IN ('DONOR_SIGNATURE', 'WITNESS_SIGNATURE')
+                        AND LENGTH(dca.old_blob) <> 0
+                        AND ((gv_shipment_extract = 'N' AND b.table_insert_date <= gd_sysdate)
+                                OR
+                             (gv_shipment_extract = 'Y' AND audit_key IN (SELECT COLUMN_VALUE FROM TABLE(dataset_in)))
+                            )
+                     ORDER BY dca.AUDIT_INSERT_DATS ASC)
+        LOOP
+             IF LENGTH(rec.old_blob) > 0 THEN
+                 SELECT rec.table_audit_key
+                               || '-'
+                               || 'DONOR_CONSENTS_ADT'
+                               || '-'
+                               || 'OLD_BLOB'
+                               || '-'
+                               || rec.column_name
+                               || '-'
+                               || rec.audit_date
+                               || '-'
+                               || gv_upload_id
+                               || DECODE(gv_enc_flag, 'Y', '.enc', '.tif')
+                  INTO lv_fileName
+                  FROM dual;
+
+                 extract_util.blob_to_file( p_blob      => rec.old_blob,
+                                            p_dir       => gc_extract_dir,
+                                            p_filename  => lv_fileName,
+                                            p_encrypt   => gv_enc_flag);
+            END IF;
+        END LOOP;
+
+
+        -- Extract donor consents new_blob column
+        FOR rec IN (SELECT
+                        dca.column_name,
+                        TO_CHAR(dca.audit_insert_dats,'MMDDYYHH24MISS') audit_date,
+                        dca.new_blob,
+                        b.table_audit_key
+                    FROM
+                        donor_consents_adt dca,
+                        download_monitor b
+                    WHERE
+                            b.table_name = 'DONOR_CONSENTS_ADT'
+                        AND dca.audit_key = b.table_audit_key
+                        AND dca.column_name
+                            IN ('DONOR_SIGNATURE', 'WITNESS_SIGNATURE')
+                        AND LENGTH(dca.new_blob) <> 0
+                        AND (gv_shipment_extract = 'N'
+                                OR
+                             (gv_shipment_extract = 'Y' AND audit_key IN (SELECT COLUMN_VALUE FROM TABLE(dataset_in)))
+                            )
+                     ORDER BY dca.AUDIT_INSERT_DATS ASC)
+        LOOP
+            IF LENGTH(rec.new_blob) > 0 THEN
+             SELECT rec.table_audit_key
+                           || '-'
+                           || 'DONOR_CONSENTS_ADT'
+                           || '-'
+                           || 'NEW_BLOB'
+                           || '-'
+                           || rec.column_name
+                           || '-'
+                           || rec.audit_date
+                           || '-'
+                           || gv_upload_id
+                           || DECODE(gv_enc_flag, 'Y', '.enc', '.tif')
+                INTO lv_fileName
+                FROM DUAL;
+
+                 extract_util.blob_to_file( p_blob      => rec.new_blob,
+                                            p_dir       => gc_extract_dir,
+                                            p_filename  => lv_fileName,
+                                            p_encrypt   => gv_enc_flag);
+            END IF;
+        END LOOP;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := error_msg('WRITE_CONSENT_AUDIT_BLOB_TO_FILE');
+
+    END write_consent_audit_blob_to_file;
+
+    PROCEDURE write_tab_to_file(table_name_in IN VARCHAR2)
+    IS
+        l_fname varchar2(100);
+        rc sys_refcursor;
+        lv_query VARCHAR2(2000);
+    BEGIN
+        SELECT LOWER(table_name_in)
+                   || '-'
+                   || gv_upload_id
+                   || DECODE(gv_enc_flag, 'Y', '.dat', '.txt')
+        INTO l_fname
+        FROM dual;
+
+
+        lv_query := get_query(table_name_in);
+
+
+        log_msg('--Table to File Number---');
+        log_msg('FileName       ' || l_fname);
+        log_msg('Table Name     ' || table_name_in);
+        log_msg('Query          ' || lv_query);
+        log_msg('-----');
+
+        OPEN rc FOR lv_query USING table_name_in, gd_sysdate;
+
+        extract_util.write_file(
+            p_dataset   => rc,
+            p_separator => chr(124),
+            p_label     => '',
+            p_heading   => 'N',
+            p_rowcount  => 'N',
+            p_directory => gc_extract_dir,
+            p_filename  => l_fname,
+            p_encrypt   => gv_enc_flag);
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := error_msg('WRITE_TAB_TO_FILE1');
+
+            if rc%isopen then
+                begin
+                    close rc;
+                exception
+                    when invalid_cursor
+                        then null;
+                end;
+            end if;
+    END write_tab_to_file;
+
+    PROCEDURE write_tab_to_file(
+                            table_name_in IN VARCHAR2,
+                            key_col_in IN VARCHAR2,
+                            dataset_in IN DBMS_UTILITY.NUMBER_ARRAY,
+                            order_by_in IN VARCHAR2 DEFAULT NULL) IS
+        l_fname varchar2(100);
+        rc sys_refcursor;
+        lv_query VARCHAR2(2000);
+    BEGIN
+        SELECT LOWER(table_name_in)
+                   || '-'
+                   || gv_upload_id
+                   || DECODE(gv_enc_flag, 'Y', '.dat', '.txt')
+        INTO l_fname
+        FROM dual;
+
+
+        lv_query := get_query(table_name_in, key_col_in, order_by_in);
+
+
+        log_msg('--Table to File Number---');
+        log_msg('FileName       ' || l_fname);
+        log_msg('Table Name     ' || table_name_in);
+        log_msg('Query          ' || lv_query);
+        log_msg('-----');
+
+        OPEN rc FOR lv_query USING table_name_in, dataset_in;
+
+        extract_util.write_file(
+            p_dataset   => rc,
+            p_separator => chr(124),
+            p_label     => '',
+            p_heading   => 'N',
+            p_rowcount  => 'N',
+            p_directory => gc_extract_dir,
+            p_filename  => l_fname,
+            p_encrypt   => gv_enc_flag);
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := error_msg('WRITE_TAB_TO_FILE2');
+
+            if rc%isopen then
+                begin
+                    close rc;
+                exception
+                    when invalid_cursor
+                        then null;
+                end;
+            end if;
+    END write_tab_to_file;
+
+    PROCEDURE write_tab_to_file(
+                            table_name_in IN VARCHAR2,
+                            key_col_in IN VARCHAR2,
+                            dataset_in IN DBMS_UTILITY.MAXNAME_ARRAY,
+                            order_by_in IN VARCHAR2 DEFAULT NULL) IS
+        l_fname varchar2(100);
+        rc sys_refcursor;
+        lv_query VARCHAR2(2000);
+    BEGIN
+
+        SELECT LOWER(table_name_in)
+                   || '-'
+                   || gv_upload_id
+                   || DECODE(gv_enc_flag, 'Y', '.dat', '.txt')
+        INTO l_fname
+        FROM dual;
+
+        lv_query := get_query(table_name_in, key_col_in, order_by_in);
+
+        log_msg('--Table to File---');
+        log_msg('FileName       ' || l_fname);
+        log_msg('Table Name     ' || table_name_in);
+        log_msg('Query          ' || lv_query);
+        log_msg('-----');
+
+        OPEN rc FOR lv_query USING table_name_in, dataset_in;
+
+        extract_util.write_file(
+            p_dataset   => rc,
+            p_separator => chr(124),
+            p_label     => '',
+            p_heading   => 'N',
+            p_rowcount  => 'N',
+            p_directory => gc_extract_dir,
+            p_filename  => l_fname,
+            p_encrypt   => gv_enc_flag);
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := error_msg('WRITE_TAB_TO_FILE3');
+
+            if rc%isopen then
+                begin
+                    close rc;
+                exception
+                    when invalid_cursor
+                        then null;
+                end;
+            end if;
+    END write_tab_to_file;
+
+    PROCEDURE extract_tables_data_by_shipment IS
+        lv_tab_name VARCHAR2(100);
+        lv_adt_tab_name VARCHAR2(100);
+        lv_key_col VARCHAR2(100);
+
+        l_string_ids_aa       DBMS_UTILITY.maxname_array;
+    BEGIN
+        FOR indx in g_tables_aa.FIRST .. g_tables_aa.LAST
+        LOOP
+            -- log_msg(g_tables_aa(indx).tab_name);
+            lv_tab_name := g_tables_aa(indx).table_name;
+            lv_adt_tab_name := g_tables_aa(indx).adt_table_name;
+            lv_key_col := g_tables_aa(indx).key_column;
+
+            l_string_ids_aa.DELETE;
+
+
+            IF lv_key_col  = 'TRANSACTION_ID' THEN
+                l_string_ids_aa := g_transaction_ids_aa;
+            ELSIF lv_key_col  = 'DONOR_ID' THEN
+                l_string_ids_aa := g_donor_ids_aa;
+            ELSIF lv_key_col  = 'UNIT_ID' THEN
+                l_string_ids_aa := g_unit_ids_aa;
+            ELSIF lv_key_col  = 'SHIPPER_NO' THEN
+                l_string_ids_aa := g_shipment_ids_aa;
+            ELSIF lv_key_col  = 'EMPLOYER_ID' THEN
+                l_string_ids_aa := g_employer_ids_aa;
+            ELSIF lv_key_col  = 'SURVEY_ID' THEN
+                l_string_ids_aa := g_survey_ids_aa;
+            ELSIF lv_key_col  = 'NOTE_ID' THEN
+                l_string_ids_aa := g_note_ids_aa;
+            ELSIF lv_key_col  = 'DRIVE_ID' THEN
+                l_string_ids_aa := g_drive_ids_aa;
+            END IF;
+
+            log_msg('');
+            log_msg('');
+            log_msg('');
+            log_msg('');
+            log_msg('----------------------------------' );
+            log_msg('Table Name         : ' || lv_tab_name);
+            log_msg('Adt Table Name     : ' || lv_adt_tab_name);
+            log_msg('Key Col            : ' || lv_key_col);
+            log_msg('Key Col Rows Count : ' || l_string_ids_aa.COUNT);
+            log_msg('----------------------------------' );
+
+            write_tab_to_file(lv_tab_name, lv_key_col, l_string_ids_aa);
+            IF gv_status <> 'OK' THEN
+                EXIT;
+            END IF;
+
+
+            -- BLOB columns.
+            IF lv_tab_name IN ('DONOR_CONSENTS', 'DONOR_PICTURES') THEN
+                -- transaction_ids for donor_consents.
+                -- donor_ids for donor_pictures.
+                write_tab_blob_to_file(lv_tab_name, lv_key_col, l_string_ids_aa);
+                IF gv_status <> 'OK' THEN
+                    EXIT;
+                END IF;
+
+            END IF;
+
+            g_audit_keys_aa.DELETE;
+            IF lv_adt_tab_name IS NOT NULL THEN
+                g_audit_keys_aa := get_audit_keys(l_string_ids_aa, lv_tab_name, lv_key_col);
+            END IF;
+
+            -- clear from download_monitor table.
+            clear_download_monitor(lv_tab_name, lv_key_col, l_string_ids_aa);
+            IF gv_status <> 'OK' THEN
+                EXIT;
+            END IF;
+
+            IF lv_adt_tab_name IS NOT NULL THEN
+                write_tab_to_file(lv_adt_tab_name,  'AUDIT_KEY', g_audit_keys_aa);
+                IF gv_status <> 'OK' THEN
+                    EXIT;
+                END IF;
+                IF lv_adt_tab_name = 'DONOR_CONSENTS_ADT' THEN
+                    write_consent_audit_blob_to_file(lv_adt_tab_name, 'AUDIT_KEY', g_audit_keys_aa);
+                    IF gv_status <> 'OK' THEN
+                        EXIT;
+                    END IF;
+                END IF;
+
+                -- clear from download_monitor table.
+                clear_download_monitor(lv_adt_tab_name, 'AUDIT_KEY', g_audit_keys_aa);
+                IF gv_status <> 'OK' THEN
+                    EXIT;
+                END IF;
+            END IF;
+        END LOOP;
+
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := error_msg('EXTRACT_TABLES_DATA_BY_SHIPMENT');
+
+    END extract_tables_data_by_shipment;
+
+    PROCEDURE extract_tables_data IS
+        lv_tab_name VARCHAR2(100);
+        lv_adt_tab_name VARCHAR2(100);
+        lv_key_col VARCHAR2(100);
+
+        l_string_ids_aa       DBMS_UTILITY.maxname_array;
+    BEGIN
+        FOR indx in g_tables_aa.FIRST .. g_tables_aa.LAST
+        LOOP
+            -- log_msg(g_tables_aa(indx).tab_name);
+            lv_tab_name := g_tables_aa(indx).table_name;
+            lv_adt_tab_name := g_tables_aa(indx).adt_table_name;
+            lv_key_col := g_tables_aa(indx).key_column;
+
+            log_msg('');
+            log_msg('');
+            log_msg('');
+            log_msg('');
+            log_msg('----------------------------------' );
+            log_msg('Table Name         : ' || lv_tab_name);
+            log_msg('Adt Table Name     : ' || lv_adt_tab_name);
+            log_msg('Key Col            : ' || lv_key_col);
+            log_msg('----------------------------------' );
+
+            write_tab_to_file(lv_tab_name);
+            IF gv_status <> 'OK' THEN
+                EXIT;
+            END IF;
+
+            -- BLOB columns.
+            IF lv_tab_name IN ('DONOR_CONSENTS', 'DONOR_PICTURES') THEN
+                -- transaction_ids for donor_consents.
+                -- donor_ids for donor_pictures.
+                write_tab_blob_to_file(lv_tab_name);
+                IF gv_status <> 'OK' THEN
+                    EXIT;
+                END IF;
+            END IF;
+
+            IF lv_adt_tab_name IS NOT NULL THEN
+                write_tab_to_file(lv_adt_tab_name);
+                IF gv_status <> 'OK' THEN
+                    EXIT;
+                END IF;
+                IF lv_adt_tab_name = 'DONOR_CONSENTS_ADT' THEN
+                    write_consent_audit_blob_to_file(lv_adt_tab_name);
+                    IF gv_status <> 'OK' THEN
+                        EXIT;
+                    END IF;
+                END IF;
+            END IF;
+        END LOOP;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := error_msg('EXTRACT_TABLES_DATA');
+    END extract_tables_data;
+
+    PROCEDURE insert_laptop_extracts IS
+        lnCount NUMBER;
+    BEGIN
+
+        SELECT
+            COUNT(1) INTO lnCount
+        FROM
+            extractfiles_xt
+        WHERE
+            file_name LIKE '%'|| g_laptop_extracts_rec.upload_id ||'%'
+            AND SUBSTR(file_name,-4) NOT IN ('.log', '.bdr');
+
+        g_laptop_extracts_rec.files_count := lnCount + 1;
+
+        INSERT INTO laptop_extracts VALUES g_laptop_extracts_rec;
+
+        gv_status := 'OK';
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := error_msg('INSERT_LAPTOP_EXTRACTS');
+    END insert_laptop_extracts;
+
+    PROCEDURE extract_laptop_extracts IS
+        l_fileName  VARCHAR2(100);
+        l_query     VARCHAR2(2000);
+        rc          SYS_REFCURSOR;
+    BEGIN
+
+        l_fileName := 'laptop_extracts'
+                       || '-'
+                       || gv_upload_id
+                       || '.hdr';
+
+        l_query := 'SELECT
+                        upload_id,
+                        drive_id,
+                        extract_seq,
+                        files_count,
+                        insert_date,
+                        insert_user,
+                        ''I''
+                    FROM laptop_extracts
+                    WHERe UPLOAD_ID = :P_1';
+
+        OPEN rc FOR l_query USING gv_upload_id;
+
+        extract_util.write_file(
+            p_dataset   => rc,
+            p_separator => chr(124),
+            p_label     => '',
+            p_heading   => 'N',
+            p_rowcount  => 'N',
+            p_directory => gc_extract_dir,
+            p_filename  => l_fileName);
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := error_msg('EXTRACT_LAPTOP_EXTRACTS');
+
+            if rc%isopen then
+                begin
+                    close rc;
+                exception
+                    when invalid_cursor
+                        then null;
+                end;
+            end if;
+    END extract_laptop_extracts;
+
+    PROCEDURE write_shipment_log IS
+        fid         UTL_FILE.file_type;
+        l_fileName  VARCHAR2(200);
+    BEGIN
+        l_fileName := g_shipment_hdr_row.drive_id
+                       || '-'
+                       || gv_upload_id
+                       || '.log';
+       fid := UTL_FILE.fopen (gc_extract_dir, l_fileName, 'W');
+
+       IF gb_print_hdr THEN
+           UTL_FILE.put_line (fid, RPAD('-', 75, '-'));
+           UTL_FILE.put_line (fid, 'Drive Id        : ' || g_shipment_hdr_row.drive_id);
+           UTL_FILE.put_line (fid, 'Shipper No      : ' || g_shipment_hdr_row.shipper_no);
+           UTL_FILE.put_line (fid, 'Shipment Status : ' || g_shipment_hdr_row.ship_status);
+           UTL_FILE.put_line (fid, 'Shipment Type   : ' || g_shipment_hdr_row.ship_type);
+           UTL_FILE.put_line (fid, 'Shipment User Id: ' || g_shipment_hdr_row.insert_user);
+           UTL_FILE.put_line (fid, 'Extract Date    : ' || TO_CHAR(gd_sysdate, 'MM-DD-YYYY HH24:MI:SS'));
+           UTL_FILE.put_line (fid, RPAD('-', 75, '-'));
+           gb_print_hdr := FALSE;
+       END IF;
+
+       UTL_FILE.put_line (fid, RPAD('Unit Id', 20) || '  |  ' || RPAD('Donor Id', 20) || '  |  ' || RPAD('Transaction Id', 25));
+       UTL_FILE.put_line (fid, RPAD('-', 75, '-'));
+       FOR indx IN g_transaction_ids_aa.FIRST .. g_transaction_ids_aa.LAST
+       LOOP
+          UTL_FILE.put_line (fid, RPAD(g_unit_ids_aa (indx), 20) || '  |  ' || RPAD(g_donor_ids_aa(indx), 20) || '  |  ' || RPAD(g_transaction_ids_aa(indx), 25));
+       END LOOP;
+       UTL_FILE.put_line (fid, RPAD('-', 75, '-'));
+
+       UTL_FILE.fclose (fid);
+    EXCEPTION
+       WHEN OTHERS
+       THEN
+          log_msg (   'Failure to write output to '
+                                || gc_extract_dir || '/'
+                                || l_fileName
+                               );
+          UTL_FILE.fclose (fid);
+    END write_shipment_log;
+
+
+    PROCEDURE process_bdr_files (donor_ids_dataset_in IN DBMS_UTILITY.MAXNAME_ARRAY DEFAULT g_empty_name_aa ) IS
+
+        lv_logdr         VARCHAR2(100);
+        temp_blob        BLOB := empty_blob();
+        temp_file        VARCHAR2(500);
+        refcur_file_names    SYS_REFCURSOR;
+        l_file_name      VARCHAR2(500);
+        FUNCTION new_file_name(file_name IN VARCHAR2) RETURN VARCHAR2 IS
+        BEGIN
+            RETURN substr(file_name, 1, length(file_name) - 4)
+                             || '-'
+                             || gv_upload_id;
+        END new_file_name;
+
+        FUNCTION file_names_for(shipment_extract_flag_in IN VARCHAR2)
+            RETURN SYS_REFCURSOR
+        IS
+            l_return SYS_REFCURSOR;
+        BEGIN
+            CASE shipment_extract_flag_in
+                WHEN 'Y'
+                THEN
+                    OPEN l_return FOR
+                        SELECT
+                            file_name
+                        FROM
+                            files_xt
+                        WHERE
+                            substr(file_name, - 3) = 'bdr'
+                            AND SUBSTR(file_name, INSTR(file_name, '_')+1 ,'10')
+                                IN (SELECT column_value FROM TABLE(donor_ids_dataset_in));
+                ELSE
+                    OPEN l_return FOR
+                        SELECT
+                            file_name
+                        FROM
+                            files_xt
+                        WHERE
+                            substr(file_name, - 3) = 'bdr';
+            END CASE;
+
+            RETURN l_return;
+
+        END file_names_for;
+    BEGIN
+
+        -- Get reports directory location
+        BEGIN
+            SELECT
+                code_desc
+            INTO lv_logdr
+            FROM
+                master_codes
+            WHERE
+                    code_type = 'LOGDR'
+                AND code = 'UTIL'
+                AND sysdate BETWEEN eff_date AND nvl(term_date, sysdate + 1);
+
+        EXCEPTION
+            WHEN no_data_found THEN
+                gv_status := 'Log Dir not maintained';
+                RETURN;
+            WHEN OTHERS THEN
+                gv_status := 'Error in fetching Log Dir: '
+                            || substr(sqlerrm, 1, 500);
+                RETURN;
+        END;
+
+        refcur_file_names := file_names_for(gv_shipment_extract);
+
+        LOOP
+            FETCH refcur_file_names INTO l_file_name;
+
+            EXIT WHEN refcur_file_names%NOTFOUND;
+
+            IF gv_enc_flag = 'Y' THEN
+                temp_file := new_file_name(l_file_name) || '.' || 'bde';
+
+                temp_blob := extract_util.file_to_blob(lv_logdr, l_file_name);
+                extract_util.blob_to_file(  p_blob  => temp_blob,
+                                            p_dir   => gc_extract_dir, -- V06
+                                            p_filename => temp_file,
+                                            p_encrypt => 'Y');
+
+                utl_file.fremove(lv_logdr, l_file_name);
+            ELSE
+                temp_file := new_file_name(l_file_name) || '.' || 'bdr';
+                utl_file.frename(lv_logdr, l_file_name, gc_extract_dir, temp_file);
+            END IF;
+
+        END LOOP;
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := error_msg('PROCESS_BDR_FILES');
+
+    END process_bdr_files;
+
+    PROCEDURE generate_zip_file(p_upload_id_in IN VARCHAR2, p_files_dir_in IN VARCHAR2, p_zip_dir_in IN VARCHAR2) IS
+        l_zipblob     BLOB;
+        temp_blob        BLOB := empty_blob();
+        lb_filesFound  BOOLEAN;
+
+    BEGIN
+        gv_status := 'OK';
+        lb_filesFound := FALSE;
+
+        -- Add the file to a new zip.
+        -- V09 -- zip only the filenames that contain the upload id. 02.28.2022
+        FOR cur_rec IN (
+            SELECT
+                file_name
+            FROM
+                extractfiles_xt
+            WHERE
+                SUBSTR(file_name, -3) IN ('hdr', 'txt', 'dat', 'enc', 'tif', 'bdr', 'bde', 'log')
+              AND file_name LIKE '%' || p_upload_id_in || '%'
+        ) LOOP
+            lb_filesFound := TRUE;
+            temp_blob := extract_util.file_to_blob(p_files_dir_in, cur_rec.file_name);
+
+            apex_zip.add_file(  p_zipped_blob   => l_zipblob,
+                                p_file_name     => cur_rec.file_name,
+                                p_content       => temp_blob);
+
+        END LOOP;
+
+        IF NOT lb_filesFound THEN
+            gv_status := 'Extract files not found';
+            RETURN;
+        END IF;
+
+        -- Close the zip file.
+        apex_zip.finish(p_zipped_blob => l_zipblob);
+
+        -- Write the file to the file system.
+        extract_util.blob_to_file(  p_blob      => l_zipblob,
+                                    p_dir       => p_zip_dir_in,
+                                    p_filename  => p_upload_id_in || '.zip');
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := 'Files extracted successfully, but error in zip process.  Zip the files manually before uploading.  Err: ' || SUBSTR(sqlerrm, 1, 500);
+            RETURN;
+    END generate_zip_file;
+
+    PROCEDURE archive_files(p_upload_id_in IN VARCHAR2) IS
+    BEGIN
+        gv_status := 'OK';
+
+        -- generate zip in archive directory(backup copy). FCOPY is not working as the zip file gets corrupted possibly due to long file names for images.
+        -- generates zip in gc_extract_arch_dir from the files in gc_extract_dir
+        generate_zip_file(p_upload_id_in => p_upload_id_in,
+                          p_files_dir_in => gc_extract_dir,
+                          p_zip_dir_in   => gc_extract_arch_dir);
+        --
+
+        FOR file_rec IN (  SELECT
+                                file_name
+                            FROM
+                                extractfiles_xt
+                            WHERE
+                                SUBSTR(file_name, -3) IN ('hdr', 'txt', 'dat', 'enc', 'tif', 'bdr', 'bde', 'log')
+                              AND file_name LIKE '%' || p_upload_id_in || '%'
+                        )
+        LOOP
+            log_msg(file_rec.file_name);
+            UTL_FILE.FRENAME (  src_location  => gc_extract_dir,
+                                src_filename  => file_rec.file_name,
+                                dest_location => gc_extract_arch_dir,
+                                dest_filename => file_rec.file_name,
+                                overwrite     => TRUE);
+           log_msg(file_rec.file_name || '-DONE');
+        END LOOP;
+
+        -- using generate_zip_file to generate zip in archive directory as well check above..
+        -- issues with FCOPY - commented out.
+        /*
+        FOR file_rec IN (  SELECT
+                                file_name
+                            FROM
+                                extractfiles_xt
+                            WHERE
+                                SUBSTR(file_name, -3) IN ('zip')
+                              AND file_name LIKE '%' || p_upload_id_in || '%'
+                        )
+        LOOP
+            UTL_FILE.FCOPY (  src_location  => gc_extract_dir,
+                                src_filename  => file_rec.file_name,
+                                dest_location => gc_extract_arch_dir,
+                                dest_filename => file_rec.file_name
+                                );
+        END LOOP;
+        */
+
+        -- Archive any log files that do not have upload id tagged in their name.(covers error scenario)
+        FOR file_rec IN (  SELECT
+                                file_name
+                            FROM
+                                extractfiles_xt
+                            WHERE
+                                SUBSTR(file_name, -3) IN ('log')
+                              AND file_name LIKE '%' || p_upload_id_in || '%'
+                        )
+        LOOP
+            UTL_FILE.FRENAME (  src_location  => gc_extract_dir,
+                                src_filename  => file_rec.file_name,
+                                dest_location => gc_extract_arch_dir,
+                                dest_filename => file_rec.file_name,
+                                overwrite     => TRUE);
+        END LOOP;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            gv_status := 'Files extracted successfully, but unable to archive the files. Archive the files manually before uploading. Err: ' || SUBSTR(SQLERRM, 1, 500);
+            RETURN;
+    END archive_files;
+
+    FUNCTION get_laptop_details RETURN laptop_details_rt IS
+        temp_laptop_details_rec laptop_details_rt;
+    BEGIN
+        temp_laptop_details_rec.laptop_id := NULL;
+        temp_laptop_details_rec.extract_in_progress := NULL;
+        BEGIN
+            SELECT  LTRIM(RTRIM(laptop_id)),
+                    extract_in_progress
+              INTO  temp_laptop_details_rec
+              FROM laptop_id_details;
+
+            gv_status := 'OK';
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                gv_status := 'Incorrect Laptop Configuration - No Data Found';
+            WHEN TOO_MANY_ROWS THEN
+                gv_status := 'Incorrect Laptop Configuration - Too Many Rows';
+        END;
+        RETURN temp_laptop_details_rec;
+    END get_laptop_details;
+
+    FUNCTION get_shipment_details(shipment_id_in IN VARCHAR2) RETURN shipment_hdr_rt IS
+        shipment_rec shipment_hdr_rt;
+    BEGIN
+        BEGIN
+            SELECT hdr.shipper_no, hdr.ship_status, hdr.ship_type, hdr.drive_id, hdr.insert_user
+              INTO shipment_rec
+              FROM material_shipment_hdr hdr
+             WHERE hdr.shipper_no = shipment_id_in;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                gv_status := 'Invalid Shipment Number. No Data Found - ' || shipment_id_in;
+        END;
+
+        RETURN shipment_rec;
+    END get_shipment_details;
+
+    PROCEDURE validate_shipment(shipment_hdr_rec_in IN shipment_hdr_rt) IS
+    BEGIN
+        IF shipment_hdr_rec_in.ship_type = 'T' THEN
+            gv_status := 'Cannot extract tube only shipments';
+            RETURN;
+        END IF;
+
+        IF shipment_hdr_rec_in.ship_type  NOT IN ('B', 'U') THEN
+            gv_status := 'Invalid Shipment Type';
+            RETURN;
+        END IF;
+
+        IF shipment_hdr_rec_in.ship_status  <> 'CL' THEN
+            gv_status := 'Cannot extract open shipments';
+            RETURN;
+        END IF;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            gv_status := 'Invalid Shipment Id.';
+    END validate_shipment;
+
+
+    FUNCTION get_drive_id RETURN VARCHAR2 IS
+        lv_drive_id VARCHAR2(20);
+    BEGIN
+        BEGIN
+            lv_drive_id := NULL;
+
+            SELECT
+                DISTINCT drive_id INTO lv_drive_id
+            FROM
+                donations
+            WHERE
+                audit_key IN (
+                    SELECT
+                        dm.table_audit_key
+                    FROM
+                        download_monitor dm
+                    WHERE
+                        dm.table_name = 'DONATIONS'
+                );
+
+            RETURN lv_drive_id;
+
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                -- get from laptop_extracts;
+                SELECT
+                    drive_id into lv_drive_id
+                FROM
+                    laptop_extracts
+                WHERE
+                    insert_date = (
+                        SELECT
+                            MAX(insert_date)
+                        FROM
+                            laptop_extracts
+                    )
+                  AND ROWNUM = 1  ;
+                gv_status := 'OK';
+            WHEN TOO_MANY_ROWS THEN
+                SELECT DISTINCT
+                    drive_id INTO lv_drive_id
+                FROM
+                    (
+                        SELECT
+                            drive_id,
+                            coll_date,
+                            MAX(coll_date)
+                            OVER() AS max_coll_date
+                        FROM
+                            donations
+                        WHERE
+                            audit_key IN (
+                                SELECT
+                                    dm.table_audit_key
+                                FROM
+                                    download_monitor dm
+                                WHERE
+                                    dm.table_name = 'DONATIONS'
+                            )
+                    )
+                WHERE
+                    coll_date = max_coll_date
+                AND ROWNUM = 1;
+                gv_status := 'OK';
+            WHEN OTHERS THEN
+                gv_status := 'Err: Something went wrong.' || SUBSTR(sqlerrm, 1, 1000);
+        END;
+
+        RETURN lv_drive_id;
+    END get_drive_id;
+
+
+    FUNCTION get_server_tables RETURN mobile_server_tables_aat IS
+        l_tables_aa mobile_server_tables_aat;
+    BEGIN
+        SELECT TABLE_NAME ,
+                ADT_TABLE_NAME ,
+                KEY_COLUMN
+          BULK COLLECT INTO l_tables_aa
+          FROM mobile_server_tables;
+
+        RETURN l_tables_aa;
+    END get_server_tables;
+
+
+    PROCEDURE start_job(shipment_id_in  IN VARCHAR2,
+                        user_id_in      IN VARCHAR2,
+                        upload_id_out   OUT VARCHAR2,
+                        status_out      OUT VARCHAR2)
+    IS
+        lb_records_found BOOLEAN;
+        lv_extract_in_progress VARCHAR2(1);
+        commit_and_exit EXCEPTION;
+        rollback_and_exit EXCEPTION;
+
+        CURSOR cur_keyids IS
+            select dn.transaction_id, dn.donor_id, msd.unit_id
+              from material_shipment_det msd, donations dn
+             where msd.unit_id = dn.unit_id
+               and msd.shipper_no = shipment_id_in
+            order by msd.audit_key;
+    BEGIN
+        gv_status := 'OK';
+
+        gv_shipment_extract := 'Y';
+
+        g_laptop_details_rec := get_laptop_details;
+
+         gv_laptop_id := g_laptop_details_rec.laptop_id;
+
+        IF gv_status <> 'OK' THEN
+            status_out := gv_status;
+            log_error(status_out);
+            RETURN;
+        END IF;
+
+        IF g_laptop_details_rec.laptop_id IS NULL THEN
+            status_out := 'Incorrect Laptop Configuration - LAPTOP_ID';
+            log_error(status_out);
+            RETURN;
+        END IF;
+
+        IF NVL(g_laptop_details_rec.extract_in_progress, 'N') = 'Y' THEN
+            status_out := 'IN_PROGRESS'; -- DO NOT CHANGE the status (used later to update control table)
+            -- log_error('Extract already in progress'); -- no need to create error file for this scenario.
+            RETURN;
+        END IF;
+
+        IF shipment_id_in IS NULL THEN
+            status_out := 'Shipment ID is required.';
+            log_error(status_out);
+            RETURN;
+        END IF;
+
+        g_shipment_hdr_row := get_shipment_details(shipment_id_in);
+
+        IF gv_status <> 'OK' THEN
+            status_out := gv_status;
+            log_error(status_out,
+                     'err_file'
+                           || '-'
+                           || NVL(gv_laptop_id, 'XX')
+                           || '_'
+                           || TO_CHAR(SYSDATE, 'mmddyyhh24miss')
+                           || '_'
+                           || shipment_id_in
+                           || '.log');
+            RETURN;
+        END IF;
+
+        -- checks if shipment is valid and closed and not of type T .
+        validate_shipment(g_shipment_hdr_row);
+
+        IF gv_status <> 'OK' THEN
+            status_out := gv_status;
+            log_error(status_out,
+                     'err_file'
+                           || '-'
+                           || NVL(gv_laptop_id, 'XX')
+                           || '_'
+                           || TO_CHAR(SYSDATE, 'mmddyyhh24miss')
+                           || '_'
+                           || shipment_id_in
+                           || '.log');
+            RETURN;
+        END IF;
+
+        log_msg('valid shipment - ' || g_shipment_hdr_row.shipper_no);
+
+        gv_drive_id := g_shipment_hdr_row.drive_id;
+
+        g_tables_aa.DELETE;
+        g_tables_aa  := get_server_tables;
+        log_msg('Count ' || g_tables_aa.COUNT);
+
+
+        initialize;
+        upload_id_out := gv_upload_id;
+
+        set_extract_progress(gv_laptop_id, 'Y'); -- UPDATES laptop_id_details table and commits.
+
+
+        mark_start;
+
+        lb_records_found := FALSE;
+
+        OPEN cur_keyids;
+        LOOP
+            FETCH cur_keyids
+            BULK COLLECT INTO g_transaction_ids_aa, g_donor_ids_aa, g_unit_ids_aa LIMIT 100;
+            EXIT WHEN g_transaction_ids_aa.COUNT = 0;
+
+            lb_records_found := TRUE;
+            init_global_arrays;
+
+            extract_tables_data_by_shipment;
+
+            IF gv_status <> 'OK' THEN
+                EXIT;
+            END IF;
+
+            IF gv_genbdr_flag = 'Y' THEN
+                process_bdr_files(g_donor_ids_aa);
+                IF gv_status <> 'OK' THEN
+                    EXIT;
+                END IF;
+            END IF;
+
+            write_shipment_log;
+
+        END LOOP;
+        CLOSE cur_keyids;
+
+
+        IF gv_status <> 'OK' THEN
+            RAISE rollback_and_exit; -- Re-extract possible as DM is rolled back.
+        END IF;
+
+
+        IF NOT lb_records_found THEN
+            gv_status := 'No records found for shipment.';
+            RAISE commit_and_exit;
+        END IF;
+
+        insert_laptop_extracts;
+
+        IF gv_status <> 'OK' THEN
+            RAISE rollback_and_exit; -- Re-extract possible as DM is rolled back.
+        END IF;
+
+        extract_laptop_extracts;
+
+        IF gv_status <> 'OK' THEN
+            RAISE rollback_and_exit; -- Re-extract possible as DM is rolled back.
+        END IF;
+
+        -- generates zip in gc_extract_dir from the files in gc_extract_dir
+        generate_zip_file(p_upload_id_in => gv_upload_id,
+                          p_files_dir_in => gc_extract_dir,
+                          p_zip_dir_in   => gc_extract_dir);
+
+        IF gv_status <> 'OK' THEN
+            RAISE commit_and_exit;  -- Extract files are ready but need to manually zip file.
+        END IF;
+
+        archive_files(gv_upload_id);
+
+        IF gv_status <> 'OK' THEN
+            RAISE commit_and_exit;  -- Extract files are ready but need to manually archive the file.
+        END IF;
+
+        set_extract_progress(gv_laptop_id, 'N');
+        status_out := 'OK';
+
+        show_elapsed('start_job_SHIPMENT');
+        COMMIT;
+    EXCEPTION
+        WHEN commit_and_exit THEN -- COMMITS and EXITS on error.
+            status_out := gv_status;
+            log_error(status_out);
+            set_extract_progress(gv_laptop_id, 'N');
+        WHEN rollback_and_exit THEN
+            status_out := gv_status;
+            log_error(status_out);
+            ROLLBACK;
+            set_extract_progress(gv_laptop_id, 'N');
+        WHEN OTHERS THEN
+            status_out := 'Error in START_JOB. Check log file.';
+            log_error(DBMS_UTILITY.format_call_stack);
+            log_error(DBMS_UTILITY.format_error_stack);
+            log_error(DBMS_UTILITY.format_error_backtrace);
+            ROLLBACK;
+            set_extract_progress(gv_laptop_id, 'N');
+    END start_job;     -- by SHIPMENT-ID
+
+    PROCEDURE start_job(upload_id_out   OUT VARCHAR2,
+                        status_out      OUT VARCHAR2)
+    IS
+        commit_and_exit EXCEPTION;
+        rollback_and_exit EXCEPTION;
+        FUNCTION download_monitor_cnt RETURN NUMBER IS
+            ln_rowCount NUMBER;
+        BEGIN
+            SELECT COUNT(1) INTO ln_rowCount
+             FROM download_monitor;
+
+            RETURN ln_rowCount;
+        END download_monitor_cnt;
+    BEGIN
+        gv_status := 'OK';
+
+        gv_shipment_extract := 'N';
+
+        g_laptop_details_rec := get_laptop_details;
+
+        gv_laptop_id := g_laptop_details_rec.laptop_id;
+
+        IF gv_status <> 'OK' THEN
+            status_out := gv_status;
+            log_error(status_out);
+            RETURN;
+        END IF;
+
+        IF g_laptop_details_rec.laptop_id IS NULL THEN
+            status_out := 'Incorrect Laptop Configuration - LAPTOP_ID';
+            log_error(status_out);
+            RETURN;
+        END IF;
+
+        IF NVL(g_laptop_details_rec.extract_in_progress, 'N') = 'Y' THEN
+            status_out := 'IN_PROGRESS'; -- DO NOT CHANGE the status (used later to update control table)
+            --log_error('Extract already in progress'); -- no need to create error file for this scenario.
+            RETURN;
+        END IF;
+
+        IF download_monitor_cnt = 0 THEN
+            status_out := 'Err: There is no file to process.';
+            log_error(status_out);
+            RETURN;
+        END IF;
+
+        gv_drive_id := get_drive_id;
+
+        IF gv_status <> 'OK' THEN
+            status_out := gv_status;
+            log_error(status_out);
+            RETURN;
+        END IF;
+
+        g_tables_aa.DELETE;
+        g_tables_aa  := get_server_tables;
+        log_msg('Count ' || g_tables_aa.COUNT);
+
+        initialize;
+        upload_id_out := gv_upload_id;
+
+        set_extract_progress(gv_laptop_id, 'Y'); -- UPDATES laptop_id_details table and commits.
+
+        mark_start;
+
+        extract_tables_data;
+
+        IF gv_status <> 'OK' THEN
+            RAISE commit_and_exit; -- Able to rextract as DM table is not cleared.
+        END IF;
+
+        -- Clean up
+        DELETE FROM download_monitor WHERE table_insert_date <= gd_sysdate; -- This stmt also tags upload id to the records via BD trigger and pkg function get_upload_id.
+
+        IF gv_genbdr_flag = 'Y' THEN
+            process_bdr_files;
+            IF gv_status <> 'OK' THEN
+                RAISE rollback_and_exit; -- Re-extract possible as DM is rolled back.
+            END IF;
+        END IF;
+
+        insert_laptop_extracts;
+
+        IF gv_status <> 'OK' THEN
+            RAISE rollback_and_exit; -- Re-extract possible as DM is rolled back.
+        END IF;
+
+        extract_laptop_extracts;
+
+        IF gv_status <> 'OK' THEN
+            RAISE rollback_and_exit; -- Re-extract possible as DM is rolled back.
+        END IF;
+
+        -- generates zip in gc_extract_dir from the files in gc_extract_dir
+        generate_zip_file(p_upload_id_in => gv_upload_id,
+                          p_files_dir_in => gc_extract_dir,
+                          p_zip_dir_in   => gc_extract_dir);
+
+        IF gv_status <> 'OK' THEN
+            RAISE commit_and_exit;  -- Extract files are ready but need to manually zip file.
+        END IF;
+
+        archive_files(gv_upload_id);
+
+        IF gv_status <> 'OK' THEN
+            RAISE commit_and_exit; -- Extract ZIP file is ready but need to manually archive the file.
+        END IF;
+
+        set_extract_progress(gv_laptop_id, 'N');
+
+        status_out := 'OK';
+
+        show_elapsed('start_job');
+
+        COMMIT;
+    EXCEPTION
+        WHEN commit_and_exit THEN -- COMMITS and EXITS on error.
+            status_out := gv_status;
+            log_error(status_out);
+            set_extract_progress(gv_laptop_id, 'N');
+        WHEN rollback_and_exit THEN
+            status_out := gv_status;
+            log_error(status_out);
+            ROLLBACK;
+            set_extract_progress(gv_laptop_id, 'N');
+        WHEN OTHERS THEN
+            status_out := 'Error in START_JOB. Check log file.';
+            log_error(DBMS_UTILITY.format_call_stack);
+            log_error(DBMS_UTILITY.format_error_stack);
+            log_error(DBMS_UTILITY.format_error_backtrace);
+            ROLLBACK;
+            set_extract_progress(gv_laptop_id, 'N');
+    END start_job;
+
+    PROCEDURE insert_extract_job(   shipment_id_in IN VARCHAR2,
+                                    user_id_in  IN VARCHAR2,
+                                    status_out  OUT VARCHAR2) IS
+    BEGIN
+        status_out := 'OK';
+        INSERT INTO laptop_extract_control (
+            shipper_no,
+            insert_user
+        ) VALUES (
+            shipment_id_in,
+            user_id_in
+        );
+
+        COMMIT;
+
+        laptop_tables_extract.run_extract_job_async(user_id_in);
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            status_out := error_msg('INSERT_EXTRACT_JOB');
+    END insert_extract_job;
+
+    PROCEDURE insert_extract_job_script(   shipment_id_in IN VARCHAR2,
+                                            user_id_in  IN VARCHAR2,
+                                            status_out  OUT VARCHAR2) IS
+
+        ln_jobId            laptop_extract_control.JOB_ID%TYPE;
+        lv_error_msg        laptop_extract_control.ERROR_MSG%TYPE;
+        lv_extract_status   laptop_extract_control.EXTRACT_STATUS%TYPE;
+    BEGIN
+        INSERT INTO laptop_extract_control (
+            shipper_no,
+            insert_user
+        ) VALUES (
+            shipment_id_in,
+            user_id_in
+        ) RETURNING job_id INTO ln_jobId;
+
+        COMMIT;
+
+        laptop_tables_extract.run_extract_job;
+
+        SELECT extract_status, error_msg
+          INTO lv_extract_status, lv_error_msg
+          FROM laptop_extract_control
+         WHERE job_id = ln_jobId;
+
+        IF lv_extract_status = 'C' THEN
+            status_out := 'Job Id ' || ln_jobId || ' submitted and completed sucessfully.';
+        ELSIF lv_extract_status = 'E' THEN
+            status_out := 'Job Id ' || ln_jobId || ' submmitted and failed. ' || lv_error_msg;
+        ELSE
+            status_out := 'Job Id ' || ln_jobId || ' submmitted. Extract Status: ' || lv_extract_status;
+        END IF;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            status_out := error_msg('INSERT_EXTRACT_JOB_SCRIPT');
+    END insert_extract_job_script;
+
+
+    PROCEDURE run_extract_job IS
+        lv_status VARCHAR2(2000);
+
+        CURSOR extract_cur IS
+         SELECT *
+           FROM laptop_extract_control
+          WHERE extract_status IS NULL
+          ORDER BY JOB_ID ASC
+          FOR UPDATE SKIP LOCKED;  -- Locks rows selected by the query at FETCH (not at OPEN CURSOR)
+
+        TYPE jobs_aat IS TABLE OF extract_cur%ROWTYPE INDEX BY PLS_INTEGER;
+
+        jobs_list jobs_aat;
+        lv_error_msg        VARCHAR2(2000);
+        lv_extract_status   VARCHAR2(1);
+        lv_upload_id        VARCHAR2(100);
+
+        lv_fileName     VARCHAR2(200);
+        lv_errMsg       VARCHAR2(2000);
+
+
+        PROCEDURE update_extract_control(
+            job_id_in       IN NUMBER,
+            status_in       IN VARCHAR2,
+            upload_id_in    IN VARCHAR2 DEFAULT NULL,
+            error_msg_in    IN VARCHAR2 DEFAULT NULL) IS
+        BEGIN
+
+            IF status_in = 'P'
+            THEN
+            -- Processing ('P')
+                UPDATE laptop_extract_control
+                   SET extract_status   = status_in,
+                       start_time       = SYSDATE
+                  WHERE job_id = job_id_in;
+            ELSIF NVL(status_in, 'X') IN ('E', 'C', 'X')
+            THEN
+            -- Error ('E'), Completed ('C'), Another extract in progress (NULL)
+                UPDATE laptop_extract_control
+                   SET extract_status   = status_in,
+                       error_msg        = error_msg_in,
+                       upload_id        = upload_id_in,
+                       end_time         = SYSDATE
+                  WHERE job_id = job_id_in;
+            END IF;
+        END update_extract_control;
+
+    BEGIN
+
+        OPEN extract_cur;
+
+        LOOP
+            FETCH extract_cur BULK COLLECT INTO jobs_list LIMIT 100; -- Locks rows.
+            -- DBMS_OUTPUT.PUT_LINE('count ' || jobs_list.COUNT);
+            EXIT WHEN jobs_list.COUNT = 0;
+
+            -- null status (submitted)
+            -- 'Q' - In Queue. (Job is in queue to be run)
+            -- 'P' - Processing.
+            -- 'C' - Completed.
+            -- 'E' - Error.
+            FORALL indx IN jobs_list.FIRST .. jobs_list.LAST
+                UPDATE laptop_extract_control
+                   SET extract_status = 'Q'
+                  WHERE job_id = jobs_list(indx).JOB_ID;
+
+            COMMIT;
+
+
+            FOR indx IN jobs_list.FIRST .. jobs_list.LAST
+            LOOP
+                log_msg(jobs_list(indx).shipper_no);
+                log_msg(jobs_list(indx).job_id);
+
+                update_extract_control( job_id_in => jobs_list(indx).job_id,
+                                        status_in => 'P'
+                                      );
+                COMMIT;
+
+                BEGIN
+                    IF jobs_list(indx).shipper_no IS NOT NULL THEN
+                        start_job(shipment_id_in    => jobs_list(indx).shipper_no,
+                                  user_id_in        => jobs_list(indx).insert_user,
+                                  upload_id_out     => lv_upload_id,
+                                  status_out        => lv_status);
+                    ELSE
+                        start_job(upload_id_out     => lv_upload_id,
+                                  status_out        => lv_status);
+                    END IF;
+
+                    IF lv_status = 'OK' THEN
+                        lv_error_msg        := NULL;
+                        lv_extract_status   := 'C'; -- Completed;
+                    ELSIF lv_status = 'IN_PROGRESS' THEN
+                        lv_error_msg        := 'Extract already in progress. Will try again.';
+                        lv_extract_status   := NULL; -- do not update status, so it can be picked next time the cron runs.
+                    ELSE
+                        lv_error_msg        := lv_status;
+                        lv_extract_status   := 'E'; -- Completed;
+                    END IF;
+
+                    update_extract_control( job_id_in    => jobs_list(indx).job_id,
+                                            status_in    => lv_extract_status,
+                                            upload_id_in => lv_upload_id,
+                                            error_msg_in => lv_error_msg
+                                          );
+                    COMMIT;
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                            lv_fileName := 'err_file'
+                               || '-'
+                               || NVL(jobs_list(indx).JOB_ID, 'XX')
+                               || '_'
+                               || TO_CHAR(SYSDATE, 'mmddyyhh24miss')
+                               || '.log';
+                            lv_errMsg := error_msg('RUN_EXTRACT_JOB');
+                            log_error(lv_errMsg,lv_fileName);
+                END;
+            END LOOP;
+
+        END LOOP;
+    END run_extract_job;
+
+    PROCEDURE run_extract_job_async(p_user_in IN VARCHAR2 DEFAULT NULL) IS
+        lv_jobName VARCHAR2(500);
+    BEGIN
+        lv_jobName := 'extract'
+                        || '_'
+                        || NVL(p_user_in,'DBADMN')
+                        || '_'
+                        || to_char(sysdate, 'MMDDYYYYHH24MISS')
+                        || '_'
+                        || SYS_GUID();
+
+        DBMS_SCHEDULER.create_job(
+            job_name    => lv_jobName,
+            job_type    => 'PLSQL_BLOCK',
+            job_action  => 'BEGIN
+                              laptop_tables_extract.run_extract_job();
+                            END;',
+            enabled     => true,
+            auto_drop   => true,
+            comments    => 'Called from ONSITE');
+
+    END run_extract_job_async;
+
+    PROCEDURE get_extract_jobs( p_user_in IN VARCHAR2,
+                                p_drive_id_in IN VARCHAR2,
+                                p_drive_date_in IN VARCHAR2,
+                                p_recordset_out OUT SYS_REFCURSOR) IS
+        lv_chapter VARCHAR2(4);
+    BEGIN
+        lv_chapter := lifetrack_timezone_convert.get_chapter_id_db(p_user_in);
+
+        OPEN p_recordset_out FOR
+          SELECT    ext.drive_id,
+                    ext.extract_seq,
+                    lec.job_id,
+                    lec.upload_id,
+                    lifetrack_timezone_convert.get_local_time(lv_chapter, lec.start_time) AS START_TIME,
+                    lifetrack_timezone_convert.get_local_time(lv_chapter, lec.end_time) AS END_TIME,
+                    lec.shipper_no,
+                    lec.insert_user,
+                    lec.insert_date,
+                    DECODE(lec.extract_status,
+                           'Q', 'In Queue',
+                            'P', 'Processing',
+                            'E', 'Error',
+                            'C', 'Completed',
+                            '', 'Submitted',
+                            NULL) AS EXTRACT_STATUS,
+                    lec.error_msg
+                FROM
+                    laptop_extract_control lec, laptop_extracts ext, drives drv
+                WHERE lec.upload_id = ext.upload_id
+                  AND ext.drive_id = drv.drive_id
+                  AND drv.drive_date = NVL(p_drive_date_in, drv.drive_date)
+                  AND ext.drive_id = NVL(p_drive_id_in, ext.drive_id)
+            UNION -- Jobs without upload id (waiting for cron to pickup) - today's date only
+            SELECT  NULL AS drive_id,
+                    NULL AS extract_seq,
+                    lec.job_id,
+                    lec.upload_id,
+                    NULL AS START_TIME,
+                    NULL AS END_TIME,
+                    lec.shipper_no,
+                    lec.insert_user,
+                    lec.insert_date,
+                    DECODE(lec.extract_status,
+                           'Q', 'In Queue',
+                            'P', 'Processing',
+                            'E', 'Error',
+                            'C', 'Completed',
+                            '', 'Submitted',
+                            NULL) AS EXTRACT_STATUS,
+                    lec.error_msg
+              FROM laptop_extract_control lec
+              WHERE lec.upload_id IS NULL
+                AND TRUNC(lec.insert_date) = TRUNC(SYSDATE)
+                ORDER BY
+                    insert_date DESC;
+    EXCEPTION
+      WHEN OTHERS THEN
+        RAISE_APPLICATION_ERROR(-20001, 'laptop_tables_extract.get_extract_jobs:: Error-' || SUBSTR(sqlerrm, 1, 300));
+
+    END get_extract_jobs;
+
+END LAPTOP_TABLES_EXTRACT;
+/
+
+

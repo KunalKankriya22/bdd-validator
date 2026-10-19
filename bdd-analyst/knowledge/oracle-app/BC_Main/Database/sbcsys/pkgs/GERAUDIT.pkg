@@ -1,0 +1,788 @@
+/* *********************************************************************************
+  Name              : GERAUDIT.pkg
+  Created By        : Kishore Gummadi
+  Date Of Creation  : 10/27/09
+  Purpose           : This package will populate the GERAUDIT_TEMP
+                      table based on values from the audit tables.
+                      This temporary table will then be used to
+                      generate the GERAUDIT report.
+
+  Version History
+  
+  Date         Version        Description
+-----------------------------------------------------------------------------
+  10/27/2009   02             Initial development - Kishore
+  04/18/2011   03             replace user by lt_session_user.get_userid  - Hussein
+  05/30/2011   04             Convert GMT times to local chapter times - Kishore
+  05/24/2012   05             Delete empty records coming from the UNITS table. IM 8658 - Kishore
+  01/22/2013   06             Added logic to get the audit key from the audit table if no records exist in the base table - Kishore
+
+
+-----**** Resetting for LT2018 ***** ------
+
+ 10/11/2016     01          Migration to LT2018
+ 12/01/2017     02          IM: 293      -- Edwin
+08/23/2023      03          MLT-6152   (added routine for CRYO_UNITS)  - Edwin
+
+ 
+***************************************************************************   */
+
+CREATE OR REPLACE PACKAGE GERAUDIT as
+  Procedure POPULATE_GERAUDIT(p_parm_id in varchar2, 
+                              p_status out varchar2);
+END GERAUDIT;
+/
+
+create or replace package body GERAUDIT as
+
+procedure POPULATE_GERAUDIT(p_parm_id in  varchar2,
+  	                    p_status out varchar2) as
+
+  cursor c1 (p_audit_table in varchar2) is
+  select column_name, data_type 
+    from all_tab_columns
+   where owner = 'SBCSYS'
+     and table_name = p_audit_table
+   order by column_id;
+
+  cursor c2 (p_ind_name in varchar2) is
+  select aic.column_name, atc.data_type 
+    from all_ind_columns aic, all_tab_columns atc
+   where aic.index_owner = 'SBCSYS'
+     and aic.index_name = p_ind_name
+     and aic.column_name = atc.column_name
+     and aic.table_name = atc.table_name
+   order by aic.column_position;
+
+  cursor c3 is
+  select table_name, column_name
+    from appl_rep_columns
+   where application = 'GERAUDIT'
+     and owner = 'SBC';
+
+  cursor c4 is
+  select parm_select
+    from rpt_parm_select
+   where report_name = 'GERAUDIT'
+     and user_name = decode(substr(LT_USER_SESSION.get_userid, 1, 4), 'OPS$', substr(LT_USER_SESSION.get_userid, 5), LT_USER_SESSION.get_userid)
+     and parm_id = p_parm_id
+     and parm_code = 'UNIT';
+
+  cursor c6 is
+  select distinct unit_id
+    from geraudit_temp;
+
+  cursor c7 (p_unit_id in varchar2) is
+  select rowid
+    from geraudit_temp
+   where unit_id = p_unit_id
+     and program_id = 'MCITUBE4'
+     and audit_log is null;
+
+  cursor c5 (p_unit_id in varchar2, 
+		 p_chapter_id in varchar2) is
+  select insert_dats, user_id, program_name, error_code, 
+         coll_date, component_prefix, product_code
+    from user_error_log
+   where unit_id = p_unit_id
+     and chapter_id = p_chapter_id;
+
+  cursor vts (p_unit_id in varchar2) is
+  select insert_date, insert_user, program_id, 
+         result_code, tb_id, test_seq, void_mode,
+         first_void_user, first_void_date,
+         second_void_user, second_void_date
+    from void_test_staging
+   where unit_id = p_unit_id;
+
+  cursor tv (p_unit_id in varchar2, 
+		 p_chapter_id in varchar2) is
+  select insert_dats, insert_user_id, void_user_id, void_dats, 
+         void_reason_code, test_id, result_status_1, testing_lab_code
+    from test_voids
+   where unit_id = p_unit_id
+     and chapter_id = p_chapter_id;
+
+cursor cu (p_unit_id in varchar2, 
+		 p_chapter_id in varchar2) is
+  select CRYO_WORKSHEET_ID, WORKSHEET_SEQ_NO, DUMMY_PRODUCT_CODE, ACTUAL_PRODUCT_CODE, 
+         FREEZE_TIME, THAW_METHOD,INSERT_DATS,INSERT_USER_ID
+    from cryo_units
+   where unit_id = p_unit_id
+     and chapter_id = p_chapter_id;
+
+
+
+  cursor cc (p_unit_id in varchar2, 
+		 p_chapter_id in varchar2) is
+  select insert_dats, insert_user, program_id, product_code, 
+         aliquot, process_dats
+    from component_cgmp
+   where unit_id = p_unit_id
+     and chapter_id = p_chapter_id;
+
+  cursor gt is
+  select rowid, chapter_id, audit_log
+    from geraudit_temp;
+
+
+
+  type AudList is table of number;
+  type RowIdList is table of varchar2(20);
+  type ColList is table of varchar2(30);
+  type DatatypeList is table of varchar2(30);
+
+  
+  t_chapter_id		varchar2(4);
+  t_unit_id		varchar2(15);
+  t_base_table		varchar2(30);
+  t_audit_table		varchar2(30);
+  t_temp_key		AudList;
+  t_audit_key		number;
+  t_rowid_list		RowIdList;
+  t_rowid		varchar2(20);
+  t_collist		ColList := ColList();
+  t_col_name		varchar2(30);
+  t_datatype_list	DatatypeList := DatatypeList();
+  t_data_type		varchar2(30);
+  t_ind_name		varchar2(30);
+  sqlstr 		varchar2(2000);
+  col_str		varchar2(20000);
+  tot_str		varchar2(30000);
+  unitstr		varchar2(1000);
+  unitstr_aud           varchar2(1000);
+  rowidstr		varchar2(1000);
+  select_str		varchar2(25000);
+  sqlstr_ind		varchar2(1000);
+  t_start_time		date;
+  t_counter		number;
+  t_ind_col_str		varchar2(10000);
+  t_idx_sel_str		varchar2(11000);
+  t_idx_str		varchar2(2000);
+  t_dummy		varchar2(1);
+  t_usr_err_audit	varchar2(500);
+  t_testing_lab_code	system_users.testing_lab_code%type;
+  t_mcitube4_cnt	number;
+  t_geraudit_rowid	varchar2(20);
+  t_audit_log		varchar2(4000);
+  t_gt_string		varchar2(4000);
+  t_gt_new_string	varchar2(4000);
+  t_date_col_name	varchar2(50);
+  t_date_string		varchar2(50);
+  t_new_date_string	varchar2(50);
+  t_descrip             varchar2(40);
+begin
+  t_start_time := sysdate;
+  begin
+    delete from geraudit_temp;
+  end;
+  commit;
+  dbms_output.enable(3000000);
+  p_status := 'OK';
+  begin
+    select parm_select 
+      into t_chapter_id
+      from rpt_parm_select
+     where appl_id in ('DON')
+       and user_name = decode(substr(LT_USER_SESSION.get_userid,1,3),'OPS',substr(LT_USER_SESSION.get_userid,5),LT_USER_SESSION.get_userid)
+       and report_name = 'GERAUDIT'
+       and parm_id = p_parm_id
+       and parm_code = 'CHP'
+       and rownum < 2 ;
+  exception
+    when NO_DATA_FOUND then
+      t_chapter_id := null;
+      p_status := 'No value entered for Chapter ID parameter';
+  end;
+
+  for c3rec in c3 loop  -- loop through base and audit tables
+    t_base_table := c3rec.table_name;
+    t_audit_table := c3rec.column_name;
+
+    if t_base_table != t_audit_table then 
+      /* -- Commented by Kishore on 01/22/2013. IM 9228 
+      sqlstr := 'select audit_key from ' || t_base_table ||
+	  	    ' where unit_id in (SELECT DECODE (PARM_SELECT, ''ALL'', UNIT_ID, PARM_SELECT) ' ||
+			                   'FROM RPT_PARM_SELECT ' ||
+			                  'WHERE REPORT_NAME = ''GERAUDIT''' || 
+			                   ' AND USER_NAME = DECODE (SUBSTR (LT_USER_SESSION.get_userid, 1, 4), ''OPS$'', ' ||
+				                                       'SUBSTR (LT_USER_SESSION.get_userid, 5), LT_USER_SESSION.get_userid) ' ||
+			                   ' AND PARM_ID = ''' || p_parm_id ||
+			                 ''' AND PARM_CODE = ''UNIT'' ' ||
+			                 ')' || 
+		      ' and chapter_id = ''' || t_chapter_id || '''';
+      -- End of commented section */
+
+      -- Added by Kishore on 01/22/2013. IM 9228
+      sqlstr := 'select audit_key from ' || t_base_table ||
+	  	    ' where unit_id in (SELECT DECODE (PARM_SELECT, ''ALL'', UNIT_ID, PARM_SELECT) ' ||
+			                   'FROM RPT_PARM_SELECT ' ||
+			                  'WHERE REPORT_NAME = ''GERAUDIT''' || 
+			                   ' AND USER_NAME = DECODE (SUBSTR (LT_USER_SESSION.get_userid, 1, 4), ''OPS$'', ' ||
+				                                       'SUBSTR (LT_USER_SESSION.get_userid, 5), LT_USER_SESSION.get_userid) ' ||
+			                   ' AND PARM_ID = ''' || p_parm_id ||
+			                 ''' AND PARM_CODE = ''UNIT'' ' ||
+			                 ')' || 
+		      ' and chapter_id = ''' || t_chapter_id || '''' ||
+                ' union ' ||
+                'select audit_key from ' || t_audit_table ||
+	  	    ' where unit_id in (SELECT DECODE (PARM_SELECT, ''ALL'', UNIT_ID, PARM_SELECT) ' ||
+			                   'FROM RPT_PARM_SELECT ' ||
+			                  'WHERE REPORT_NAME = ''GERAUDIT''' || 
+			                   ' AND USER_NAME = DECODE (SUBSTR (LT_USER_SESSION.get_userid, 1, 4), ''OPS$'', ' ||
+				                                       'SUBSTR (LT_USER_SESSION.get_userid, 5), LT_USER_SESSION.get_userid) ' ||
+			                   ' AND PARM_ID = ''' || p_parm_id ||
+			                 ''' AND PARM_CODE = ''UNIT'' ' ||
+			                 ')' || 
+		      ' and chapter_id = ''' || t_chapter_id || '''';
+
+                      --' and rownum = 1 ';
+      -- End of change
+
+      begin
+        execute immediate sqlstr bulk collect into t_temp_key;
+      exception
+        when others then
+          p_status := 'Error while retrieving the Audit Key';
+      end;
+
+      col_str := null;
+	-- Build column list from ALL_TAB_COLUMNS
+	for c1rec in c1(t_audit_table) loop      
+        if nvl(c1rec.column_name, '*') not in ('AUDIT_KEY', 'PROGRAM_ID', 
+      						     'AUDIT_INSERT_DATS', 'AUDIT_INSERT_USER') then
+          -- Need to display Test ID's from UTRS table if not present in UTRS_AUDIT table.
+          -- Insert some random value for Audit key here (%#*@^23) 
+          -- Replace with actual value inside the loop below
+          if t_audit_table = 'UTRS_AUDIT' and nvl(c1rec.column_name, '*') = 'TEST_ID' then
+            col_str := col_str || 'decode(' || c1rec.column_name || ', null, ''' || 
+                                          upper(c1rec.column_name) || ': '' || (select test_id from ' ||
+                                          t_base_table || ' where audit_key = %#*@^23) || ''   '', ''' ||
+      		     				upper(c1rec.column_name) || ': '' || ' || 
+      		     				c1rec.column_name || ' || ''   '') || ';
+          else          
+            if upper(c1rec.data_type) = 'DATE' then
+      	  col_str := col_str || 'decode(' || c1rec.column_name || ', null, null, ''' ||
+      	   					  upper(c1rec.column_name) || ': '' || to_char(' || 
+      						  c1rec.column_name ||
+      						  ', ''DD-MON-YYYY HH24:MI'') || ''   '') || ';
+            else
+      	  col_str := col_str || 'decode(' || c1rec.column_name || ', null, null, ''' ||
+      		     				  upper(c1rec.column_name) || ': '' || ' || 
+      		     				  c1rec.column_name || ' || ''   '') || ';
+            end if;
+          end if; --if t_audit_table = 'UTRS_AUDIT' 
+        end if;
+	end loop;
+	col_str := rtrim(col_str, ' || ');
+
+      begin
+        select index_name
+	    into t_ind_name
+	    from all_indexes
+           where owner = 'SBCSYS'
+	     and table_name = t_base_table
+	     and uniqueness = 'UNIQUE'
+	     and rownum = 1;
+      exception
+        when no_data_found then
+	    t_ind_name := null;
+      end;
+
+      t_counter := 0;
+      for c2rec in c2(t_ind_name) loop
+        if nvl(c2rec.column_name, '*') not in ('UNIT_ID', 'COLL_DATE', 'CHAPTER_ID') then
+          t_counter := t_counter + 1;
+          t_collist.extend;
+          t_datatype_list.extend;
+          t_collist(t_counter) := c2rec.column_name;
+          t_datatype_list(t_counter) := c2rec.data_type;            
+        end if;
+      end loop;
+
+      if t_temp_key.count > 0 then
+        for j in 1 .. t_temp_key.count loop
+          t_audit_key := t_temp_key(j);
+          unitstr := 'select unit_id from ' || t_base_table;
+          unitstr := unitstr || ' where audit_key = ' || t_audit_key;
+          unitstr := unitstr || ' and rownum = 1';
+          --dbms_output.put_line('UnitId SQL: ' || unitstr);
+          begin
+            execute immediate unitstr into t_unit_id;
+          exception
+            when no_data_found then -- Added by Kishore on 01/22/2013. IM 9228
+              -- Added by Kishore on 01/22/2013. IM 9228
+              begin
+                unitstr_aud := 'select unit_id from ' || t_audit_table;
+                unitstr_aud := unitstr_aud || ' where audit_key = ' || t_audit_key;
+                unitstr_aud := unitstr_aud || ' and rownum = 1';
+
+                execute immediate unitstr_aud into t_unit_id;
+              exception
+                when no_data_found then
+                  p_status := 'No data found while retrieving the Unit ID from the Audit table';
+                when others then
+                  p_status := 'Error while retrieving the Unit ID from the Audit table';
+              end;
+              -- End of change
+            when others then
+              p_status := 'Error while retrieving the Unit ID';
+          end;
+          
+          rowidstr := 'select rowidtochar(rowid) from ' || t_audit_table;
+          rowidstr := rowidstr || ' where audit_key = ' || t_audit_key;
+          --dbms_output.put_line('RowId SQL: ' || rowidstr);
+          begin
+            execute immediate rowidstr bulk collect into t_rowid_list;
+          exception
+            when others then
+              p_status := 'Error while retrieving the rowid';
+          end;
+
+          if t_rowid_list.count > 0 then
+            for k in 1 .. t_rowid_list.count loop
+              --dbms_output.put_line('Execution Time: ' || to_char((sysdate - t_start_time) * 24 * 60 * 60) || ' secs');
+              t_rowid := t_rowid_list(k);
+              --dbms_output.put_line('RowId: ' || t_rowid);
+              
+              if t_collist.count > 0 then
+                t_ind_col_str := null;
+                for l in 1 .. t_collist.count loop
+                  t_col_name := t_collist(l);
+                  t_data_type := t_datatype_list(l);
+                  t_dummy := null;
+    		      sqlstr_ind := 'select ''x'' from ' || t_audit_table ||
+	              	        ' where rowidtochar(rowid) = ''' || t_rowid || 
+		      	        ''' and ' || t_col_name || ' is null';
+    		      begin
+      	        execute immediate sqlstr_ind into t_dummy;
+    		      exception
+      	        when others then
+        		    t_dummy := null;
+    		      end;
+                  --dbms_output.put_line('Dummy: ' || t_dummy);
+                  if t_dummy is not null then
+                    if t_data_type = 'DATE' then
+                      t_ind_col_str := t_ind_col_str || '''' || upper(t_col_name) || 
+                                       ': '' || to_char(' || t_col_name ||
+      		 			   ', ''DD-MON-YYYY HH24:MI'')' || ' || ''   ''' || ' || ';
+                    else
+                      t_ind_col_str := t_ind_col_str || '''' || upper(t_col_name) || 
+                                       ': '' || ' || t_col_name || ' || ''   ''' || ' || ';
+                    end if;
+                    --dbms_output.put_line('Part Ind Str: ' || t_ind_col_str);
+                  end if;
+                end loop; -- for l in 1 .. t_collist.count loop
+              end if; -- if t_collist.count > 0 then
+              if t_ind_col_str is not null then
+                t_ind_col_str := rtrim(t_ind_col_str, ' || ');
+              end if;
+
+              t_idx_sel_str := 'select ' || t_ind_col_str ||
+                               ' from ' || t_base_table ||
+                               ' where audit_key = ' || t_audit_key;
+              begin
+                execute immediate t_idx_sel_str into t_idx_str;
+              exception
+                when others then
+                  t_idx_str := null;
+              end;
+              
+              --dbms_output.put_line('Execution Time1: ' || to_char((sysdate - t_start_time) * 24 * 60 * 60) || ' secs');
+              if t_ind_col_str is not null then
+                tot_str := col_str || ' || ''   '' || ''' || t_idx_str || '''';
+              else
+                tot_str := col_str;
+              end if;
+              tot_str := replace(tot_str, '%#*@^23', to_char(t_audit_key)); -- Need Audit key to get Test ID's in UTRS table
+              --dbms_output.put_line('Log: ' || substr(tot_str, 25));
+
+              select_str := 'insert into GERAUDIT_TEMP';
+              /* -- Commented by Kishore on 01/22/2013. IM 9228
+              select_str := select_str || ' select ''' || t_chapter_id || ''', ''' || t_unit_id || ''', ' ||
+  	                                              'to_char(audit_insert_dats, ''DD-MON-YYYY HH24:MI''), ' ||
+	                                                'audit_insert_user usr, substr(program_id, 1, 8), ';
+              -- End of commented section */
+              -- Added by Kishore on 01/22/2013. IM 9228
+              select_str := select_str || ' select ''' || t_chapter_id || ''', ''' || t_unit_id || ''', ' ||
+  	                                              'to_char(audit_insert_dats, ''DD-MON-YYYY HH24:MI''), ' ||
+	                                                'audit_insert_user usr, ltrim(rtrim(program_id)), ';
+              -- End of change
+	      --select_str := select_str || '''' || t_audit_table || ''' audit_tbl_name, ';
+	      select_str := select_str || '''' || t_base_table || ''', ';
+	      select_str := select_str || 'ltrim(' || tot_str || '), ''';
+              select_str := select_str || p_parm_id || '''';
+              select_str := select_str || ' from ' || t_audit_table;
+              select_str := select_str || ' where audit_key = ' || t_audit_key;
+              select_str := select_str || ' and rowid = ''' || t_rowid || '''';
+              /*if t_base_table = 'COMPONENTS' then
+                dbms_output.put_line('Insert statement: ' || select_str || '             ');
+              end if; */
+              begin
+                execute immediate select_str;
+              exception
+                when others then
+                  p_status := 'Error inserting into GERAUDIT_TEMP table';
+              end;          
+
+            end loop; -- for k in 1 .. t_rowid_list.count loop
+          end if; -- if t_rowid_list.count > 0 then
+        end loop; -- for j in 1 .. t_temp_key.count loop
+	end if; -- if t_temp_key.count > 0 then
+    end if; --if t_base_table != t_audit_table then
+
+    -- Insert records from tables other than the audit tables
+    for c4rec in c4 loop
+      -- USER_ERROR_LOG
+      if t_base_table = 'USER_ERROR_LOG' then
+        for c5rec in c5(c4rec.parm_select, t_chapter_id) loop
+          if c5rec.error_code is not null then
+            t_usr_err_audit := 'ERROR_CODE: ' || c5rec.error_code || '   ';
+          end if;
+          if c5rec.coll_date is not null then
+            t_usr_err_audit := t_usr_err_audit || 'COLL_DATE: ' || 
+                               to_char(c5rec.coll_date, 'DD-MON-YYYY HH24:MI') || '   ';
+          end if;
+          if c5rec.component_prefix is not null then
+            t_usr_err_audit := t_usr_err_audit || 'COMPONENT_PREFIX: ' || c5rec.component_prefix || '   ';
+          end if;
+          if c5rec.product_code is not null then
+            t_usr_err_audit := t_usr_err_audit || 'PRODUCT_CODE: ' || c5rec.product_code || '   ';
+          end if;
+          t_usr_err_audit := rtrim(t_usr_err_audit, '   ');
+
+          insert into GERAUDIT_TEMP values (
+              t_chapter_id,
+              c4rec.parm_select,
+              to_char(c5rec.insert_dats, 'DD-MON-YYYY HH24:MI'),
+              c5rec.user_id,
+              c5rec.program_name,
+              'USER_ERROR_LOG',
+              t_usr_err_audit,
+              p_parm_id);
+        end loop; -- for c5rec in c5 loop
+      end if; -- if t_base_table = 'USER_ERROR_LOG' then
+
+      -- VOID_TEST_STAGING
+      t_usr_err_audit := null;
+      if t_base_table = 'VOID_TEST_STAGING' then
+        for vtsrec in vts(c4rec.parm_select) loop
+          if vtsrec.first_void_user is not null then
+            t_usr_err_audit := 'FIRST_VOID_USER: ' || vtsrec.first_void_user || '   ';
+          end if;
+          if vtsrec.first_void_date is not null then
+            t_usr_err_audit := t_usr_err_audit || 'FIRST_VOID_DATE: ' || 
+                               to_char(vtsrec.first_void_date, 'DD-MON-YYYY HH24:MI') || '   ';
+          end if;
+          if vtsrec.second_void_user is not null then
+            t_usr_err_audit := 'SECOND_VOID_USER: ' || vtsrec.second_void_user || '   ';
+          end if;
+          if vtsrec.second_void_date is not null then
+            t_usr_err_audit := t_usr_err_audit || 'SECOND_VOID_DATE: ' || 
+                               to_char(vtsrec.second_void_date, 'DD-MON-YYYY HH24:MI') || '   ';
+          end if;
+          if vtsrec.result_code is not null then
+            t_usr_err_audit := t_usr_err_audit || 'RESULT_CODE: ' || vtsrec.result_code || '   ';
+          end if;
+          if vtsrec.tb_id is not null then
+            t_usr_err_audit := t_usr_err_audit || 'TB_ID: ' || vtsrec.tb_id || '   ';
+          end if;
+          if vtsrec.test_seq is not null then
+            t_usr_err_audit := t_usr_err_audit || 'TEST_SEQ: ' || vtsrec.test_seq || '   ';
+          end if;
+          if vtsrec.void_mode is not null then
+            t_usr_err_audit := t_usr_err_audit || 'VOID_MODE: ' || vtsrec.void_mode || '   ';
+          end if;
+          if vtsrec.insert_user is not null then
+            begin
+              select testing_lab_code
+                into t_testing_lab_code
+                from system_users
+               where user_id = vtsrec.insert_user
+                 and chapter_id = t_chapter_id
+                 and rownum = 1;
+            exception
+              when others then
+                t_testing_lab_code := null;
+            end;
+            if t_testing_lab_code is not null then
+              t_usr_err_audit := t_usr_err_audit || 'TESTING_LAB_CODE: ' || t_testing_lab_code || '   ';
+            end if;
+          end if;
+          
+          t_usr_err_audit := rtrim(t_usr_err_audit, '   ');
+
+          begin
+            insert into GERAUDIT_TEMP values (
+              t_chapter_id,
+              c4rec.parm_select,
+              to_char(vtsrec.insert_date, 'DD-MON-YYYY HH24:MI'),
+              vtsrec.insert_user,
+              vtsrec.program_id,
+              'VOID_TEST_STAGING',
+              t_usr_err_audit,
+              p_parm_id);
+          exception
+            when others then
+              p_status := 'Error while inserting VOID_TEST_STAGING data';
+          end;
+        end loop; -- for vtsrec in vts loop
+      end if; -- if t_base_table = 'VOID_TEST_STAGING' then
+
+      -- TEST_VOIDS
+      t_usr_err_audit := null;
+      if t_base_table = 'TEST_VOIDS' then
+        for tvrec in tv(c4rec.parm_select, t_chapter_id) loop
+          if tvrec.void_user_id is not null then
+            t_usr_err_audit := 'VOID_USER_ID: ' || tvrec.void_user_id || '   ';
+          end if;
+          if tvrec.void_dats is not null then
+            t_usr_err_audit := t_usr_err_audit || 'VOID_DATS: ' || 
+                               to_char(tvrec.void_dats, 'DD-MON-YYYY HH24:MI') || '   ';
+          end if;
+          if tvrec.void_reason_code is not null then
+            t_usr_err_audit := t_usr_err_audit || 'VOID_REASON_CODE: ' || tvrec.void_reason_code || '   ';
+          end if;
+          if tvrec.test_id is not null then
+            t_usr_err_audit := t_usr_err_audit || 'TEST_ID: ' || tvrec.test_id || '   ';
+          end if;
+          if tvrec.result_status_1 is not null then
+            t_usr_err_audit := t_usr_err_audit || 'RESULT_STATUS_1: ' || tvrec.result_status_1 || '   ';
+          end if;
+          if tvrec.testing_lab_code is not null then
+            t_usr_err_audit := t_usr_err_audit || 'TESTING_LAB_CODE: ' || tvrec.testing_lab_code || '   ';
+          end if;
+          t_usr_err_audit := rtrim(t_usr_err_audit, '   ');
+
+          begin
+            insert into GERAUDIT_TEMP values (
+              t_chapter_id,
+              c4rec.parm_select,
+              to_char(tvrec.void_dats, 'DD-MON-YYYY HH24:MI'),
+              tvrec.insert_user_id,
+              null,
+              'TEST_VOIDS',
+              t_usr_err_audit,
+              p_parm_id);
+          exception
+            when others then
+              p_status := 'Error while inserting TEST_VOIDS data';
+          end;
+        end loop; -- for tvrec in tv loop
+      end if; -- if t_base_table = 'TEST_VOIDS' then
+
+       ------ For Cryo units-------
+
+        
+      t_usr_err_audit := null;
+      if t_base_table = 'CRYO_UNITS' then
+        for crrec in cu(c4rec.parm_select, t_chapter_id) loop
+          if crrec.CRYO_WORKSHEET_ID is not null then
+            t_usr_err_audit := 'CRYO_WORKSHEET_ID: ' || crrec.CRYO_WORKSHEET_ID || '   ';
+          end if;
+          if crrec.WORKSHEET_SEQ_NO is not null then
+            t_usr_err_audit := t_usr_err_audit || 'WORKSHEET_SEQ_NO: ' || crrec.WORKSHEET_SEQ_NO ||'   '; 
+          end if;
+          if crrec.DUMMY_PRODUCT_CODE is not null then
+            t_usr_err_audit := t_usr_err_audit || 'DUMMY_PRODUCT_CODE: ' || crrec.DUMMY_PRODUCT_CODE || '   ';
+          end if;
+          if crrec.ACTUAL_PRODUCT_CODE is not null then
+            t_usr_err_audit := t_usr_err_audit || 'ACTUAL_PRODUCT_CODE: ' || crrec.ACTUAL_PRODUCT_CODE || '   ';
+          end if;
+          if crrec.THAW_METHOD is not null then
+            t_usr_err_audit := t_usr_err_audit || 'THAW_METHOD: ' || crrec.THAW_METHOD || '   ';
+          end if;
+          if crrec.FREEZE_TIME is not null then
+            t_usr_err_audit := t_usr_err_audit || 'FREEZE_TIME: ' || to_char(crrec.FREEZE_TIME,'HH24:MI') || '   ';
+          end if;
+          t_usr_err_audit := rtrim(t_usr_err_audit, '   ');
+
+          begin
+            insert into GERAUDIT_TEMP values (
+              t_chapter_id,
+              c4rec.parm_select,
+              to_char(crrec.INSERT_DATS, 'DD-MON-YYYY HH24:MI'),
+              crrec.insert_user_id,
+              null,
+              'CRYO_UNITS',
+              t_usr_err_audit,
+              p_parm_id);
+          exception
+            when others then
+              p_status := 'Error while inserting CRYO_UNITS';
+          end;
+        end loop; -- for tvrec in tv loop
+      end if; -- if t_base_table = 'TEST_VOIDS' then
+
+
+
+        -----------------------
+
+      -- COMPONENT_CGMP
+      t_usr_err_audit := null;
+      if t_base_table = 'COMPONENT_CGMP' then
+        for ccrec in cc (c4rec.parm_select, t_chapter_id) loop
+          if ccrec.product_code is not null then
+            t_usr_err_audit := 'PRODUCT_CODE: ' || ccrec.product_code || '   ';
+          end if;
+          if ccrec.aliquot is not null then
+            t_usr_err_audit := t_usr_err_audit || 'ALIQUOT: ' || 
+                               ccrec.aliquot || '   ';
+          end if;
+          if ccrec.process_dats is not null then
+            t_usr_err_audit := t_usr_err_audit || 'PROCESS_DATS: ' ||
+                               to_char(ccrec.process_dats, 'DD-MON-YYYY HH24:MI') || '   ';
+          end if;
+          t_usr_err_audit := rtrim(t_usr_err_audit, '   ');
+
+          insert into GERAUDIT_TEMP values (
+              t_chapter_id,
+              c4rec.parm_select,
+              to_char(ccrec.insert_dats, 'DD-MON-YYYY HH24:MI'),
+              ccrec.insert_user,
+              ccrec.program_id,
+              'COMPONENT_CGMP',
+              t_usr_err_audit,
+              p_parm_id);
+        end loop; -- for ccrec in cc(c4rec.parm_select, t_chapter_id) loop
+      end if; -- if t_base_table = 'COMPONENT_CGMP' then
+
+    end loop; -- for c4rec in c4 loop
+
+      
+  end loop; -- for c3rec in c3 loop  
+  --p_status := 'Execution Time: ' || to_char((sysdate - t_start_time) * 24 * 60 * 60) || ' secs';
+
+  commit;
+
+  -- Erase multiple MCITUBE4 records in GERAUDIT_TEMP table
+  for c6rec in c6 loop
+    t_mcitube4_cnt := 0;
+    for c7rec in c7 (c6rec.unit_id) loop
+      t_mcitube4_cnt := t_mcitube4_cnt + 1;
+      if t_mcitube4_cnt > 1 then
+        delete from geraudit_temp
+         where rowid = c7rec.rowid;
+      end if;
+    end loop;
+  end loop;
+
+  -- Erase empty CPISEP records in the GERAUDIT_TEMP table
+  begin
+    delete from geraudit_temp
+     where program_id = 'CPISEP'
+       and audit_log is null;
+  end;
+
+  commit;
+
+  -- Added by Kishore on 05/24/2012. IM 8658
+  -- Erase empty records in the GERAUDIT_TEMP table that are coming from the UNITS table
+  begin
+    delete from geraudit_temp
+     where base_table_name = 'UNITS'
+       and insert_user_id = 'SBCSYS'
+       and audit_log is null;
+  end;
+
+  commit;
+  -- End of change
+
+  -- Added by Kishore on 05/30/2011. IM 5720  
+  for gtrec in gt loop
+    -- Check for "DATE"
+    t_audit_log := gtrec.audit_log;
+    t_gt_new_string := gtrec.audit_log;
+
+    while length(t_audit_log) > 0 loop
+      t_gt_string := substr(substr(t_audit_log, 1, instr(t_audit_log, '_DATE:') + 23), 
+                            instr(substr(t_audit_log, 1, instr(t_audit_log, '_DATE:')), ' ', - 1) + 1);
+      if length(t_gt_string) > 0 then
+        t_date_col_name := substr(t_gt_string, 1, instr(t_gt_string, ' ') - 2);
+        t_date_string := substr(t_gt_string, instr(t_gt_string, ' ') + 1);
+        /*t_gt_new_string := substr(substr(t_audit_log, 1, instr(t_audit_log, '_DATE:') + 23),
+                                  1,
+	      	                instr(substr(t_audit_log, 1, instr(t_audit_log, '_DATE:') + 23),
+			                      t_date_col_name) - 1) || t_dt_col_name || ': '; */
+
+        if t_date_col_name = 'RECEIVED_DATE' then
+          t_new_date_string := t_date_string;
+        else
+          if substr(t_date_string, - 5) = '00:00' then
+            t_new_date_string := t_date_string;
+          else
+            t_new_date_string := to_char(lifetrack_timezone_convert.get_local_time(gtrec.chapter_id, 
+                                                                                   to_date(t_date_string, 'DD-MON-YYYY HH24:MI')),
+                                         'DD-MON-YYYY HH24:MI');
+          end if;
+        end if;
+
+        --t_gt_new_string := t_gt_new_string || t_new_date_string || ' ';
+        t_gt_new_string := replace(t_gt_new_string, t_date_col_name || ': ' || t_date_string, t_date_col_name || ': ' || t_new_date_string);
+      end if; -- if length(t_gt_string) > 0 then
+      
+      t_audit_log := substr(t_audit_log, length(substr(t_audit_log, 1, instr(t_audit_log, '_DATE:') + 23)) + 2);
+    end loop;
+
+    -- Check for "DATS"
+    t_audit_log := gtrec.audit_log;
+    t_gt_string := null;
+    t_date_col_name := null;
+    t_date_string := null;
+    t_new_date_string := null;
+
+    while length(t_audit_log) > 0 loop
+      t_gt_string := substr(substr(t_audit_log, 1, instr(t_audit_log, '_DATS:') + 23), 
+                            instr(substr(t_audit_log, 1, instr(t_audit_log, '_DATS:')), ' ', - 1) + 1);
+      if length(t_gt_string) > 0 then
+        t_date_col_name := substr(t_gt_string, 1, instr(t_gt_string, ' ') - 2);
+        t_date_string := substr(t_gt_string, instr(t_gt_string, ' ') + 1);
+        /*t_gt_new_string := substr(substr(t_audit_log, 1, instr(t_audit_log, '_DATS:') + 23),
+                                  1,
+	      	                instr(substr(t_audit_log, 1, instr(t_audit_log, '_DATS:') + 23),
+			                      t_date_col_name) - 1) || t_dt_col_name || ': '; */
+
+        if substr(t_date_string, - 5) = '00:00' then
+          t_new_date_string := t_date_string;
+        else
+          t_new_date_string := to_char(lifetrack_timezone_convert.get_local_time(gtrec.chapter_id, 
+                                                                                 to_date(t_date_string, 'DD-MON-YYYY HH24:MI')),
+                                       'DD-MON-YYYY HH24:MI');
+        end if;
+
+        --t_gt_new_string := t_gt_new_string || t_new_date_string || ' ';
+        t_gt_new_string := replace(t_gt_new_string, t_date_col_name || ': ' || t_date_string, t_date_col_name || ': ' || t_new_date_string);
+      end if; -- if length(t_gt_string) > 0 then
+      
+      t_audit_log := substr(t_audit_log, length(substr(t_audit_log, 1, instr(t_audit_log, '_DATS:') + 23)) + 2);
+    end loop;
+
+    if t_gt_new_string is not null then
+      begin
+        update geraudit_temp
+           set audit_log = rtrim(t_gt_new_string)
+         where rowid = gtrec.rowid;
+      exception
+        when others then
+          p_status := 'Error while updating GERAUDIT_TEMP data with rowid: ' || gtrec.rowid;
+      end;
+    end if;
+
+  end loop;
+
+  commit;
+  -- End of change
+end POPULATE_GERAUDIT;
+
+end GERAUDIT;
+
+/
+
+Create or Replace Public Synonym GERAUDIT for GERAUDIT
+
+/
+
+Grant execute on GERAUDIT to SRVSYS,UTIL
+
+/
+

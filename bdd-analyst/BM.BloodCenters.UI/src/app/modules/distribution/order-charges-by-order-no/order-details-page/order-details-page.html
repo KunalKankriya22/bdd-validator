@@ -1,0 +1,281 @@
+<app-page-header-with-breadcrumb [config]="headerConfig" />
+
+<section class="order-details-container">
+  <!-- Loading -->
+  @if (loading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading order details"></mat-spinner>
+    </div>
+  }
+
+  <!-- Error -->
+  @if (error() && !loading()) {
+    <div class="error-container" role="alert">
+      <mat-icon aria-hidden="true">error</mat-icon>
+      <p>{{ error() }}</p>
+      <button mat-stroked-button (click)="goBack()">Go Back</button>
+    </div>
+  }
+
+  @if (hasData() && !loading()) {
+    <!-- Filter / Retrieve Card -->
+    <div class="retrieve-card">
+      <div class="retrieve-fields">
+        <div class="field-group">
+          <mat-form-field appearance="fill" class="retrieve-field" subscriptSizing="dynamic">
+            <mat-label>Order No</mat-label>
+            <mat-select [value]="selectedOrderNo()" (selectionChange)="onOrderChange($event.value)">
+              <mat-option>
+                <ngx-mat-select-search [formControl]="orderNoSearchCtrl"
+                  placeholderLabel="Search orders..."
+                  noEntriesFoundLabel="No matching orders">
+                </ngx-mat-select-search>
+              </mat-option>
+              @for (order of filteredOrders(); track order.orderNo) {
+                <mat-option [value]="order.orderNo">{{ order.orderNo }} - {{ order.customerName }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+        </div>
+
+        <dl class="field-group info-group">
+          <dt class="info-label">By</dt>
+          <dd class="info-value">{{ orderData()?.orderBy || '--' }}</dd>
+        </dl>
+        <dl class="field-group info-group">
+          <dt class="info-label">Customer ID</dt>
+          <dd class="info-value">{{ orderData()?.customerId || '--' }}</dd>
+        </dl>
+        <dl class="field-group info-group">
+          <dt class="info-label">Customer Description</dt>
+          <dd class="info-value">{{ orderData()?.customerName || '--' }}</dd>
+        </dl>
+        <dl class="field-group info-group">
+          <dt class="info-label">Priority</dt>
+          <dd class="info-value">{{ orderData()?.priority ?? '--' }}</dd>
+        </dl>
+        <dl class="field-group info-group">
+          <dt class="info-label">Type</dt>
+          <dd class="info-value">{{ orderData()?.orderType || '--' }}</dd>
+        </dl>
+        <dl class="field-group info-group">
+          <dt class="info-label">Estimate Arrival Date &amp; Time</dt>
+          <dd class="info-value">{{ formatDateTime(orderData()?.estArrivalTime) }}</dd>
+        </dl>
+
+        <div class="retrieve-actions">
+          <button mat-button
+                  type="button"
+                  class="btn-clear"
+                  (click)="clearAll()"
+                  aria-label="Clear all filters">
+            CLEAR ALL
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Ordered Products + Audit Trail -->
+    <div class="results-card">
+      <div class="results-section">
+        <div class="section-header">
+          <h3 class="section-title">Ordered Products</h3>
+          <button mat-button
+                  class="order-notes-btn"
+                  (click)="showOrderNotes()"
+                  aria-label="Order notes">
+            ORDER NOTES
+          </button>
+        </div>
+        <div class="products-notes-layout">
+          <div class="table-area">
+            <div class="table-container">
+              <table class="data-table" role="table" aria-label="Ordered products">
+                <thead>
+                  <tr>
+                    <th scope="col">Item</th>
+                    <th scope="col">Product</th>
+                    <th scope="col">ABORh</th>
+                    <th scope="col">Required</th>
+                    <th scope="col">Allocated</th>
+                    <th scope="col">Canceled</th>
+                    <th scope="col">Status</th>
+                    <th scope="col"><span class="cdk-visually-hidden">Notes</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (item of orderedProducts(); track item.itemNo) {
+                    <tr tabindex="0"
+                        [attr.aria-label]="'Item ' + item.itemNo + ', ' + (item.productType || '') + ', status ' + (item.itemStatus || 'none')">
+                      <td>{{ item.itemNo }}</td>
+                      <td>{{ item.productType || '--' }}</td>
+                      <td>{{ item.bloodType || '--' }}</td>
+                      <td>{{ item.requiredQty }}</td>
+                      <td>{{ item.allocatedQty }}</td>
+                      <td>{{ item.canceledQty ?? 0 }}</td>
+                      <td>
+                        @if (item.itemStatus) {
+                          <span class="status-chip">{{ getStatusInfo(item.itemStatus).label }}</span>
+                        }
+                      </td>
+                      <td>
+                        <mat-icon class="notes-icon-btn no-notes" aria-hidden="true">chat_bubble_outline</mat-icon>
+                      </td>
+                    </tr>
+                  }
+                  @if (orderedProducts().length === 0) {
+                    <tr>
+                      <td colspan="8" class="empty-row">No products found.</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          @if (notesPanelVisible()) {
+            <aside class="notes-panel"
+                   role="region"
+                   aria-label="Order notes">
+              <h4 class="notes-title">Notes for Order</h4>
+              <p class="notes-content" [class.empty]="!orderNote()?.note">
+                {{ orderNote()?.note || 'No notes available.' }}
+              </p>
+            </aside>
+          }
+        </div>
+      </div>
+
+      <div class="results-section">
+        <div class="section-header">
+          <h3 class="section-title">Audit Trail</h3>
+        </div>
+        <app-data-table
+          [config]="auditTableConfig"
+          [data]="auditTrail()"
+          [loading]="false">
+        </app-data-table>
+      </div>
+    </div>
+  }
+</section>
+
+<!-- Overlay backdrop + side panel -->
+@if (activePanel() !== null) {
+  <div class="overlay-backdrop" (click)="closeSidePanel()"></div>
+  <div class="overlay-side-panel"
+       role="dialog"
+       aria-modal="true"
+       [attr.aria-label]="activePanel() === 'shipped-attr' ? 'Shipped Attributes and Antigens' : activePanel() === 'shipped-products' ? 'Shipped Products' : 'Ordered Attributes and Antigens'"
+       cdkTrapFocus
+       (keydown.escape)="closeSidePanel()">
+
+    <!-- SHIPPED ATTRIBUTES/ANTIGENS -->
+    @if (activePanel() === 'shipped-attr') {
+      <app-additional-charges-panel
+        [otherCharges]="orderData()?.otherCharges || []"
+        [antigens]="orderData()?.antigens || []"
+        [attributes]="orderData()?.attributes || []"
+        (closePanel)="closeSidePanel()">
+      </app-additional-charges-panel>
+    }
+
+    <!-- SHIPPED PRODUCTS -->
+    @if (activePanel() === 'shipped-products') {
+      <div class="side-panel">
+        <div class="side-panel-header">
+          <h2>Shipped Products</h2>
+          <button mat-icon-button (click)="closeSidePanel()" aria-label="Close shipped products panel">
+            <mat-icon>close</mat-icon>
+          </button>
+        </div>
+        <div class="side-panel-content">
+          <app-data-table
+            [config]="shippedProductsTableConfig"
+            [data]="shippedProducts()"
+            [loading]="false">
+          </app-data-table>
+        </div>
+        <div class="side-panel-actions">
+          <button mat-raised-button color="primary" (click)="closeSidePanel()" aria-label="Close shipped products panel">CLOSE</button>
+        </div>
+      </div>
+    }
+
+    <!-- ORDERED ATTRIBUTES/ANTIGENS -->
+    @if (activePanel() === 'ordered-attr') {
+      <div class="side-panel">
+        <div class="side-panel-header">
+          <h2>Ordered Attributes &amp; Antigens</h2>
+          <button mat-icon-button (click)="closeSidePanel()" aria-label="Close ordered attributes panel">
+            <mat-icon>close</mat-icon>
+          </button>
+        </div>
+        <div class="side-panel-content">
+          @if (panelLoading()) {
+            <div class="panel-loading">
+              <mat-spinner diameter="32" aria-label="Loading ordered attributes"></mat-spinner>
+            </div>
+          } @else {
+            <section class="charges-section">
+              <h3 class="panel-section-title">Ordered Antigens</h3>
+              <table class="charges-table" role="table" aria-label="Ordered antigens">
+                <thead>
+                  <tr>
+                    <th scope="col">Item</th>
+                    <th scope="col">Antigen ID</th>
+                    <th scope="col" class="align-right">Unit Price</th>
+                    <th scope="col">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @if (orderedAntigens().length === 0) {
+                    <tr><td colspan="4" class="no-data">No ordered antigens</td></tr>
+                  }
+                  @for (ag of orderedAntigens(); track $index) {
+                    <tr>
+                      <td>{{ ag.itemNo }}</td>
+                      <td>{{ ag.antigenId || '--' }}</td>
+                      <td class="align-right">{{ ag.unitPrice != null ? '$' + ag.unitPrice.toFixed(2) : '--' }}</td>
+                      <td>{{ ag.resultStatus || '--' }}</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </section>
+
+            <section class="charges-section">
+              <h3 class="panel-section-title">Ordered Attributes</h3>
+              <table class="charges-table" role="table" aria-label="Ordered attributes">
+                <thead>
+                  <tr>
+                    <th scope="col">Item</th>
+                    <th scope="col">Group</th>
+                    <th scope="col">Code</th>
+                    <th scope="col" class="align-right">Unit Price</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @if (orderedAttributes().length === 0) {
+                    <tr><td colspan="4" class="no-data">No ordered attributes</td></tr>
+                  }
+                  @for (attr of orderedAttributes(); track $index) {
+                    <tr>
+                      <td>{{ attr.itemNo }}</td>
+                      <td>{{ attr.attribGroup || '--' }}</td>
+                      <td>{{ attr.attribCode || '--' }}</td>
+                      <td class="align-right">{{ attr.unitPrice != null ? '$' + attr.unitPrice.toFixed(2) : '--' }}</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </section>
+          }
+        </div>
+        <div class="side-panel-actions">
+          <button mat-raised-button color="primary" (click)="closeSidePanel()" aria-label="Close ordered attributes panel">CLOSE</button>
+        </div>
+      </div>
+    }
+  </div>
+}

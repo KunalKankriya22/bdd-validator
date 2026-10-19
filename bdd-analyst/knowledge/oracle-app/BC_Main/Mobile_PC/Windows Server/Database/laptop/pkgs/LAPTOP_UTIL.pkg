@@ -1,0 +1,121 @@
+CREATE OR REPLACE PACKAGE laptop_util AS
+/*-----------------------------------------------------------------------
+   ** VER   DATE        BY       COMMENTS
+   ** --------------------------------------------------------------------
+   ** V01  07/30/2021   ASHOK   Initial version - used in laptop table triggers.
+   ** V02  12/22/2022           set_mobile_server_audit_seq added. Used to reset
+                                audit seq in mobile server.
+   ** V03  01/23/2023           audit seq changes - compare with current server
+                                value before updating.
+   ** V04  01/27/2025           MLT-7584 (reverting back V03).
+   **---------------------------------------------------------------------
+*/   
+    PROCEDURE download_monitor_insert (
+        table_name_in  IN  VARCHAR2,
+        trns_mode_in   IN  VARCHAR2,
+        audit_key_in   IN  NUMBER
+    );
+    
+    PROCEDURE set_mobile_server_audit_seq;
+
+END laptop_util;
+/
+
+
+CREATE OR REPLACE PACKAGE BODY laptop_util AS
+
+    PROCEDURE download_monitor_insert (
+        table_name_in  IN  VARCHAR2,
+        trns_mode_in   IN  VARCHAR2,
+        audit_key_in   IN  NUMBER
+    ) IS
+        lncount  NUMBER := 0;
+        dm_rec   download_monitor%rowtype;
+    BEGIN
+        SELECT
+            COUNT(1)
+        INTO lncount
+        FROM
+            download_monitor
+        WHERE
+                table_audit_key = audit_key_in
+            AND table_name = table_name_in;
+
+        IF lncount = 0 THEN
+            dm_rec.table_name := table_name_in;
+            dm_rec.table_audit_key := audit_key_in;
+            dm_rec.transaction_mode := trns_mode_in;
+            dm_rec.extract_date := NULL;
+            
+            INSERT INTO download_monitor VALUES dm_rec;
+        END IF;
+
+    END download_monitor_insert;
+
+
+    PROCEDURE set_mobile_server_audit_seq IS
+        ln_audit_seq NUMBER;
+        lc_seq_name  CONSTANT VARCHAR2(20) := 'DBADMN.AUDIT_SEQ';
+        lv_laptop_id laptop_id_details.LAPTOP_ID%TYPE;
+        ln_mobile_audit_seq NUMBER;
+    
+        PROCEDURE set_error_flag(flag_in IN VARCHAR2, msg_in IN VARCHAR2) IS
+        BEGIN
+            UPDATE laptop_id_details
+              SET download_error_flag = flag_in,
+                  error_msg = msg_in;
+            COMMIT;  
+        END set_error_flag;
+    
+    BEGIN
+        BEGIN
+            SELECT laptop_id INTO lv_laptop_id 
+              FROM laptop_id_details;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                raise_application_error(-20001, 'No record found in LAPTOP_ID_DETAILS');
+            WHEN TOO_MANY_ROWS THEN
+                raise_application_error(-20002, 'Too many rows in LAPTOP_ID_DETAILS');
+        END;
+        
+        BEGIN
+            SELECT
+                current_seq
+            INTO ln_audit_seq
+            FROM
+                laptop_register   lr
+            WHERE
+                lr.laptop_id = lv_laptop_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                raise_application_error(-20003, 'No record found in LAPTOP_REGISTER');
+            WHEN TOO_MANY_ROWS THEN
+                raise_application_error(-20004, 'Multiple records found in LAPTOP_REGISTER');
+        END;
+        
+        SELECT DBADMN.AUDIT_SEQ.NEXTVAL INTO ln_mobile_audit_seq FROM DUAL;
+        
+        /* -- V04
+        -- V03
+        IF ln_mobile_audit_seq > ln_audit_seq THEN
+            ln_audit_seq := ln_mobile_audit_seq + 1000;        
+        END IF;
+        --
+        */
+        
+        EXECUTE IMMEDIATE 'ALTER SEQUENCE '
+                          || lc_seq_name
+                          || ' RESTART START WITH '
+                          || to_char(ln_audit_seq);
+                          
+        set_error_flag('N', NULL);                  
+    
+    EXCEPTION
+        WHEN OTHERS THEN
+            set_error_flag('Y', SUBSTR(sqlerrm, 1, 1000));
+            raise_application_error(-20005, 'Error creating audit sequence ' || sqlerrm);
+    END set_mobile_server_audit_seq;
+
+
+END laptop_util;
+/

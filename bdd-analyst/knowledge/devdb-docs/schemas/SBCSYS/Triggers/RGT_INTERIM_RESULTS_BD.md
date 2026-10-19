@@ -1,0 +1,40 @@
+---
+tags:
+  - trigger
+  - SBCSYS
+---
+# RGT_INTERIM_RESULTS_BD
+
+**Schema**: [[schemas/SBCSYS/SBCSYS|SBCSYS]]
+**Table**: [[schemas/SBCSYS/Tables/RGT_INTERIM_RESULTS|RGT_INTERIM_RESULTS]]
+**Type**: BEFORE EACH ROW
+**Event**: DELETE
+**Status**: ENABLED
+
+## Trigger Body
+
+```plsql
+begin
+
+	insert into RGT_INTERIM_RESULTS_AUDIT
+    (
+	CHAPTER_ID, CONTRACT_ID, UNIT_ID,
+	BATCH_ID, TEST_ID, TEST_SEQ_NO,
+	RESULT_CODE, INSERT_USER_ID, INSERT_DATS,
+	EXTRACT_FLAG, FIRST_EXTRACT_DATE, LAST_EXTRACT_DATE,
+	RESULT_FLAG, COLL_DATE, RESULTS_QC_DATE,
+	RESULTS_QC_USER, AUDIT_KEY,PROGRAM_ID,
+	AUDIT_INSERT_DATS, AUDIT_INSERT_USER
+    )
+    values
+    (
+	:old.CHAPTER_ID, :old.CONTRACT_ID, :old.UNIT_ID,
+	:old.BATCH_ID, :old.TEST_ID, :old.TEST_SEQ_NO,
+	:old.RESULT_CODE, :old.INSERT_USER_ID, :old.INSERT_DATS,
+	:old.EXTRACT_FLAG, :old.FIRST_EXTRACT_DATE, :old.LAST_EXTRACT_DATE,
+	:old.RESULT_FLAG, :old.COLL_DATE, :old.RESULTS_QC_DATE,
+	:old.RESULTS_QC_USER, :old.AUDIT_KEY, 'DELETE',
+	sysdate, lt_user_session.get_userid
+    );
+end;
+```

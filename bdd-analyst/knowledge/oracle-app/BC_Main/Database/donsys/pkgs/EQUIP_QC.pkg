@@ -1,0 +1,494 @@
+create or replace
+PACKAGE EQUIP_QC IS
+
+/* ---------------- Version History---------------------
+
+Modified By         Ver          Date            Comments
+=============================================================
+
+B. Edwin             01          05/18/19    Original version created
+                                  to determine if the QC is passed or failed
+B. Edwin             02          09/29/19  changes to paramer logic.
+
+B. Edwin             03          11/12/19 MLT- 2759
+B. Edwin             04          07/16/20 MLT-3839
+B. Edwin             05          07/20/20 MLT-3839 (fine tune to V04)
+---------------------------------------------------- ------------ */
+PROCEDURE CHECK_QC_STATUS (
+                           pl_id_type          in varchar2,
+                           pl_equip_supp_code  in varchar2,
+                           pl_QC_code          in varchar2,
+                           pl_qc_check_code    in varchar2,
+                           pl_qc_value_date    in date,
+                           pl_data_type        in varchar2,
+                           pl_qc_value         in varchar2,
+                           pl_chapter_id       in varchar2,
+                           pl_qc_status        out varchar2
+                         ) ;
+
+ PROCEDURE CHECK_BAG_QC_STATUS (
+                           pl_scan_type        in varchar2,
+                           pl_bag_open_flag    in varchar2,
+                           pl_bag_open_date    in date,
+                           pl_bag_exp_date     in varchar2,
+                           pl_qc_scan_value         in varchar2,
+                           pl_qc_status        out varchar2
+                         ) ;
+
+ PROCEDURE READ_DATA (
+                      pl_id_type           in varchar2,
+                      pl_equip_supply_code in varchar2,
+                      pl_data_type         in varchar2,
+                      pl_qc_code           in varchar2,
+                      pl_qc_check_code     in varchar2,
+                      pl_scan_allowed      out varchar2,
+                      pl_range_required    out varchar2,
+                      pl_range_value       out varchar2,
+                      pl_qc_accept_value   out varchar2,
+                      pl_status            out varchar2
+                   ) ;
+ 
+t_scan_allowed    varchar2(1);
+t_range_required  varchar2(1);
+t_range_value     number:=0;
+t_qc_accept_value varchar2(5);
+t_status          varchar2(50);
+local_date        date;
+t_value_type      varchar2(10);
+END EQUIP_QC;
+/
+
+create or replace
+PACKAGE BODY EQUIP_QC IS
+
+PROCEDURE READ_DATA
+      (
+         pl_id_type           in varchar2,
+         pl_equip_supply_code in varchar2,
+         pl_data_type         in varchar2,
+         pl_qc_code           in varchar2,
+         pl_qc_check_code     in varchar2,
+         pl_scan_allowed      out varchar2,
+         pl_range_required    out varchar2, 
+         pl_range_value       out varchar2,
+         pl_qc_accept_value   out varchar2,
+         pl_status            out varchar2
+      ) IS
+
+Begin
+  select scan_allowed,range_required,
+         range_value,qc_accpt_value into
+         pl_scan_allowed,pl_range_required,
+         pl_range_value,pl_qc_accept_value  from valid_equip_parms 
+         where device_type=pl_id_type and
+         equip_supply=pl_equip_supply_code  and 
+         qc_test_parm_code=pl_QC_code and
+         qc_condition_code=pl_qc_check_code and 
+         data_type=pl_data_type;
+
+   pl_status:='PASS';
+    
+Exception 
+    when no_data_found then 
+       pl_status:='FAIL';
+   when others then 
+      pl_status:='FAIL';
+END READ_DATA;
+
+
+PROCEDURE CHECK_QC_STATUS (
+                           pl_id_type          in varchar2,
+                           pl_equip_supp_code  in varchar2,
+                           pl_QC_code          in varchar2,
+                           pl_qc_check_code    in varchar2,
+                           pl_qc_value_date    in date,
+                           pl_data_type        in varchar2,
+                           pl_qc_value         in varchar2,
+                           pl_chapter_id       in varchar2,
+                           pl_qc_status        out varchar2
+                         ) IS
+
+local_date    date;
+nLOTNUM    NUMBER:=0;
+nLOTNUM1    NUMBER:=0;
+nCATALOG   NUMBER:=0;
+pSupply_code  varchar2(10);
+nCount     NUMBER:=0;
+nREFNO     NUMBER:=0;
+nSupplCount NUMBER:=0;
+nCheck      NUMBER:=0;
+
+Begin
+
+  local_date:=lifetrack_timezone_convert.get_local_time(pl_chapter_id,sysdate);
+      
+ 
+           READ_DATA ( pl_id_type, pl_equip_supp_code, pl_data_type,
+                        pl_qc_code, pl_qc_check_code,t_scan_allowed , 
+                        t_range_required,
+                        t_range_value, t_qc_accept_value,t_status);
+
+       dbms_output.put_line('scan allowed='||t_scan_allowed);
+       dbms_output.put_line('range required='||t_range_required); 
+       dbms_output.put_line('range value='||t_range_value);
+       dbms_output.put_line('QC accpet value='||t_qc_accept_value); 
+       dbms_output.put_line('T1  status='||t_status); 
+
+    If pl_qc_check_code='CKCDT' then  
+ 
+       IF nvl(t_range_required,'X')='Y'  and
+           t_range_required is not null then 
+
+            If pl_qc_value_date between trunc(local_date) and trunc(local_date)+ t_range_value then
+               pl_qc_status:='PASS';
+            Else
+               pl_qc_status:='FAIL';
+            End If;  
+
+       ELSE
+
+           If trunc(pl_qc_value_date) >=trunc(local_date) then
+               pl_qc_status:='PASS';
+            Else
+               pl_qc_status:='FAIL';
+            End If; 
+       END IF;
+
+   Elsif pl_qc_check_code='CKRNG' then  
+
+        IF nvl(t_range_required,'X')='Y'  and
+           t_range_required is not null then 
+      
+            If to_number(pl_qc_value) between (to_number(t_qc_accept_value) - t_range_value) and
+               (to_number(t_qc_accept_value) + t_range_value) then
+
+               pl_qc_status:='PASS';
+            Else
+               pl_qc_status:='FAIL';
+            End If;  
+
+         Else
+            If to_number(pl_qc_value) = to_number(t_qc_accept_value) then
+               pl_qc_status:='PASS';
+            Else
+               pl_qc_status:='FAIL';
+            End If; 
+         End If;
+ 
+   Elsif pl_qc_check_code='DATE' then  
+ 
+          IF nvl(t_range_required,'X')='Y'  and
+              t_range_required is not null then 
+      
+            If trunc(pl_qc_value_date) between trunc(local_date - t_range_value) and
+               trunc(local_date + t_range_value) then
+               pl_qc_status:='PASS';
+            Else
+               pl_qc_status:='FAIL';
+            End If;  
+         Else
+           If pl_qc_value_date >=trunc(local_date) then
+               pl_qc_status:='PASS';
+            Else
+               pl_qc_status:='FAIL';
+            End If;  
+         End If;
+
+     Elsif pl_qc_check_code='LED' then  
+ 
+          IF nvl(t_range_required,'X')='Y'  and
+              t_range_required is not null then 
+      
+            If pl_qc_value_date between trunc(local_date) - t_range_value and
+               local_date then
+               pl_qc_status:='PASS';
+            Else
+               pl_qc_status:='FAIL';
+            End If;  
+         Else
+           If pl_qc_value_date < local_date then
+               pl_qc_status:='PASS';
+            Else
+               pl_qc_status:='FAIL';
+            End If;  
+         End If;
+
+   Elsif pl_qc_check_code='NUMB' then  
+ 
+     IF nvl(t_range_required,'X')='Y'  and
+           t_range_required is not null then 
+      
+            If to_number(pl_qc_value) between to_number(t_qc_accept_value) - t_range_value and
+               to_number(t_qc_accept_value) + t_range_value then
+
+               pl_qc_status:='PASS';
+            Else
+               pl_qc_status:='FAIL';
+            End If;  
+
+      Else
+
+          If to_number(pl_qc_value) = to_number(t_qc_accept_value) then
+              pl_qc_status:='PASS';
+          Else
+               pl_qc_status:='FAIL';
+          End If; 
+        
+     End If;
+
+   Elsif pl_qc_check_code in ('CKNA','OK') then  
+ 
+           If pl_qc_value=t_qc_accept_value then
+               pl_qc_status:='PASS';
+            Else
+               pl_qc_status:='FAIL';
+            End If; 
+   Elsif pl_qc_check_code in ('CKYN') then  
+
+        begin
+           select nvl(count(*),0) into nCount from 
+           valid_equip_parms 
+           where device_type=pl_id_type and
+           equip_supply=pl_equip_supp_code  and 
+           qc_test_parm_code=pl_QC_code and
+           qc_condition_code=pl_qc_check_code and 
+           qc_accpt_value=pl_qc_value;
+           
+           If nCount > 0 then 
+             pl_qc_status:='PASS';
+           Else
+             pl_qc_status:='FAIL';
+           End If;
+        end;
+
+  
+
+   Elsif pl_qc_check_code in ('SERIL') then  
+ 
+           If LTrim(pl_qc_value,'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890') is null then
+               pl_qc_status:='PASS';
+            Else
+               pl_qc_status:='FAIL';
+            End If;  
+
+  Elsif pl_qc_check_code in ('LOTN') then  
+ 
+       If nvl(t_scan_allowed,' ')='Y' then 
+
+          select count(*) into nLOTNUM from valid_lots where lot_number=pl_qc_value and
+          local_date between eff_date and nvl(term_date, local_date+10);
+          If nLOTNUM > 0 then 
+               select count(*) into nLOTNUM1 from valid_lots where chapter_id=pl_chapter_id and 
+               lot_number=pl_qc_value and local_date between eff_date and nvl(term_date, local_date+10);
+               If nLOTNUM1 > 0 then 
+                  pl_qc_status:='PASS';
+               Else
+                  pl_qc_status:='LERROR';
+              End If; 
+          Else
+              pl_qc_status:='LERROR';   -- the client side correct error wil be displayed
+          End If; 
+       Else
+          pl_qc_status:='PASS';
+       End If;
+
+       Begin
+
+            select nvl(count(*),0) into nCheck from valid_lots where 
+            lot_number=pl_qc_value and supply_code is not null and 
+            local_date between eff_date and nvl(term_date, local_date+10);
+
+            If nCheck > 0 then 
+              
+               select nvl(count(*),0) into nSupplCount from valid_lots where lot_number=pl_qc_value and
+               chapter_id=pl_chapter_id  and supply_code=pl_equip_supp_code and local_date
+               between eff_date and nvl(term_date, local_date+10);
+
+               If  nSupplCount > 0 then 
+                  pl_qc_status:='PASS';
+               Else
+                 pl_qc_status:='LERROR';
+               End If;
+            Else
+             null;
+            End IF;
+
+
+          Exception 
+             when others then 
+               null;
+         End;
+
+
+  Elsif pl_qc_check_code in ('REFNO') then  
+ 
+          select nvl(count(*),0) into nREFNO from equipment where chapter_id=pl_chapter_id and 
+          equip_reference=pl_qc_value and equip_type=pl_QC_code and rownum=1;
+            If nREFNO > 0 then 
+               pl_qc_status:='PASS';
+            Else
+                   pl_qc_status:='FAIL';
+               --- pl_qc_status:=pl_QC_code;
+            End If;  
+
+  Elsif pl_qc_check_code in ('CATN') then  
+      
+         select count(*) into nCATALOG from valid_catalogs where  catalog_number=pl_qc_value 
+         and local_date between eff_date and nvl(term_date, local_date+10);
+         
+         If nCATALOG > 0 then 
+
+          select count(*) into nCATALOG from valid_catalogs where chapter_id=pl_chapter_id and 
+          catalog_number=pl_qc_value and local_date between eff_date and nvl(term_date, local_date+10);
+            If nCATALOG > 0 then 
+               pl_qc_status:='PASS';
+            Else
+               pl_qc_status:='CERROR';
+            End If;
+         Else
+            pl_qc_status:='CERROR';    -- if the Catalog is not defined in the table PASS as per Celeste.
+
+         End IF;  
+
+
+             -- Check for special cataog for WBKIT or PLKIT or Generbal Bag
+
+ 
+     
+          Begin
+
+            select count(*) into nCheck from valid_lots where 
+            catalog_number=pl_qc_value and supply_code is not null and 
+            local_date between eff_date and nvl(term_date, local_date+10);
+
+            If nCheck > 0 then 
+              
+               select nvl(count(*),0) into nSupplCount from valid_lots where catalog_number=pl_qc_value and
+               chapter_id=pl_chapter_id  and supply_code=pl_equip_supp_code and local_date
+               between eff_date and nvl(term_date, local_date+10);
+
+               If  nSupplCount > 0 then 
+                  pl_qc_status:='PASS';
+               Else
+                 pl_qc_status:='CERROR';
+               End If;
+            Else
+             null;
+            End IF;
+
+
+          Exception 
+             when others then 
+               null;
+         End;
+       
+ 
+   End If;
+
+    Exception 
+        when no_data_found then
+            pl_qc_status:='FAIL';
+        When others then
+            pl_qc_status:='FAIL';
+END CHECK_QC_STATUS;
+
+PROCEDURE CHECK_BAG_QC_STATUS (
+                           pl_scan_type        in varchar2,
+                           pl_bag_open_flag    in varchar2,
+                           pl_bag_open_date    in date, 
+                           pl_bag_exp_date     in varchar2,
+                           pl_qc_scan_value    in varchar2,
+                           pl_qc_status        out varchar2
+                         ) IS
+
+BEGIN
+
+ --- Check if the scan is valid type (if catalog or lot no)
+
+   begin
+     select distinct value_type into t_value_type from valid_equip_parms
+     where device_type='SUPLY'  and equip_supply='BAG'
+      and qc_test_parm_code='OPCON' and rownum =1;
+
+     If t_value_type = pl_scan_type then 
+       pl_qc_status:= 'PASS';
+     Else
+       pl_qc_status:='FAIL';
+       return;
+     End If;
+
+   exception when no_data_found then 
+      pl_qc_status:='FAIL';
+      return;
+   when others then 
+      pl_qc_status:='FAIL';
+      return;
+   end;
+
+  -- Check the expiration 
+ 
+   Begin
+     
+    select qc_accpt_value  into t_qc_accept_value from valid_equip_parms
+     where device_type='SUPLY'  and equip_supply='BAG'
+     and qc_test_parm_code='EXPDT' and rownum =1;
+
+     If t_qc_accept_value='EQG' then
+         If pl_bag_exp_date >=local_date then 
+            pl_qc_status:= 'PASS';
+         Else
+             pl_qc_status:='FAIL';
+             return;
+         End If;
+     Else
+       pl_qc_status:='FAIL';
+       return;
+     End If;
+   
+   Exception when no_data_found then
+       pl_qc_status:='FAIL';
+       return;
+     when others then
+       pl_qc_status:='FAIL';
+       return;
+   End;
+
+ -- Check if the bag opened
+  If pl_bag_open_flag = 'Y' then 
+     
+    Begin
+       select range_required, range_value into
+         t_range_required, t_range_value  from valid_equip_parms
+         where device_type='SUPLY'  and equip_supply='BAG'
+         and qc_test_parm_code='OPCON' and qc_accpt_value='YES' and
+         local_date between eff_date and nvl(term_date, local_date+10);
+
+
+          IF nvl(t_range_required,'X')='Y'  and 
+            t_range_required is not null then
+          
+             If pl_bag_open_date between (local_date-t_range_value) and
+                (local_date+t_range_value) then
+                pl_qc_status:='PASS';
+             Else
+                pl_qc_status:='FAIL';
+            End If;
+         End If;
+
+    Exception 
+      when no_data_found then 
+          pl_qc_status:='FAIL';
+          return;
+      when others then 
+        pl_qc_status:='FAIL';
+        return;
+    End;
+   
+ End If;
+
+END CHECK_BAG_QC_STATUS;
+
+END EQUIP_QC ; /*-- Package body --*/
+/
+--grant execute on EQUIP_QC to public;
+--/

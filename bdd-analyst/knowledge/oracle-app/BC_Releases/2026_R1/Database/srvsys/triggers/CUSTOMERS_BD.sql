@@ -1,0 +1,72 @@
+--------------------------------------------------------
+--  DDL for Trigger CUSTOMERS_BD
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "CUSTOMERS_BD" before delete on CUSTOMERS for each row
+begin
+  insert into CUSTOMERS_AUDIT
+  (	CUSTOMER_ID,
+	CHAPTER_ID,
+	ALPHA_KEY,
+	CUSTOMER_TYPE,
+	NAME,
+	SHORT_NAME,
+	ADDRESS_1,
+	ADDRESS_2,
+	ADDRESS_3,
+	CITY,
+	STATE,
+	COUNTRY,
+	ZIP,
+	PHONE_NO,
+	FAX_NO,
+	TELEX_NO,
+	PAYEE_ID,
+	COD_FLAG,
+	RETURN_ACCEPTED_FLAG,
+	EFF_DATE,
+	LAST_MODIFIED_DATE,
+	PHONE_EXT,
+	AR_ACCOUNT,
+	CP6_DEST,
+	FI_PRICE_SCH_NO,
+	price_change_flag,
+	AUDIT_KEY,
+	PROGRAM_ID,
+	AUDIT_INSERT_USER,
+	AUDIT_INSERT_DATE
+  )
+	values
+  (	:old.CUSTOMER_ID,
+	:old.CHAPTER_ID,
+	:old.ALPHA_KEY,
+	:old.CUSTOMER_TYPE,
+	:old.NAME,
+	:old.SHORT_NAME,
+	:old.ADDRESS_1,
+	:old.ADDRESS_2,
+	:old.ADDRESS_3,
+	:old.CITY,
+	:old.STATE,
+	:old.COUNTRY,
+	:old.ZIP,
+	:old.PHONE_NO,
+	:old.FAX_NO,
+	:old.TELEX_NO,
+	:old.PAYEE_ID,
+	:old.COD_FLAG,
+	:old.RETURN_ACCEPTED_FLAG,
+	:old.EFF_DATE,
+	:old.LAST_MODIFIED_DATE,
+	:old.PHONE_EXT,
+	:old.AR_ACCOUNT,
+	:old.CP6_DEST,
+	:old.FI_PRICE_SCH_NO,
+	:old.PRICE_CHANGE_FLAG,
+	:old.AUDIT_KEY,
+	'DELETE',LT_USER_SESSION.GET_USERID,
+	sysdate
+  ) ;
+  end ;
+/
+ALTER TRIGGER "CUSTOMERS_BD" ENABLE;

@@ -1,0 +1,367 @@
+<div class="rchkin-layout" role="main">
+  <app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+  <div class="page-content">
+    <!-- Filter Panel: Return ID + RETRIEVE + CLEAR -->
+    <div class="filter-panel" role="search" aria-label="Return ID filter panel">
+      <div class="filter-row">
+        <!-- Return ID Dropdown -->
+        <mat-form-field
+          appearance="fill"
+          floatLabel="auto"
+          class="filter-field filter-field--return-id"
+          subscriptSizing="dynamic">
+          <mat-label>Return ID <span class="required-marker"></span></mat-label>
+          <mat-select
+            [id]="elementId('return-id')"
+            [formControl]="returnIdControl"
+            (openedChange)="onSelectOpenedChange(returnIdSearchCtrl, $event)"
+            panelClass="searchable-select-panel">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="returnIdSearchCtrl"
+                placeholderLabel="Search..."
+                noEntriesFoundLabel=""
+                ariaLabel="Search return IDs">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (advice of filteredReturnAdvices(); track advice.returnAdviceId) {
+              <mat-option [value]="advice.returnAdviceId">
+                {{ advice.returnAdviceId }}
+              </mat-option>
+            }
+            @if (filteredReturnAdvices().length === 0 && returnIdSearchCtrl.value) {
+              <mat-option disabled class="no-data-option">
+                No Data Available
+              </mat-option>
+            }
+          </mat-select>
+          @if (returnIdControl.touched && returnIdControl.hasError('required')) {
+            <mat-error>Return ID is required</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- RETRIEVE Button -->
+        <div class="filter-actions">
+          <button
+            mat-stroked-button
+            type="button"
+            class="retrieve-button"
+            [class.retrieve-button--enabled]="returnIdControl.value && !hasReturnAdvice()"
+            (click)="onRetrieve()"
+            [disabled]="retrieving() || !returnIdControl.value || hasReturnAdvice()">
+            RETRIEVE
+          </button>
+
+          <!-- CLEAR Button -->
+          <button
+            mat-button
+            type="button"
+            class="clear-button"
+            (click)="onClear()"
+            [disabled]="!returnIdControl.value">
+            CLEAR
+          </button>
+        </div>
+      </div>
+
+      <!-- Header Information Row -->
+      <dl class="header-info-row" aria-label="Return advice details">
+        <div class="display-field">
+          <dt class="display-field__label">Customer Name</dt>
+          <dd class="display-field__value">{{ returnAdviceHeader()?.customerName || '-' }}</dd>
+        </div>
+        <div class="display-field">
+          <dt class="display-field__label">User ID</dt>
+          <dd class="display-field__value">{{ returnAdviceHeader()?.returnUserId || '-' }}</dd>
+        </div>
+        <div class="display-field">
+          <dt class="display-field__label">Return Date</dt>
+          <dd class="display-field__value">{{ formatDate(returnAdviceHeader()?.returnDate) }}</dd>
+        </div>
+        <div class="display-field">
+          <dt class="display-field__label">Return Reason</dt>
+          <dd class="display-field__value">{{ getReturnReasonDisplay() }}</dd>
+        </div>
+        <div class="display-field">
+          <dt class="display-field__label">Current Location</dt>
+          <dd class="display-field__value">{{ hasReturnAdvice() ? 'QUARANTINE' : '-' }}</dd>
+        </div>
+      </dl>
+    </div>
+
+    <!-- Loading State -->
+    @if (loading() || retrieving()) {
+      <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+        <mat-spinner diameter="36" aria-label="Loading"></mat-spinner>
+        <span class="sr-only">Loading, please wait...</span>
+      </div>
+    }
+
+    <!-- Error State -->
+    @if (error() && !retrieving()) {
+      <div class="error-container" role="alert" aria-live="assertive">
+        <mat-icon aria-hidden="true">error_outline</mat-icon>
+        <p>{{ error() }}</p>
+      </div>
+    }
+
+    <!-- Empty State -->
+    @if (isEmpty() && !error() && !retrieving()) {
+      <div class="empty-state" role="status">
+        <mat-icon class="empty-state__icon" aria-hidden="true">search</mat-icon>
+        <p class="empty-state__title">No Results to Display</p>
+        <p class="empty-state__subtitle">Please enter search criteria to view results</p>
+      </div>
+    }
+
+    <!-- Data Table Card -->
+    @if (hasData()) {
+      <div class="content-card">
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Return items data table, scrollable">
+          <table
+            mat-table
+            [dataSource]="returnItems()"
+            class="return-items-table"
+            [attr.aria-label]="'Return items data table'">
+
+            <!-- Select Restock Column -->
+            <ng-container matColumnDef="selectRestock">
+              <th mat-header-cell *matHeaderCellDef>Select Restock</th>
+              <td mat-cell *matCellDef="let row">
+                <mat-form-field appearance="fill" class="table-select" subscriptSizing="dynamic">
+                  <mat-select
+                    [(ngModel)]="row.selectRestock"
+                    (selectionChange)="onRestockChange(row, $event.value)"
+                    placeholder="Select"
+                    [aria-label]="'Select restock for unit ' + (row.displayUnitId || row.unitId)">
+                    @for (option of restockOptions; track option.value) {
+                      <mat-option [value]="option.value">{{ option.label }}</mat-option>
+                    }
+                  </mat-select>
+                </mat-form-field>
+              </td>
+            </ng-container>
+
+            <!-- Unit ID Column -->
+            <ng-container matColumnDef="unitId">
+              <th mat-header-cell *matHeaderCellDef>Unit ID</th>
+              <td mat-cell *matCellDef="let row">{{ row.displayUnitId || row.unitId }}</td>
+            </ng-container>
+
+            <!-- Product Code Column -->
+            <ng-container matColumnDef="productCode">
+              <th mat-header-cell *matHeaderCellDef>Product Code</th>
+              <td mat-cell *matCellDef="let row">{{ row.productCode }}</td>
+            </ng-container>
+
+            <!-- ABORh Column -->
+            <ng-container matColumnDef="aboRh">
+              <th mat-header-cell *matHeaderCellDef>ABORh</th>
+              <td mat-cell *matCellDef="let row">{{ row.aboDescription || '-' }}</td>
+            </ng-container>
+
+            <!-- Warehouse ID Column -->
+            <ng-container matColumnDef="warehouseId">
+              <th mat-header-cell *matHeaderCellDef>Warehouse ID</th>
+              <td mat-cell *matCellDef="let row">
+                @if (row.selectRestock === 'Y') {
+                  <span class="readonly-value">{{ row.selectedWarehouseId || '-' }}</span>
+                } @else {
+                  <span class="sr-only">Not applicable</span>
+                }
+              </td>
+            </ng-container>
+
+            <!-- Device Number Column - Searchable -->
+            <ng-container matColumnDef="deviceNumber">
+              <th mat-header-cell *matHeaderCellDef>Device Number</th>
+              <td mat-cell *matCellDef="let row">
+                @if (row.selectRestock === 'Y') {
+                  <mat-form-field appearance="fill" class="table-select table-select--wide" subscriptSizing="dynamic">
+                    <mat-select
+                      [(ngModel)]="row.selectedDeviceNumber"
+                      (selectionChange)="onDeviceChange(row, $event.value)"
+                      (openedChange)="onSelectOpenedChange(deviceSearchCtrl, $event)"
+                      panelClass="searchable-select-panel"
+                      [aria-label]="'Device number for unit ' + (row.displayUnitId || row.unitId)">
+                      <mat-option>
+                        <ngx-mat-select-search
+                          [formControl]="deviceSearchCtrl"
+                          placeholderLabel="Search..."
+                          noEntriesFoundLabel=""
+                          ariaLabel="Search device numbers">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (device of getDevicesForRow(row); track device.deviceNumber) {
+                        <mat-option [value]="device.deviceNumber">{{ device.deviceNumber }} - {{ device.description }}</mat-option>
+                      }
+                      @if (getDevicesForRow(row).length === 0) {
+                        <mat-option disabled class="no-data-option">
+                          No Data Available
+                        </mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                } @else {
+                  <span class="sr-only">Not applicable</span>
+                }
+              </td>
+            </ng-container>
+
+            <!-- Rack Number Column - Searchable -->
+            <ng-container matColumnDef="rackNumber">
+              <th mat-header-cell *matHeaderCellDef>Rack Number</th>
+              <td mat-cell *matCellDef="let row">
+                @if (row.selectRestock === 'Y') {
+                  <mat-form-field appearance="fill" class="table-select table-select--wide" subscriptSizing="dynamic">
+                    <mat-select
+                      [(ngModel)]="row.selectedRackNumber"
+                      (selectionChange)="onRackChange(row, $event.value)"
+                      (openedChange)="onSelectOpenedChange(rackSearchCtrl, $event)"
+                      [disabled]="!row.selectedDeviceNumber"
+                      panelClass="searchable-select-panel"
+                      [aria-label]="'Rack number for unit ' + (row.displayUnitId || row.unitId)">
+                      <mat-option>
+                        <ngx-mat-select-search
+                          [formControl]="rackSearchCtrl"
+                          placeholderLabel="Search..."
+                          noEntriesFoundLabel=""
+                          ariaLabel="Search rack numbers">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (rack of getRacksForRow(row); track rack.rackNumber) {
+                        <mat-option [value]="rack.rackNumber">{{ rack.rackNumber }} - {{ rack.description }}</mat-option>
+                      }
+                      @if (getRacksForRow(row).length === 0) {
+                        <mat-option disabled class="no-data-option">
+                          No Data Available
+                        </mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                } @else {
+                  <span class="sr-only">Not applicable</span>
+                }
+              </td>
+            </ng-container>
+
+            <!-- Tray Number Column - Searchable (Optional) -->
+            <ng-container matColumnDef="trayNumber">
+              <th mat-header-cell *matHeaderCellDef>Tray Number</th>
+              <td mat-cell *matCellDef="let row">
+                @if (row.selectRestock === 'Y') {
+                  <mat-form-field appearance="fill" class="table-select table-select--wide" subscriptSizing="dynamic">
+                    <mat-select
+                      [(ngModel)]="row.selectedTrayId"
+                      (selectionChange)="onTrayChange(row, $event.value)"
+                      (openedChange)="onSelectOpenedChange(traySearchCtrl, $event)"
+                      [disabled]="!row.selectedRackNumber"
+                      panelClass="searchable-select-panel"
+                      [aria-label]="'Tray number for unit ' + (row.displayUnitId || row.unitId)">
+                      <mat-option>
+                        <ngx-mat-select-search
+                          [formControl]="traySearchCtrl"
+                          placeholderLabel="Search..."
+                          noEntriesFoundLabel=""
+                          ariaLabel="Search tray numbers">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (tray of getTraysForRow(row); track tray.trayNumber) {
+                        <mat-option [value]="tray.trayNumber">
+                          {{ tray.trayNumber }}{{ tray.isFull === 'Y' ? ' (Full)' : '' }}
+                        </mat-option>
+                      }
+                      @if (getTraysForRow(row).length === 0) {
+                        <mat-option disabled class="no-data-option">
+                          No Data Available
+                        </mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                } @else {
+                  <span class="sr-only">Not applicable</span>
+                }
+              </td>
+            </ng-container>
+
+            <!-- Rejection Code Column - Searchable dropdown -->
+            <ng-container matColumnDef="rejectionCode">
+              <th mat-header-cell *matHeaderCellDef>Rejection Code</th>
+              <td mat-cell *matCellDef="let row">
+                @if (row.selectRestock === 'N') {
+                  <mat-form-field appearance="fill" class="table-select table-select--wide" subscriptSizing="dynamic">
+                    <mat-select
+                      [(ngModel)]="row.selectedRejectCode"
+                      (selectionChange)="onRejectCodeChange(row, $event.value)"
+                      (openedChange)="onSelectOpenedChange(rejectCodeSearchCtrl, $event)"
+                      panelClass="searchable-select-panel"
+                      [aria-label]="'Rejection code for unit ' + (row.displayUnitId || row.unitId)">
+                      <mat-option>
+                        <ngx-mat-select-search
+                          [formControl]="rejectCodeSearchCtrl"
+                          placeholderLabel="Search..."
+                          noEntriesFoundLabel=""
+                          ariaLabel="Search rejection codes">
+                        </ngx-mat-select-search>
+                      </mat-option>
+                      @for (code of filteredRejectCodes(); track code.code) {
+                        <mat-option [value]="code.code">{{ code.code }} - {{ code.description }}</mat-option>
+                      }
+                      @if (filteredRejectCodes().length === 0) {
+                        <mat-option disabled class="no-data-option">
+                          No Data Available
+                        </mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                } @else {
+                  <span class="sr-only">Not applicable</span>
+                }
+              </td>
+            </ng-container>
+
+            <!-- Expiration Date Column -->
+            <ng-container matColumnDef="expirationDate">
+              <th mat-header-cell *matHeaderCellDef>Expiration Date</th>
+              <td mat-cell *matCellDef="let row">{{ formatDateTime(row.expDate) }}</td>
+            </ng-container>
+
+            <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+            <tr mat-row *matRowDef="let row; columns: displayedColumns;"></tr>
+          </table>
+        </div>
+      </div>
+    }
+
+    <!-- Form Footer: CANCEL + SAVE (only visible when data is loaded) -->
+    @if (hasData()) {
+      <div class="form-footer" role="group" aria-label="Form actions">
+        <button
+          mat-button
+          type="button"
+          class="cancel-button"
+          (click)="onCancel()"
+          [disabled]="processing()">
+          CANCEL
+        </button>
+        <button
+          mat-raised-button
+          color="primary"
+          type="button"
+          class="save-button"
+          (click)="onSave()"
+          [disabled]="processing() || !canSave()"
+          [attr.aria-label]="processing() ? 'Saving, please wait' : 'Save'"
+          [attr.aria-busy]="processing()">
+          @if (processing()) {
+            <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
+            <span class="sr-only">Saving, please wait...</span>
+          } @else {
+            SAVE
+          }
+        </button>
+      </div>
+    }
+  </div>
+</div>

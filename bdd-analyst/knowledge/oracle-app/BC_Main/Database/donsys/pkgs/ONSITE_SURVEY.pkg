@@ -1,0 +1,313 @@
+CREATE OR REPLACE PACKAGE ONSITE_SURVEY IS
+
+/* ---------------- Version History---------------------
+
+
+Modified By         Ver          Date            Comments
+=============================================================
+
+B. Edwin             01          10/05/19  Original version created
+                                  package to link the survey template
+                                  based on the donor survey criteria
+
+                      02         chapterID logic was added.
+                      03         05/14/21         MLT-4286 (eff dates check added)
+                                 -- Made unit ID optional
+                                 -- Added a wrapper routine survey_link_status
+                                    which will be called from Onsite App
+                      04        MLT-4286 (term date on template is until
+                                midnight of that day) - survey_cat cursor modified.
+---------------------------------------------------- ------------ */
+    PROCEDURE LINK_SURVEY_TEMPLATE
+                             (
+                               pl_session_id       in varchar2,
+                               pl_chapter_id       in varchar2,
+                               pl_drive_date       in date,
+                               pl_donor_id         in varchar2,
+                               pl_unit_id          in varchar2,
+                               pl_user_id          in varchar2,
+                               pl_link_status      out varchar2
+                              );
+    
+    /*
+    --1) This routine sets status out parameter to Y if any questions are available
+    --   for the criteria.
+    --2) Default out status is N.
+    */
+    PROCEDURE SURVEY_LINK_STATUS
+                             (
+                               pl_transaction_id   in varchar2,
+                               pl_link_status      out varchar2
+                              );
+    
+    t_status          varchar2(50);
+    local_date        date;
+END ONSITE_SURVEY;
+/
+
+
+CREATE OR REPLACE PACKAGE BODY ONSITE_SURVEY IS
+
+
+    PROCEDURE LINK_SURVEY_TEMPLATE
+                              (
+                               pl_session_id       in varchar2,
+                               pl_chapter_id       in varchar2,
+                               pl_drive_date       in date,
+                               pl_donor_id         in varchar2,
+                               pl_unit_id          in varchar2,
+                               pl_user_id          in varchar2,
+                               pl_link_status      out varchar2
+                             ) IS
+    
+    CURSOR grp_cur (pl_local_date in date) is 
+        select distinct survey_group_id 
+          from survey_criteria_parm 
+         where chapter_id=pl_chapter_id 
+           and pl_local_date between eff_date and nvl(term_date, pl_local_date+10);
+    
+    /* CURSOR survey_cat(pl_grp in varchar2, pl_local_date in date) is select survey_category_code,
+               survey_category_values,linked_template_id template_id
+               from survey_criteria_parm where survey_group_id=pl_grp and
+                chapter_id=pl_chapter_id and pl_local_date between eff_date and nvl(term_date, pl_local_date+10);
+    */
+    
+    CURSOR survey_cat(pl_grp in varchar2, pl_local_date in date) is 
+        select distinct survey_category_code, survey_category_values,linked_template_id template_id
+          from survey_criteria_parm A, VALID_SURVEY_QUES_TEMPLATES B 
+         where A.survey_group_id=pl_grp 
+           and A.chapter_id=pl_chapter_id 
+           and pl_local_date between A.eff_date and nvl(A.term_date, pl_local_date+10)
+           and A.linked_template_id=B.template_id 
+           and trunc(pl_local_date) between B.eff_date and nvl(B.term_date, pl_local_date+10);
+    
+    
+    
+    t_donation_type   varchar2(5);
+    t_proc_code       varchar2(5);
+    t_zip             varchar2(5);
+    nCount            NUMBER:=0;
+    t_count           NUMBER:=0;
+    pl_template_id    varchar2(10);
+    grp_counter       number:=0;
+    no_of_encounter   number:=0;
+    
+    Begin
+    
+      local_date:=lifetrack_timezone_convert.get_local_time(pl_chapter_id,sysdate);
+    
+    
+        FOR Z in grp_cur (local_date) Loop
+    
+          pl_template_id:=null;
+          grp_counter:=0;
+          no_of_encounter:=0;
+    
+          FOR Z1 in survey_cat(Z.survey_group_id, local_date) Loop
+            grp_counter:=grp_counter+1;
+    
+           If Z1.survey_category_code='NEWD' then
+              select count(*) into nCount from donations where
+              donor_id=pl_donor_id and coll_date=pl_drive_date and
+              0 = (select count(*) from donations where donor_id=pl_donor_id and
+                  coll_date!=pl_drive_date);
+    
+              If nCount   > 0 then
+                no_of_encounter:=no_of_encounter+1;
+                pl_template_id:=Z1.template_id;
+              End If;
+          End If;
+    
+          If Z1.survey_category_code='RETD' then
+              nCount:=0;
+              select nvl(count(*),0) into nCount from donations where
+              donor_id=pl_donor_id and coll_date!=pl_drive_date;
+    
+              If nCount   > 0 then
+                no_of_encounter:=no_of_encounter+1;
+                pl_template_id:=Z1.template_id;
+              End If;
+          End If;
+    
+          If Z1.survey_category_code='DON' then
+              -- get the current donation type
+              select donation_type into t_donation_type from donations
+              where donor_id=pl_donor_id and NVL(unit_id,'@')=nvl(pl_unit_id, NVL(unit_id,'@')) and
+              coll_date=pl_drive_date and rownum=1;
+    
+              If Instr(Z1.survey_category_values,t_donation_type) > 0 then
+                no_of_encounter:=no_of_encounter+1;
+                pl_template_id:=Z1.template_id;
+              End If;
+          End If;
+    
+          If Z1.survey_category_code='PROC' then
+    
+              -- get the current proc code
+              select procedure_code into t_proc_code from donations
+              where donor_id=pl_donor_id and NVL(unit_id,'@')=nvl(pl_unit_id, NVL(unit_id,'@')) and
+              coll_date=pl_drive_date and rownum=1;
+    
+              If Instr(Z1.survey_category_values,t_proc_code) > 0 then
+                no_of_encounter:=no_of_encounter+1;
+                pl_template_id:=Z1.template_id;
+              End If;
+          End If;
+    
+          If Z1.survey_category_code='ZIP' then
+              -- get the donor zip code
+              select zip  into t_zip from valid_city_state where
+             usps_id=(select nvl(usps_id,0) from donor_addresses where
+                      donor_id=pl_donor_id);
+    
+              If Instr(Z1.survey_category_values,t_donation_type) > 0 then
+                no_of_encounter:=no_of_encounter+1;
+                pl_template_id:=Z1.template_id;
+              End If;
+          End If;
+    
+    
+           If Z1.survey_category_code = 'SEX' then
+    
+             If Z1.survey_category_values='M' then
+                nCount:=0;
+                select count(*) into nCount from donors where gender='M' and
+                donor_id=pl_donor_id;
+                If nCount > 0 then
+                   no_of_encounter:=no_of_encounter+1;
+                   pl_template_id:=Z1.template_id;
+                End If;
+            Elsif Z1.survey_category_values = 'F' then
+    
+               nCount:=0;
+               select count(*) into nCount from donors where gender='F' and
+                donor_id=pl_donor_id;
+                If nCount > 0 then
+                     no_of_encounter:=no_of_encounter+1;
+                    pl_template_id:=Z1.template_id;
+                End If;
+            Elsif (Z1.survey_category_values like 'M,F%') or
+                (Z1.survey_category_values like 'F,M%') then
+                  no_of_encounter:=no_of_encounter+1;
+                 pl_template_id:=Z1.template_id;
+           End If;
+    
+          END IF;
+    
+           If Z1.survey_category_code='DFLT' then
+                no_of_encounter:=no_of_encounter+1;
+                pl_template_id:=Z1.template_id;
+           End If;
+    
+    
+          END LOOP;
+             If  no_of_encounter = grp_counter then
+               If pl_template_id is not null then
+                  -- check if the template is already there in the table for that session id
+    
+                   select nvl(count(*),0) into t_Count from survey_crit_link_template
+                   where session_id=pl_session_id and survey_template_id=pl_template_id;
+    
+                   If t_Count = 0 then
+    
+                   insert into survey_crit_link_template (
+                    SESSION_ID, SURVEY_TEMPLATE_ID,
+                    CRITERIA_CODE,INSERT_DATE,
+                    INSERT_USER,PROGRAM_ID) VALUES
+                    (pl_session_id,pl_template_id,null,
+                    sysdate,pl_user_id,'ONSITE_SURVEY');
+                   End If;
+    
+    
+               End If;
+              End If;
+    
+        END LOOP;
+      pl_link_status:='OK';
+    
+    EXCEPTION when others
+    then
+      pl_link_status:=sqlerrm;
+    
+    END LINK_SURVEY_TEMPLATE;
+
+    PROCEDURE SURVEY_LINK_STATUS
+                              (
+                               pl_transaction_id   in varchar2,
+                               pl_link_status      out varchar2
+                             ) IS  
+        PRAGMA AUTONOMOUS_TRANSACTION;                             
+        lv_sessionId VARCHAR2(50);
+        ld_localDate DATE;
+        nCnt NUMBER := 0;
+        
+        CURSOR don_cur IS 
+        SELECT chapter_id, coll_date, donor_id, unit_id
+          FROM donations
+         WHERE transaction_id = pl_transaction_id;
+        
+        don_rec don_cur%ROWTYPE;
+        
+    BEGIN
+        -- Default out status
+        pl_link_status := 'N';
+        
+        lv_sessionId := SYS_GUID();
+        
+        -- Get donation
+        OPEN don_cur;
+        FETCH don_cur INTO don_rec;
+        CLOSE don_cur;
+        
+        IF don_rec.donor_id IS NULL OR don_rec.chapter_id IS NULL OR don_rec.coll_date IS NULL THEN
+            RETURN;
+        END IF;
+        
+        -- call the routine which inserts into survey_crit_link_template table
+        link_survey_template(  lv_sessionId,
+                               don_rec.chapter_id,
+                               don_rec.coll_date,
+                               don_rec.donor_id,
+                               don_rec.unit_id,
+                               'ONSITE',
+                               pl_link_status
+                             );
+        
+        -- check if any survey questions are available for this criteria.                             
+        IF pl_link_status = 'OK' THEN
+            ld_localDate:=lifetrack_timezone_convert.get_local_time(don_rec.chapter_id,sysdate);
+            SELECT
+                COUNT(1) INTO nCnt
+            FROM
+                survey_crit_link_template sc
+                INNER JOIN valid_survey_ques_templates  vt ON sc.survey_template_id = vt.template_id
+                INNER JOIN valid_survey_questions       vq ON vt.question_code = vq.question_code
+                INNER JOIN valid_survey_answers         va ON vt.question_code = va.question_code
+            WHERE
+                    sc.session_id = lv_sessionId
+                AND ld_localDate BETWEEN vt.eff_date AND nvl(vt.term_date, ld_localDate + 1)
+                AND ld_localDate BETWEEN vq.eff_date AND nvl(vq.term_date, ld_localDate + 1); 
+        END IF;
+        
+    
+        -- Delete as we only need to know if any questions are available for the criteria.
+        DELETE FROM survey_crit_link_template
+          WHERE session_id = lv_sessionId;
+    
+        
+        COMMIT;
+        
+        IF nCnt = 0 THEN
+            pl_link_status := 'N';
+        ELSE 
+            pl_link_status := 'Y';
+        END IF;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE(SQLERRM);
+            pl_link_status := 'N';    
+    END;
+
+END ONSITE_SURVEY ; /*-- Package body --*/
+/

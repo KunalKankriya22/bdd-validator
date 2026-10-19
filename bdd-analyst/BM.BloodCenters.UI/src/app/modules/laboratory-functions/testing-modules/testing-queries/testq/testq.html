@@ -1,0 +1,409 @@
+<app-page-header-with-breadcrumb [config]="pageHeaderConfig" />
+
+<section
+  class="testq-container"
+  [attr.aria-labelledby]="elementId('heading')"
+  role="region">
+
+  <!-- Unit ID Input Section -->
+  <div class="unit-input-section">
+    <div class="unit-input-row">
+      <app-unit-id-field
+        class="unit-id-field"
+        label="Unit ID"
+        [required]="true"
+        [showBarcodeIcon]="true"
+        hintDefault="Scan or type"
+        (validated)="onUnitIdValidated($event)"
+        (cleared)="onUnitIdCleared()"
+        #unitIdField
+      />
+
+      <div class="collection-date-field">
+        <label class="collection-date-label">Collection Date</label>
+        @if (hasMultipleDates()) {
+          <mat-form-field appearance="outline" class="collection-date-select">
+            <mat-select
+              [value]="collectionDate()"
+              (selectionChange)="onCollectionDateSelected($event.value)"
+              aria-label="Select collection date">
+              @for (date of collectionDates(); track date) {
+                <mat-option [value]="date">{{ formatDateValue(date) }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+        } @else {
+          <span class="collection-date-value">{{ collectionDateDisplay() }}</span>
+        }
+      </div>
+
+      <button
+        mat-button
+        type="button"
+        class="clear-btn"
+        (click)="clear()"
+        [id]="elementId('clear-btn')"
+        aria-label="Clear form">
+        CLEAR
+      </button>
+    </div>
+  </div>
+
+  <!-- Loading State -->
+  @if (isLoading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading test data"></mat-spinner>
+    </div>
+  }
+
+  <!-- Error State -->
+  @if (error() && !isLoading()) {
+    <div class="error-container" role="alert" aria-live="assertive">
+      <mat-icon aria-hidden="true">error</mat-icon>
+      <p>{{ error() }}</p>
+    </div>
+  }
+
+  <!-- Empty State -->
+  @if (isEmpty() && !isLoading() && !error()) {
+    <div class="empty-state" role="status">
+      <mat-icon class="empty-icon" aria-hidden="true">search</mat-icon>
+      <h2 class="empty-title">No Results to Display</h2>
+      <p class="empty-subtitle">Scan or enter a Unit ID to begin.</p>
+    </div>
+  }
+
+  <!-- Results Section -->
+  @if (hasResults() && !isLoading()) {
+    <div class="results-section">
+      <!-- Unit Attributes and Interdictions Button -->
+      <div class="actions-row">
+        <button
+          mat-stroked-button
+          color="primary"
+          class="attributes-btn"
+          (click)="openAttributesInterdictionsDialog()"
+          [id]="elementId('attributes-btn')">
+          UNIT ATTRIBUTES AND INTERDICTIONS
+        </button>
+      </div>
+
+      <!-- Scheduled/Unscheduled Tests Section -->
+      @if (hasScheduledTests()) {
+        <div class="test-section">
+          <h2 class="section-title">Scheduled/Unscheduled Tests</h2>
+
+          <div class="section-body">
+            <!-- Vertical Section Label -->
+            <div class="section-label-vertical scheduled-label-bg">
+              <mat-icon class="section-label-icon">event</mat-icon>
+              <span class="section-label-text">Scheduled Tests</span>
+            </div>
+
+            <div class="section-content">
+              <div class="table-container">
+                <table mat-table [dataSource]="scheduledPagedData()" class="test-table" multiTemplateDataRows>
+                  <!-- Expand Column -->
+                  <ng-container matColumnDef="expand">
+                    <th mat-header-cell *matHeaderCellDef class="expand-column"></th>
+                    <td mat-cell *matCellDef="let row" class="expand-column">
+                      <button
+                        mat-icon-button
+                        (click)="toggleRow(row); $event.stopPropagation()"
+                        [attr.aria-expanded]="isRowExpanded(row)"
+                        [attr.aria-label]="isRowExpanded(row) ? 'Collapse row' : 'Expand row'">
+                        <mat-icon>{{ isRowExpanded(row) ? 'expand_less' : 'expand_more' }}</mat-icon>
+                      </button>
+                    </td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="can">
+                    <th mat-header-cell *matHeaderCellDef>Can</th>
+                    <td mat-cell *matCellDef="let row">{{ row.cancelFlag === 'Y' ? 'Y' : '' }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="si">
+                    <th mat-header-cell *matHeaderCellDef>SI</th>
+                    <td mat-cell *matCellDef="let row">{{ row.testSeqNo }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="testId">
+                    <th mat-header-cell *matHeaderCellDef>Test ID</th>
+                    <td mat-cell *matCellDef="let row">{{ row.testId }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="sq">
+                    <th mat-header-cell *matHeaderCellDef>Sq</th>
+                    <td mat-cell *matCellDef="let row">{{ row.testState || 'NA' }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="resultCode1">
+                    <th mat-header-cell *matHeaderCellDef>Result Code 1</th>
+                    <td mat-cell *matCellDef="let row">{{ row.resultStatus1 || '' }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="resultDescription">
+                    <th mat-header-cell *matHeaderCellDef>Result Description</th>
+                    <td mat-cell *matCellDef="let row">{{ getResultDescription(row) }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="testBatchId">
+                    <th mat-header-cell *matHeaderCellDef>Test Batch ID</th>
+                    <td mat-cell *matCellDef="let row">{{ row.tbId || '' }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="absValChan">
+                    <th mat-header-cell *matHeaderCellDef>ABS/Val/Chan</th>
+                    <td mat-cell *matCellDef="let row">{{ row.absorbance || '' }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="ratio">
+                    <th mat-header-cell *matHeaderCellDef>Ratio</th>
+                    <td mat-cell *matCellDef="let row">{{ row.ratio || '' }}</td>
+                  </ng-container>
+
+                  <!-- Expanded Row Detail -->
+                  <ng-container matColumnDef="expandedDetail">
+                    <td mat-cell *matCellDef="let row" [attr.colspan]="displayedColumns.length">
+                      @if (isRowExpanded(row)) {
+                        <div class="expanded-row-detail" [@detailExpand]>
+                          <table class="detail-table">
+                            <thead>
+                              <tr>
+                                <th>Result Date & Time</th>
+                                <th>Tech</th>
+                                <th>Lab</th>
+                                <th>TB Seq</th>
+                                <th>Well</th>
+                                <th>Mode</th>
+                                <th>Edit</th>
+                                <th>Temperature</th>
+                                <th>Result</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              <tr>
+                                <td>{{ formatDateTimeValue(row.resultDats) }}</td>
+                                <td>{{ row.resultUserId || '-' }}</td>
+                                <td>{{ row.testingLabCode || '-' }}</td>
+                                <td>{{ row.tbSeqNo || '-' }}</td>
+                                <td>{{ row.wellNumber || '-' }}</td>
+                                <td>{{ row.testModeDesc || '-' }}</td>
+                                <td>{{ row.editResultFlag || '-' }}</td>
+                                <td>{{ row.temperature || '-' }}</td>
+                                <td>{{ row.resultStatus2Desc || row.resultStatus2 || '-' }}</td>
+                              </tr>
+                            </tbody>
+                          </table>
+                          <table class="detail-table detail-table-secondary">
+                            <thead>
+                              <tr>
+                                <th>Lab</th>
+                                <th>TB Seq</th>
+                                <th>Well</th>
+                                <th>Mode</th>
+                                <th>Edit</th>
+                                <th>Temp</th>
+                                <th>Result Code</th>
+                                <th>U Chap</th>
+                                <th>T Chap</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              <tr>
+                                <td>{{ row.testingLabCode || '-' }}</td>
+                                <td>{{ row.tbSeqNo || '-' }}</td>
+                                <td>{{ row.wellNumber || '-' }}</td>
+                                <td>{{ row.testModeDesc || '-' }}</td>
+                                <td>{{ row.editResultFlag || '-' }}</td>
+                                <td>{{ row.temperature || '-' }}</td>
+                                <td>{{ row.resultStatus2 || '-' }}</td>
+                                <td>{{ row.chapterId || '-' }}</td>
+                                <td>{{ row.testChapterId || '-' }}</td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      }
+                    </td>
+                  </ng-container>
+
+                  <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+                  <tr mat-row *matRowDef="let row; columns: displayedColumns;" class="test-row"></tr>
+                  <tr mat-row *matRowDef="let row; columns: ['expandedDetail']" class="expanded-row"></tr>
+                </table>
+              </div>
+
+              <mat-paginator
+                [length]="scheduledTests().length"
+                [pageSize]="scheduledPageSize()"
+                [pageIndex]="scheduledPageIndex()"
+                [pageSizeOptions]="[10, 25, 50]"
+                (page)="onScheduledPageChange($event)"
+                [showFirstLastButtons]="true"
+                aria-label="Pagination for scheduled tests">
+              </mat-paginator>
+            </div>
+          </div>
+        </div>
+      }
+
+      <!-- Unscheduled Tests Section -->
+      @if (hasUnscheduledTests()) {
+        <div class="test-section unscheduled-section">
+          <div class="section-body">
+            <!-- Vertical Section Label -->
+            <div class="section-label-vertical unscheduled-label-bg">
+              <mat-icon class="section-label-icon">event_busy</mat-icon>
+              <span class="section-label-text">Unscheduled Tests</span>
+            </div>
+
+            <div class="section-content">
+              <div class="table-container">
+                <table mat-table [dataSource]="unscheduledPagedData()" class="test-table" multiTemplateDataRows>
+                  <ng-container matColumnDef="expand">
+                    <th mat-header-cell *matHeaderCellDef class="expand-column"></th>
+                    <td mat-cell *matCellDef="let row" class="expand-column">
+                      <button
+                        mat-icon-button
+                        (click)="toggleRow(row); $event.stopPropagation()"
+                        [attr.aria-expanded]="isRowExpanded(row)"
+                        [attr.aria-label]="isRowExpanded(row) ? 'Collapse row' : 'Expand row'">
+                        <mat-icon>{{ isRowExpanded(row) ? 'expand_less' : 'expand_more' }}</mat-icon>
+                      </button>
+                    </td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="can">
+                    <th mat-header-cell *matHeaderCellDef>Can</th>
+                    <td mat-cell *matCellDef="let row">{{ row.cancelFlag === 'Y' ? 'Y' : '' }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="si">
+                    <th mat-header-cell *matHeaderCellDef>SI</th>
+                    <td mat-cell *matCellDef="let row">{{ row.testSeqNo }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="testId">
+                    <th mat-header-cell *matHeaderCellDef>Test ID</th>
+                    <td mat-cell *matCellDef="let row">{{ row.testId }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="sq">
+                    <th mat-header-cell *matHeaderCellDef>Sq</th>
+                    <td mat-cell *matCellDef="let row">{{ row.testState || 'NA' }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="resultCode1">
+                    <th mat-header-cell *matHeaderCellDef>Result Code 1</th>
+                    <td mat-cell *matCellDef="let row">{{ row.resultStatus1 || '' }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="resultDescription">
+                    <th mat-header-cell *matHeaderCellDef>Result Description</th>
+                    <td mat-cell *matCellDef="let row">{{ getResultDescription(row) }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="testBatchId">
+                    <th mat-header-cell *matHeaderCellDef>Test Batch ID</th>
+                    <td mat-cell *matCellDef="let row">{{ row.tbId || '' }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="absValChan">
+                    <th mat-header-cell *matHeaderCellDef>ABS/Val/Chan</th>
+                    <td mat-cell *matCellDef="let row">{{ row.absorbance || '' }}</td>
+                  </ng-container>
+
+                  <ng-container matColumnDef="ratio">
+                    <th mat-header-cell *matHeaderCellDef>Ratio</th>
+                    <td mat-cell *matCellDef="let row">{{ row.ratio || '' }}</td>
+                  </ng-container>
+
+                  <!-- Expanded Row Detail -->
+                  <ng-container matColumnDef="expandedDetail">
+                    <td mat-cell *matCellDef="let row" [attr.colspan]="displayedColumns.length">
+                      @if (isRowExpanded(row)) {
+                        <div class="expanded-row-detail" [@detailExpand]>
+                          <table class="detail-table">
+                            <thead>
+                              <tr>
+                                <th>Result Date & Time</th>
+                                <th>Tech</th>
+                                <th>Lab</th>
+                                <th>TB Seq</th>
+                                <th>Well</th>
+                                <th>Mode</th>
+                                <th>Edit</th>
+                                <th>Temperature</th>
+                                <th>Result</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              <tr>
+                                <td>{{ formatDateTimeValue(row.resultDats) }}</td>
+                                <td>{{ row.resultUserId || '-' }}</td>
+                                <td>{{ row.testingLabCode || '-' }}</td>
+                                <td>{{ row.tbSeqNo || '-' }}</td>
+                                <td>{{ row.wellNumber || '-' }}</td>
+                                <td>{{ row.testModeDesc || '-' }}</td>
+                                <td>{{ row.editResultFlag || '-' }}</td>
+                                <td>{{ row.temperature || '-' }}</td>
+                                <td>{{ row.resultStatus2Desc || row.resultStatus2 || '-' }}</td>
+                              </tr>
+                            </tbody>
+                          </table>
+                          <table class="detail-table detail-table-secondary">
+                            <thead>
+                              <tr>
+                                <th>Lab</th>
+                                <th>TB Seq</th>
+                                <th>Well</th>
+                                <th>Mode</th>
+                                <th>Edit</th>
+                                <th>Temp</th>
+                                <th>Result Code</th>
+                                <th>U Chap</th>
+                                <th>T Chap</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              <tr>
+                                <td>{{ row.testingLabCode || '-' }}</td>
+                                <td>{{ row.tbSeqNo || '-' }}</td>
+                                <td>{{ row.wellNumber || '-' }}</td>
+                                <td>{{ row.testModeDesc || '-' }}</td>
+                                <td>{{ row.editResultFlag || '-' }}</td>
+                                <td>{{ row.temperature || '-' }}</td>
+                                <td>{{ row.resultStatus2 || '-' }}</td>
+                                <td>{{ row.chapterId || '-' }}</td>
+                                <td>{{ row.testChapterId || '-' }}</td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      }
+                    </td>
+                  </ng-container>
+
+                  <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+                  <tr mat-row *matRowDef="let row; columns: displayedColumns;" class="test-row"></tr>
+                  <tr mat-row *matRowDef="let row; columns: ['expandedDetail']" class="expanded-row"></tr>
+                </table>
+              </div>
+
+              <mat-paginator
+                [length]="unscheduledTests().length"
+                [pageSize]="unscheduledPageSize()"
+                [pageIndex]="unscheduledPageIndex()"
+                [pageSizeOptions]="[10, 25, 50]"
+                (page)="onUnscheduledPageChange($event)"
+                [showFirstLastButtons]="true"
+                aria-label="Pagination for unscheduled tests">
+              </mat-paginator>
+            </div>
+          </div>
+        </div>
+      }
+    </div>
+  }
+</section>

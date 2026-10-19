@@ -1,0 +1,635 @@
+CREATE OR REPLACE package srvlib is
+/******************************************
+Created By   : Edwin
+Created On   : 01/01/2009
+Purpose      : DIST application routines.
+Modified Date: 03/07/09
+Version      : 02 Ashok [12/11/2015] - SCR 177145 - moved number generation logic to db package. LT2015SP1
+Version      : 03 Edwin [10/27/21] a new routine to calculatie the box id and ship number is added for plasma gel tube (2019_R4)
+
+**************************************** */
+
+
+        procedure update_inventory_levels ( p_product_type in varchar2,
+											p_blood_type  in varchar2,
+											p_chapter_id  in varchar2,
+											p_customer_id in varchar2,
+											p_inventory_class in varchar2,
+											p_unit_id in varchar2,
+											p_coll_date in date,
+											p_add_del_flag in varchar2);
+        procedure update_trays (p_location_id in varchar2,
+                               p_chapter_id  in varchar2,
+                               p_product_type in varchar2,
+                               p_blood_type in varchar2,
+                               p_add_del_flag in varchar2);
+        -- SCR 177145 - gen_num procedure added.
+        procedure gen_num(
+                               p_pref 	 IN VARCHAR2  -- IN Preference
+                              ,p_type 	 IN VARCHAR2  -- IN Type
+                              ,p_chp_id  IN VARCHAR2  -- IN Chapter ID
+                              ,p_num     OUT VARCHAR2 -- OUT Generated Number
+                              ,p_err_msg OUT VARCHAR2 -- OUT Error Message
+                            );
+        -- SCR 177145
+        procedure gen_num_id( p_pref 	 IN VARCHAR2  -- IN Preference
+                              ,p_type 	 IN VARCHAR2  -- IN Type
+                              ,p_chp_id  IN VARCHAR2  -- IN Chapter ID
+                              ,p_num     OUT VARCHAR2 -- OUT Generated Number
+                              ,p_err_msg OUT VARCHAR2 -- OUT Error Message
+                            );
+        -- SCR 177145
+        procedure gen_num_box(p_chp_id   IN VARCHAR2  -- IN Chapter ID
+                              ,p_num      OUT VARCHAR2 -- OUT Generated Number
+                              ,p_err_msg  OUT VARCHAR2 -- OUT Error Message
+                            );
+        -- SCR 177145
+        procedure gen_num_shipment(
+                               p_class    IN VARCHAR2,  -- IN Class
+                               p_chp_id   IN VARCHAR2   -- IN Chapter ID
+                              ,p_num      OUT VARCHAR2  -- OUT Generated Number
+                              ,p_err_msg  OUT VARCHAR2  -- OUT Error Message
+                            ) ;
+
+      PROCEDURE generate_geltube_ids (
+                                  p_id_type    in varchar2,
+                                  p_chapter_id  in varchar2,
+                                  p_id_value  out varchar2,
+                                  p_error_msg out varchar2);
+end srvlib;
+/
+
+
+CREATE OR REPLACE package body srvlib is
+--Variable created to get base blood type
+       temp_v_base_blood_type            varchar2(5);
+      procedure update_inventory_levels (   p_product_type in varchar2,
+											p_blood_type  in varchar2,
+											p_chapter_id  in varchar2,
+											p_customer_id in varchar2,
+											p_inventory_class in varchar2,
+											p_unit_id in varchar2,
+											p_coll_date in date,
+											p_add_del_flag in varchar2) is
+      begin
+--This part gets the base blood type from actual blood type(p_blood_type) of the unit id as the
+--table INVENTORY_LEVELS only mantains the base blood type
+/* Commented by Sobha to remove too many rows for the group labels
+    IF p_blood_type != 'PO' THEN
+            SELECT abo_label into temp_v_base_blood_type
+             FROM  valid_abo_values
+             WHERE (tested_abo_code,abo_only) in ( SELECT  tested_abo_code,abo_only
+                                                          FROM valid_abo_values
+                                                          WHERE abo_label = p_blood_type AND
+                                                                      unit_scheme_type =  decode(length(p_unit_id),13,'I','C'))
+                         AND identifier_code = 'RG'
+                        AND  unit_scheme_type =  decode(length(p_unit_id),13,'I','C');
+     ELSE*/
+         temp_v_base_blood_type := p_blood_type;
+    --END IF;
+--------
+		if p_add_del_flag = 'A'
+		then
+    		update inventory_levels
+    		set    qty = qty + 1
+    		where  product_type = p_product_type
+      		and  blood_type = temp_v_base_blood_type
+      		and  chapter_id = p_chapter_id
+      		and  customer_id = 'STANDARD'
+      		and  inventory_class = p_inventory_class
+      		and  nvl(attrib_group,'**') =
+						   (select decode(count(*),1,'ALERT','**')
+				     		from   unit_attributes
+				     		where  unit_id = p_unit_id
+				       		and  coll_date = p_coll_date
+				       		and  chapter_id = p_chapter_id
+				       		and  attrib_group = 'ALERT'
+				       		and  attrib_code = 'CMV')
+      		and  nvl(attrib_code,'**') = (select decode(count(*),1,'CMV','**')
+				     		from   unit_attributes
+				     		where  unit_id = p_unit_id
+				       		and  coll_date = p_coll_date
+				       		and  chapter_id = p_chapter_id
+				       		and  attrib_group = 'ALERT'
+				       		and  attrib_code = 'CMV');
+			if sql%notfound
+			then
+      			begin
+          			insert into inventory_levels
+         			(inventory_class, chapter_id, customer_id,
+          			qty, product_type, blood_type, attrib_group,
+          			attrib_code, tier)
+          			select p_inventory_class, p_chapter_id, 'STANDARD',
+                 			1,p_product_type,temp_v_base_blood_type,
+		      	   			decode(count(*),0,'','ALERT'),
+		      	   			decode(count(*),0,'','CMV'), 1
+		          			from   unit_attributes
+		          			where  unit_id = p_unit_id
+		            			and  coll_date = p_coll_date
+		            			and  chapter_id = p_chapter_id
+		            			and  attrib_group = 'ALERT'
+		            			and  attrib_code = 'CMV';
+      			end;
+			end if;
+		else
+    		update inventory_levels
+    		set    qty = qty - 1
+    		where  product_type = p_product_type
+      		and  blood_type = temp_v_base_blood_type
+      		and  chapter_id = p_chapter_id
+      		and  customer_id = 'STANDARD'
+      		and  inventory_class = p_inventory_class
+      		and  nvl(attrib_group,'**') =
+						   (select decode(count(*),1,'ALERT','**')
+				     		from   unit_attributes
+				     		where  unit_id = p_unit_id
+				       		and  coll_date = p_coll_date
+				       		and  chapter_id = p_chapter_id
+				       		and  attrib_group = 'ALERT'
+				       		and  attrib_code = 'CMV')
+      		and  nvl(attrib_code,'**') = (select decode(count(*),1,'CMV','**')
+				     		from   unit_attributes
+				     		where  unit_id = p_unit_id
+				       		and  coll_date = p_coll_date
+				       		and  chapter_id = p_chapter_id
+				       		and  attrib_group = 'ALERT'
+				       		and  attrib_code = 'CMV');
+		end if;
+      end;
+      --
+      procedure update_trays (p_location_id in varchar2,
+                             p_chapter_id  in varchar2,
+                             p_product_type in varchar2,
+                             p_blood_type in varchar2,
+                             p_add_del_flag in varchar2) is
+        temp_items number;
+        temp_trays number;
+      begin
+        select item_count
+        into   temp_items
+        from   trays
+        where  chapter_id   = p_chapter_id
+          and  tray_number  = substr(p_location_id,9,4);
+        if p_add_del_flag = 'A'
+        then
+          if temp_items = 0
+          then
+            update trays
+            set WAREHOUSE_ID  = substr(p_location_id,1,1),
+                DEVICE_TYPE   = substr(p_location_id,2,1),
+                DEVICE_NUMBER = substr(p_location_id,3,2),
+                RACK_NUMBER   = substr(p_location_id,5,2),
+                SHELF_NUMBER  = substr(p_location_id,7,2),
+                PRODUCT_TYPE  = p_product_type,
+                BLOOD_TYPE    = p_blood_type,
+                ITEM_COUNT    = 1
+            where  chapter_id   = p_chapter_id
+              and  tray_number  = substr(p_location_id,9,4)
+              and  sysdate between effective_date and nvl(term_date,sysdate);
+          else
+            update trays
+            set    ITEM_COUNT    = ITEM_COUNT + 1
+            where  chapter_id   = p_chapter_id
+              and  tray_number  = substr(p_location_id,9,4)
+              and  sysdate between effective_date and nvl(term_date,sysdate);
+          end if;
+        elsif p_add_del_flag = 'D'
+        then
+          temp_trays := 1;
+          if temp_items = 1
+          then
+            select count(*)
+            into  temp_trays
+            from  trays
+            where CHAPTER_ID    = p_chapter_id
+              and WAREHOUSE_ID  = substr(p_location_id,1,1)
+              and DEVICE_TYPE   = substr(p_location_id,2,1)
+              and DEVICE_NUMBER = substr(p_location_id,3,2)
+              and RACK_NUMBER   = substr(p_location_id,5,2)
+              and SHELF_NUMBER  = substr(p_location_id,7,2)
+              and exists
+                  (select 'x'
+                   from rack_details
+                   where CHAPTER_ID    = p_chapter_id
+                     and WAREHOUSE_ID  = substr(p_location_id,1,1)
+                     and DEVICE_TYPE   = substr(p_location_id,2,1)
+                     and DEVICE_NUMBER = substr(p_location_id,3,2)
+                     and RACK_NUMBER   = substr(p_location_id,5,2)
+                     and TRAY_COUNT    = 1);
+          end if;
+          if temp_trays != 1
+          then
+            update trays
+            set WAREHOUSE_ID  = '',
+                DEVICE_TYPE   = '',
+                DEVICE_NUMBER = '',
+                RACK_NUMBER   = '',
+                SHELF_NUMBER  = '',
+                PRODUCT_TYPE  = '',
+                BLOOD_TYPE    = '',
+                ITEM_COUNT    = 0
+            where  chapter_id   = p_chapter_id
+              and  tray_number  = substr(p_location_id,9,4);
+          else
+            update trays
+            set    ITEM_COUNT   = ITEM_COUNT - 1
+            where  chapter_id   = p_chapter_id
+              and  tray_number  = substr(p_location_id,9,4);
+          end if;
+        end if;
+      exception
+	 when others then
+	    null;
+      end;
+
+-- SCR 177145  -- LT2015SP1
+procedure gen_num( p_pref 				IN VARCHAR2
+                      ,p_type 			IN VARCHAR2
+                      ,p_chp_id        IN VARCHAR2
+                      ,p_num OUT VARCHAR2
+                      ,p_err_msg OUT VARCHAR2
+                    ) is
+  l_temp_type VARCHAR2(20);
+  l_temp_num  NUMBER(8) 	:= 0;
+  l_temp_cnt  NUMBER;
+  l_temp_gen_num VARCHAR2(8);
+
+  l_local_date  DATE;
+  l_err_msg VARCHAR2(200);
+
+  user_excpt EXCEPTION;
+begin
+  p_err_msg := 'OK'; -- default value.
+
+
+  IF p_pref = 'P'                						-- Generating pick slip ID
+  THEN
+    l_temp_type := 'PICK_SLIP_ID';
+  ELSIF p_pref = 'W'              					-- Generating work order NUMBER
+  THEN
+    l_temp_type := 'WORK_ORDER_NO';
+  ELSIF p_pref = 'C'              					-- Generating Credit adjustment Id
+  THEN
+    l_temp_type := 'ADJ_ADVICE_ID';
+  ELSIF p_pref = 'D'              					-- Generating Debit adjustment Id
+  THEN
+    l_temp_type := 'ADJ_ADVICE_ID';
+  ELSIF p_pref = 'R'              					-- Generating Return slip
+  THEN
+    l_temp_type := 'RETURN_ADVICE_ID';
+  ELSE
+    l_err_msg := '0900'; --show_error_dist('0900');              -- invalid parameter
+    RAISE user_excpt; -- check_package_failure;
+  END IF;
+
+  BEGIN
+   SELECT nvl(max_number,0)+1
+   	INTO l_temp_num
+   FROM   number_generation
+   WHERE  chapter_id = p_chp_id
+    AND  number_type = l_temp_type
+    FOR UPDATE OF max_number;
+  EXCEPTION
+    WHEN no_data_found
+    	THEN
+      l_temp_num := 1;
+    WHEN OTHERS
+    	THEN
+      l_err_msg:='Error: 1 -'|| SUBSTR(sqlerrm, 1, 150);
+      raise user_excpt;
+  END;
+  --
+
+  l_local_date := lifetrack_timezone_convert.get_local_time(p_chp_id, SYSDATE);
+
+  -- check IF already exists
+  IF l_temp_type ='PICK_SLIP_ID'
+  THEN
+		BEGIN
+			SELECT COUNT(*)
+				INTO 	l_temp_cnt
+			FROM 	pick_slips
+			WHERE chapter_id = p_chp_id
+				--AND SUBSTR(pick_slip_id,3) = TO_CHAR(v_local_date,'Y') || '-' ||				-- Changes w.r.t. SCR 18714
+				--SUBSTR(TO_CHAR(temp_number,'099999'),2,6);
+				AND SUBSTR(pick_slip_id,3) = TO_CHAR(l_local_date,'RR') || '-' ||
+				SUBSTR(TO_CHAR(l_temp_num,'09999999'),2,8);
+
+			IF l_temp_cnt > 0
+			THEN
+				BEGIN
+				--SELECT NVL(max(to_NUMBER(SUBSTR(pick_slip_id,5))),0)+1				-- Changes w.r.t. SCR 18714
+				SELECT NVL(max(to_NUMBER(SUBSTR(pick_slip_id,7))),0)+1
+					INTO 	l_temp_num
+				FROM 	pick_slips
+				WHERE chapter_id = p_chp_id
+					--AND SUBSTR(pick_slip_id,3,1) = TO_CHAR(v_local_date,'Y');				-- Changes w.r.t. SCR 18714
+					AND SUBSTR(pick_slip_id,3,2) = TO_CHAR(l_local_date,'RR');
+				EXCEPTION
+					WHEN no_data_found
+					THEN
+						l_temp_num := 1;
+					WHEN OTHERS
+					THEN
+            l_err_msg:='Error: 2 -'|| SUBSTR(sqlerrm, 1, 150);
+            raise user_excpt;
+				END;
+			END IF;
+		END;
+  END IF;
+ 	--
+  --tmp_gen_no := SUBSTR(TO_CHAR(temp_number,'099999'),2,6);				-- Changes w.r.t. SCR 18714
+  --gen_number := pref || TYPE || TO_CHAR(v_local_date,'y')
+  l_temp_gen_num := SUBSTR(TO_CHAR(l_temp_num,'09999999'),2,8);
+  p_num := p_pref || p_type || TO_CHAR(l_local_date,'RR')
+                || '-' || l_temp_gen_num;
+  --
+  UPDATE number_generation
+  SET    max_number = l_temp_num
+  WHERE  chapter_id = p_chp_id
+    AND  number_type = l_temp_type;
+  --
+
+  COMMIT;
+
+
+
+EXCEPTION
+  WHEN user_excpt THEN
+    p_err_msg:=l_err_msg;
+  WHEN OTHERS THEN
+    p_err_msg := SUBSTR(sqlerrm, 1, 150);
+END gen_num;
+
+-- SCR 177145  -- LT2015SP1
+procedure gen_num_id( p_pref 		IN VARCHAR2
+                      ,p_type 		IN VARCHAR2
+                      ,p_chp_id   IN VARCHAR2
+                      ,p_num      OUT VARCHAR2
+                      ,p_err_msg  OUT VARCHAR2
+                    ) is
+
+  l_temp_num    NUMBER;
+  l_temp_type    VARCHAR2(20);
+  l_temp_pref    VARCHAR2(4);
+  l_err_msg VARCHAR2(200);
+
+  user_excpt EXCEPTION;
+begin
+
+  p_err_msg := 'OK'; -- default value.
+
+  --
+  if p_type = 'CS'                -- consignee_id
+  then
+    l_temp_type := 'CONSIGNEE_ID';
+  elsif p_type = 'CU'
+  then
+    l_temp_type := 'CUSTOMER_ID';
+  else
+    l_err_msg := '0900'; -- Error Code (invalid parameter)
+    raise user_excpt;
+    --show_error_dist('0900');              -- invalid parameter
+    --check_package_failure;
+  end if;
+  --
+  l_temp_pref := substr(upper(p_pref),1,3);
+  --
+  select max_number+1 into l_temp_num
+  from   number_generation
+  where  chapter_id  = p_chp_id
+    and  number_type = l_temp_type
+  for update of max_number;
+  --
+  -- generate new number
+-- HCL  id := temp_pref || type || '-'|| substr(type,1,2) ||
+ p_num := l_temp_pref || '-'|| substr(p_type,1,2) ||
+        lpad(to_char(l_temp_num),4,'0');
+   --
+  update number_generation
+  set    max_number  = l_temp_num
+  where  chapter_id  = p_chp_id
+    and  number_type = l_temp_type;
+  --
+
+  COMMIT;
+
+EXCEPTION
+  WHEN user_excpt THEN
+    p_err_msg:=l_err_msg;
+  WHEN OTHERS THEN
+    p_err_msg := SUBSTR(sqlerrm, 1, 150);
+end gen_num_id;
+
+-- SCR 177145  -- LT2015SP1
+procedure gen_num_box(p_chp_id   IN VARCHAR2
+                      ,p_num      OUT VARCHAR2
+                      ,p_err_msg  OUT VARCHAR2
+                    ) is
+
+  l_temp_num    NUMBER;
+  l_temp_cnt    NUMBER;
+  l_local_date  DATE;
+
+  l_err_msg VARCHAR2(200);
+
+begin
+
+  p_err_msg := 'OK'; -- default value.
+
+  --
+  select max_number+1 into l_temp_num
+  from   number_generation
+  where  chapter_id = p_chp_id
+    and  number_type = 'BOX_ID'
+  for update of max_number;
+  --
+
+  l_local_date := lifetrack_timezone_convert.get_local_time(p_chp_id, SYSDATE);
+
+  /*
+  if is_timezone_enabled then
+     Lifetrack_timezone_convert.get_local_time(chap_id,sysdate,v_local_time);
+     v_local_date := v_local_time;
+  else
+     v_local_date := sysdate;
+  end if;
+  */
+
+  -- check if already exists
+  select count(*)
+  into l_temp_cnt
+  from boxes
+  where chapter_id = p_chp_id
+    and box_id = to_char(l_local_date,'mmddyy') ||
+                 lpad(to_char(l_temp_num),4,'0');
+  if l_temp_cnt > 0
+  then
+     select max(to_number(substr(box_id,7)))+1
+     into l_temp_num
+     from boxes
+     where chapter_id = p_chp_id
+       and box_id like to_char(l_local_date,'mmddyy') ||'%';
+  end if;
+  --
+  -- generate new box id with format MMDDYY9999
+  p_num := to_char(l_local_date,'mmddyy') ||
+            lpad(to_char(l_temp_num),4,'0');
+  --
+  update number_generation
+  set    max_number = l_temp_num
+  where  chapter_id = p_chp_id
+    and  number_type = 'BOX_ID';
+  --
+
+  COMMIT;
+
+
+EXCEPTION
+  WHEN OTHERS THEN
+    p_err_msg := SUBSTR(sqlerrm, 1, 150);
+end gen_num_box;
+
+
+-- SCR 177145  -- LT2015SP1
+procedure gen_num_shipment(
+                       p_class    IN VARCHAR2,
+                       p_chp_id   IN VARCHAR2
+                      ,p_num      OUT VARCHAR2
+                      ,p_err_msg  OUT VARCHAR2
+                    ) is
+
+  l_temp_num    NUMBER;
+  l_temp_cnt    NUMBER;
+  l_sep         VARCHAR2(2);
+
+  l_local_date  DATE;
+
+  l_err_msg VARCHAR2(200);
+
+begin
+
+  p_err_msg := 'OK';
+
+  l_sep := substr(p_class,1,2);
+  --
+  select max_number+1 into l_temp_num
+  from   number_generation
+  where  chapter_id  = p_chp_id
+    and  number_type = 'SHIPMENT_NO'
+  for update of max_number;
+
+  l_local_date := lifetrack_timezone_convert.get_local_time(p_chp_id, SYSDATE);
+
+  /*
+  if is_timezone_enabled then
+     Lifetrack_timezone_convert.get_local_time(p_chp_id,sysdate,v_local_date);
+  else
+     v_local_date := sysdate;
+  end if;
+  */
+  --
+  -- check if already exists
+  select count(*)
+  into l_temp_cnt
+  from shipments
+  where chapter_id = p_chp_id
+    --and substr(shipment_no,1,8) = 'SH' || to_char(sysdate,'mmddyy')
+    and substr(shipment_no,1,8) = 'SH' || to_char(l_local_date,'mmddyy')
+    and substr(shipment_no,11) = lpad(to_char(l_temp_num),4,'0');
+  if l_temp_cnt > 0
+  then
+     select max(to_number(substr(shipment_no,11)))+1
+     into l_temp_num
+     from shipments
+     where chapter_id = p_chp_id
+       --and shipment_no like 'SH' || to_char(sysdate,'mmddyy') ||'%';
+       and shipment_no like 'SH' || to_char(l_local_date,'mmddyy') ||'%';
+  end if;
+  --
+  -- generate new order number with format ORMMDDYYCL9999
+  --ship_no := 'SH' || to_char(sysdate,'mmddyy') || sep ||
+  p_num := 'SH' || to_char(l_local_date,'mmddyy') || l_sep ||
+                  lpad(to_char(l_temp_num),4,'0');
+  --
+  update number_generation
+  set    max_number  = l_temp_num
+  where  chapter_id  = p_chp_id
+    and  number_type = 'SHIPMENT_NO';
+  --
+
+  COMMIT;
+
+EXCEPTION
+  WHEN OTHERS THEN
+    p_err_msg := SUBSTR(sqlerrm, 1, 150);
+end gen_num_shipment;
+
+
+PROCEDURE generate_geltube_ids (p_id_type in varchar2, p_chapter_id in varchar2, p_id_value out varchar2,
+                               p_error_msg out varchar2) IS
+  temp_box number;
+  temp_tship number;
+  local_date  date;
+BEGIN
+
+ local_date:=lifetrack_timezone_convert.get_local_time(p_chapter_id,sysdate);
+
+ If p_id_type='B' then
+   begin
+      SELECT   max_number + 1 INTO temp_box
+      FROM number_generation
+      WHERE  number_type = 'GELTUBE_BOX'
+      AND chapter_id = p_chapter_id for update of max_number;
+
+     p_id_value:= 'BG' || to_char(local_date,'MMDDYY') || lpad(to_char(temp_box),4,'0');
+
+     UPDATE number_generation
+     SET max_number = temp_box
+     WHERE  number_type = 'GELTUBE_BOX'
+     AND chapter_id = p_chapter_id ;
+
+  exception
+      WHEN no_data_found THEN
+          p_error_msg:='Error in Box ID generation-GELTUBE id type is not defined in Number Generation';
+          return;
+      WHEN others THEN
+          p_error_msg:='Error in Box ID generation';
+          return;
+   end;
+
+ Elsif p_id_type='S' then
+
+    begin
+      SELECT   max_number + 1 INTO temp_tship
+      FROM number_generation
+      WHERE  number_type = 'GELTUBE_SHIP'
+      AND chapter_id = p_chapter_id for update of max_number;
+
+     p_id_value:= 'SG' || to_char(local_date,'MMDDYY') || lpad(to_char(temp_tship),4,'0');
+   UPDATE number_generation
+   SET max_number = temp_tship
+   WHERE  number_type = 'GELTUBE_SHIP'
+   AND chapter_id = p_chapter_id ;
+
+
+  exception
+      WHEN no_data_found THEN
+          p_error_msg:='Error in T ship generation-GELTUBE_SHIP id type is not defined in Number Generation';
+          return;
+      WHEN others THEN
+          p_error_msg:=sqlerrm||'-Error in ship no generation';
+          return;
+   end;
+  End If;
+
+ COMMIT;
+
+exception
+    WHEN others THEN
+         p_error_msg:=sqlerrm||'-Error in ship no generation';
+          return;
+end generate_geltube_ids;
+
+END srvlib;
+/

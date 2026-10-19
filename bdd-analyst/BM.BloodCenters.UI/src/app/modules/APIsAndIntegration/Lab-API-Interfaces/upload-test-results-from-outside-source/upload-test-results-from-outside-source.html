@@ -1,0 +1,250 @@
+<div class="upload-test-results-page">
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Accessibility: H1 for screen readers (Fix #1) -->
+  <h1 class="visually-hidden">Upload Test Results from Outside Source</h1>
+
+  <!-- ARIA Live Region for Status Announcements (Fix #4) -->
+  <div role="status" aria-live="polite" aria-atomic="true" class="visually-hidden">
+    {{ statusMessage }}
+  </div>
+
+  <!-- Main Content -->
+  <div class="content-container">
+    <!-- Form -->
+    <form [formGroup]="uploadForm" (ngSubmit)="onUpload()" class="upload-form">
+      <!-- Chapter ID Card -->
+      <mat-card class="chapter-card">
+        <mat-card-content>
+          <mat-form-field appearance="fill">
+            <mat-label>Chapter ID</mat-label>
+            <mat-select formControlName="chapterId" placeholder="Select Chapter" required aria-required="true" hideSingleSelectionIndicator>
+              <!-- Search Option -->
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="chapterSearchControl"
+                  placeholderLabel="Search chapters..."
+                  noEntriesFoundLabel="No matching chapters"
+                  [attr.aria-label]="'Search chapters'">
+                </ngx-mat-select-search>
+              </mat-option>
+
+              @if (isLoadingChapters) {
+                <mat-option disabled>
+                  <mat-spinner diameter="20" aria-label="Loading chapters"></mat-spinner>
+                  <span class="visually-hidden">Loading chapters...</span>
+                </mat-option>
+              }
+              @for (chapter of filteredChapters; track chapter.chapterId) {
+                <mat-option [value]="chapter.chapterId">
+                  {{ chapter.chapterId }} - {{ chapter.chapterName }}
+                </mat-option>
+              }
+              @if (!isLoadingChapters && filteredChapters.length === 0) {
+                <mat-option disabled>No chapters available</mat-option>
+              }
+            </mat-select>
+            @if (chapterControl?.invalid && chapterControl?.touched) {
+              <mat-error>Chapter ID is required</mat-error>
+            }
+          </mat-form-field>
+        </mat-card-content>
+      </mat-card>
+
+      <!-- Upload Card -->
+      <mat-card class="upload-card">
+        <mat-card-content>
+          <!-- Empty State (when no chapter selected) -->
+          @if (!showUploadArea) {
+            <section class="empty-state" aria-labelledby="empty-state-heading">
+              <div class="empty-state-content">
+                <mat-icon class="empty-icon" aria-hidden="true">edit</mat-icon>
+                <h2 id="empty-state-heading" class="empty-title">Get Started</h2>
+                <p class="empty-message">
+                  Use the Chapter ID input above to select a chapter and to upload test results from
+                  an external source.
+                </p>
+              </div>
+            </section>
+          }
+
+          <!-- Upload Area (shown after chapter selection) -->
+          @if (showUploadArea) {
+            <!-- Chapter Behind Server Section -->
+            @if (selectedChapter) {
+              <dl class="chapter-info-section">
+                <dt class="visually-hidden">Chapter Name</dt>
+                <dd class="chapter-info-label">{{ selectedChapter.chapterName }}</dd>
+                <dt class="visually-hidden">Chapter Details</dt>
+                <dd class="chapter-info-value">
+                  <span class="chapter-id">{{ selectedChapter.chapterId }}</span>
+                  <span class="chapter-separator" aria-hidden="true"> | </span>
+                  <span class="chapter-date">{{ chapterLocalDate }}</span>
+                </dd>
+                <div class="chapter-divider"></div>
+              </dl>
+            }
+
+            <!-- Upload File Section -->
+            <div class="file-upload-section">
+              <h2 class="upload-section-title">{{ uploadHeading }}</h2>
+
+              <!-- File Input (Hidden) -->
+              <label for="file-input" class="visually-hidden">Select TXT files to upload</label>
+              <input
+                type="file"
+                id="file-input"
+                (change)="onFileSelect($event)"
+                accept=".txt"
+                multiple
+                class="file-input-hidden"
+              />
+
+              <!-- Drag and Drop Zone (always visible) -->
+              <button
+                type="button"
+                class="drag-drop-zone"
+                [class.dragging]="isDragging"
+                [class.error]="showFileValidationError"
+                [class.has-files]="hasFiles"
+                aria-label="File upload area. Drag and drop files here or click to browse. Supported file types: TXT"
+                [attr.aria-describedby]="'supported-file-types'"
+                (dragover)="onDragOver($event)"
+                (dragleave)="onDragLeave($event)"
+                (drop)="onDrop($event)"
+                (click)="triggerFileInput()"
+              >
+                <mat-icon class="upload-icon" aria-hidden="true">upload</mat-icon>
+                <p class="drag-drop-text">
+                  Drag and drop or <span class="browse-link">browse files</span>
+                </p>
+                <p id="supported-file-types" class="supported-files-text">Supported file types: TXT</p>
+                @if (browseFileLocation) {
+                  <p class="supported-files-text file-path-text">
+                    File path: <span class="file-path-value">{{ browseFileLocation }}</span>
+                  </p>
+                }
+              </button>
+
+              <!-- Error Message -->
+              @if (showFileValidationError) {
+                <p class="file-validation-error" role="alert" aria-live="assertive">{{ fileValidationErrorMessage }}</p>
+              }
+
+              <!-- No files message -->
+              @if (!hasFiles && !showFileValidationError) {
+                <p class="no-files-message">There are currently no file uploads in progress</p>
+              }
+
+              <!-- Uploaded Files List -->
+              @if (hasFiles) {
+                <div class="uploaded-files-list">
+                  @for (fileItem of uploadedFiles; track $index) {
+                    <div
+                      class="file-card"
+                      [class.uploading]="fileItem.status === 'uploading'"
+                      [class.success]="fileItem.status === 'success'"
+                      [class.error]="fileItem.status === 'error'"
+                    >
+                      <div class="file-card-content">
+                        <mat-icon class="file-type-icon" aria-hidden="true">description</mat-icon>
+                        <div class="file-info-section">
+                          <span class="file-name">{{
+                            fileItem.file.name
+                          }}</span>
+
+                          <!-- Progress Bar -->
+                          @if (fileItem.status === 'uploading') {
+                            <span class="file-upload-status" aria-hidden="true">{{ fileItem.progress }}% uploaded</span>
+                            <mat-progress-bar
+                              mode="determinate"
+                              [value]="fileItem.progress"
+                              [attr.aria-label]="'Uploading ' + fileItem.file.name + ', ' + fileItem.progress + ' percent complete'"
+                              class="file-progress-bar"
+                            ></mat-progress-bar>
+                          }
+
+                          @if (fileItem.status === 'pending' && fileItem.progress === 100) {
+                            <span class="file-status-text" role="status" aria-live="polite">{{
+                              formatFileSize(fileItem.file.size)
+                            }} Successfully uploaded</span>
+                          }
+
+                          @if (fileItem.status === 'success') {
+                            <span class="file-status-text" role="status" aria-live="polite"
+                              >{{ formatFileSize(fileItem.file.size) }} Successfully uploaded</span
+                            >
+                          }
+
+                          @if (fileItem.status === 'error') {
+                            <span class="file-status-text error-text" role="alert" aria-live="assertive">{{
+                              fileItem.errorMessage || 'Upload failed'
+                            }}</span>
+                          }
+                        </div>
+
+                        @if (fileItem.status === 'error') {
+                          <mat-icon
+                            class="status-error-icon"
+                            [matTooltip]="fileItem.errorMessage || 'Upload failed'"
+                            [attr.aria-label]="'Error: ' + (fileItem.errorMessage || 'Upload failed')"
+                            role="img"
+                            >error</mat-icon
+                          >
+                        }
+                        @if (
+                          (fileItem.status === 'uploading' || fileItem.status === 'pending' || fileItem.status === 'success' || fileItem.status === 'error') &&
+                          !isUploading
+                        ) {
+                          <button
+                            type="button"
+                            mat-icon-button
+                            (click)="onRemoveFile($index)"
+                            [attr.aria-label]="'Remove file ' + fileItem.file.name"
+                            class="delete-file-btn"
+                          >
+                            <mat-icon aria-hidden="true">delete</mat-icon>
+                          </button>
+                        }
+                      </div>
+                    </div>
+                  }
+                </div>
+              }
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="form-actions">
+              <button
+                mat-stroked-button
+                type="button"
+                (click)="onCancel()"
+                [disabled]="isUploading"
+                class="cancel-btn"
+              >
+                CANCEL
+              </button>
+
+              <button
+                mat-raised-button
+                color="primary"
+                type="submit"
+                [disabled]="!hasPendingFiles"
+                [attr.aria-busy]="isUploading"
+                class="upload-btn"
+              >
+                @if (isUploading) {
+                  <mat-spinner diameter="20" aria-label="Uploading files"></mat-spinner>
+                  UPLOADING...
+                } @else {
+                  UPLOAD
+                }
+              </button>
+            </div>
+          }
+        </mat-card-content>
+      </mat-card>
+    </form>
+  </div>
+</div>

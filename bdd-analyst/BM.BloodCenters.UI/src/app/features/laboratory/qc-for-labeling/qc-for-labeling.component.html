@@ -1,0 +1,200 @@
+<!-- Cell template for Component Review dropdown -->
+<ng-template #componentReviewTpl let-row>
+  <mat-form-field appearance="fill" class="cell-dropdown" subscriptSizing="dynamic">
+    <mat-select [value]="row.componentReview"
+      (selectionChange)="onComponentReviewChange(row, $event.value)"
+      [attr.aria-label]="'Component Review for unit ' + row.unitId">
+      @for (opt of componentReviewOptions; track opt.value) {
+        <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+</ng-template>
+
+<!-- Cell template for QC for Labeling dropdown -->
+<ng-template #qcLabelFlagTpl let-row>
+  <mat-form-field appearance="fill" class="cell-dropdown" subscriptSizing="dynamic">
+    <mat-select [value]="row.qcLabelFlag"
+      (selectionChange)="onQcLabelFlagChange(row, $event.value)"
+      [attr.aria-label]="'QC for Labeling for unit ' + row.unitId">
+      @for (opt of componentReviewOptions; track opt.value) {
+        <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+</ng-template>
+
+<div class="qc-for-labeling-container">
+  <!-- Page Header with Breadcrumbs -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Filter Section -->
+  <section class="search-filters-section">
+    <form [formGroup]="filterForm" class="filter-form">
+      <div class="filter-row">
+        <!-- ABO/Rh Batch Dropdown -->
+        <mat-form-field appearance="fill" class="filter-field batch-field">
+          <mat-label>ABO/Rh Batch</mat-label>
+          <mat-select
+            formControlName="aboRhBatch"
+            [attr.aria-label]="'ABO/Rh Batch'">
+            @for (batch of batches(); track batch.tbId) {
+              <mat-option [value]="batch.tbId">
+                {{ batch.tbId }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Testing Chapter (Read-only) -->
+        <div class="info-field testing-chapter-field">
+          <span class="info-label">Testing Chapter</span>
+          <span class="info-value">{{ testingChapter() || '-' }}</span>
+        </div>
+
+        <!-- Number of Unscheduled Units (Read-only) -->
+        <div class="info-field">
+          <span class="info-label">Number of unscheduled units in this worksheet</span>
+          <span class="info-value">{{ selectedBatch() ? unscheduledCount() : '-' }}</span>
+        </div>
+
+        <!-- Clear Button -->
+        <button type="button" class="btn-clear" [disabled]="!selectedBatch()" (click)="onClear()">CLEAR</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- Results Section -->
+  <section class="results-section">
+    <!-- Loading State -->
+    @if (loading()) {
+      <div class="loading-container">
+        <mat-spinner diameter="40"></mat-spinner>
+        <span class="loading-text">Loading results, please wait...</span>
+      </div>
+    }
+
+    <!-- Error State -->
+    @if (error() && !loading()) {
+      <div class="error-container">
+        <mat-icon>error</mat-icon>
+        <p>{{ error() }}</p>
+      </div>
+    }
+
+    <!-- Empty State -->
+    @if (!hasData() && !loading() && !error()) {
+      <div class="empty-container">
+        <div class="empty-state-icon">
+          <mat-icon>search</mat-icon>
+        </div>
+        <h3 class="empty-state-title">No Results to Display</h3>
+        <p class="empty-state-message">Select a test batch to begin.</p>
+      </div>
+    }
+
+    <!-- Data Table -->
+    @if (hasData() && isReady()) {
+      <app-data-table
+        [config]="tableConfig"
+        [data]="filteredData()"
+        [loading]="loading()"
+        (rowAction)="onRowAction($event)">
+      </app-data-table>
+
+      <!-- Save Button -->
+      <div class="save-container">
+        <button class="btn-save" (click)="onSave()" [disabled]="saving()" type="button">
+          @if (saving()) {
+            SAVING...
+          } @else {
+            SAVE
+          }
+        </button>
+      </div>
+    }
+  </section>
+</div>
+
+<!-- Side Panel Backdrop -->
+@if (sidePanelOpen()) {
+  <div class="panel-backdrop" (click)="onPanelClose()"></div>
+}
+
+<!-- Side Panel -->
+<div class="side-panel" [class.open]="sidePanelOpen()">
+  @if (sidePanelOpen()) {
+    <div class="side-panel-container">
+      @switch (currentPanelSection()) {
+        <!-- Components Panel -->
+        @case ('components') {
+          <div class="side-panel-header">
+            <h2 class="side-panel-title">Components Defined for Unit ID {{ sidePanelRow()?.unitId }}</h2>
+            <button type="button" mat-icon-button class="side-panel-close" aria-label="Close panel" (click)="onPanelClose()">
+              <mat-icon>close</mat-icon>
+            </button>
+          </div>
+
+          <div class="side-panel-content">
+            @if (panelLoading()) {
+              <div class="loading-container">
+                <mat-spinner diameter="36"></mat-spinner>
+                <span class="loading-text">Loading components...</span>
+              </div>
+            } @else {
+              <app-data-table
+                [config]="componentsTableConfig"
+                [data]="componentRows()"
+                [loading]="panelLoading()">
+              </app-data-table>
+            }
+          </div>
+        }
+
+        <!-- Tests Panel -->
+        @case ('tests') {
+          <div class="side-panel-header">
+            <h2 class="side-panel-title">Scheduled / Unscheduled Tests for (Unit ID {{ sidePanelRow()?.unitId }})</h2>
+            <button type="button" mat-icon-button class="side-panel-close" aria-label="Close panel" (click)="onPanelClose()">
+              <mat-icon>close</mat-icon>
+            </button>
+          </div>
+
+          <div class="side-panel-content side-panel-content--scrollable">
+            @if (panelLoading()) {
+              <div class="loading-container">
+                <mat-spinner diameter="36"></mat-spinner>
+                <span class="loading-text">Loading test data...</span>
+              </div>
+            } @else {
+              <!-- Unit Tests Scheduled -->
+              <div class="test-section">
+                <h3 class="test-section-title">Unit Tests Scheduled</h3>
+                <app-data-table
+                  [config]="testsTableConfig"
+                  [data]="scheduledTests()"
+                  [loading]="panelLoading()">
+                </app-data-table>
+              </div>
+
+              <!-- Unit Tests Unscheduled -->
+              <div class="test-section">
+                <h3 class="test-section-title">Unit Tests Unscheduled</h3>
+                <app-data-table
+                  [config]="testsTableConfig"
+                  [data]="unscheduledTests()"
+                  [loading]="panelLoading()">
+                </app-data-table>
+              </div>
+            }
+          </div>
+        }
+      }
+
+      <div class="side-panel-divider"></div>
+      <div class="side-panel-footer">
+        <button class="btn-close-outline" (click)="onPanelClose()" type="button">CLOSE</button>
+      </div>
+    </div>
+  }
+</div>

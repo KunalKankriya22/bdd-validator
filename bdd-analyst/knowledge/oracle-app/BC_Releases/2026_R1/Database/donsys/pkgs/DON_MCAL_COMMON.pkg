@@ -1,0 +1,763 @@
+CREATE OR REPLACE PACKAGE DON_MCAL_COMMON IS
+
+/************************************************************************************
+Developed By : 
+Create Date  : 
+Purpose      : 
+Date Mod     : 04/15/2011
+Version	     : 02	- Modified By: Hussein - Replace user by lt_sesseion_user.get_user_id
+             : 03 - Modified By: Kishore - Remove "chapter_id" clause from VALID_PROC_CODES table. SCR 18384	
+             : 04 - Modified by Kishore on 07/21/2014 - Check if the timeslot for the site has expired or not
+                    in "open_site" procedure. IM 10073.
+             : 05 - MLT 213 Modified calendar-highlights query to apply timezone on date field.
+*************************************************************************************/
+
+   PROCEDURE create_alert (p_msg in varchar2,
+                           p_chapter_id in varchar2) ;
+   PROCEDURE decide_day_status (from_date in date,
+                                to_date in date,
+                                p_chapter_id in varchar2,
+                                decision_mode in varchar,
+                                status_string out varchar2,
+                                err_flag out varchar2,
+                                err_msg out varchar2) ;
+   PROCEDURE get_resource_util (curdate in date,
+                              p_chapter_id in varchar2,
+                              exclude_drive_id in varchar2,
+                              p_resource_code in varchar2,
+                              number_booked out number,
+                              number_avail out number) ;
+   PROCEDURE get_part_assign_drives (p_start_date in date,
+                                    p_end_date in date,
+                                    p_schedule_id in varchar2,
+                                    p_chapter_id in varchar2,
+                                    out_string out varchar2,
+                                    err_flag out varchar2) ;
+   PROCEDURE get_recov_staff (p_start_date in date,
+                             p_end_date in date,
+                             p_schedule_id in varchar2,
+                             p_chapter_id in varchar2,
+                             out_string out varchar2,
+                             err_flag out varchar2) ;
+   PROCEDURE open_site(p_site_id in varchar2,
+                      p_from_date in date,
+                      p_to_date in date,
+                      p_chapter_id in varchar2,
+                      p_donation_type_group in varchar2,
+                      p_proc_code in varchar2,
+                      err_flag out varchar2,
+                      err_msg out varchar2)  ;
+   PROCEDURE staff_weekly_hours(p_schedule_id in varchar2,
+                                p_staff_no in varchar2,
+                                p_chapter_id in varchar2,
+                                tot_hrs out varchar2);
+END DON_MCAL_COMMON ; 
+
+/
+
+
+CREATE OR REPLACE PACKAGE BODY DON_MCAL_COMMON IS
+PROCEDURE create_alert (p_msg in varchar2,
+                        p_chapter_id in varchar2) IS
+  min_drive_days number := 0 ;
+  new_id varchar2(10) ;
+  err_flag varchar2(1) ;
+  err_msg varchar2(70) ;
+  action_string varchar2(15) ;
+BEGIN
+
+  don_common_pack.generate_new_id('MSG',new_id,err_flag,err_msg) ;
+  begin
+    insert into alert_messages 
+    (msg_id,msg_text,chapter_id,program_id)
+    values
+    (new_id,p_msg,p_chapter_id,'DRIVE_BI') ;
+  exception
+    when others then return ;
+  end ;
+  begin
+    insert into alert_log
+    (msg_id,user_id,chapter_id)
+    select new_id,user_id,p_chapter_id
+     from valid_user_access_classes
+    where access_class = 'ALDRV'
+    and   user_id != LT_USER_SESSION.get_userid
+    and   sysdate between eff_date and nvl(term_date,sysdate+1) ;
+
+/******* Modified by Yash on 10/13/1999
+    select new_id,user_id,p_chapter_id
+     from system_users
+    where user_class = 'ALDRV'
+    and   user_id != LT_USER_SESSION.get_userid
+    and   sysdate between eff_date and nvl(term_date,sysdate+1) ;
+********/
+  exception
+    when others then return ;
+  end ;
+end create_alert;
+
+PROCEDURE decide_day_status (from_date in date,
+                             to_date in date,
+                             p_chapter_id in varchar2,
+                             decision_mode in varchar,
+                             status_string out varchar2,
+                             err_flag out varchar2,
+                             err_msg out varchar2) IS
+ resource_reqd number(5) ;
+ avl_value number(5) ;
+ temp_avl_value number(5) ;
+ avl_percentage number ;
+ caldate  date ;
+ s_status varchar2(5) ;
+ c_status varchar2(5) ;
+ v_status varchar2(5) ;
+ o_status varchar2(5) ;
+ recruiter_drive_flag varchar2(1) ;
+ v_staff_no varchar2(6) ;
+ selection varchar2(1) ;
+ temp_status_string varchar2(2000) ;
+
+ v_resource_type varchar2(5) ;
+ cursor cur_res is
+ select resource_code from valid_resources
+ where  resource_type = v_resource_type
+ and    critical_ind = 'Y'
+  and   sysdate between eff_date and nvl(term_date,sysdate+1) ;
+BEGIN
+/* Possible values of decision mode : 'S' - staff, 'V' - van ,'C' - coach, 'O' - overall */
+/* Status string format : xx-xx-xx:xxxxx:x
+                          Date---> Statu Y/N */
+err_flag := 'N' ;
+caldate := from_date ;
+begin
+  select staff_no into v_staff_no from system_users
+  where user_id = LT_USER_SESSION.get_userid ;
+  exception
+    when others then
+       err_flag := 'Y' ;
+       err_msg:='Could not get staff number for current user';
+       return ;
+end ;
+while caldate <= to_date loop
+ /*-------------------------------------------------------------------------
+  First check if this date is closed. If closed, immediately skip to
+  next date.
+ -------------------------------------------------------------------------*/
+ begin
+    select 'x' into selection
+    from calendar_highlights ch
+    where TRUNC(lifetrack_timezone_convert.get_local_time(NVL(ch.chapter_id,'WAD'), ch.hi_date)) = caldate
+    and  ch.hi_status = 'CLOSD' ;
+   o_status := 'CLOSD' ;
+   goto make_string ;
+ exception
+    when no_data_found then null ;
+    when others then err_flag := 'Y';err_msg:='Error selecting calendar highlight for '||to_char(caldate,'MMDDYYYY') ;return ;
+ end ;
+ -- Decide status for each resource type
+ for i in 1..3 loop
+  if decision_mode = 'O' then
+   if i = 1 then
+      v_resource_type := 'STAFF' ;
+   elsif i = 2 then
+      v_resource_type := 'VAN' ;
+   elsif i = 3 then
+      v_resource_type := 'COACH' ;
+   end if ;
+  elsif decision_mode = 'S' then
+      v_resource_type := 'STAFF' ;
+  elsif decision_mode = 'V' then
+      v_resource_type := 'VAN' ;
+  elsif decision_mode = 'C' then
+      v_resource_type := 'COACH' ;
+  end if ;
+   avl_value := 0 ;
+   for cur_resrec in cur_res loop
+      get_resource_util(caldate,p_chapter_id,null,cur_resrec.resource_code,resource_reqd,temp_avl_value) ;
+      avl_value := avl_value + temp_avl_value ;
+   end loop ;
+
+   if avl_value = 0 then   /*-- To avoid zero divide error --*/
+    if resource_reqd = 0 then /*-- If that resource has not been booked on that day --*/
+      avl_percentage := 0 ;
+    else /*-- Otherwise, set a very high value --*/
+      avl_percentage := 10000 ;
+    end if ;
+   else
+    avl_percentage := (resource_reqd/avl_value) * 100 ;
+   end if ;
+
+   begin
+     select status into  o_status
+     from valid_day_status
+     where resource_code = v_resource_type
+     and   chapter_id = p_chapter_id
+     and  round(avl_percentage) between nvl(lower_limit,0) and nvl(upper_limit,9999);
+     exception
+       when no_data_found then
+             /*-- If status is not set up properly in VALID_DAY_STATUS,
+                  following default logic is used --*/
+               if avl_percentage > 100 then
+                    o_status := 'BOOKD' ;
+               else
+                    o_status := 'OPEN' ;
+               end if ;
+       when others then
+               err_flag := 'Y' ;
+               err_msg:='Error selecting status' ;
+               return ;
+   end ;
+   if decision_mode = 'O' then
+     if v_resource_type = 'STAFF' then
+        s_status := o_status ;
+     elsif v_resource_type = 'VAN' then
+        v_status := o_status ;
+     elsif v_resource_type = 'COACH' then
+        c_status := o_status ;
+     end if ;
+   else /*- If decision mode is not 'S', then exit 1..3 loop after first iter */
+      exit ;
+   end if ;
+ end loop ; /*- End for(i) loop -*/
+if decision_mode = 'O' then
+  begin
+    select overall_status into o_status
+    from valid_status_rules vsr1
+    where staff_status = s_status
+     and  coach_status = c_status
+     and  van_status   = v_status
+     and  sysdate between eff_date and nvl(term_date,sysdate+1) ;
+   exception
+    when no_data_found then
+       err_flag := 'Y' ;
+       err_msg:='Validation table not set to decide status for '||to_char(caldate,'MM-DD-YYYY'||' Stf:'||s_status||' Van:'||v_status||' Coach:'||c_status);
+       return ;
+    when others then
+       err_flag := 'Y' ;
+       err_msg:='Validation table not set to decide status for '||to_char(caldate,'MM-DD-YYYY');
+       return ;
+  end ;
+end if ;
+<<make_string>>
+begin
+  select 'Y' into recruiter_drive_flag
+  from drives
+  where drive_date = caldate
+   and  chapter_id = p_chapter_id
+   and  status in ('CNFRM','HOLD')
+   and  drive_type in ('I','C')
+   and  recruiter_id = v_staff_no
+   and  rownum = 1 ;
+   exception
+     when no_data_found then
+        recruiter_drive_flag := 'N' ;
+     when others then
+        err_flag := 'Y' ;
+        err_msg:='Error in deciding recruiters drive'||to_char(sqlcode)||substr(sqlerrm,1,60);
+        return ;
+end ;
+temp_status_string := temp_status_string||to_char(caldate,'MM-DD-YYYY')||recruiter_drive_flag||o_status||':' ;
+caldate := caldate + 1 ;
+end loop ; /*-- end while --*/
+status_string := temp_status_string ;
+END decide_day_status;
+
+
+PROCEDURE get_resource_util (curdate in date,
+                             p_chapter_id in varchar2,
+                             exclude_drive_id in varchar2,
+                             p_resource_code in varchar2,
+                             number_booked out number,
+                             number_avail out number) IS
+/*******Added Drive Facility validation by SDN on 09/27/99***********/
+cursor c1 is
+select max(number_reqd) maxreq from drive_estimated_resources der,drive_groups dg
+    where dg.drive_group_type = 'PIGGY'
+     and  dg.chapter_id = p_chapter_id
+     and  drive_group_id not in (select drive_group_id from drive_groups
+     where drive_id=nvl(exclude_drive_id,'***'))
+     and  dg.drive_id in (select dr.drive_id from drives dr, drive_facilities df
+                          where dr.drive_date = curdate
+                          and  dr.drive_id = df.drive_id
+                          and  dr.status in ('CNFRM','HOLD')
+                          and  dr.drive_type in ('I','C'))
+     and  der.drive_id = dg.drive_id
+     and  der.chapter_id = dg.chapter_id
+     and  der.resource_code = p_resource_code
+     group by dg.drive_group_id 
+     order by dg.drive_group_id ;
+
+temp_reqd number := 0; 
+BEGIN
+  /*-------------------------------------------------------------------
+    Count sum of number required for all drives on that date that are
+    not piggybacked.
+  -------------------------------------------------------------------*/
+/*******Added Drive Facility validation by SDN on 09/27/99***********/
+  begin
+    select nvl(sum(number_reqd),0) into temp_reqd
+    from drive_estimated_resources
+    where drive_id in (select dr.drive_id from drives dr, drive_facilities df
+                where dr.drive_date = curdate
+                 and  dr.drive_id = df.drive_id
+                 and  dr.chapter_id = p_chapter_id
+                 and  dr.status in ('CNFRM','HOLD')
+                 and  dr.drive_type in ('I','C')
+                 and  dr.drive_id != decode(exclude_drive_id,null,'*',exclude_drive_id)) 
+    and  chapter_id = p_chapter_id
+    and  resource_code = p_resource_code
+    and  not exists (select 'x' from drive_groups
+                     where drive_group_type = 'PIGGY'
+                      and  drive_id = drive_estimated_resources.drive_id
+                      and  chapter_id = drive_estimated_resources.chapter_id) ;
+ end ;
+
+   for c1rec in c1 loop
+         temp_reqd := temp_reqd + c1rec.maxreq ;
+   end loop ;   
+
+  number_booked := temp_reqd ;
+
+   begin
+     select available_number into number_avail
+     from resource_exceptions
+     where drive_date = curdate
+      and  resource_code = p_resource_code 
+      and  chapter_id = p_chapter_id ;
+   exception
+     when no_data_found then
+       begin
+         select max_available into number_avail 
+         from resource_avail_rules
+         where week_day = to_char(curdate,'DY')
+         and   resource_code = p_resource_code
+         and   chapter_id = p_chapter_id
+         and   curdate between eff_date and nvl(term_date,curdate+1) ;
+       exception
+         when no_data_found then number_avail := 0 ;
+       end ;
+   end ;
+END get_resource_util ;
+
+PROCEDURE get_part_assign_drives (p_start_date in date,
+                                  p_end_date in date,
+                                  p_schedule_id in varchar2,
+                                  p_chapter_id in varchar2,
+                                  out_string out varchar2,
+                                  err_flag out varchar2) IS
+ cursor c1 is 
+  select /*+ ordered use_nl(drive_estimated_resources */
+         drives.drive_id,to_char(drive_date,'MM-DD-YYYY') drive_date,drive_type,
+         nvl(number_reqd,0) number_reqd
+  from   drives,drive_estimated_resources der
+  where  drive_date between p_start_date and p_end_date
+   and   drive_type in ('I','C')
+   and   status = 'CNFRM'
+   and   drives.chapter_id = p_chapter_id
+   and   der.drive_id = drives.drive_id
+   and   der.resource_code = 'STAFF'
+   and   der.chapter_id = p_chapter_id 
+   order by drive_date ;
+
+staff_assigned number ;
+tl_assigned varchar2(1) ;
+driver_assigned varchar2(1) ;
+temp_string varchar2(2000) ;
+BEGIN
+  for c1rec in c1 loop
+      /*-- Get number of staff assigned to the drive --*/
+      begin
+        select nvl(count(*),0) into staff_assigned
+        from staff_schedule_details
+        where schedule_id = p_schedule_id
+         and  drive_id = c1rec.drive_id
+         and  chapter_id = p_chapter_id ;
+      exception
+         when others then err_flag := 'Y' ; return ;
+      end ;
+      /*-- Check whether TL is assigned --*/
+     begin
+       select 'Y' into tl_assigned
+         from staff_schedule_details
+        where schedule_id = p_schedule_id
+         and  drive_id = c1rec.drive_id
+         and  job_code = 'TMLDR'
+         and  chapter_id = p_chapter_id 
+         and  rownum = 1 ;
+     exception
+       when no_data_found then tl_assigned := 'N' ;
+       when others then err_flag := 'Y' ; return ;
+     end ;
+     /*-- Check whether driver is assigned --*/
+     begin
+      select 'Y' into driver_assigned
+       from  staff_schedule_details
+        where schedule_id = p_schedule_id
+         and  drive_id = c1rec.drive_id
+         and  special_job_code is not null
+         and  chapter_id = p_chapter_id 
+         and  rownum = 1 ;
+     exception
+       when no_data_found then driver_assigned := 'N' ;
+       when others then err_flag := 'Y' ; return ;
+     end ;
+     /*-- Decide whether to display the record --*/
+     if staff_assigned < c1rec.number_reqd or tl_assigned = 'N' or driver_assigned = 'N' then
+        temp_string := temp_string||c1rec.drive_id||':'||
+                                    c1rec.drive_date||':'||
+                                    ltrim(to_char(staff_assigned))||':'||
+                                    ltrim(to_char(c1rec.number_reqd))||':' ;
+        if staff_assigned < c1rec.number_reqd then
+           temp_string := temp_string||'1' ;
+        end if ;
+        if tl_assigned = 'N' then
+           temp_string := temp_string||'2' ;
+        end if ;
+        if driver_assigned = 'N' then
+           if c1rec.drive_type = 'C' then
+              temp_string := temp_string||'3' ;
+           elsif c1rec.drive_type = 'I' then
+              temp_string := temp_string||'4' ;
+           end if ;
+        end if ;
+        temp_string := temp_string||':' ;
+     end if ;
+  end loop ;
+  out_string := temp_string ;
+END get_part_assign_drives ;
+
+PROCEDURE get_recov_staff (p_start_date in date,
+                           p_end_date in date,
+                           p_schedule_id in varchar2,
+                           p_chapter_id in varchar2,
+                           out_string out varchar2,
+                           err_flag out varchar2) IS
+
+ cursor c1 is 
+ select staff_no,first_name||' '||last_name name
+ from employees
+ where emp_class = 'MSTAF'
+  and  chapter_id = p_chapter_id
+  and  sysdate between eff_date and nvl(term_date,sysdate+1) ;
+
+ v_staff_no varchar2(6) ;
+ v_start_time date ;
+ v_end_time date ;
+ prev_start_time date ;
+ prev_end_time date ;
+ act_start_time date ;
+ act_end_time date ;
+ curdate date := p_start_date ;
+ loop_counter number ;
+ temp_string varchar2(2000) ;
+ cursor c2 is
+ select drive_id,schedule_start_time,schedule_end_time from drives
+ where  drive_date = curdate + loop_counter
+  and   chapter_id = p_chapter_id
+  and   drive_id in (select drive_id from staff_schedule_details
+                     where  schedule_id = p_schedule_id
+                      and   chapter_id  = p_chapter_id
+                      and   staff_no    = v_staff_no)
+  and  status = 'CNFRM' ;
+
+ date_range number ;
+ selection char(1) ;
+ count_recs number := 0 ;
+ count_drives_in_day number ;
+ count_drives_in_week number ;
+
+ v_sch_start date ;
+ v_sch_end date ;
+ v_stbk number ;
+ v_location_id varchar2(10) ;
+ v_travel_time number ;
+
+ min_recov_time number ;
+begin
+
+ begin
+   select nvl(to_number(parameter_value),0) into min_recov_time
+   from valid_parameters
+   where parameter_code = 'RECOV'
+    and  chapter_id = p_chapter_id ;
+ exception
+   when others then err_flag := 'Y' ; return ;
+ end ;
+
+ date_range := p_end_date - p_start_date;
+
+ for c1rec in c1 loop
+   v_staff_no := c1rec.staff_no ;
+   count_drives_in_week := 0 ;
+
+   for i in 0..date_range loop
+     loop_counter := i ;
+     count_drives_in_day := 0 ;
+     for c2rec in c2 loop /*-- looping to check all drives on the day --*/
+      /*-- Get the drive timings --*/
+      begin
+        select schedule_start_time,schedule_end_time,nvl(schedule_stup_bkdown_time,0),location_id
+        into   v_sch_start,v_sch_end,v_stbk,v_location_id
+        from drives
+        where drive_id = c2rec.drive_id
+        and  chapter_id = p_chapter_id ;
+      exception
+        when no_data_found then v_stbk := 0 ;
+        when others then err_flag := 'Y' ; return ;
+      end ;
+
+      begin
+        select nvl(travel_time,0) into v_travel_time 
+        from locations
+        where location_id = v_location_id
+         and  chapter_id = p_chapter_id ;
+      exception
+       when no_data_found then v_travel_time := 0 ;
+       when others then err_flag := 'Y' ; return ;
+      end ;
+
+      act_start_time := v_sch_start - v_travel_time/60/24 - (0.5*v_stbk)/60/24 ;
+      act_end_time := v_sch_end + v_travel_time/60/24 + (0.5*v_stbk)/60/24 ;
+
+       count_drives_in_day := count_drives_in_day + 1 ; /*-- Counting no. of drives on the day --*/
+       if count_drives_in_day > 1 then /*-- If this is the 2nd drive, check for end and start time
+                                        and change the v_end_time and v_start_time --*/
+          if act_end_time > v_end_time then
+             v_end_time := act_end_time ;
+          end if ;
+          if act_start_time < v_start_time then
+             v_start_time := act_start_time ;
+          end if ;
+       else /*-- First drive on the day, set the v_start_time and v_end_time --*/
+          v_end_time := act_end_time ;
+          v_start_time := act_start_time ;
+       end if ;
+   end loop ; /*-- end loop c2rec --*/
+
+   if count_drives_in_day > 0 then /*-- Check for recovery time because staff has been assigned
+                                   to a drive on that day --*/
+      count_drives_in_week := count_drives_in_week + 1 ;
+       if count_drives_in_week > 1 then  /*-- After first drive in the week
+                                             , so check for recovery time --*/
+           if (v_start_time - prev_end_time) * 24 < min_recov_time then
+              /*-- Recovery time violated, show this record --*/
+              temp_string := temp_string||c1rec.staff_no||':'||
+                                        c1rec.name||':'||
+                                        ltrim(to_char((v_start_time-prev_end_time)*24))||':'||
+                                        to_char(curdate+loop_counter,'MM-DD-YYYY')||':' ;
+           end if ;
+           prev_end_time := v_end_time ;
+           prev_start_time := v_start_time ;        
+       else  /*-- On first drive of the week, so do not check for recovery time. 
+                   Set the prev_end_time and prev_start_time variables --*/
+           prev_end_time := v_end_time ;
+           prev_start_time := v_start_time ;
+        end if ;
+     end if ;
+   end loop ; /*-- End loop for i --*/
+ end loop ; /*-- end loop c1rec --*/
+
+ out_string := temp_string ;
+end get_recov_staff ;  
+
+PROCEDURE open_site(p_site_id in varchar2,
+                    p_from_date in date,
+                    p_to_date in date,
+                    p_chapter_id in varchar2,
+                    p_donation_type_group in varchar2,
+                    p_proc_code in varchar2,
+                    err_flag out varchar2,
+                    err_msg out varchar2)  IS
+type procrectyp is record (procedure_code varchar2(5),
+                           sch_view_interval number) ;
+type proctabtyp is table of procrectyp index by binary_integer ;
+proclist proctabtyp ;
+week_of_month number ; /*-- Which week of month is this date--*/
+last_week varchar2(1)  ; /*-- Is this date in the last week --*/
+curdate date ;
+cursor c1 is
+select procedure_code,nvl(sch_view_interval,0) sch_view_interval
+from valid_proc_codes
+--where sysdate between eff_date and nvl(term_date, sysdate + 10) ; -- Added by Kishore on 08/17/2011. SCR 18384 -- Commented by Kishore on 07/21/2014. IM 10085
+where lifetrack_timezone_convert.get_local_time(p_chapter_id, sysdate) between 
+      eff_date and nvl(term_date, sysdate + 10); -- Added by Kishore on 07/21/2014. IM 10085
+
+--where chapter_id = p_chapter_id -- Commented by Kishore on 08/17/2011. SCR 18384
+--and   sysdate between eff_date and nvl(term_date,sysdate+1) ; -- Commented by Kishore on 08/17/2011. SCR 18384
+
+cursor c2 is
+select frequency_code,donation_type_group,proc_code,slot_time,capacity
+from fixed_site_hours
+where site_id = p_site_id
+and   week_day = to_char(curdate,'DY')
+and   chapter_id = p_chapter_id 
+and   donation_type_group = decode(p_donation_type_group,null,donation_type_group,p_donation_type_group) 
+and   proc_code = decode(p_proc_code,null,proc_code,p_proc_code) 
+and   lifetrack_timezone_convert.get_local_time(p_chapter_id, sysdate) between 
+      eff_date and nvl(term_date, sysdate + 10); -- Added by Kishore on 07/21/2014. IM 10073, IM 10085
+
+date_range number ;
+counter number := 0 ;
+interval number ;
+/*-- This procedure finds the interval for a procedure code --*/
+procedure get_sch_view_interval (p_procedure_code in varchar2,interval out number) is
+ proc_found_flag varchar2(1) := 'N' ;
+begin
+  for j in 1..proclist.count loop
+      if proclist(j).procedure_code = p_procedure_code then
+         interval := proclist(j).sch_view_interval ;
+         proc_found_flag := 'Y' ;
+         exit ;
+      end if ;
+  end loop ;
+  if proc_found_flag = 'N' then /*-- Interval for proc code not found --*/
+     interval := -99 ;
+  end if ;
+end get_sch_view_interval;
+/*-- This procedure find out which week of month a date belongs to --*/
+procedure find_week (p_date in date,week_of_month out number,last_week out varchar2) is
+  weeks number ; /*-- Number of weeks in the month --*/
+  temp_storage number ;
+begin
+  temp_storage := ceil(to_number(to_char(p_date,'DD')) / 7) ;
+  weeks := ceil(to_number(to_char(last_day(p_date),'DD')) / 7) ;
+  week_of_month := temp_storage ;
+  if weeks = temp_storage then
+     last_week := 'Y' ;
+  else
+      last_week := 'N' ;
+  end if ;
+end ;
+BEGIN
+  /*-- Populate proclist --*/
+  for c1rec in c1 loop
+      counter := counter + 1 ;
+      proclist(counter).procedure_code := c1rec.procedure_code ;
+      proclist(counter).sch_view_interval := c1rec.sch_view_interval ;
+  end loop ;
+  date_range := p_to_date - p_from_date + 1 ;
+  for i in 1..date_range loop
+    curdate := p_from_date + i - 1 ;
+    for c2rec in c2 loop
+      /*-- Decide whether this record needs to be expanded into slots --*/
+      if c2rec.frequency_code != '0' then
+        find_week(curdate,week_of_month,last_week) ;
+        if ((c2rec.frequency_code != 'L' and
+             week_of_month != c2rec.frequency_code) or
+            (c2rec.frequency_code = 'L' and last_week = 'N' )) then
+            goto next_iter ;
+        end if ;
+      end if ;
+      /*-- Get the slot interval for the procedure --*/
+      get_sch_view_interval (c2rec.proc_code,interval) ;
+      if interval = -99 then /*-- Procedure code not found in valid_proc_codes --*/
+         goto next_iter ;
+      elsif interval = 0 then /*-- Interval not defined, default it to 30 minutes --*/
+         interval := 30 ;
+      end if ;
+      /*-- Create slots --*/
+
+       begin
+        insert into fixed_site_slots
+         (site_id,
+          sch_date,
+          donation_type_group,
+          proc_code,
+          chapter_id,
+          time_of_day,
+          max_slots,
+          booked_slots,
+          program_id)
+         values
+         (p_site_id,
+          curdate,
+          c2rec.donation_type_group,
+          c2rec.proc_code,
+          p_chapter_id,
+--          to_date(to_char(curdate,'MM-DD-YY')||' '||to_char(c2rec.slot_time,'HH24:MI'),'MM-DD-YY HH24:MI'),
+          to_date(to_char(curdate,'MM-DD-YYYY')||' '||to_char(c2rec.slot_time,'HH24:MI'),'MM-DD-YYYY HH24:MI'),
+          c2rec.capacity,
+          0,
+          'OPENSITE') ;
+       exception
+         when others then rollback ; err_flag := 'Y' ; err_msg := 'Error in inserting' ;
+    dbms_output.put_line(to_char(sqlcode)||' '||sqlerrm);return;
+       end ;
+
+
+      <<next_iter>>
+      null ;
+    end loop ; /*-- end loop c2rec --*/
+  end loop ; /*-- end i loop --*/
+  commit ;
+END open_site;
+
+PROCEDURE staff_weekly_hours (p_schedule_id in varchar2,
+                              p_staff_no in varchar2,
+                              p_chapter_id in varchar2,
+                              tot_hrs out varchar2)IS
+cursor c1 is 
+  select nvl(sto.from_time, trunc(sysdate)) bod, 
+         nvl(sto.to_time, trunc(sysdate)) eod, 'X' drive_id
+    from staff_schedule_hdr sth, staff_off_day sto
+   where sth.schedule_id = p_schedule_id
+     and sth.status != 'CANCL'
+     and sto.staff_no = p_staff_no
+     and sth.chapter_id = p_chapter_id
+     and sto.chapter_id = p_chapter_id
+     and sto.unavail_date between sth.start_date and sth.end_date
+     and sto.assignment_type = 'WORK'
+  union
+  select std.actual_bod bod, std.actual_eod eod, std.drive_id drive_id
+    from staff_schedule_details std, staff_schedule_hdr sth
+   where sth.schedule_id = std.schedule_id
+     and std.schedule_id = p_schedule_id
+     and std.staff_no = p_staff_no
+     and std.chapter_id = sth.chapter_id
+     and std.chapter_id = p_chapter_id
+     and sth.status != 'CANCL'
+  order by 1;
+
+  v_eod  date;
+  v_bod  date;
+  total_hours  number;
+  temp_hours  varchar2(50);
+  bod_eod number;
+  last_bod date;
+  last_eod date;
+  last_drive varchar2(10);
+BEGIN
+  bod_eod :=0;
+    for c1rec in c1 loop
+    v_bod := c1rec.bod;
+    v_eod := c1rec.eod;
+    if trunc(v_bod) = trunc(last_bod) then
+      if last_drive != 'X' then
+        bod_eod := bod_eod - (last_eod - last_bod)* 24 * 60;
+        bod_eod := bod_eod + (v_eod - last_bod) * 24 * 60;
+      else
+        bod_eod := bod_eod + (v_eod - v_bod)* 24 * 60;
+      end if;
+    else
+        bod_eod := bod_eod + (v_eod - v_bod)* 24 * 60;
+    end if;
+    total_hours := bod_eod;
+    last_bod := c1rec.bod;
+    last_eod := c1rec.eod;
+    last_drive := c1rec.drive_id;
+  end loop;
+  temp_hours := to_char(trunc(total_hours/60))
+                               ||':'||
+                                lpad(
+                                to_char(
+                                mod(total_hours,60)
+                                 )
+                                  ,2,'0');
+
+  tot_hrs := temp_hours;  
+END staff_weekly_hours;
+
+
+END DON_MCAL_COMMON ;
+
+/

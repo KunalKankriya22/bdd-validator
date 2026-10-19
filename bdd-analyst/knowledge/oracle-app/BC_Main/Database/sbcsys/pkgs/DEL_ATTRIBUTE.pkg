@@ -1,0 +1,863 @@
+/*******************************************************************************
+*  Version 02                                                                  *
+*  Last Modified History: 
+      1) Amit Bhagat Oct 18,2000  
+      2) Basker Edwin 04/22/2007
+   --- This version cycle is over ----
+
+  -- Revised History starting from LT_2018
+
+   Ver : 01   Edwin  09-20-2016 - New Attribute code logic change SCR: 
+
+*******************************************************************************/
+Create or Replace 
+PACKAGE  Del_attribute               
+AS                                  
+   TYPE TAB1 IS                                                 
+   TABLE OF VARCHAR2(9)                                         
+   INDEX BY BINARY_INTEGER;        
+
+   PROCEDURE split(p_FORMULA    in  varchar2,      
+                   p_PROD_CODE  in  varchar2,
+                   p_split_table IN OUT TAB1,     
+                   p_no_of_elements OUT number);   
+   PROCEDURE Sort(p_Sort_table  IN OUT TAB1,   
+                  p_Size_of_table number);      
+   PROCEDURE add_attribute(p_product_code varchar2,  
+                          p_attribute_to_add varchar2,    
+                          p_new_product_code out varchar2 ,    
+                          p_final_formula out varchar2,       
+                          p_product_type in varchar2 := null ,     
+                          p_delete_attribute in varchar2 := null);
+   PROCEDURE Delete_product_attribute (P_unit_id varchar2, 
+                          p_coll_date date,           
+                          p_chapter_id varchar2,     
+                          p_user_id varchar2,       
+                          p_program_id varchar2,   
+                          P_product_code varchar2,
+                          P_attrib_code varchar2,
+                          P_update_flag varchar2,         
+                          P_new_product_code out varchar2,     
+                          P_new_product_formula out varchar2);
+END;                                                            
+/
+Create or replace 
+PACKAGE BODY del_attribute                                      
+AS                                                              
+   -------------------------------------------------------------------    
+   -- This cursor selects valid deletion and association attributes       
+   -- from attribute_matrix for process I and process II        
+   -------------------------------------------------------------------    
+   CURSOR C2 (temp_attrib_to_process varchar2) IS               
+           SELECT NVL(attrib_deleted_code,'x') f1,
+               NVL(associated_attrib_code,'x') f2   
+           FROM   attribute_matrix    
+           WHERE  attrib_added_code = temp_attrib_to_process 
+           AND    sysdate between eff_date and nvl(term_date, sysdate);  
+   ------------------------------------------------------------------------     
+   -- This cursor selects parent attributes and the intermediate attributes     
+   -- from values from product_attribute_log for processing. This would trace   
+   -- out the whole History of the product in the product_attribute_log table.  
+   ------------------------------------------------------------------------     
+   CURSOR C1(p_c1_unit_id varchar2,              
+             p_product_code varchar2,               
+             p_c1_chapter_id varchar2,             
+             p_c1_coll_date date) IS              
+           SELECT distinct old_product_code, new_product_code, attrib_code,
+                  attrib_date                       
+           FROM   product_attribute_log            
+           WHERE  nvl(invalid_flag,'N') != 'Y'    
+           START WITH new_product_code = p_product_code    
+               AND unit_id = p_c1_unit_id    
+               AND chapter_id = p_c1_chapter_id       
+               AND trunc(coll_date) = p_c1_coll_date 
+           CONNECT BY new_product_code = PRIOR old_product_code 
+               AND unit_id = PRIOR unit_id  
+               AND chapter_id = PRIOR chapter_id     
+               AND trunc(coll_date) = PRIOR coll_date     
+               AND attrib_date < PRIOR attrib_date 
+           ORDER BY attrib_date desc;  
+--------------------------------------------------------------------------------
+-- Name                : Split     
+--                                                              
+-- Purpose        : "Split" procedure splits the given formula and arranges the 
+--                  individual attributes in an array. This later becomes the 
+--                  original  parent array of attributes to be attached to the 
+--                  process attributes.                     
+-- Parameters     :                                        
+-- S No.        Name                                Description                                In/Out/InOut        Type  
+--  1.         p_formula         Formula to be split         In  varchar2
+--  2.         p_prod_code       Product code to be split    In  varchar2
+--  2.         p_split_table     Array in which split attr   Out TAB1
+--  3.         p_no_of_elements  No of split attributes      Out number 
+-- Returns         : None  
+--------------------------------------------------------------------------------
+                                                                
+PROCEDURE split(p_formula varchar2,                             
+                p_prod_code varchar2,
+                p_split_table IN OUT TAB1,                      
+                p_no_of_elements OUT number)                    
+IS                                                    
+   temp_n_j                 NUMBER := 0;                     
+   temp_n_k                 NUMBER := 1;                    
+   temp_n_occur             number(5) ; 
+   szFormula                varchar2(240);   
+   cursor c1 is 
+      select attrib_code 
+      from VALID_PRODUCT_CCLASS_ATTR_ISBT
+      where product_code = p_prod_code
+      and attrib_group = '+'
+      and sysdate between eff_date and nvl(term_date,sysdate);
+BEGIN                                             
+   --Find any '+' attributes which are not a part of the formula.
+   temp_n_occur:=Length(Replace(p_formula,'-'));
+   temp_n_occur:=temp_n_occur/8;
+
+   FOR rec in c1
+   LOOP
+      temp_n_j := temp_n_j+1;              
+      p_split_table(temp_n_j) := rec.attrib_code;
+   END LOOP;
+
+  /*
+    IF mod(length(p_formula),3) != 0 THEN         
+      temp_n_occur := temp_n_occur + 1;         
+    END IF; 
+  */
+                                    
+   --dbms_output.put_line('In split ' || to_char(temp_n_occur));
+
+   szFormula:=Replace(p_formula,'-');
+ 
+   FOR i in 1..temp_n_occur                  
+   LOOP                                     
+      temp_n_j := temp_n_j+1;              
+      p_split_table(temp_n_j) := SUBSTR(szFormula,temp_n_k,8);  
+      temp_n_k :=temp_n_k+8;              
+      --dbms_output.put_line ('-|'||p_split_table(temp_n_j) ||'|-');  
+   END LOOP;                                   
+   -- The no of elements in a PL/SQL array is recorded here for future use
+   p_no_of_elements :=temp_n_j;               
+END split;                                   
+--------------------------------------------------------------------------------
+-- Name        : Sort     
+--    
+-- Purpose     : "Sort" procedure sorts the given array and arranges the    
+--               attributes in an ascending order      
+--                                                     
+-- Parameters  :                                     
+-- S No.        Name               Description      In/Out/InOut        Type
+--  1.      p_sort_table       Array of attributes to      In/Out      TAB1 
+--  2.      p_size_of_table    No of attr to be sorted     In/Out      number 
+-- Returns         : None                                    
+--------------------------------------------------------------------------------
+                                                   
+PROCEDURE sort(p_sort_table IN OUT TAB1,                        
+               p_size_of_table number)             
+IS                                                              
+   temp_n_second    number := 0;                                
+   temp_c_array     varchar2(8);                                
+BEGIN                                                           
+   FOR i in 1..p_size_of_table                                  
+   LOOP                                                         
+      p_sort_table(i) := ltrim(rtrim(p_sort_table(i)));         
+   END LOOP;                                                    
+   FOR first in 1..p_size_of_table                              
+   LOOP                                                         
+      temp_n_second :=first +1;                                 
+      FOR second in temp_n_second .. p_size_of_table            
+      LOOP                                                      
+         IF (p_sort_table(first) > p_sort_table(second)) THEN     
+            temp_c_array :=p_sort_table(first);      
+            p_sort_table(first) :=p_sort_table(second);       
+            p_Sort_table(second) :=temp_c_array;   
+         END IF;                                  
+      END  LOOP;                                                
+   END LOOP;                                                    
+END sort;                                                       
+------------------------------------------------------------------------------- 
+--Delete row checks any given element in an array and returns its presence
+--if this element has to be deleted it will be indicated by a flag        
+FUNCTION Delete_row(p_source_table In Out TAB1,                 
+                    p_size_of_source number,                    
+                    p_target_element varchar2,                  
+                    p_del_y_n char )                            
+RETURN BOOLEAN IS                                               
+   temp_n_found_flag number := 0; --0 indicates row not found   
+BEGIN                                                           
+   FOR s in 1..p_size_of_source                                 
+   LOOP                                                         
+      IF p_target_element = 'x'                                 
+         OR rtrim(p_source_table(s)) = rtrim(p_target_element)
+      THEN                                                      
+         IF p_del_y_n ='Y' THEN                                 
+            p_source_table(s) := NULL;       
+         END IF;                                                
+         RETURN TRUE;                       
+      END IF;                                                   
+   END LOOP;                                                    
+   RETURN FALSE;                                                
+END Delete_row;                                                 
+------------------------------------------------------------------------------- 
+PROCEDURE add_attribute(p_product_code varchar2,     
+                        p_attribute_to_add varchar2,
+                        p_new_product_code out varchar2 ,
+                        p_final_formula out varchar2,   
+                        p_product_type in varchar2 := null , 
+                        p_delete_attribute in varchar2 := null) 
+IS                                                              
+   temp_t_split_table TAB1;                    
+   temp_t_att_to_delete TAB1;                 
+   temp_t_att_to_assoc TAB1;                 
+   temp_t_oth_att      TAB1;
+   temp_n_split_table_ele number;           
+   temp_n_k11   number := 1;               
+   temp_n_l11   number := 1;              
+   temp_n_l21   number := 0;             
+   temp_n_oth_att number := 0;
+   temp_b_var1 boolean;                 
+   temp_v_final_formula varchar2(240);  
+   temp_v_initial_formula varchar2(240);         
+   temp_v_formula_ele varchar2(100);   
+BEGIN                               
+   -- Get the product formula for the given product
+   BEGIN                          
+      SELECT product_formula     
+      INTO temp_v_initial_formula         
+      FROM valid_products      
+      WHERE product_code = p_product_code     
+      AND unit_scheme_type = 'I'     
+      AND sysdate between eff_date and nvl(term_date, sysdate);
+      --dbms_output.put_line(temp_v_initial_formula); 
+   EXCEPTION                                   
+      WHEN no_data_found THEN                 
+             return; -- If no product code is returned an error is assumed.  
+      WHEN others THEN                                  
+             return;                                       
+   END;   
+
+    dbms_output.put_line('Step-1 passed');                                            
+   -- Split the above formula                        
+   split(temp_v_initial_formula,p_product_code,
+         temp_t_split_table,temp_n_split_table_ele);
+
+    dbms_output.put_line('Step-2 passed');
+   -- Add the passed attrib code and the values maintained for this attrib code 
+   -- In the product matrix table.                        
+   /*For i in 1..temp_n_split_table_ele                     
+   LOOP                                                    
+      dbms_output.put_line('-'||temp_t_split_table(i)||'-');        
+   END LOOP;*/                                           
+   /* ----------------------------------------------------------------- */     
+   /* Added by mukesh to put attrib to be added in original split table */     
+   /* ----------------------------------------------------------------- */     
+   IF NOT (Delete_row(temp_t_split_table,temp_n_split_table_ele,    
+                               p_attribute_to_add,'N' )) 
+   THEN   
+       temp_n_split_table_ele :=temp_n_split_table_ele +1;   
+       temp_t_split_table(temp_n_split_table_ele ) := p_attribute_to_add;
+   END IF;      
+
+   dbms_output.put_line('Step-3 passed');                                       
+   /*-------------------------------------------------------------------*/ 
+   /*for i in 1..temp_n_split_table_ele                   
+   /*-------------------------------------------------------------------*/ 
+   /*LOOP                                                  
+       dbms_output.put_line(temp_t_split_table(i));      
+   END LOOP;*/                                         
+   FOR temp_rec_matrix in C2(p_attribute_to_add)       
+   LOOP                                               
+      -- Add attribute only if it already does not exist in the addition  
+      -- or Deletion arrays.                         
+      -- If a deletion attribute is associated along with the association 
+      -- attribute, add only if deletion attribute is present.     
+      -- dbms_output.put_line(temp_rec_matrix.f1);         
+      -- If deletion attribute is present 
+      IF (Delete_row(temp_t_split_table, temp_n_split_table_ele, 
+             temp_rec_matrix.f1,'N'))                    
+      THEN                                           
+         temp_t_att_to_delete(temp_n_k11) :=temp_rec_matrix.f1;     
+         temp_n_k11:=temp_n_k11+1;                 
+      END IF;                                     
+      IF NOT (Delete_row(temp_t_split_table,     
+         temp_n_split_table_ele,temp_rec_matrix.f2,'N')) 
+      THEN   
+         --added by AB on 06-11-97             
+         IF temp_rec_matrix.f1 = 'x' OR       
+            Delete_row(temp_t_split_table,   
+                       temp_n_split_table_ele,temp_rec_matrix.f1,'N')  
+         THEN                              
+            temp_t_att_to_assoc(temp_n_l11) := temp_rec_matrix.f2;
+            temp_n_l11 := temp_n_l11+1;          
+         END IF;                                
+      END IF;                                  
+   END LOOP;                   
+   dbms_output.put_line('Step-4 passed');               
+   -- Now start the second iteration         
+   -- Pick up attributes to be added / Deleted due to addition of the implied
+   -- attributes above. Checks to be made on both the original array with the   
+   -- split product formula and on the addition deletion arrays.      
+   temp_n_l21 := temp_n_l11 -1;                            
+   FOR l21 in 1..(temp_n_l21)                             
+   LOOP                                                  
+      FOR temp_rec_matrix11 in C2(temp_t_att_to_assoc(l21))       
+      LOOP                                             
+         --If deletion attrib is there in the original attributes then
+         IF (Delete_row(temp_t_split_table,          
+            temp_n_split_table_ele,temp_rec_matrix11.f1,'N')) 
+         THEN                                      
+            -- If deletion attrib is not existing in the new deletion array or
+            -- if deletion attibute is null ('x') then       
+            IF NOT (                                        
+                     Delete_row(temp_t_att_to_delete, (temp_n_k11-1),
+                                temp_rec_matrix11.f1,'N') OR        
+                     temp_rec_matrix11.f1 = 'x'          
+                   )                                    
+            THEN                                                
+               -- add deletion attribute to the deletion array   
+               temp_t_att_to_delete(temp_n_k11) :=temp_rec_matrix11.f1;  
+               temp_n_k11:=temp_n_k11+1;                
+            END IF;                                    
+         END IF;                                      
+         -- If assoc attrib is not in original attribs then    
+         IF NOT (Delete_row(temp_t_split_table,     
+            temp_n_split_table_ele,temp_rec_matrix11.f2,'N')) THEN 
+            -- If assoc attrib is not in the new assoc attributes already then 
+            IF NOT (                                          
+                      Delete_row(temp_t_att_to_assoc, (temp_n_l11-1),  
+                                temp_rec_matrix11.f2,'N') OR
+                      temp_rec_matrix11.f2 = 'x'           
+                   )                                      
+            THEN                                         
+               -- If the deletion attribute is null ('x') or the  
+               -- del attrib is present in the original table of attribs then 
+               IF (temp_rec_matrix11.f1 = 'x' OR 
+                  Delete_row(temp_t_split_table,
+                  temp_n_split_table_ele, temp_rec_matrix11.f1, 'N')) 
+               THEN                                  
+                  temp_t_att_to_assoc(temp_n_l11) := temp_rec_matrix11.f2; 
+                  temp_n_l11:=temp_n_l11+1; 
+               END IF;           
+            END IF;             
+         END IF;               
+      END LOOP;               
+   END LOOP;                
+
+   dbms_output.put_line('Step-5 passed'); 
+   ---------------------------------------------------------     
+   -- Delete attributes to delete from attributes to attach.    
+   ---------------------------------------------------------   
+   FOR k11 in 1..(temp_n_k11-1)               
+   LOOP                                      
+      IF (temp_t_att_to_delete(k11) != 'x') THEN      
+         temp_b_var1 := Delete_row(temp_t_split_table,temp_n_split_table_ele,
+                     temp_t_att_to_delete(k11),'Y');        
+      END IF;                                              
+   END LOOP;                   
+
+   dbms_output.put_line('Step-6 passed');                           
+   ------------------------------------------------------
+   -- add addtributes_to_assoc to attributes_to_attach  
+   ------------------------------------------------------        
+   FOR l11 in 1..(temp_n_l11-1)                       
+   LOOP                                              
+       IF NOT (Delete_row(temp_t_split_table,temp_n_split_table_ele,
+                temp_t_att_to_assoc(l11),'N' )) THEN         
+          temp_n_split_table_ele :=temp_n_split_table_ele +1;     
+          temp_t_split_table(temp_n_split_table_ele ) :=   
+                           ltrim(temp_t_att_to_assoc(l11));     
+       END IF;                                 
+    END LOOP;                                 
+    ----------------------------------------------------
+    -- Sort the final array                            
+    ---------------------------------------------------         
+    sort(temp_t_split_table,temp_n_split_table_ele); 
+    dbms_output.put_line('Attr:'||to_char(temp_n_oth_att));
+
+    FOR temp_final in 1..temp_n_split_table_ele     
+    LOOP                                           
+       temp_v_formula_ele := temp_t_split_table(temp_final);
+       dbms_output.put_line('formula_ele:'||temp_v_formula_ele);
+
+       IF substr(temp_v_formula_ele,1,1) != '+' then
+         -- temp_v_final_formula := temp_v_final_formula ||  LT2018 
+         --   rpad(temp_v_formula_ele,3 ,' ');
+          select decode(temp_v_final_formula,null,null,
+                        temp_v_final_formula||'-') || temp_v_formula_ele
+                    into temp_v_final_formula from dual;
+
+       ELSIF temp_v_formula_ele is not null THEN
+          temp_n_oth_att := temp_n_oth_att + 1;
+          temp_t_oth_att(temp_n_oth_att) := temp_t_split_table(temp_final); 
+       END IF;
+    END LOOP;
+                                                
+    p_final_formula := rtrim(temp_v_final_formula);         
+    temp_v_final_formula := rtrim(temp_v_final_formula);   
+    
+    dbms_output.put_line('<<<'||temp_v_final_formula||'>>>');     
+    ---------------------------------------------------  
+    --Select product code for product formula developed.
+    ---------------------------------------------------
+    p_new_product_code := null;
+    IF temp_n_oth_att != 0 THEN
+       sort(temp_t_oth_att, temp_n_oth_att);
+    END IF;
+    DECLARE                                             
+       temp_n_av    number  := 0;
+       temp_t_av      TAB1;
+       temp_x       varchar2(1);
+       match        boolean := TRUE;
+       CURSOR lc1 IS
+       SELECT product_code                      
+       FROM valid_products                    
+       WHERE product_formula = temp_v_final_formula    
+       AND unit_scheme_type = 'I'           
+       AND (
+              (p_product_type is not null 
+               and product_type = p_product_type) 
+           OR
+              (p_product_type is null
+               and product_type = 
+                   ( SELECT product_type FROM valid_products 
+                     WHERE product_code = p_product_code    
+                     AND unit_scheme_type = 'I'      
+                     AND sysdate BETWEEN eff_date   
+                     AND nvl(term_date, sysdate))  
+              )
+           )
+       AND sysdate between eff_date and nvl(term_date, sysdate);     
+
+       CURSOR lc2 (inp_pcode varchar2) IS
+       SELECT attrib_code FROM VALID_PRODUCT_CCLASS_ATTR_ISBT
+       WHERE product_code =  inp_pcode
+       AND attrib_group = '+'
+       AND sysdate between eff_date and nvl(term_date,sysdate);
+    BEGIN
+dbms_output.put_line(p_product_type||', '||temp_v_final_formula);
+       FOR rec in lc1
+       LOOP
+          dbms_output.put_line('+ Attr:'||to_char(temp_n_oth_att));
+          IF temp_n_oth_att = 0 THEN
+             -- No '+' Modifiers
+             BEGIN
+                dbms_output.put_line(rec.product_code);
+                SELECT distinct 'x' INTO temp_x 
+                FROM VALID_PRODUCT_CCLASS_ATTR_ISBT
+                WHERE ATTRIB_GROUP = '+'
+                AND product_code = rec.product_code
+                AND sysdate between eff_date and nvl(term_date,sysdate); 
+             EXCEPTION
+                WHEN no_data_found THEN
+                   p_new_product_code := rec.product_code;
+                   exit;
+                WHEN others THEN
+                   return;
+             END;
+          ELSE
+             --Verify exact matches in required and present.
+             for rec2 in lc2(rec.product_code)
+             loop
+                temp_n_av := temp_n_av + 1;
+                temp_t_av(temp_n_av) := rec2.attrib_code;
+             end loop;
+             IF temp_n_av != 0 THEN
+                -- If number of '+' modifiers match compare and verify
+                -- Else reinitialize and check next matching product
+                IF temp_n_av = temp_n_oth_att THEN
+                   sort(temp_t_av,temp_n_av);
+                   for i in 1 .. temp_n_av
+                   loop
+                      IF temp_t_av(i) != temp_t_oth_att(i) THEN
+                         match := FALSE;
+                         exit;
+                      END IF;
+                   end loop;
+                ELSE 
+                   match := false;
+                END IF;
+                IF not match THEN
+                   for i in 1 .. temp_n_av
+                   loop
+                     temp_t_av(i) := null;
+                   end loop;
+                   temp_n_av := 0;
+                   match := TRUE;
+		   p_new_product_code:=rec.product_code; --Edwin 04/22/07
+                ELSE
+                   p_new_product_code := rec.product_code;
+                   exit;
+                END IF;
+             ELSE
+	       p_new_product_code:=rec.product_code;  --Edwin 04/22/07
+	     END IF;
+          END IF; 
+       END LOOP;
+       IF p_new_product_code is NULL THEN
+         return;--exception handler has to be written  
+       END IF;
+
+       dbms_output.put_line('new product code:'||p_new_product_code);
+       --Open Cursor
+       --If + attrs not present then verify no data exists in 
+       --VALID_PRODUCT_CCLASS_ATTR for product_code
+       --If + attr are present then verify that all attrs are present 
+       --in VALID_PRODUCT_CCLASS_ATTR for product_code
+       --prod_code value to be returned in p_new_product_code                 
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN    
+         return;--exception handler has to be written  
+      WHEN OTHERS THEN                
+         Null;                       
+    END;                            
+END add_attribute;                 
+------------------------------------------------------------------------------- 
+PROCEDURE Delete_product_attribute (P_unit_id varchar2,   
+                          p_coll_date date,        
+                          p_chapter_id varchar2,  
+                          p_user_id varchar2,    
+                          p_program_id varchar2,
+                          p_product_code varchar2,   
+                          p_attrib_code varchar2,   
+                          p_update_flag varchar2,  
+                          p_new_product_code out varchar2,
+                          p_new_product_formula out varchar2) 
+Is                                           
+   temp_t_attributes_to_process TAB1; --process attributes from back trace are  
+                                      --stored here   
+   temp_t_attributes_to_attach  TAB1; --original parent attributes are 
+                                      --stored here   
+   temp_t_products_to_process   TAB1; --products from back trace are stored here
+   temp_t_inter_product_code    TAB1; --Intermediate products are stored here  
+   temp_t_new_products          TAB1; --New Products          
+   temp_n_i1                    number :=0; -- Index of      
+                                            -- temp_t_attributes_to_process 
+   temp_n_j1                    number :=0; -- Index of    
+                                            -- temp_t_products_to_process 
+   temp_n_ip                    number :=0; -- Index of temp_t_inter_products 
+   e_in_attach                  number;     -- No of Elements in       
+                                            -- attributes to attach array   
+   temp_product_code_formula    varchar2(240);              
+   temp_attrib_deleted_code     varchar2(10);              
+   temp_attrib_associated_code  varchar2(10);             
+   temp_attrib_to_process       varchar2(10);            
+   Final_product_code           varchar2(60);          
+   temp_v_old_product_code      varchar2(8);          
+   temp_v_inter_product_code    varchar2(8);         
+   temp_d_attrib_date           Date;               
+   temp_d_attrib_date_2         Date;              
+   temp_d_insert_date           Date;             
+   temp_c_split_done            char(1) := 'N';--Check whether the  
+   temp_v_new_formula           Varchar2(240);      
+   temp_dummy_bool              Boolean;          
+   processed_flag               Varchar2(1);     
+   temp_v_product               Varchar2(8);    
+   temp_v_store_flag            Varchar2(1) := 'N';      
+   temp_n_proc_ctr              number(3) := 0;         
+   temp_t_splt_prod_cd          TAB1;        
+   temp_n_splt_ctr              number(3) := 0;       
+   temp_n_ctr                   number(3) := 0;      
+   temp_v_frst_old_prd_cd       varchar2(8);        
+   temp_v_to_be_processed       varchar2(1) := 'N';
+   temp_v_prod_type             varchar2(5);         
+   CURSOR C15 IS                       
+      SELECT old_product_code         
+      FROM product_attribute_log     
+      WHERE unit_id = p_unit_id     
+        AND chapter_id = p_chapter_id        
+        AND trunc(coll_date) = trunc(p_coll_date) 
+        AND substr(old_product_code,1,6) = substr(temp_v_old_product_code,1,6)
+        AND substr(old_product_code,8,1) = substr(temp_v_old_product_code,8,1)
+        AND substr(old_product_code,7,1) != substr(temp_v_old_product_code,7,1)
+        AND attrib_code = p_attrib_code                       
+        AND invalid_flag IS NULL                             
+      FOR UPDATE OF invalid_flag;                           
+   CURSOR C16 IS                                           
+       SELECT product_code                                
+       FROM components c                                 
+       WHERE unit_id = p_unit_id                        
+         AND exists 
+             (SELECT 'x'                       
+              FROM product_attribute_log      
+              WHERE unit_id = p_unit_id      
+              AND chapter_id = p_chapter_id         
+              AND trunc(coll_date) = trunc(p_coll_date)  
+              AND invalid_flag = 'X'    
+              AND substr(new_product_code,7,2) = substr(c.product_code,7,2)  
+             )                                          
+         AND reject_reason_code IS NULL                       
+         AND relabel_product_code IS NULL;                   
+   CURSOR C17(p_c1_unit_id varchar2,                        
+              p_product_code varchar2,                     
+              p_c1_chapter_id varchar2,                   
+              p_c1_coll_date date) IS                    
+           SELECT distinct old_product_code, new_product_code, attrib_code,
+               attrib_date                             
+           FROM   product_attribute_log                  
+           WHERE  nvl(invalid_flag,'N') != 'Y'          
+           START WITH new_product_code = p_product_code
+               AND unit_id = p_c1_unit_id          
+               AND chapter_id = p_c1_chapter_id   
+               AND trunc(coll_date) = p_c1_coll_date       
+           CONNECT BY new_product_code = PRIOR old_product_code    
+               AND unit_id = PRIOR unit_id     
+               AND chapter_id = PRIOR chapter_id        
+               AND coll_date = PRIOR coll_date         
+               AND attrib_date < PRIOR attrib_date    
+           ORDER BY attrib_date desc;         
+BEGIN                                     
+   ---------------------------------------------------------------------------- 
+   --The cursor C1 gets the entire history of the product in reverse order.
+   --Temp_v_store_flag is used so that we store the attributes only upto the 
+   --one we have to delete. The history of the product before that is not 
+   --relevent to us.
+   ---------------------------------------------------------------------------- 
+   FOR temp_rec IN C1 (P_unit_id,P_product_code,P_chapter_id,trunc(P_coll_date))
+   LOOP                                                         
+      --dbms_output.put_line( temp_rec.attrib_code || ' ' || p_attrib_code);    
+      IF temp_rec.attrib_code = p_attrib_code THEN              
+         temp_v_store_flag := 'Y';                              
+         temp_v_to_be_processed := 'Y';    
+         temp_v_old_product_code := temp_rec.old_product_code;
+         temp_d_attrib_date_2 := temp_rec.attrib_date; 
+      END IF;                               
+      IF nvl(temp_v_store_flag,'N') != 'Y' THEN      
+         temp_n_i1 :=temp_n_i1+1;                             
+         temp_t_attributes_to_process(temp_n_i1) :=Temp_rec.attrib_code;     
+         temp_n_j1 :=temp_n_j1+1;                           
+         temp_t_products_to_process(temp_n_j1) :=Temp_rec.old_product_code;
+         temp_t_new_products(temp_n_j1) := temp_rec.new_product_code;     
+      END IF;                                            
+   END LOOP;                                            
+   IF temp_v_to_be_processed = 'N' THEN                
+      return;                                         
+   END IF;                                           
+   --Terminate if the parameter attribute was not found.      
+   /*for i in 1..temp_n_j1                         
+   loop                                           
+      dbms_output.put_line('Product :' || temp_t_products_to_process(i)  
+                        || ' Attr :' || temp_t_attributes_to_process(i)); 
+   end loop;*/
+   --                                                           
+   --dbms_output.put_line( temp_n_j1);                  
+   ---------------------------------------------------------------------------  
+   -- Check if the product was split                            
+   ---------------------------------------------------------------------------  
+   BEGIN                                               
+      SELECT attrib_date,insert_dats                  
+      INTO  temp_d_attrib_date,temp_d_insert_date    
+      FROM product_attribute_log                    
+      WHERE unit_id = p_unit_id                    
+         AND chapter_id = p_chapter_id            
+         AND trunc(coll_date) = trunc(p_coll_date)         
+         AND old_product_code = temp_v_old_product_code   
+         AND attrib_date = temp_d_attrib_date_2
+         AND nvl(invalid_flag,'N') != 'Y';    
+      IF( temp_d_attrib_date != temp_d_insert_date ) THEN    
+         temp_c_split_done := 'Y';          
+      END IF;                              
+      dbms_output.put_line(' Split Done : '||nvl(temp_c_split_done,'N')); 
+   EXCEPTION                                             
+      WHEN NO_DATA_FOUND THEN                           
+         return;                                       
+         NULL;--Code the exception handler            
+   END;                                              
+   ---------------------------------------------------------------------------- 
+   --Get the product formula                        
+   ---------------------------------------------------------------------------- 
+   BEGIN                                           
+      SELECT product_formula                      
+      INTO temp_product_code_formula             
+      FROM valid_products                       
+      WHERE product_code = SUBSTR(temp_v_old_product_code,1,5) 
+        AND unit_scheme_type = 'I';           
+   EXCEPTION                                 
+      WHEN NO_DATA_FOUND THEN               
+         return;                           
+         NULL;--Code the exception handler
+   END;                                  
+   ---------------------------------------------------------------------------- 
+   --  Now start the process of addition of attributes from process attributes  
+   --  array to attributes derived from the orginal parent formula        
+   ---------------------------------------------------------------------------- 
+   --dbms_output.put_line('This is '||to_char(temp_n_i1));
+   processed_flag := 'N';              
+   temp_n_ip := 0;                    
+   IF temp_n_i1 != 0 THEN            
+      temp_v_product:= temp_v_old_product_code; --temp_t_products_to_process(1);
+      --dbms_output.put_line(temp_v_product);
+      FOR j in reverse 1 .. temp_n_i1
+      LOOP /*Main for loop for processing */  
+         --dbms_output.put_line(temp_t_attributes_to_process(j)||'|-');
+         IF temp_t_attributes_to_process(j) IS NOT NULL THEN     
+            /*****ADDED TO HANDLE PRODUCT TYPE CHANGE*****/     
+            BEGIN                                    
+               temp_v_prod_type := null;            
+               SELECT nvl(new_product_type,vp.product_type) 
+               INTO temp_v_prod_type              
+               FROM valid_product_attributes vpa, valid_products vp 
+               WHERE vp.product_code = substr(temp_v_product,1,5)
+                 AND vp.product_type = vpa.product_type
+                 AND vpa.attrib_code = temp_t_attributes_to_process(j)   
+                 AND sysdate between vpa.eff_date 
+                     and nvl(vpa.term_date,sysdate); 
+            EXCEPTION                                    
+               WHEN others THEN                         
+                  return;                              
+            END;                                      
+            /*_____________________________________________________________*/
+            add_attribute(substr(temp_v_product,1,5),       
+                          temp_t_attributes_to_process(j), 
+                          temp_v_inter_product_code,      
+                          temp_v_new_formula,            
+                          temp_v_prod_type);            
+            processed_flag := 'Y';                     
+           /* dbms_output.put_line( 'Product Code after adding ' ||
+                      temp_t_attributes_to_process(j) ||
+                      temp_v_inter_product_code); */
+            IF (temp_v_inter_product_code IS NOT NULL ) THEN    
+                temp_n_ip := temp_n_ip + 1;          
+                temp_t_inter_product_code(temp_n_ip) :=       
+                   temp_v_inter_product_code || substr(p_product_code,6,3);
+                temp_v_product := temp_v_inter_product_code ||      
+                                substr(p_product_code,6,3);        
+            ELSE                                        
+               return;                                 
+            END IF;                                   
+         END IF;                                     
+      END LOOP;                                     
+   END IF;                                         
+   IF processed_flag = 'N' THEN                   
+      temp_t_inter_product_code(1) := temp_v_old_product_code;   
+      temp_v_new_formula := temp_product_code_formula;    
+   END IF;                                     
+   --dbms_output.put_line(to_char(temp_n_ip) || ' is temp_n_ip'); 
+   --------------------------------------------------------------------- 
+   -- If the procedure has been called with the update option then
+   -- update the product_attribute_log and insert interdictions in     
+   -- component_interdictions (if req.)               
+   --------------------------------------------------------------------- 
+   IF nvl(p_update_flag,'N') = 'Y' THEN                 
+      IF temp_n_ip != 0 THEN                           
+         --temp_n_ctr := temp_n_ip;                   
+         --update the product attribute log here     
+          temp_n_ip := 1;                           
+          FOR log_rec IN C17(p_unit_id,temp_t_products_to_process(temp_n_j1),  
+                             p_chapter_id, p_coll_date)       
+          LOOP                                               
+             dbms_output.put_line(log_rec.old_product_code  
+               ||' - '|| log_rec.new_product_code ||'-' ||log_rec.attrib_code);
+             IF log_rec.attrib_code = p_attrib_code THEN       
+                temp_n_proc_ctr := 1;                         
+             END IF;                                         
+             IF temp_n_proc_ctr >= 1 THEN                   
+                IF temp_n_proc_ctr = 1 THEN                
+                   temp_v_frst_old_prd_cd := log_rec.old_product_code;    
+                   UPDATE product_attribute_log          
+                   SET   invalid_flag ='Y'              
+                   WHERE unit_id = p_unit_id           
+                     AND chapter_id = p_chapter_id    
+                     AND trunc(coll_date) = trunc(p_coll_date) 
+                     AND old_product_code = log_rec.old_product_code
+                     AND new_product_code = log_rec.new_product_code     
+                     AND attrib_code = log_rec.attrib_code        
+                     AND attrib_date = temp_d_attrib_date_2      
+                     AND nvl(invalid_flag,'N') != 'Y';
+                ELSIF temp_n_proc_ctr = 2 THEN       
+                   UPDATE product_attribute_log     
+                   SET old_product_code = temp_v_frst_old_prd_cd,  
+                       new_product_code = temp_t_inter_product_code(temp_n_ip)
+                   WHERE unit_id = p_unit_id                 
+                     AND chapter_id = p_chapter_id          
+                     AND trunc(coll_date) = trunc(p_coll_date)       
+                     AND old_product_code = log_rec.old_product_code
+                     AND new_product_code = log_rec.new_product_code     
+                     AND attrib_code = log_rec.attrib_code        
+                     AND nvl(invalid_flag,'N') != 'Y'; 
+                ELSE                                  
+                   UPDATE product_attribute_log      
+                   SET old_product_code =           
+                       temp_t_inter_product_code(temp_n_ip), 
+                       new_product_code =         
+                       temp_t_inter_product_code(temp_n_ip + 1)  
+                   WHERE unit_id = p_unit_id    
+                     AND chapter_id = p_chapter_id       
+                     AND trunc(coll_date) = trunc(p_coll_date)
+                     AND old_product_code = log_rec.old_product_code    
+                     AND new_product_code = log_rec.new_product_code   
+                     AND attrib_code = log_rec.attrib_code      
+                     AND nvl(invalid_flag,'N') != 'Y';         
+                   temp_n_ip := temp_n_ip + 1;      
+                END IF;                            
+                temp_n_proc_ctr := temp_n_proc_ctr + 1;     
+             END IF;                             
+          END LOOP;                             
+       ELSE                                    
+          dbms_output.put_line('At Update ...');        
+          UPDATE product_attribute_log       
+          SET invalid_flag = 'Y'            
+          WHERE unit_id = p_unit_id        
+            AND chapter_id = p_chapter_id 
+            AND trunc(coll_date) = trunc(p_coll_date)    
+            AND new_product_code = p_product_code 
+            AND attrib_code = p_attrib_code      
+            AND attrib_date = temp_d_attrib_date_2;   
+       END IF;                       
+       ----------------------------------------------------------------------  
+       -- Now mark parallel products with 'X' if a split has been done  
+       -- after the attribute was added.                     
+       -------------------------------------------------------------------  
+       IF temp_c_split_done = 'Y' THEN                     
+          FOR log_x IN C15                                
+          LOOP                                           
+             dbms_output.put_line('At Update invalid flag...'||log_x.old_product_code);
+             UPDATE product_attribute_log 
+             SET invalid_flag = 'X'
+             WHERE CURRENT OF C15;
+          END LOOP;    
+          ---------------------------------------------------------------- 
+          -- Put Hold interdictions on Components where the product code  
+          -- has the an attribute which has been removed from one of the 
+          -- parallel aliquots.                         
+          ---------------------------------------------------------------- 
+          FOR comp_h in C16                               
+          LOOP                                           
+             DECLARE                                    
+                temp_v_x varchar2(1);                  
+             BEGIN                                    
+             dbms_output.put_line('At Update invalid flag interdictions...');
+                SELECT 'x'                                  
+                INTO temp_v_x                              
+                FROM component_interdictions              
+                WHERE unit_id = p_unit_id                
+                  AND coll_date = p_coll_date           
+                  AND chapter_id = p_chapter_id        
+                  AND product_code = comp_h.product_code        
+                  AND inter_code = 'X';              
+             EXCEPTION                              
+                WHEN no_data_found THEN            
+                   INSERT                         
+                   INTO component_interdictions  
+                      (unit_id, coll_date, chapter_id,    
+                       product_code,inter_code,insert_dats,    
+                       inter_user_id,audit_key,program_id)    
+                   VALUES                    
+                      (p_unit_id,p_coll_date,p_chapter_id,  
+                      comp_h.product_code,'X',trunc(sysdate),       
+                      p_user_id,AUDIT_SEQ_LAB.nextval,p_program_id);   
+            END;                                        
+            dbms_output.put_line('Before Loop End');   
+         END LOOP;                                    
+      END IF;                                        
+   END IF;                                          
+   IF temp_n_ip = 0 THEN                           
+      temp_n_ip := 1;                             
+   END IF;                                       
+   --The final product after all the process I and II will be sent out    
+   --for forms display                                   
+   p_new_product_code := temp_t_inter_product_code(temp_n_ip);  
+   p_new_product_formula := temp_v_new_formula;      
+END delete_product_attribute;                       
+END;                                               
+------------------------------------------------------------------------------- 
+/

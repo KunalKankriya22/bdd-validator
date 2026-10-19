@@ -1,0 +1,145 @@
+<form [formGroup]="form" (ngSubmit)="onSaveOrEdit(action)">
+  <div class="dialog-container">
+    <!-- Header -->
+    <div class="dialog-header" [ngClass]="action === 'edit' ? 'dialog-header--edit' : 'dialog-header--add'">
+      <div class="header-content">
+        <h2 class="dialog-title">{{ action === 'add' ? 'Add New Code' : 'Edit Code' }}</h2>
+        <div *ngIf="action === 'edit'" class="header-subtitle">
+          <span>{{ editModeValues.code }} - {{ form.get('type')?.value }}</span>
+          <span *ngIf="lastUpdated" class="last-updated">{{ lastUpdated }}</span>
+        </div>
+      </div>
+      <button mat-icon-button class="close-button" type="button" (click)="onCancel()">
+        <mat-icon>close</mat-icon>
+      </button>
+    </div>
+
+    <!-- Scope Selector -->
+    <div class="scope-selector">
+      <mat-radio-group [value]="scope" (change)="scope = $event.value" [disabled]="action === 'edit'">
+        <mat-radio-button value="donor" (click)="goAddDonor()">Donor</mat-radio-button>
+        <mat-radio-button value="lab">Lab</mat-radio-button>
+      </mat-radio-group>
+    </div>
+
+    <!-- Content -->
+    <div class="dialog-content">
+      <div class="form-row">
+        <mat-form-field *ngIf="action === 'add'" appearance="fill">
+          <mat-label>Code</mat-label>
+          <input matInput formControlName="code" maxlength="4"
+                 (keydown)="preventSpaceInput($event)" />
+          <mat-error *ngIf="form.get('code')?.hasError('required')">Code is required</mat-error>
+          <mat-error *ngIf="form.get('code')?.hasError('maxlength')">Max 4 characters allowed</mat-error>
+        </mat-form-field>
+        <div *ngIf="action === 'edit'" class="field-display-card">
+          <div class="field-label">Code</div>
+          <div class="field-value">{{ editModeValues.code || '-' }}</div>
+        </div>
+
+        <ng-container *ngIf="action === 'edit' && isSystemControlled; else editType">
+          <div class="field-display-card">
+            <div class="field-label">Type</div>
+            <div class="field-value">{{ form.get('type')?.value || '-' }}</div>
+          </div>
+        </ng-container>
+        <ng-template #editType>
+          <mat-form-field appearance="fill">
+            <mat-label>Type</mat-label>
+            <mat-select formControlName="type" required>
+              <mat-option>
+                <ngx-mat-select-search
+                  [formControl]="typeSearchControl"
+                  placeholderLabel="Search Type..."
+                  noEntriesFoundLabel="No matching types">
+                </ngx-mat-select-search>
+              </mat-option>
+              <mat-option *ngFor="let type of typeOptions()" [value]="type">
+                {{ type }}
+              </mat-option>
+            </mat-select>
+            <mat-error *ngIf="form.get('type')?.hasError('required')">Type is required</mat-error>
+          </mat-form-field>
+        </ng-template>
+      </div>
+
+      <ng-container *ngIf="action === 'edit' && isSystemControlled; else editDescription">
+        <div class="field-display-card full-width">
+          <div class="field-label">Description</div>
+          <div class="field-value">{{ form.value.description || '-' }}</div>
+        </div>
+      </ng-container>
+      <ng-template #editDescription>
+        <mat-form-field appearance="fill" class="full-width">
+          <mat-label>Description</mat-label>
+          <input matInput formControlName="description" required maxlength="50"
+                 (keydown)="preventLeadingAndMultipleSpaces($event, 'description')"
+                 (blur)="trimTrailingSpaces('description')" />
+          <mat-hint>characters remaining: {{ 50 - (form.get('description')?.value?.length || 0) }}</mat-hint>
+          <mat-error *ngIf="form.get('description')?.hasError('required')">Description is required</mat-error>
+          <mat-error *ngIf="form.get('description')?.hasError('maxlength')">Max 50 characters allowed</mat-error>
+        </mat-form-field>
+      </ng-template>
+
+      <div class="form-row">
+        <!-- ADD mode: Editable effective date -->
+        <mat-form-field *ngIf="action === 'add'" appearance="fill">
+          <mat-label>Effective Date</mat-label>
+          <input matInput [matDatepicker]="effPicker" formControlName="effectiveDate"
+                 #effDateNativeInput
+                 aria-label="Effective Date"
+                 placeholder="DD-MMM-YYYY"
+                 autocomplete="off"
+                 [min]="minDate"
+                 (input)="onEffDateInput()"
+                 (keydown)="preventSpaceInput($event)" />
+          <mat-datepicker-toggle matIconSuffix [for]="effPicker"></mat-datepicker-toggle>
+          <mat-datepicker #effPicker></mat-datepicker>
+          <mat-error *ngIf="getEffectiveDateError()">{{ getEffectiveDateError() }}</mat-error>
+        </mat-form-field>
+
+        <!-- EDIT mode: Read-only display card -->
+        <div *ngIf="action === 'edit'" class="field-display-card">
+          <div class="field-label">Effective Date</div>
+          <div class="field-value">{{ editModeValues.effectiveDate || '-' }}</div>
+        </div>
+
+        <mat-form-field appearance="fill">
+          <mat-label>Termination Date</mat-label>
+          <input matInput [matDatepicker]="termPicker" formControlName="terminationDate"
+                 #termDateNativeInput
+                 [errorStateMatcher]="termDateErrorMatcher"
+                 aria-label="Termination Date"
+                 placeholder="DD-MMM-YYYY"
+                 autocomplete="off"
+                 [matDatepickerFilter]="terminationDateFilter"
+                 (input)="onTermDateInput()"
+                 (keydown)="preventSpaceInput($event)" />
+          <mat-datepicker-toggle matIconSuffix [for]="termPicker"></mat-datepicker-toggle>
+          <mat-datepicker #termPicker></mat-datepicker>
+          <mat-error *ngIf="getTerminationDateError()">{{ getTerminationDateError() }}</mat-error>
+        </mat-form-field>
+      </div>
+
+      <!-- Interdiction -->
+      <div class="audit-section">
+        <div class="audit-content">
+          <div>
+            <h3 class="audit-title">Enable System Interdiction</h3>
+            <p class="audit-description">
+              This is a restriction automatically enforced by the system.
+              Only users with system-level authorization can remove or override it.
+            </p>
+          </div>
+          <mat-slide-toggle formControlName="interdictionEnabled"></mat-slide-toggle>
+        </div>
+      </div>
+    </div>
+
+    <!-- Actions (Fixed at bottom) -->
+    <div class="dialog-actions">
+      <button mat-button type="button" (click)="onCancel()">CANCEL</button>
+      <button type="submit" mat-raised-button color="primary" [disabled]="isSubmitDisabled">{{ isSaving ? 'Saving...' : (action === 'add' ? 'ADD' : 'SAVE') }}</button>
+    </div>
+  </div>
+</form>

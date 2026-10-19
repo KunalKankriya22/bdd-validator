@@ -1,0 +1,257 @@
+CREATE OR REPLACE PACKAGE ATUPRTUR AS
+
+/*****************************************************************************
+Developed By : ISSA KARMI 
+Create Date  : 05.05.2011 
+Purpose      : This procedure will a file by reading the records from table 
+Date Mod     :
+Version      :01
+
+**************************************************************************** */
+   procedure add_log_entry(p_log_text in varchar2);
+   PROCEDURE gen_file_name;
+   procedure main_proc(file_name in varchar2);
+   procedure rollback_and_exit;
+
+
+   PROCEDURE LOAD_SURROUND_from_table(p_file_name varchar2);
+
+
+   complete               BOOLEAN:=false;
+   logfile                UTL_FILE.FILE_TYPE;
+   instfile               UTL_FILE.FILE_TYPE;
+   outfile                UTL_FILE.FILE_TYPE;
+   read_record            VARCHAR2(500);
+   szRunID                VARCHAR2(30);
+   v_machine_id           VARCHAR2(10);
+   P_FILE_NAME            VARCHAR2(100);
+   result_file_name       VARCHAR2(100);
+   szRTUFile              VARCHAR2(50);
+   logfilename            VARCHAR2(100);
+   szUnitID              VARCHAR2(50); 
+   eExcept                EXCEPTION;    
+   szBatchHdr             VARCHAR2(250);
+   szHeader               VARCHAR2(250);
+   nRowCount              NUMBER:=0;
+   szChapter              VARCHAR2(50);
+   szStatus               VARCHAR2(20);
+   szContract             VARCHAR2(10);
+   szBTString             VARCHAR2(20);
+   szFTString             VARCHAR2(20);
+   rowcount               NUMBER:=0;
+   szTestID               VARCHAR2(300);
+   codabar_unit_scheme    VARCHAR2(1);
+   szUnit_ID              VARCHAR2(50);
+   szResParm              VARCHAR2(10); 
+   szARCPrefix            VARCHAR2(10);
+   szAlphaConvReq         VARCHAR2(3);
+   v_chapter_id           VARCHAR2(5);
+
+END ATUPRTUR;
+/
+CREATE OR REPLACE PACKAGE BODY ATUPRTUR AS
+
+PROCEDURE add_log_entry(p_log_text varchar2) is
+ BEGIN
+    UTL_FILE.putf(logfile,'%s\n',p_log_text);
+    UTL_FILE.fflush(logfile);
+ END add_log_entry;
+
+
+PROCEDURE gen_file_name IS 
+   
+       CURSOR c_file is select distinct file_id --,record_id,chapter_id,data_string,external_source ,line_order,lifetrak_format
+                       from LT_INTERFACE_FILES
+					   where PROCESSED_FLAG is null
+					   and lifetrak_format='Y';
+							
+
+	
+	begin
+	
+     for rec in c_file loop
+	 
+	   main_proc(rec.file_id);
+	   
+	   dbms_output.put_line('file_name='||rec.file_id);
+	 end loop;	
+	
+end gen_file_name; 
+
+ 
+ 
+Procedure main_proc(file_name in varchar2) is
+  start_time   VARCHAR2(30);
+  end_time     VARCHAR2(30);
+  LogDir       varchar2(50);
+  v_filesource varchar2(1); 
+Begin
+  dbms_output.enable(50000000);
+ -- v_machine_id:=v_inst_id;
+  result_file_name:=file_name;
+  begin
+       select code_desc into LogDir from master_codes
+        where code_type='LOGDR' and code='ILOG' and sysdate
+        between eff_date and nvl(term_date,sysdate);
+  exception
+      when others then
+           dbms_output.put_line('Error in prepare_log_filename');
+           raise_application_error('-20000','Log file name');
+           raise;
+ end;
+
+ dbms_output.put_line('Logdir='||LogDir);
+	
+ dbms_output.put_line('v_filesource='||v_filesource);
+
+   begin
+     p_file_name:=substr(result_file_name,1,instr(result_file_name,'.',1)-1);
+	 
+	 p_file_name :=replace(p_file_name,' ','_');
+	 
+     szRTUFile:='R'||p_file_name ||to_char(sysdate,'yymmddhh24mi')||'.RTL';
+
+    select 'ATUPSURD_'||p_file_name||'_'||
+     decode(substr(user,1,4),'OPS$',substr(user,5),user)||'.r'
+       into logfilename from dual;
+  
+   exception
+       when others then
+         dbms_output.put_line('Error in getting logfilename ... Aborting');
+         raise;
+   end;
+ 
+
+   dbms_output.put_line('logfile='||logfilename);
+    
+     begin
+       start_time := to_char(sysdate,'mm-dd-yy hh24:mi:ss');
+       dbms_output.put_line('start time='||start_time);
+       logfile:=UTL_FILE.fopen(LogDir,logfilename, 'w');
+       dbms_output.put_line('file opened');
+	   
+	   
+      -- instfile:=UTL_FILE.fopen(LogDir,file_name, 'r');
+       
+	   outfile := UTL_FILE.FOPEN(LogDir,szRTUFile, 'w');
+       
+	   dbms_output.put_line('R file opened');
+       
+	   add_log_entry(' Surround Interface Log');
+       add_log_entry('----------------------------------');
+       add_log_entry(' ');
+       add_log_entry('File Name  : '||result_file_name);
+       add_log_entry('Log Name   : '||logfilename);
+       add_log_entry('----------------------------------------');
+   exception
+      when utl_file.invalid_path then
+           dbms_output.put_line('Invalid path or filename'); raise;
+   end;
+
+    szRunID:=to_char(sysdate,'yyyymmddhh24miss');
+    --dbms_output.put_line('Before populating the temp table..');
+    
+	
+	  
+	LOAD_SURROUND_from_Table(file_name);
+	    
+	--dbms_output.put_line('After temp table is populated');
+
+
+    --Close all the file pointers
+
+    UTL_FILE.FCLOSE(logfile);
+    UTL_FILE.FCLOSE(instfile);
+    UTL_FILE.FCLOSE(outfile);
+
+--	dbms_output.put_line('complete=' || outfile);
+End main_proc;
+
+
+
+
+
+
+
+PROCEDURE LOAD_SURROUND_from_table(p_file_name varchar2) IS
+
+   CURSOR  RTUR_TEST IS select sequence_no,header_name,start_pos,end_pos
+                                from RTURLOAD_TESTS order by sequence_no;
+								
+	
+   CURSOR get_data is select file_id,record_id,chapter_id,data_string,external_source ,line_order,lifetrak_format
+                       from LT_INTERFACE_FILES
+					   where PROCESSED_FLAG is null
+					   and lifetrak_format='Y'
+					   and file_id=p_file_name
+					   order by line_order;  								
+
+   test_id varchar2(10);
+   result_code varchar2(5);
+   lt_result_code varchar2(5);
+   temp_unit_id varchar2(15);
+   nStart NUMBER:=0;
+   nEnd   NUMBER:=0;
+
+BEGIN
+
+   
+   for rec in get_data loop
+		
+		Begin 
+         read_record :=rec.data_string;
+		 v_chapter_id :=rec.chapter_id;
+		 
+		 IF v_chapter_id is null then
+		 
+		   begin
+		   select CHAPTER_ID INTO v_chapter_id
+           from donations
+           where unit_id =substr(rec.data_string,1,13);
+		   
+		   exception
+		     when no_data_found then
+			 add_log_entry('Chapter is not exist:'||sqlerrm);
+              rollback_and_exit;
+			  exit;
+			 
+		   end;
+		 END IF;
+          
+
+		UTL_FILE.PUT_LINE(outfile, read_record); 
+		  
+		  update LT_INTERFACE_FILES
+		  set PROCESSED_FLAG ='C',PROCESSED_DATE =sysdate 		  
+          where		  record_id=rec.record_id
+		  and  PROCESSED_FLAG is null;
+		  
+		  
+     Exception
+           when no_data_found then
+               exit;
+           when UTL_FILE.READ_ERROR then
+               add_log_entry('Error reading file ');
+               rollback_and_exit;
+           when others then 
+              add_log_entry('Load:'||sqlerrm);
+              rollback_and_exit;
+     End;
+    
+	End Loop;
+   COMMIT;
+END LOAD_SURROUND_from_table;
+
+
+procedure rollback_and_exit is
+end_time  varchar2(30);
+Begin
+rollback;
+add_log_entry('Aborting');
+UTL_FILE.fclose(logfile);
+raise_application_error('-20000','Aborting');
+End rollback_and_exit;
+
+END ATUPRTUR;
+/
+

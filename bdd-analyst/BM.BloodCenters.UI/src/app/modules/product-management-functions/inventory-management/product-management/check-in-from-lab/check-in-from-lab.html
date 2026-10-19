@@ -1,0 +1,297 @@
+<div class="main-content">
+  <!-- Page Header -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Content Area -->
+  <div class="content-area">
+
+  <!-- Card 1: Filter (Inventory Class + Receive Date) -->
+  <div class="main-card">
+    <h2 class="cdk-visually-hidden">Filter Criteria</h2>
+    <div class="filter-section" [formGroup]="filterForm">
+      <div class="filter-row filter-row--primary">
+
+        <!-- Inventory Class Code dropdown -->
+        <mat-form-field appearance="fill" [attr.aria-busy]="isLoadingClasses()">
+          <mat-label>Inventory Class Code</mat-label>
+          <mat-select formControlName="inventoryClassCode" required>
+            @for (cls of inventoryClasses(); track cls.code) {
+              <mat-option [value]="cls.code">{{ cls.code }}</mat-option>
+            }
+          </mat-select>
+          @if (isLoadingClasses()) {
+            <mat-spinner matSuffix diameter="16" aria-hidden="true"></mat-spinner>
+          }
+          <mat-error>Inventory Class Code is required.</mat-error>
+        </mat-form-field>
+
+        <!-- Inventory Class description (read-only) -->
+        <div class="field-display" role="group" aria-labelledby="inv-class-label">
+          <div class="field-display__label" id="inv-class-label">Inventory Class</div>
+          <div class="field-display__value">{{ inventoryClassDescription() }}</div>
+        </div>
+
+        <!-- Received Date (editable, defaults to chapter local date) -->
+        <mat-form-field appearance="fill">
+          <mat-label>Received Date</mat-label>
+          <input matInput formControlName="receivedDate"
+                 (blur)="onReceivedDateBlur()"
+                 placeholder="MM-DD-YY HH:MM" />
+          <mat-hint>MM-DD-YY HH:MM</mat-hint>
+        </mat-form-field>
+
+        <div class="button-wrapper">
+          <button type="button" mat-button class="clear-btn" (click)="clearAll()" [attr.aria-label]="'Clear all fields'"
+                  [disabled]="!filterForm.get('inventoryClassCode')?.value">
+            CLEAR ALL
+          </button>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 2: Entry Row (visible after inventory class is selected) -->
+  @if (showEntryRow()) {
+    <div class="entry-card">
+      <h2 class="cdk-visually-hidden">Product Entry</h2>
+      <div class="entry-section" [formGroup]="entryForm" (keydown.enter)="onEntryEnterKey($event)">
+        <div class="filter-row filter-row--entry">
+
+          <!-- Unit ID scan/input -->
+          <app-unit-id-field
+            [validateFfValue]="'N'"
+            [required]="true"
+            [placeholder]="'Scan or type Unit ID'"
+            [showBarcodeIcon]="true"
+            [skipDoubleEntry]="true"
+            (postValidate)="onUnitPostValidate($event)"
+            (validated)="onUnitValidated($event)"
+            (cleared)="onUnitCleared()"
+          ></app-unit-id-field>
+
+          <!-- Collection Date (auto-filled from validate-unit) -->
+          <div class="field-display" role="group" aria-labelledby="coll-date-label">
+            <div class="field-display__label" id="coll-date-label">Collection Date</div>
+            <div class="field-display__value">{{ collectionDate() || '-' }}</div>
+          </div>
+
+          <!-- Product Code (scan or select) -->
+          <app-scan-select-field
+            #productCodeField
+            [label]="'Product Code'"
+            [placeholder]="'Scan or select product code'"
+            [showBarcodeIcon]="true"
+            [disabled]="unitProducts().length === 0"
+            [scanPatterns]="SCAN_PATTERNS.PRODUCT"
+            [options]="productCodeOptions()"
+            [parseFn]="parseProductCode"
+            (valueChanged)="onProductCodeChanged($event)"
+            (cleared)="onProductCodeCleared()"
+            class="entry-field">
+          </app-scan-select-field>
+
+          <!-- Aliquot (visible only when multiple aliquots exist) -->
+          @if (showAliquotField()) {
+            <mat-form-field appearance="fill">
+              <mat-label>Aliquot</mat-label>
+              <mat-select formControlName="aliquot">
+                @for (al of aliquotOptions(); track al.aliquot) {
+                  <mat-option [value]="al.aliquot">{{ al.aliquot }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+          }
+
+          <!-- ABO/Rh (scan or select) -->
+          <app-scan-select-field
+            #aboRhField
+            [label]="'ABORh'"
+            [placeholder]="'Scan or select ABORh'"
+            [showBarcodeIcon]="true"
+            [disabled]="aboTypeOptions().length === 0"
+            [scanPatterns]="SCAN_PATTERNS.ABO"
+            [options]="aboTypeOptions()"
+            [parseFn]="parseAboRh"
+            (valueChanged)="onAboRhChanged($event)"
+            (cleared)="onAboRhCleared()"
+            class="entry-field">
+          </app-scan-select-field>
+
+          <!-- Expiration Date -->
+          <mat-form-field appearance="fill" class="entry-field">
+            <mat-label>Expiration Date</mat-label>
+            <input matInput formControlName="expirationDate"
+                   (blur)="onExpirationDateBlur()"
+                   placeholder="Scan or type expiration date" />
+            @if (expirationDateValidating()) {
+              <mat-hint class="field-validating">Validating...</mat-hint>
+            }
+            <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+          </mat-form-field>
+
+          <!-- Warehouse ID (read-only, from global header context) -->
+          <div class="field-display" role="group" aria-labelledby="warehouse-label">
+            <div class="field-display__label" id="warehouse-label">Warehouse ID</div>
+            <div class="field-display__value">{{ warehouseId() || '-' }}</div>
+          </div>
+
+          <!-- Device dropdown (loaded after warehouse selected) -->
+          <mat-form-field appearance="fill" [attr.aria-busy]="isLoadingDevices()">
+            <mat-label>Device</mat-label>
+            <mat-select formControlName="device"
+                        [disabled]="devices().length === 0"
+                        [matTooltip]="selectedDeviceTooltip()"
+                        matTooltipPosition="above">
+              @for (d of devices(); track d.deviceId) {
+                <mat-option [value]="d.deviceId"
+                            [matTooltip]="d.deviceName || d.deviceId"
+                            matTooltipPosition="right">{{ d.deviceId }}{{ d.deviceName ? ' - ' + d.deviceName : '' }}</mat-option>
+              }
+            </mat-select>
+            @if (isLoadingDevices()) {
+              <mat-spinner matSuffix diameter="16" aria-hidden="true"></mat-spinner>
+            }
+          </mat-form-field>
+
+          <!-- Rack dropdown (loaded after device selected) -->
+          <mat-form-field appearance="fill" [attr.aria-busy]="isLoadingRacks()">
+            <mat-label>Rack</mat-label>
+            <mat-select formControlName="rack"
+                        [disabled]="racks().length === 0"
+                        [matTooltip]="selectedRackTooltip()"
+                        matTooltipPosition="above">
+              @for (r of racks(); track r.rackId) {
+                <mat-option [value]="r.rackId"
+                            [matTooltip]="r.rackName || r.rackId"
+                            matTooltipPosition="right">{{ r.rackId }}{{ r.rackName ? ' - ' + r.rackName : '' }}</mat-option>
+              }
+            </mat-select>
+            @if (isLoadingRacks()) {
+              <mat-spinner matSuffix diameter="16" aria-hidden="true"></mat-spinner>
+            }
+          </mat-form-field>
+
+          <!-- Tray dropdown (loaded after rack selected; selection triggers auto check-in) -->
+          <mat-form-field appearance="fill" [attr.aria-busy]="isLoadingTrays()">
+            <mat-label>Tray</mat-label>
+            <mat-select formControlName="tray"
+                        [disabled]="trays().length === 0"
+                        [matTooltip]="selectedTrayTooltip()"
+                        matTooltipPosition="above"
+                        (selectionChange)="onTrayTabOut()"
+                        (blur)="onTrayTabOut()">
+              @for (t of trays(); track t.trayId) {
+                <mat-option [value]="t.trayId"
+                            [matTooltip]="(t.trayName || t.trayId) + ' (' + t.available + '/' + t.capacity + ' available)'"
+                            matTooltipPosition="right">{{ t.trayId }}{{ t.trayName ? ' - ' + t.trayName : '' }}</mat-option>
+              }
+            </mat-select>
+            @if (isLoadingTrays()) {
+              <mat-spinner matSuffix diameter="16" aria-hidden="true"></mat-spinner>
+            }
+          </mat-form-field>
+
+          <div class="button-wrapper">
+            <button type="button" mat-button class="clear-btn" (click)="clearEntryRow()" [attr.aria-label]="'Clear entry row'">
+              CLEAR ALL
+            </button>
+          </div>
+
+        </div>
+      </div>
+
+      @if (isSaving()) {
+        <div class="detail-status-row" role="status" aria-live="polite">
+          <mat-spinner diameter="18"></mat-spinner>
+          <span class="detail-status-text">Processing check-in...</span>
+        </div>
+      }
+    </div>
+  }
+
+  <!-- Card 3: Results Grid -->
+  <div class="results-card">
+    <h2 class="cdk-visually-hidden">Check-In Results</h2>
+
+    <span class="cdk-visually-hidden" role="status" aria-live="polite" aria-atomic="true">
+      @if (isLoadingGrid()) {
+        Loading check-in records
+      } @else if (gridData().length === 0) {
+        No results to display
+      } @else {
+        {{ gridTotal() }} {{ gridTotal() === 1 ? 'record' : 'records' }} found
+      }
+    </span>
+
+    @if (gridData().length === 0) {
+      <div class="empty-state" role="status">
+        <div class="empty-state__icon-wrapper">
+          <mat-icon aria-hidden="true">search</mat-icon>
+        </div>
+        <p class="empty-state__title">No Results to Display</p>
+        <p class="empty-state__subtitle">Enter Check-in temperature to begin. Checked-in units will appear here.</p>
+      </div>
+    }
+
+    @if (gridData().length > 0) {
+      <div class="table-wrapper">
+        <table class="data-table" [attr.aria-label]="'Check-In Records'">
+          <thead>
+            <tr>
+              <th scope="col" class="sortable-col"
+                  [attr.aria-sort]="sortDir() === 'asc' ? 'ascending' : sortDir() === 'desc' ? 'descending' : 'none'">
+                <button type="button" class="sort-button"
+                        (click)="toggleSortUnitId()"
+                        [attr.aria-label]="'Sort by Unit ID, currently ' + (sortDir() === 'asc' ? 'ascending' : sortDir() === 'desc' ? 'descending' : 'unsorted')">
+                  Unit ID
+                  <mat-icon class="sort-icon" aria-hidden="true">
+                    {{ sortDir() === 'asc' ? 'arrow_upward' : sortDir() === 'desc' ? 'arrow_downward' : 'unfold_more' }}
+                  </mat-icon>
+                </button>
+              </th>
+              <th scope="col">Collection Date</th>
+              <th scope="col">Product Code</th>
+              <th scope="col">ABO/Rh</th>
+              <th scope="col">Expiration Date</th>
+              <th scope="col">Warehouse ID</th>
+              <th scope="col">Device</th>
+              <th scope="col">Rack</th>
+              <th scope="col">Tray</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (row of pagedData(); track row.unitId + row.tray) {
+              <tr>
+                <td>{{ row.unitId }}</td>
+                <td>{{ row.collectionDate || '-' }}</td>
+                <td>{{ row.productCode || '-' }}</td>
+                <td>{{ row.aboRh || '-' }}</td>
+                <td>{{ row.expirationDate || '-' }}</td>
+                <td>{{ row.warehouseId || '-' }}</td>
+                <td>{{ row.device || '-' }}</td>
+                <td>{{ row.rack || '-' }}</td>
+                <td>{{ row.tray || '-' }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+
+      <div class="pagination-footer">
+        <mat-paginator
+          [pageSizeOptions]="[10, 25, 50, 100]"
+          [pageSize]="gridPageSize()"
+          [pageIndex]="gridPageIndex()"
+          [length]="gridTotal()"
+          [showFirstLastButtons]="true"
+          (page)="onPageChange($event)"
+          [attr.aria-label]="'Check-In Records pagination'">
+        </mat-paginator>
+      </div>
+    }
+
+  </div>
+
+  </div><!-- /content-area -->
+</div>

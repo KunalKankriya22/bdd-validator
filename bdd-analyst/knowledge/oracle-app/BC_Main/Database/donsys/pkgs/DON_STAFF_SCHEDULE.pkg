@@ -1,0 +1,3327 @@
+CREATE OR REPLACE PACKAGE DON_STAFF_SCHEDULE IS
+
+  type paramrectyp is record (parameter_code varchar2(5),
+                            parameter_value varchar2(30)) ;
+  type paramtabtyp is table of paramrectyp index by binary_integer ;
+  paramlist paramtabtyp ;
+  type piggyrectyp is record (piggyback_drive varchar2(10),
+                              piggybacked_to varchar2(10)) ;
+  type piggytabtyp is table of piggyrectyp index by binary_integer ;
+  piggylist piggytabtyp ;
+  type emprectyp is record ( staff_no varchar2(6),
+                    tl_skill number,
+                    coach_driver_skill number,
+                    van_driver_skill number,
+                    atl_skill number ,
+                    overall_skill number,
+                    off_day_candidate varchar2(1),
+                    assigned_curdate varchar2(1),
+                    unavl_start_time varchar2(5),
+                    unavl_end_time varchar2(5),
+                    hours number,
+                    team_id varchar2(5),
+                    term_date date,
+                    facility_code varchar2(5),
+                    mix_team varchar2(1)) ;
+  type emptabtyp is table of emprectyp index by binary_integer ;
+  emplist emptabtyp ;
+ type drvrectyp is record (
+                   drive_id varchar2(10),
+                   min_skill_rating number,
+                   proj_draw number,
+                   drive_type varchar2(5),
+                   drive_start_time date,
+                   drive_end_time date,
+                   drive_facility varchar2(5),
+                   staff_reqd number) ;
+ type drvtabtyp is table of drvrectyp index by binary_integer ;
+ drvlist drvtabtyp ;
+ type faciltyp is record (
+                   drive_id varchar2(10),
+                   facility_code varchar2(5)) ;
+ type faciltabtyp is table of faciltyp index by binary_integer ;
+ facility_list faciltabtyp ;
+ type empfaciltyp is record (
+                   staff_no varchar2(6),
+                   facility_code varchar2(5)) ;
+ type empfaciltabtyp is table of empfaciltyp index by binary_integer ;
+ emp_facility empfaciltabtyp ;
+ type emprectemp is record (
+            staff_no varchar2(6),
+            hours number,
+            skill_rating number,
+            emplist_index number) ;
+ type emptabtemp is table of emprectemp index by binary_integer ;
+ type empindtyp is table of number index by binary_integer ;
+
+PROCEDURE MAIN_PROC
+ (START_DATE IN date
+ ,END_DATE IN date
+ ,SCHEDULE_ID IN varchar2
+ ,CHAPTER_ID IN varchar2
+ ,SCH_NAME IN varchar2
+ );
+PROCEDURE PREPARE_LOG_FILEHANDLE;
+PROCEDURE WRITE_LOG
+ (LOG_MSG IN varchar2
+ );
+PROCEDURE CREATE_HEADER_ENTRY;
+PROCEDURE READ_PARAMETERS;
+FUNCTION GET_PARAMETER
+ (PARAMETER_CODE IN varchar2
+ )
+ RETURN VARCHAR2;
+PROCEDURE PREPARE_DRIVE_LIST
+ (CURDATE IN date
+ );
+PROCEDURE SORT_DRVLIST
+ (SORT_COUNT IN number
+ );
+PROCEDURE SWAP_DRVLIST
+ (FIRST_INDEX IN number
+ ,SECOND_INDEX IN number
+ );
+PROCEDURE CREATE_EMPLOYEE_LIST;
+PROCEDURE CHECK_VACATIONS
+ (EMP_INDEX IN number
+ );
+PROCEDURE PRINT_EMPLOYEES;
+PROCEDURE POTENTIAL_STAFF_OFF_DAY
+ (V_JOB_CODE IN varchar2
+ );
+PROCEDURE SORT_EMPTEMPLIST
+ (EMPTEMPLIST IN OUT emptabtemp
+ ,SORT_TYPE IN varchar2
+ ,SORT_COLUMN IN varchar2
+ );
+PROCEDURE SWAP_EMPTEMPLIST
+ (EMPTEMPLIST IN OUT emptabtemp
+ ,FIRST_INDEX IN number
+ ,SECOND_INDEX IN number
+ );
+PROCEDURE GET_DRIVE_ASSIGNMENT
+ (V_STAFF_NO IN varchar2
+ ,CDATE IN date
+ ,HOURS OUT number
+ );
+PROCEDURE CALC_HOURS_FOR_DRIVE
+ (V_DRIVE_ID IN varchar2
+ ,ACT_START_TIME OUT date
+ ,ACT_END_TIME OUT date
+ );
+PROCEDURE DO_PRE_ASSIGNMENTS;
+PROCEDURE ASSIGN_TL
+ (DRIVE_INDEX IN number
+ );
+FUNCTION CHECK_JOB
+ (EMP_INDEX IN number
+ ,JOB_CODE IN varchar2
+ )
+ RETURN BOOLEAN;
+FUNCTION CHECK_OFF_DAY_CANDIDATE
+ (EMP_INDEX IN number
+ )
+ RETURN BOOLEAN;
+FUNCTION CHECK_ASSIGN_TODAY
+ (EMP_INDEX IN number
+ )
+ RETURN BOOLEAN;
+FUNCTION CHECK_UNAVL
+ (EMP_INDEX IN number
+ ,DRIVE_INDEX IN number
+ )
+ RETURN BOOLEAN;
+FUNCTION CHECK_SKILL_RATING
+ (DRIVE_INDEX IN number
+ ,V_STAFF_NO IN varchar2
+ ,V_JOB_CODE IN varchar2
+ )
+ RETURN BOOLEAN;
+FUNCTION CHECK_TEAM
+ (DRIVE_INDEX IN number
+ ,V_STAFF_NO IN varchar2
+ ,TEAM_ID varchar2
+ )
+ RETURN BOOLEAN;
+FUNCTION CHECK_RECOVERY_TIME
+ (DRIVE_INDEX IN number
+ ,V_STAFF_NO IN varchar2
+ )
+ RETURN BOOLEAN;
+PROCEDURE ASSIGN_TEAM_MEMBER
+ (DRIVE_INDEX IN number
+ );
+PROCEDURE GET_TL
+ (DRIVE_INDEX IN number
+ ,TL_ID OUT varchar2
+ ,TL_TEAM OUT varchar2
+ ,TL_INDEX OUT number
+ );
+PROCEDURE LIST_ELIGIBLE_STAFF
+ (EMPTEMPLIST IN OUT emptabtemp
+ ,TL_TEAM IN varchar2
+ ,DRIVE_INDEX IN number
+ ,TL_INDEX number
+ );
+PROCEDURE SELECT_DRIVER
+ (EMPTEMPLIST IN emptabtemp
+ ,TL_ID IN varchar2
+ ,DRIVE_INDEX IN number
+ );
+PROCEDURE CHECK_TEAM_FOR_ASSIGNED_DRIVER
+ (DRIVE_INDEX IN number
+ ,V_TEAM_ID IN varchar2
+ ,DRIVER_ASSIGNED IN OUT varchar2
+ );
+PROCEDURE CHK_TEAM_UNASSIGNED_DRVR
+ (TEAM_ID IN varchar2
+ ,DRIVE_INDEX IN number
+ ,DRIVER_ASSIGNED OUT varchar2
+ ,OFF_DAY_FLAG IN varchar2
+ );
+PROCEDURE ASSIGN_DRIVER
+ (DRIVE_INDEX IN number
+ ,V_STAFF_NO IN varchar2
+ ,V_JOB_CODE IN varchar2
+ );
+PROCEDURE SELECT_OTHER_MEMBERS
+ (DRIVE_INDEX IN number
+ );
+PROCEDURE CHECK_TEAM_FOR_MINIMUM_SKILL
+ (V_TEAM_ID IN varchar2
+ ,DRIVE_INDEX IN number
+ );
+PROCEDURE CHECK_TEAM_FOR_AVERAGE_SKILL
+ (V_TEAM_ID IN varchar2
+ ,DRIVE_INDEX IN number
+ ,OFF_DAY_FLAG IN varchar2
+ );
+FUNCTION GET_AVERAGE_SKILL
+ (EMPTEMPLIST IN emptabtemp
+ ,EMP_INDEX IN empindtyp
+ ,DRIVE_INDEX IN number
+ )
+ RETURN NUMBER;
+FUNCTION HANDLE_UNASSIGNMENT
+ (DRIVE_INDEX IN number
+ ,V_STAFF_NO IN varchar2
+ )
+ RETURN BOOLEAN;
+PROCEDURE FIND_SUITABLE_STAFF
+ (V_TEAM_ID IN varchar2
+ ,SUITABLE_STAFF_NO OUT varchar2
+ ,SPECIAL_JOB_CODE IN varchar2
+ ,DRIVE_INDEX IN number
+ );
+PROCEDURE ASSIGN_AND_UNASSIGN
+ (DRIVE_INDEX IN number
+ ,OLD_STAFF_NO IN varchar2
+ ,NEW_STAFF_NO IN varchar2
+ ,SPECIAL_JOB_CODE IN varchar2
+ );
+PROCEDURE SCHEDULE_PIGGYBACK_DRIVES;
+PROCEDURE ASSIGN_STAFF_TO_DRIVE
+ (V_DRIVE_INDEX IN varchar2
+ ,V_STAFF_NO IN varchar2
+ ,V_JOB_CODE IN varchar2
+ ,V_ASSIGN_MODE IN varchar2
+ );
+PROCEDURE REVERSE_EMPLIST_ORDER;
+PROCEDURE PRINT_ASSIGNMENT;
+PROCEDURE COPY_EMP_TO_TEMP
+ (EMPTEMPLIST IN OUT emptabtemp
+ ,TEMP_COUNTER IN number
+ ,EMPLIST IN emptabtyp
+ ,EMP_COUNTER IN number
+ );
+PROCEDURE BOD_EOD
+ (DRIVE IN varchar2
+ ,JOBCODE IN varchar2
+ ,BOD OUT date
+ ,EOD OUT date
+ );
+FUNCTION MIX_FACILITY
+ RETURN NUMBER;
+FUNCTION MIX_TEAM
+ RETURN NUMBER;
+FUNCTION NO_OFF
+ RETURN NUMBER;
+PROCEDURE OVERTIME_UNDERTIME
+ (P_OVTIM OUT number
+ ,P_UNTIM OUT number
+ );
+FUNCTION PARTIAL_ASSIGNMENTS
+ RETURN NUMBER;
+FUNCTION RECOVERY_TIME
+ RETURN NUMBER;
+END DON_STAFF_SCHEDULE; /*-- End of package header --*/
+/
+
+CREATE OR REPLACE PACKAGE BODY DON_STAFF_SCHEDULE IS
+  curdate       date ;
+  g_start_date  date ;
+  g_end_date    date ;
+  g_actual_bod  date ;
+  g_actual_eod  date ;
+  g_save_bod    date ;
+  g_save_eod    date ;
+  g_schedule_id varchar2(20) ;
+  g_chapter_id  varchar2(4) ;
+  g_sch_name    varchar2(200) ;
+  suitable_team varchar2(5) ;
+  selection     varchar2(1) ;
+  g_log_handle utl_file.file_type ;
+  g_comments    varchar2(500) ;
+-- This is the main procedure which calls the other procedures
+procedure main_proc (start_date in date,end_date in date,schedule_id in varchar2,chapter_id in varchar2, sch_name in varchar2) is
+  loop_count number ;
+  l_mixfc    number := 0;
+  l_mixtm    number := 0;
+  l_nooff    number := 0;
+  l_ovtim    number := 0;
+  l_untim    number := 0;
+  l_parta    number := 0;
+  l_recov    number := 0;
+  err_flag   varchar2(5) ;
+begin
+  dbms_output.enable(1000000);
+  curdate := start_date ;
+  g_start_date := start_date ;
+  g_end_date := end_date ;
+  g_schedule_id := schedule_id ;
+  g_chapter_id := chapter_id ;
+  g_sch_name := sch_name ;
+  g_comments := null ;
+  prepare_log_filehandle ;
+  loop_count := end_date - start_date + 1 ; -- Number of days for scheduling
+  create_header_entry ;
+  read_parameters ;
+  create_employee_list ;
+  /*-- If the first date is an even number, reverse the list --*/
+--  if mod(to_number(to_char(curdate,'DD')),2) = 0 then
+--     reverse_emplist_order ;
+--  end if ;
+  --print_employees ;
+  for i_days in 1..loop_count loop
+     for i_temp in 1..emplist.count loop
+         check_vacations(i_temp) ;
+     end loop ;
+     if drvlist.count > 0 then
+        drvlist.delete ;
+     end if ;
+     for i_temp in 1..emplist.count loop
+         emplist(i_temp).off_day_candidate := 'N' ;
+         emplist(i_temp).assigned_curdate := 'N' ;
+     end loop ;
+     prepare_drive_list(curdate) ;
+     /*-- If no drives, then go to next iteration --*/
+     if drvlist.count = 0 then
+        goto next_iter_main ;
+     end if ;
+     for j in 1..drvlist.count loop
+       write_log(drvlist(j).drive_id||' '||to_char(drvlist(j).proj_draw));
+     end loop ;
+     potential_staff_off_day('TMLDR') ;
+     write_log('After potential_staff_off TMLDR');
+     potential_staff_off_day('MEMBR') ;
+     write_log('OFF list for '||to_char(curdate,'MM-DD-YYYY'));
+     for x in 1..emplist.count loop
+        if emplist(x).off_day_candidate = 'Y' then
+           write_log(emplist(x).staff_no);
+        end if ;
+     end loop ;
+     write_log('After potential_off') ;
+     /*- Check all pre-assignments for that day and first assign those staff -*/
+     do_pre_assignments ;
+     write_log('After pre_assignments') ;
+     /*-- For each drive on the day, assign TL and Team member --*/
+     for i_drives in 1..drvlist.count loop
+         write_log('Before assign_tl doing .'||drvlist(i_drives).drive_id);
+         assign_tl(i_drives) ;
+         write_log('After assign_tl doing index no.'||to_char(i_drives));
+         assign_team_member(i_drives) ;
+         write_log('After assign_team_member index no.'||to_char(i_drives));
+     end loop ;
+     if piggylist.count > 0 then
+       schedule_piggyback_drives ;
+       piggylist.delete ;
+     end if ;
+     reverse_emplist_order ;
+     <<next_iter_main>>
+     curdate := curdate + 1 ;
+  end loop ; -- End of i in 1 to 7 loop
+  print_assignment ;
+  l_mixfc := mix_facility;
+  l_mixtm := mix_team;
+  l_nooff := no_off;
+  l_parta := partial_assignments;
+  l_recov := recovery_time;
+  overtime_undertime(l_ovtim, l_untim);
+  update staff_schedule_hdr
+     set mixfc = l_mixfc,
+         mixtm = l_mixtm,
+         nooff = l_nooff,
+         ovtim = l_ovtim,
+         untim = l_untim,
+         parta = l_parta,
+         recov = l_recov
+   where schedule_id = g_schedule_id
+     and start_date  = g_start_date
+     and end_date    = g_end_date
+     and chapter_id  = g_chapter_id;
+  commit ;
+  exception
+    when others then write_log('Error occurred 1');write_log(to_char(sqlcode)||' '||sqlerrm);return;
+end main_proc;
+procedure prepare_log_filehandle is
+ log_dir varchar2(50) ;
+ log_file varchar2(100) ;
+begin
+ begin
+         select lower(parameter_value) into log_dir
+         from   valid_parameters
+         where  parameter_code = 'SLOG';
+--         and    chapter_id = g_chapter_id ;
+ exception
+  when others then dbms_output.put_line('Error in SQL:'||sqlcode||substr(sqlerrm,1,100));raise;
+ end ;
+ log_file := g_schedule_id||'_'||to_char(sysdate,'MMDDYYYY')||'.log' ;
+ g_log_handle := utl_file.fopen(log_dir,log_file,'w');
+exception
+ when utl_file.invalid_path then dbms_output.put_line('Invalid path or filename');raise;
+ when others then dbms_output.put_line('Error in prepare_log_filename');raise;
+end prepare_log_filehandle ;
+procedure write_log (log_msg in varchar2) is
+begin
+ utl_file.put_line(g_log_handle,log_msg) ;
+ utl_file.fflush(g_log_handle) ;
+exception
+ when others then dbms_output.put_line('Error in writing to logfile');raise;
+end write_log;
+/*---- This procedure creates an entry in the staff_schedule_hdr table  --*/
+procedure create_header_entry is
+begin
+ begin
+   insert into staff_schedule_hdr
+   (chapter_id,schedule_id,start_date,end_date,status,last_modified_date,program_id, comments)
+   values
+   (g_chapter_id,g_schedule_id,g_start_date,g_end_date,'TENTV',sysdate,'PROC', g_sch_name) ;
+ exception
+   when others then write_log('Error in create_header_entry '||sqlcode||substr(sqlerrm,1,100)); raise;
+ end ;
+end create_header_entry;
+procedure read_parameters is
+ cursor param is
+ select parameter_code,parameter_value
+ from valid_parameters
+ where parameter_code in ('TLOFF','TMOFF','OCDAY','OCHR','AVGHR','RECOV','AVGSK');-- and chapter_id = g_chapter_id ;
+ counter number := 1 ;
+begin
+ for paramrec in param loop
+     paramlist(counter).parameter_code := paramrec.parameter_code ;
+     paramlist(counter).parameter_value := paramrec.parameter_value ;
+     counter := counter + 1 ;
+ end loop ;
+ exception
+   when others then write_log('Error in read_parameters '||sqlcode||' '||substr(sqlerrm,1,100)); raise;
+end read_parameters ;
+function get_parameter (parameter_code in varchar2) return varchar2 is
+begin
+  for i in 1..paramlist.count loop
+      if paramlist(i).parameter_code = parameter_code then
+          return paramlist(i).parameter_value ;
+      end if ;
+  end loop ;
+  return null ;
+end get_parameter ;
+-- This procedure selects the drives and sequences them as required
+procedure prepare_drive_list (curdate in date) is
+  v_drive_id varchar2(10) ;
+  counter number := 1;
+  piggy_counter number := 1;
+  facility_counter number := 1 ;
+  cur_start_time date ;
+  cur_end_time date ;
+  startup_bkdown date ;
+  travel_time number ;
+  no_skillrtg_counter number:=0 ; --cnt of drives with no min skill rtg spcfied
+  pb_id varchar2(10) ;
+  pb_drive_id varchar2(10) ;
+  cursor drv is
+  select drives.drive_id drive_id,drive_type,
+         nvl(min_skill_rating,1) min_skill_rating, schedule_start_time,
+         schedule_end_time, nvl(schedule_stup_bkdown_time,0)
+         schedule_stup_bkdown_time, location_id,nvl(number_reqd,0) number_reqd
+    from drives,drive_estimated_resources
+   where drive_date = curdate
+     and drive_type in ('I','C')
+     and status = 'CNFRM'
+     and drive_estimated_resources.drive_id=drives.drive_id
+     and drives.chapter_id = g_chapter_id
+     and drive_estimated_resources.chapter_id = g_chapter_id
+     and resource_code='STAFF'
+   order by nvl(number_reqd,0), nvl(min_skill_rating,-99) desc ;
+/*
+  cursor res is
+  select resource_code,nvl(number_reqd,0) number_reqd
+  from drive_estimated_resources
+  where drive_id = v_drive_id
+  and   chapter_id = g_chapter_id ;
+*/
+  cursor cur_facil is
+  select facility_code from drive_facilities
+  where drive_id = v_drive_id
+  and   chapter_id = g_chapter_id ;
+begin
+  if facility_list.count > 0 then
+     facility_list.delete ;
+  end if ;
+ /*-------- Select the drives --------*/
+ for drvrec in drv loop
+   for piggy_count in 1..piggylist.count loop
+       if piggylist(piggy_count).piggyback_drive = drvrec.drive_id then
+          goto next_drive_iter ; /*-- Skip this drive --*/
+       end if ;
+   end loop ;
+   /*-- Check if drive is a piggyback --*/
+   begin
+     select drive_group_id into pb_id
+     from drive_groups
+     where drive_group_type = 'PIGGY'
+     and   drive_id = drvrec.drive_id
+     and   chapter_id = g_chapter_id ;
+     begin
+       select drive_id into pb_drive_id
+       from drive_groups
+       where drive_group_type = 'PIGGY'
+       and   drive_group_id = pb_id
+       and   drive_id  != drvrec.drive_id
+       and   chapter_id = g_chapter_id ;
+       piggylist(piggy_counter).piggyback_drive := pb_drive_id ;
+       piggylist(piggy_counter).piggybacked_to := drvrec.drive_id ;
+       piggy_counter := piggy_counter + 1 ;
+     exception
+       when others then write_log('Error 290 '||sqlcode||' '||substr(sqlerrm,1,100)) ; raise ;
+     end ;
+   exception
+     when no_data_found then null ;
+     when others then write_log('Error 290 '||sqlcode||' '||substr(sqlerrm,1,100)) ; raise ;
+   end ;
+   drvlist(counter).drive_id := drvrec.drive_id ;
+   drvlist(counter).min_skill_rating := drvrec.min_skill_rating ;
+   drvlist(counter).drive_type := drvrec.drive_type ;
+   v_drive_id := drvrec.drive_id ;
+/*   for resrec in res loop
+       if resrec.resource_code = 'STAFF' then
+          drvlist(counter).staff_reqd := resrec.number_reqd ;
+       end if ;
+   end loop ;*/
+   begin
+     select facility_code into drvlist(counter).drive_facility
+     from drive_facilities
+     where drive_id = v_drive_id
+     and   chapter_id = g_chapter_id
+     and rownum < 2;
+   exception
+     when no_data_found then null;
+   end;
+   drvlist(counter).staff_reqd := drvrec.number_reqd;
+   begin
+    select nvl(sum(projected_draw),0) into drvlist(counter).proj_draw
+    from drive_sponsors
+    where drive_id = drvlist(counter).drive_id
+    and   chapter_id = g_chapter_id ;
+    exception
+      when others then write_log('Error 1 '||sqlcode||' '||substr(sqlerrm,1,100)) ; raise ;
+   end ;
+   if drvlist(counter).min_skill_rating = 0 then
+       no_skillrtg_counter := no_skillrtg_counter + 1 ;
+   end if ;
+   /*--- Get travel time ---*/
+   begin
+     select (nvl(travel_time,0)/60)/24 into travel_time
+     from locations
+     where location_id = drvrec.location_id
+     and   chapter_id = g_chapter_id ;
+    exception
+      when no_data_found then write_log('Drive '||drvrec.drive_id||' has invalid location');raise ;
+      when others then write_log('Error 2 '||sqlcode||' '||substr(sqlerrm,1,100)) ; raise ;
+   end ;
+   /*---- Calculate actual drive hours ----*/
+   drvlist(counter).drive_start_time := drvrec.schedule_start_time - travel_time - (drvrec.schedule_stup_bkdown_time/2/60/24) ;
+   drvlist(counter).drive_end_time := drvrec.schedule_end_time + travel_time + (drvrec.schedule_stup_bkdown_time/2/60/24) ;
+   counter := counter + 1 ;
+   for cur_facilrec in cur_facil loop
+       facility_list(facility_counter).drive_id := v_drive_id ;
+       facility_list(facility_counter).facility_code := cur_facilrec.facility_code ;
+       facility_counter := facility_counter + 1 ;
+   end loop ;
+   <<next_drive_iter>>
+   null ;
+ end loop ; -- End of cursor drv loop
+ /*-- Sort the drives (without any min. skill rating)
+      in the descending order of proj. draw  -------*/
+ sort_drvlist(no_skillrtg_counter) ;
+end prepare_drive_list ;
+procedure sort_drvlist(sort_count in number) is
+ big number ;
+ placeholder number ;
+ temp number ;
+ start_index number ;
+begin
+  write_log('Sorting drive list for '||to_char(curdate,'MM-DD-YYYY')||' Count in list:'||to_char(drvlist.count)||' sort_count:'||to_char(sort_count));
+  start_index := drvlist.count - sort_count + 1 ;
+  for k in start_index..drvlist.count
+  loop
+    big := drvlist(k).proj_draw ;
+    placeholder := k ;
+    for l in k+1..drvlist.count loop
+      if drvlist(l).proj_draw > big then
+        big := drvlist(l).proj_draw ;
+        placeholder := l;
+      end if ;
+    end loop ;-- end for l loop
+    swap_drvlist(k,placeholder) ;
+  end loop ; -- end for k loop
+end sort_drvlist ;
+procedure swap_drvlist(first_index in number,second_index in number) is
+ temp drvrectyp ;
+begin
+ temp := drvlist(first_index) ;
+ drvlist(first_index) := drvlist(second_index) ;
+ drvlist(second_index) := temp ;
+end swap_drvlist ;
+/*-- This procedure creates list of all Collection Services employees
+     and also their job areas ------------*/
+procedure create_employee_list is
+ v_staff_no varchar2(6) ;
+ u_staff_no varchar2(6) ;
+ counter number := 1 ;
+ emptemplist emptabtemp ;
+ facility_counter number := 1 ;
+ cursor c1 is
+ select staff_no,nvl(team_id,'X') team_id,nvl(term_date,sysdate+1000) term_date,
+        facility_code, nvl(mix_team,'N') mix_team
+ from employees
+---- where emp_class = 'MSTAF'  -- commented by MG, added following instead
+ where emp_class in (select code from valid_master_codes
+                where code_type = 'AUTAS'
+                  and sysdate between eff_date and nvl(term_date, sysdate+2))
+ -------------------------------------------------------------------------
+ and chapter_id=g_chapter_id
+ and sysdate between eff_date and nvl(term_date,sysdate+1)
+ and nvl(schedule_from_date,g_start_date+1) <= g_start_date
+ order by team_id, team_seq ;
+ /*
+ select emp1.staff_no,nvl(emp1.team_id,'X') team_id,
+        nvl(emp1.term_date,sysdate+1000) term_date,emp1.facility_code,
+        nvl(emp1.mix_team,'N') mix_team,count(emp2.staff_no)
+ from employees emp2, employees emp1
+ where emp1.emp_class = 'MSTAF'
+ and emp1.chapter_id=g_chapter_id
+ and emp2.emp_class = 'MSTAF'
+ and emp2.chapter_id=g_chapter_id
+ and sysdate between emp1.eff_date and nvl(emp1.term_date,sysdate+1)
+ and sysdate between emp2.eff_date and nvl(emp2.term_date,sysdate+1)
+ and nvl(emp1.schedule_from_date,sysdate+1) <= g_start_date
+ and nvl(emp2.schedule_from_date,sysdate+1) <= g_start_date
+ and nvl(emp1.team_id,'X')=nvl(emp2.team_id,'X')
+ group by emp1.staff_no,nvl(emp1.team_id,'X') ,
+          nvl(emp1.term_date,sysdate+1000) ,emp1.facility_code,
+          nvl(emp1.mix_team,'N') ,emp2.team_id
+ order by 6 desc,2;
+ */
+ cursor job is
+ select job_code,nvl(skill_rating,1) skill_rating
+ from employee_jobs
+ where staff_no = v_staff_no
+ and chapter_id=g_chapter_id
+ and sysdate between eff_date and nvl(term_date,sysdate+1) ;
+ cursor c_facility is
+ select facility_code from emp_facilities
+ where  staff_no = v_staff_no
+ and    chapter_id=g_chapter_id
+ and    sysdate between eff_date and nvl(term_date,sysdate+1) ;
+begin
+ counter := 1 ;
+ /*---------------------------------------------------------------------------
+ This delete is done because I found a possible bug with PL/SQL tables. It
+ does not clear the tables every time the procedure is completed.
+ ---------------------------------------------------------------------------*/
+ if emplist.count > 0 then
+   emplist.delete ;
+ end if ;
+ for c1rec in c1 loop
+     emplist(counter).staff_no := c1rec.staff_no ;
+     emplist(counter).team_id := c1rec.team_id ;
+     emplist(counter).tl_skill := 0 ;
+     emplist(counter).coach_driver_skill := 0 ;
+     emplist(counter).van_driver_skill := 0 ;
+     emplist(counter).atl_skill := 0 ;
+     emplist(counter).overall_skill := 0 ;
+     emplist(counter).hours := 0 ;
+     emplist(counter).term_date := c1rec.term_date ;
+     emplist(counter).facility_code := c1rec.facility_code ;
+     emplist(counter).mix_team := c1rec.mix_team ;
+     v_staff_no := c1rec.staff_no ;
+     for jobrec in job loop
+         if jobrec.job_code = 'TMLDR' then
+             emplist(counter).tl_skill := jobrec.skill_rating ;
+         elsif jobrec.job_code = 'CDRVR' then
+             emplist(counter).coach_driver_skill := jobrec.skill_rating ;
+         elsif jobrec.job_code = 'VDRVR' then
+             emplist(counter).van_driver_skill := jobrec.skill_rating ;
+         elsif jobrec.job_code = 'ATL' then
+             emplist(counter).atl_skill := jobrec.skill_rating ;
+         elsif jobrec.job_code = 'OVRAL' then
+             emplist(counter).overall_skill := jobrec.skill_rating ;
+         end if ;
+     end loop ;
+     for c_facilrec in c_facility loop
+         emp_facility(facility_counter).staff_no := v_staff_no ;
+         emp_facility(facility_counter).facility_code := c_facilrec.facility_code ;
+         facility_counter := facility_counter + 1 ;
+     end loop ;
+     counter := counter + 1 ;
+ end loop ; /*-- End emprec loop --*/
+ write_log('#employees found=counter:'||to_char(counter)||'emplist.count:'||to_char(emplist.count));
+exception
+ when others then write_log('Error in create_employee_list '||sqlcode||' '||substr(sqlerrm,1,100)); raise;
+end create_employee_list ;
+/*-- This procedure checks whether the staff belongs the facility of the drive --*/
+function check_facility(p_staff_no in varchar2,p_drive_id in varchar2) return boolean is
+ type temp_facility_type is table of varchar2(5) index by binary_integer ;
+ temp_facility temp_facility_type ;
+ counter number := 0 ;
+ facility_counter number := 1 ;
+begin
+ if temp_facility.count > 0 then
+    temp_facility.delete ;
+ end if ;
+ for a_temp in 1..emp_facility.count loop
+    if emp_facility(a_temp).staff_no = p_staff_no then
+       temp_facility(facility_counter) := emp_facility(a_temp).facility_code ;
+       facility_counter := facility_counter + 1 ;
+    end if ;
+ end loop ;
+ if temp_facility.count = 0 then
+    return FALSE ;
+ end if ;
+ for loop_facil in 1..facility_list.count loop
+     if facility_list(loop_facil).drive_id = p_drive_id then
+      for loop_emp_facil in 1..temp_facility.count loop
+        if temp_facility(loop_emp_facil) = facility_list(loop_facil).facility_code then
+           return TRUE ;
+        end if ;
+      end loop ;
+     end if ;
+ end loop ;
+ return FALSE ;
+end ;
+/*-- This procedure checks unavailability of the staff -- */
+procedure check_vacations(emp_index in number) is
+begin
+     begin
+       emplist(emp_index).unavl_start_time := 'NONE' ;
+       emplist(emp_index).unavl_end_time := 'NONE' ;
+       select nvl(to_char(from_time,'HH24:MI'),'ALL'),
+              nvl(to_char(to_time,'HH24:MI'),'ALL')
+      into emplist(emp_index).unavl_start_time,emplist(emp_index).unavl_end_time
+       from staff_off_day
+       where staff_no = emplist(emp_index).staff_no
+       and chapter_id=g_chapter_id
+       and   unavail_date = curdate ;
+     exception
+       when no_data_found then null ;
+/*
+---   Added by JMC, 10/11/99.
+*/
+       WHEN too_many_rows THEN
+            emplist(emp_index).unavl_start_time := 'ALL';
+            emplist(emp_index).unavl_end_time := 'ALL';
+/*
+---END of addition by JMC,  10/11/99
+*/
+       when others then write_log('Error in check_vacations '||sqlcode||' '||substr(sqlerrm,1,100));raise;
+     end ;
+end check_vacations;
+/*--- This procedure is temporary and is for debugging purpose.
+      It will be removed later.    -------*/
+procedure print_employees is
+begin
+  null ;
+ dbms_output.put_line('emplist.count :'||to_char(emplist.count));
+ for i1 in 1..emplist.count loop
+  dbms_output.put_line('First list:'||emplist(i1).staff_no||':'||'TL skill:'||to_char(emplist(i1).tl_skill)) ;
+ end loop ;
+end print_employees ;
+function check_mix_team(emp_index in number) return boolean is
+begin
+write_log('inside mcheck_mix');
+ if emplist(emp_index).mix_team = 'Y' then
+    return TRUE ;
+ else
+    return FALSE ;
+ end if ;
+exception when others then return FALSE;
+end ;
+/*-- Returns TRUE if terminated, FALSE if not terminated --*/
+function check_term(emp_index in number) return boolean is
+begin
+ if emplist(emp_index).term_date <= curdate then
+    return TRUE ;
+ else
+    return FALSE ;
+ end if ;
+end ;
+/*------ Identifies the TLs with potential off day ------*/
+procedure potential_staff_off_day (v_job_code in varchar2) is
+temp_schedule_id varchar2(20) ;
+counter number := 1 ;
+hours number ;
+v_drive_id varchar2(10) ;
+emptemplist emptabtemp ;
+param_ocday number ;
+param_ochr number ;
+loop_var number ;
+act_start_time date ;
+act_end_time date ;
+begin
+   write_log('In potential_staff_off_day for '||to_char(curdate,'MM-DD-YYYY'));
+   /*--- Initialize TL off day field in the PL/SQL table ---*/
+   for i in 1..emplist.count loop
+       emplist(i).off_day_candidate := 'N' ;
+   end loop ;
+  param_ocday := get_parameter('OCDAY') ; -- Check whether staff got off in last                                          -- so many days
+  param_ochr := get_parameter('OCHR') ; -- Check hours in last so many days
+  if param_ocday = 0 then
+     return ;
+  end if ;
+  for i in 1..emplist.count loop
+     if check_term(i)=FALSE and
+        ((v_job_code='TMLDR' and emplist(i).tl_skill != 0) or
+        (v_job_code != 'TMLDR' and emplist(i).tl_skill = 0)) then
+       /*-- Check if TL is pre-assigned on that day. If TL is
+            pre-assigned, then potential OFF cannot be given --*/
+       begin
+        select 'x' into selection
+        from pre_assignments
+        where staff_no = emplist(i).staff_no
+          and chapter_id=g_chapter_id
+        and drive_id in (select drive_id from drives
+                         where drive_date = curdate
+                          and chapter_id=g_chapter_id )
+        and nvl(pre_asign_status,'*') != 'CANCL'  and rownum=1;
+        goto next_iter1 ;
+        exception
+          when no_data_found then null ;
+          when others then write_log('Error 11: '||sqlcode||' '||substr(sqlerrm,1,100));raise;
+       end ;
+       /*-- Check if TL is OFF in last <x-parameterized> days.  --*/
+       -- Check for assignment to drives
+       if curdate - param_ocday < g_start_date then
+       begin
+         select schedule_id into temp_schedule_id
+         from staff_schedule_hdr
+         where start_date = g_start_date - 7
+         and   end_date = g_end_date - 7
+         and chapter_id=g_chapter_id
+         and   status = 'FINAL' ;
+       exception
+         when no_data_found then write_log('No previous schedule ID found');temp_schedule_id := NULL ;
+          when others then write_log('Error 12: '||sqlcode||' '||substr(sqlerrm,1,100));raise;
+       end ;
+       end if ; /*-- End if for curdate - param_ocday etc ... */
+       /*--- Checking for drive assignment for last few days ---*/
+       for j in 1..param_ocday loop
+           if curdate - j >= g_start_date then /*-- In current schedule--*/
+            begin
+              select 'x' into selection
+              from staff_schedule_details
+              where schedule_id = g_schedule_id
+              and chapter_id=g_chapter_id
+              and staff_no = emplist(i).staff_no
+              and drive_id in (select drive_id from drives
+                                 where drive_date = curdate - j
+                                  and chapter_id=g_chapter_id )
+              and rownum = 1 ;
+            exception
+             when no_data_found then write_log('In Nofound1 '||to_char(curdate-j,'MM-DD-YYYY'));goto next_iter1 ;
+             when others then write_log('Error 13:'||to_char(sqlcode)||' '||sqlerrm) ; raise ;
+            end ;
+           else /*-- In previous schedule --*/
+           /*-- temp_schedule_id is null means previous
+                schedule info not present in system. ---*/
+            if temp_schedule_id is not null then
+               begin
+                select 'x' into selection
+                from staff_schedule_details
+                where schedule_id = temp_schedule_id
+                and   chapter_id=g_chapter_id
+                and   staff_no = emplist(i).staff_no
+                and   drive_id in (select drive_id from drives
+                                 where drive_date = curdate - j
+                                 and chapter_id=g_chapter_id )
+                and   rownum = 1 ;
+                exception
+                 when no_data_found then goto next_iter1 ;
+                 when others then write_log('Error 14:'||to_char(sqlcode)||' '||sqlerrm) ; raise ;
+               end ;
+            else
+               goto next_iter1 ;
+            end if ;
+           end if ; /*-- End if for curdate - j >= g_start_date --*/
+        end loop ; /*-- for j in 1..param_ocday loop --*/
+     emptemplist(counter).staff_no := emplist(i).staff_no ;
+     emptemplist(counter).skill_rating := emplist(i).overall_skill ;
+     emptemplist(counter).emplist_index := i ;
+     counter := counter + 1 ;
+     end if ; /*-- End if for v_job_code etc. check --*/
+   <<next_iter1>>
+   null ;
+   end loop ; /*-- for i in 1..emplist.count --*/
+   /*-- If nobody in emptemplist, then there is nobody who did not get OFF
+        in last OCDAY days. So we put everybody in emptemplist and
+        then decide potential OFF based on hours only.  ----*/
+   if emptemplist.count = 0 then
+      counter := 1 ;
+      for i in 1..emplist.count loop
+          emptemplist(counter).staff_no := emplist(i).staff_no ;
+          emptemplist(counter).skill_rating := emplist(i).overall_skill ;
+          emptemplist(counter).emplist_index := i ;
+          counter := counter + 1 ;
+      end loop ;
+   end if ;
+   for i in 1..emptemplist.count loop
+       emptemplist(i).hours := 0 ; -- Initialize variable
+       for j in 1..param_ochr loop
+           hours := 0;
+           get_drive_assignment(emptemplist(i).staff_no,curdate-j,hours) ;
+           emptemplist(i).hours := emptemplist(i).hours+hours ;
+       end loop ;
+   end loop ; /*-- for i in 1..emptemplist.count --*/
+   for i in 1..emptemplist.count loop
+       write_log(emptemplist(i).staff_no||' Hours:'||emptemplist(i).hours);
+   end loop ;
+   sort_emptemplist(emptemplist,'D','HOURS') ; -- Sort based on hours descending
+   if v_job_code = 'TMLDR' then
+        loop_var := get_parameter('TLOFF') ;
+   elsif v_job_code = 'MEMBR' then
+        loop_var := get_parameter('TMOFF') ;
+   end if ;
+   if loop_var > emptemplist.count then
+      loop_var := emptemplist.count ;
+   end if ;
+   /*---- Mark the staff for potential OFF ----*/
+   write_log('Count of staff for potential OFF:'||to_char(emptemplist.count));
+   for i in 1..loop_var loop
+       for j in 1..emplist.count loop
+         if emplist(j).staff_no = emptemplist(i).staff_no and emplist(j).off_day_candidate != 'Y' then
+            write_log(to_char(curdate,'MM-DD-YYYY')||' Getting OFF :'||emptemplist(i).staff_no);
+            emplist(j).off_day_candidate := 'Y' ;
+            exit ;
+         end if ;
+       end loop ;
+   end loop ;
+end potential_staff_off_day ;
+/*-- This procedure sorts the emptemplist table based on hours --*/
+procedure sort_emptemplist (emptemplist in out emptabtemp,sort_type in varchar2,sort_column in varchar2) is
+ buffer number ;
+ placeholder number ;
+ temp number ;
+ start_index number ;
+ sort_count number ;
+begin
+   start_index := 1 ;
+   sort_count := emptemplist.count ;
+   for k in start_index..sort_count loop
+       if sort_column = 'HOURS' then
+          buffer := emptemplist(k).hours ;
+       elsif sort_column = 'SKILL' then
+          buffer := emptemplist(k).skill_rating ;
+       end if ;
+       placeholder := k ;
+       for l in k+1..sort_count loop
+           if (sort_column = 'HOURS' and
+               ((sort_type = 'D' and emptemplist(l).hours > buffer) or
+               (sort_type = 'A' and emptemplist(l).hours < buffer)) ) or
+              (sort_column = 'SKILL' and
+               ((sort_type = 'D' and emptemplist(l).skill_rating > buffer) or
+               (sort_type = 'A' and emptemplist(l).skill_rating < buffer)) )
+           then
+              if sort_column = 'HOURS' then
+                buffer := emptemplist(l).hours ;
+              elsif sort_column = 'SKILL' then
+                buffer := emptemplist(l).skill_rating ;
+              end if ;
+              placeholder := l;
+           end if ;
+       end loop ;-- end for l loop
+       swap_emptemplist(emptemplist,k,placeholder) ;
+   end loop ; -- end for k loop
+end sort_emptemplist ;
+procedure swap_emptemplist(emptemplist in out emptabtemp,first_index in number,second_index in number) is
+ temp emprectemp ;
+begin
+ temp := emptemplist(first_index) ;
+ emptemplist(first_index) := emptemplist(second_index) ;
+ emptemplist(second_index) := temp ;
+end swap_emptemplist ;
+/*- This procedure calculates the number of hours for a staff on given day-*/
+procedure get_drive_assignment(v_staff_no in varchar2,cdate in date,hours out number) is
+ temp_schedule_id varchar2(20) ;
+ act_start_time date ;
+ act_end_time date ;
+ temp_hours number := 0 ;
+ cursor c1 is
+ select drive_id from staff_schedule_details
+ where schedule_id = temp_schedule_id
+  and  chapter_id=g_chapter_id
+  and  staff_no = v_staff_no
+  and  drive_id in (select drive_id from drives
+                     where drive_date = cdate
+                      and  chapter_id=g_chapter_id
+                      and  status != 'CANCL') ;
+begin
+ temp_schedule_id := g_schedule_id ;
+ if cdate < g_start_date then /*-- Check with previous week's schedule --*/
+   begin
+     select schedule_id into temp_schedule_id
+     from staff_schedule_hdr
+     where start_date = g_start_date - 7
+     and   end_date = g_end_date - 7
+     and chapter_id=g_chapter_id
+     and   status = 'FINAL' ;
+   exception
+    when no_data_found then  return ;
+    when others then write_log(to_char(sqlcode)||' '||sqlerrm||' Error 16') ; raise ;
+   end ;
+ end if ;
+ for c1rec in c1 loop
+  calc_hours_for_drive(c1rec.drive_id,act_start_time,act_end_time) ;
+  temp_hours := temp_hours + (act_end_time - act_start_time) * 24 ;
+ end loop ;
+ hours := temp_hours ;
+end get_drive_assignment;
+/*-- This procedure calculates the hours for a drive --*/
+procedure calc_hours_for_drive(v_drive_id in varchar2,act_start_time out date,act_end_time out date) is
+hr_diff number ;
+v_location_id varchar2(10) ;
+v_stbk_time number ;
+v_travel_time number ;
+v_sch_start_time date ;
+v_sch_end_time date ;
+begin
+ begin
+   select schedule_start_time,schedule_end_time,location_id,nvl(schedule_stup_bkdown_time,0)
+   into v_sch_start_time,v_sch_end_time,v_location_id,v_stbk_time
+   from drives
+   where drive_id = v_drive_id
+   and chapter_id=g_chapter_id ;
+  exception
+    when no_data_found  then write_log(to_char(sqlcode)||' '||sqlerrm||' Error 20') ; raise ;
+    when others  then write_log(to_char(sqlcode)||' '||sqlerrm||' Error 17') ; raise ;
+ end ;
+ begin
+   select nvl(travel_time,0) into v_travel_time
+   from locations
+   where location_id = v_location_id
+   and chapter_id=g_chapter_id ;
+ exception
+    when no_data_found  then v_travel_time := 0 ;
+    when others  then write_log(to_char(sqlcode)||' '||sqlerrm||' Error 18') ; raise ;
+ end ;
+ act_start_time := v_sch_start_time - (v_travel_time/60)/24 - ((v_stbk_time/2)/60)/24 ;
+ act_end_time := v_sch_end_time + (v_travel_time/60)/24 + ((v_stbk_time/2)/60)/24 ;
+-- hours := (hr_diff * 24) + (2 * v_travel_time) / 60 + (v_stbk_time/60) ;
+end calc_hours_for_drive;
+/*-- This procedure does the pre-assignments for all the drives in the day--*/
+procedure do_pre_assignments is
+ v_staff_no         varchar2(6) ;
+ v_job_code         varchar2(5) ;
+ v_special_job_code varchar2(5) ;
+ v_drive_id         varchar2(10) ;
+ cursor c1_pre is
+ SELECT staff_no,job_code,special_job_code,sys_bod,actual_bod,sys_eod,
+        actual_eod, comments
+   FROM pre_assignments
+  WHERE drive_id = v_drive_id
+    AND chapter_id=g_chapter_id
+    AND nvl(pre_asign_status,'*') != 'CANCL' ;
+begin
+ for i_pre in 1..drvlist.count loop
+     v_drive_id := drvlist(i_pre).drive_id ;
+     for c1rec_pre in c1_pre loop
+       v_special_job_code := null ;
+       v_staff_no := c1rec_pre.staff_no ;
+       v_job_code := c1rec_pre.job_code ;
+       v_special_job_code := c1rec_pre.special_job_code ;
+       g_actual_bod := c1rec_pre.actual_bod;
+       g_actual_eod := c1rec_pre.actual_eod;
+       g_save_bod := c1rec_pre.sys_bod;
+       g_save_eod := c1rec_pre.sys_eod;
+       g_comments := c1rec_pre.comments;
+       write_log('i_pre:'||to_char(i_pre)||' v_staff_no:'||v_staff_no||' v_job_code:'||v_job_code);
+       assign_staff_to_drive(i_pre,v_staff_no,v_job_code,'P') ;
+       if v_special_job_code is not null then
+           assign_driver(i_pre,v_staff_no,v_special_job_code) ;
+       end if ;
+     end loop ;
+ end loop ;
+end do_pre_assignments ;
+/*---- This procedure assigns TL to a drive ---*/
+/*-- Parameter passed is the index number of drive in the drive list --*/
+procedure select_best_team (drive_index in number, team_id out varchar2) is
+cursor a1 is
+select nvl(team_id,'X') team_id,count(*) teamcnt from employees
+ where staff_no in (select staff_no
+  from staff_schedule_details
+ where schedule_id = g_schedule_id
+  and chapter_id=g_chapter_id
+  and drive_id=drvlist(drive_index).drive_id)
+ and term_date is null and
+---- emp_class = 'MSTAF'  -- commented by MG, added following instead
+ emp_class in (select code from valid_master_codes
+                where code_type = 'AUTAS'
+                  and sysdate between eff_date and nvl(term_date, sysdate+2))
+ -------------------------------------------------------------------------
+ and chapter_id=g_chapter_id
+ and sysdate between eff_date and nvl(term_date,sysdate+1)
+ and nvl(schedule_from_date,g_start_date+1) <= g_start_date
+ group by team_id
+ order by 2 ;
+ temp_team varchar2(5);
+begin
+for a1rec in a1
+loop
+    temp_team:=a1rec.team_id;
+    if a1rec.teamcnt=drvlist(drive_index).staff_reqd then
+      exit;
+    end if;
+end loop;
+if temp_team is null then
+ begin
+   select code into team_id from valid_master_codes
+    where sort_sequence_1 in (select sort_sequence_1 from valid_master_codes
+          where code_type='FACLT' and code in (select facility_code from
+                drive_facilities where drive_id=drvlist(drive_index).drive_id))
+      and code in
+          (select nvl(team_id,'X') from employees
+            where staff_no not in (select staff_no from staff_schedule_details
+                                 where schedule_id = g_schedule_id
+                                   and chapter_id=g_chapter_id
+                                   and drive_id!=drvlist(drive_index).drive_id
+                                   and drive_id in (select drive_id from drives
+                                                where drive_date = curdate
+                                                and chapter_id=g_chapter_id ))
+              and term_date is null
+---- and emp_class = 'MSTAF'  -- commented by MG, added following instead
+ and emp_class in (select code from valid_master_codes
+                where code_type = 'AUTAS'
+                  and sysdate between eff_date and nvl(term_date, sysdate+2))
+ -------------------------------------------------------------------------
+              and chapter_id=g_chapter_id
+              and sysdate between eff_date and nvl(term_date,sysdate+1)
+              and nvl(schedule_from_date,g_start_date+1) <= g_start_date
+         group by team_id having count(*)=drvlist(drive_index).staff_reqd)
+      and rownum=1;
+ exception
+   when no_data_found then
+     begin
+       write_log('mukesh - drive:'|| drvlist(drive_index).drive_id);
+       select code into team_id from valid_master_codes
+        where sort_sequence_1 in (select sort_sequence_1 from valid_master_codes
+        where code_type='FACLT' and code in (select facility_code from
+        drive_facilities where drive_id=drvlist(drive_index).drive_id))
+        and code in
+       (select team_id from employees where
+        staff_no not in (select staff_no from staff_schedule_details
+        where schedule_id = g_schedule_id
+         and chapter_id=g_chapter_id
+         and drive_id!=drvlist(drive_index).drive_id
+         and   drive_id in (select drive_id from drives
+                            where drive_date = curdate
+                            and chapter_id=g_chapter_id ))
+                             and term_date is null and
+---- emp_class = 'MSTAF'  -- commented by MG, added following instead
+ emp_class in (select code from valid_master_codes
+                where code_type = 'AUTAS'
+                  and sysdate between eff_date and nvl(term_date, sysdate+2))
+ -------------------------------------------------------------------------
+        and chapter_id=g_chapter_id
+        and sysdate between eff_date and nvl(term_date,sysdate+1)
+        and nvl(schedule_from_date,g_start_date+1) <= g_start_date
+        group by team_id having count(*) in (select max(count(*))
+        from employees
+        where staff_no not in (select staff_no from staff_schedule_details
+        where schedule_id = g_schedule_id
+         and chapter_id=g_chapter_id
+         and drive_id!=drvlist(drive_index).drive_id
+         and   drive_id in (select drive_id from drives
+                            where drive_date = curdate
+                            and chapter_id=g_chapter_id ))
+                             and term_date is null and
+---- emp_class = 'MSTAF'  -- commented by MG, added following instead
+ emp_class in (select code from valid_master_codes
+                where code_type = 'AUTAS'
+                  and sysdate between eff_date and nvl(term_date, sysdate+2))
+ -------------------------------------------------------------------------
+        and chapter_id=g_chapter_id
+        and sysdate between eff_date and nvl(term_date,sysdate+1)
+        and nvl(schedule_from_date,g_start_date+1) <= g_start_date
+        group by team_id having count(*) <= drvlist(drive_index).staff_reqd+2)
+        )
+        and rownum=1;
+     exception
+       when no_data_found then team_id:='X';
+       write_log('mukesh2 - drive:'|| drvlist(drive_index).drive_id);
+       when others  then write_log(to_char(sqlcode)||' '||sqlerrm||' Error in select best team') ; raise ;
+     end;
+   when others  then write_log(to_char(sqlcode)||' '||sqlerrm||' Error in select best team') ; raise ;
+ end;
+else
+  team_id:=temp_team;
+end if;
+end select_best_team;
+procedure assign_tl (drive_index in number) is
+ tl_staff_no varchar2(6) ;
+ drive_hours number ;
+ emptemplist emptabtemp ;
+ emptemplist1 emptabtemp ;
+ counter number := 0 ;
+ param_avg_hours number ;
+ temp_drive_id varchar2(10) ;
+ team_id varchar2(5);
+ temp_emp_index number ;
+ tl_assigned varchar2(1) := 'N' ;
+ temp_index  number ;
+ v_tl_id varchar2(6) ;
+ old_drive_id varchar2(10) ;
+ assigned_atl_flag varchar2(1) := 'N' ; /* Will be set to 'Y' only when already
+                                 assigned ATLs are considered for TL position */
+ cursor c1 is
+   select staff_no from staff_schedule_details
+    where drive_id = temp_drive_id
+      and chapter_id=g_chapter_id
+      and schedule_id = g_schedule_id
+      and job_code = 'MEMBR'
+      and exists (select 'x' from employee_jobs
+                   where staff_no = staff_schedule_details.staff_no
+                     and job_code='ATL'
+                     and chapter_id=g_chapter_id
+                     and curdate between eff_date and nvl(term_date,curdate+1))
+      and assign_mode != 'P'
+      and rownum = 1 ;
+ cursor c3 is
+   select drive_id from staff_schedule_details
+    where schedule_id = g_schedule_id
+      and chapter_id=g_chapter_id
+      and drive_id != drvlist(drive_index).drive_id
+      and drive_id in (select drive_id from drives
+                        where drive_date = curdate
+                          and chapter_id=g_chapter_id )
+      and staff_no = v_tl_id ;
+begin
+  /*-- If a TL is already assigned to drive, then return --*/
+  begin
+     select 'x' into selection
+     from staff_schedule_details
+     where schedule_id = g_schedule_id
+       and chapter_id=g_chapter_id
+     and   drive_id = drvlist(drive_index).drive_id
+     and job_code = 'TMLDR' ;
+     return ;
+  exception
+     when no_data_found then null ;
+     when too_many_rows then return ;
+     when others  then write_log(to_char(sqlcode)||' '||sqlerrm||' Error 31') ; raise ;
+  end ;
+  /*-- Calculate total hours for the drive --*/
+  drive_hours := (drvlist(drive_index).drive_end_time - drvlist(drive_index).drive_start_time)*24 ;
+  emptemplist.delete ;
+  /* select best team*/
+  write_log('select best_team');
+  select_best_team(drive_index,team_id);
+  write_log('After select best_team');
+  if team_id is not null then
+  for i_staff in 1..emplist.count loop
+      /* Following IF statement checks that the staff is
+       * TL, is not a potential_off_day candidate, is not
+       * assigned to a drive on that day yet and is not
+       * OFF on that day  and is from a team that can fill this drive--*/
+      if check_term(i_staff)=FALSE and
+         check_facility(emplist(i_staff).staff_no,drvlist(drive_index).drive_id) = TRUE and
+         check_job(i_staff,'TMLDR') = TRUE and
+         check_off_day_candidate(i_staff)  = FALSE and
+         check_team(drive_index,i_staff,team_id) = TRUE and
+         check_assign_today(i_staff) = FALSE and
+         check_unavl(i_staff,drive_index) = FALSE then
+           counter := counter + 1 ;
+           copy_emp_to_temp(emptemplist,counter,emplist,i_staff) ;
+      end if ;
+  end loop ; /*-- for i_staff loop --*/
+  /*-- If no TLs got selected, select TLs with potential OFF days --*/
+  if counter = 0 then
+  for i_staff in 1..emplist.count loop
+      if check_term(i_staff)=FALSE and
+         check_facility(emplist(i_staff).staff_no,drvlist(drive_index).drive_id) = TRUE and
+         check_job(i_staff,'TMLDR') = TRUE and
+         check_off_day_candidate(i_staff)  = FALSE and
+         check_assign_today(i_staff) = FALSE and
+         check_unavl(i_staff,drive_index) = FALSE then
+           counter := counter + 1 ;
+           copy_emp_to_temp(emptemplist,counter,emplist,i_staff) ;
+      end if ;
+  end loop ; /*-- for i_staff loop --*/
+  end if;
+  end if;
+  /*-- If no TLs got selected, select TLs with potential OFF days --*/
+  if counter = 0 then
+     for k_temp in 1..emplist.count loop
+         if check_term(k_temp) = FALSE and
+            check_facility(emplist(k_temp).staff_no,drvlist(drive_index).drive_id) = TRUE and
+            check_off_day_candidate(k_temp) = TRUE then
+          if check_job(k_temp,'TMLDR') = TRUE and
+             check_assign_today(k_temp) = FALSE and
+             check_unavl(k_temp,drive_index) = FALSE then
+              counter := counter + 1 ;
+              copy_emp_to_temp(emptemplist,counter,emplist,k_temp) ;
+          end if ;
+         end if ;
+     end loop ;
+  end if ;
+  /*-- If still no TLs got selected, select free ATLs ---*/
+  if counter = 0 then
+     for k_temp in 1..emplist.count loop
+      if check_term(k_temp) = FALSE and
+         check_facility(emplist(k_temp).staff_no,drvlist(drive_index).drive_id) = TRUE and
+         check_job(k_temp,'ATL') = TRUE and
+         check_off_day_candidate(k_temp)  = FALSE and
+         check_assign_today(k_temp) = FALSE and
+         check_unavl(k_temp,drive_index) = FALSE then
+              counter := counter + 1 ;
+              copy_emp_to_temp(emptemplist,counter,emplist,k_temp) ;
+      end if ;
+     end loop ;
+  end if ;
+ /*-- If still none selected, select free ATLs with potential OFF --*/
+  if counter = 0 then
+     for k_temp in 1..emplist.count loop
+      if check_term(k_temp) = FALSE and
+         check_facility(emplist(k_temp).staff_no,drvlist(drive_index).drive_id) = TRUE and
+         check_job(k_temp,'ATL') = TRUE and
+         check_assign_today(k_temp) = FALSE and
+         check_unavl(k_temp,drive_index) = FALSE then
+              counter := counter + 1 ;
+              copy_emp_to_temp(emptemplist,counter,emplist,k_temp) ;
+      end if ;
+     end loop ;
+  end if ;
+ if counter > 0 then
+  param_avg_hours := get_parameter('AVGHR') ;
+  if drive_hours > param_avg_hours then
+   sort_emptemplist(emptemplist,'A','HOURS') ; -- Sort based on hours ascending
+  else
+   sort_emptemplist(emptemplist,'D','HOURS') ; -- Sort based on hours descending
+  end if ;
+  /*-- Assign the first TL with sufficient skill rating and recovery time --*/
+  for k_temp in 1..emptemplist.count loop
+    if check_skill_rating(drive_index,emptemplist(k_temp).staff_no,'TMLDR') = TRUE then
+      if check_facility(emptemplist(k_temp).staff_no,drvlist(drive_index).drive_id) = TRUE then
+        if check_recovery_time(drive_index,emptemplist(k_temp).staff_no) = TRUE then
+          write_log('I am here ');
+          assign_staff_to_drive(drive_index,emptemplist(k_temp).staff_no,'TMLDR','A') ;
+          write_log('Escaped from ther');
+          v_tl_id := emptemplist(k_temp).staff_no ;
+          tl_assigned := 'Y' ;
+          exit ;
+        end if ;
+      end if ;
+    end if ;
+  end loop ;
+ end if ; /*-- end if counter > 0 --*/
+  /*-- If still none selected, check for ATLs assigned to other drives
+       on that day as team members. If this ATL is assigned to the drive,
+       some other staff will be assigned to the ATL's place ----*/
+ if counter = 0 then
+   counter := 1 ;
+   write_log('Checking assigned ATLs for '||drvlist(drive_index).drive_id) ;
+   for k_temp in 1..drive_index-1 loop
+     temp_drive_id := drvlist(k_temp).drive_id ;
+     write_log('Checking '||temp_drive_id||' for assigned ATL');
+     for c1rec in c1 loop
+       write_log('Found assigned ATL '||c1rec.staff_no);
+       emptemplist1(counter).staff_no := c1rec.staff_no ;
+       for l in 1..emplist.count loop
+         if emplist(l).staff_no = c1rec.staff_no then
+           temp_emp_index := l ;
+           exit ;
+         end if ;
+       end loop ;
+       emptemplist1(counter).hours := emplist(temp_emp_index).hours ;
+       emptemplist1(counter).skill_rating := emplist(temp_emp_index).overall_skill ;
+       emptemplist1(counter).emplist_index := k_temp ;  --MG see a problem here
+       counter := counter + 1 ;
+     end loop ; /*--- for c1rec loop ---*/
+   end loop ; /*--- for k_temp loop ---*/
+ end if ;
+ if emptemplist1.count > 0 then
+   param_avg_hours := get_parameter('AVGHR') ;
+   if drive_hours > param_avg_hours then
+     sort_emptemplist(emptemplist1,'A','HOURS') ; -- Sort on hours ascending
+   else
+     sort_emptemplist(emptemplist1,'D','HOURS') ; -- Sort on hours descending
+   end if ;
+  /*-- Assign the first ATL based on suitability  --*/
+  for k_temp in 1..emptemplist1.count loop
+    if check_facility(emptemplist1(k_temp).staff_no,drvlist(drive_index).drive_id) = TRUE and
+       check_skill_rating(drive_index,emptemplist1(k_temp).staff_no,'TMLDR') = TRUE then
+       if check_recovery_time(drive_index,emptemplist1(k_temp).staff_no) = TRUE then
+         /*-- Get the old drive this ATL was assigned to --*/
+         begin
+           select drive_id into old_drive_id
+             from staff_schedule_details
+            where schedule_id = g_schedule_id
+              and chapter_id=g_chapter_id
+              and drive_id != drvlist(drive_index).drive_id
+              and drive_id in (select drive_id from drives
+                                where drive_date = curdate
+                                  and chapter_id=g_chapter_id )
+              and staff_no = emptemplist1(k_temp).staff_no ;
+         exception
+           when no_data_found then write_log('Error 300');return;
+           when others  then write_log(to_char(sqlcode)||' '||sqlerrm||' Error 301') ; raise ;
+         end ;
+         /*-- Locating old_drive_id in drvlist PL/SQL table --*/
+         for j_temp in 1..drvlist.count loop
+           if drvlist(j_temp).drive_id = old_drive_id then
+              temp_index := j_temp ;
+              exit;
+           end if ;
+         end loop ;
+         if handle_unassignment(temp_index,emptemplist1(k_temp).staff_no) = TRUE then
+           write_log('oo more!!!!! ther');
+           assign_staff_to_drive(drive_index,emptemplist1(k_temp).staff_no,'TMLDR','A') ;
+           write_log('exited thre too');
+           tl_assigned := 'Y' ;
+           exit ;
+         end if ;
+       end if ;
+     end if ;
+   end loop ;
+ end if ; /*-- end if emptemplist.count > 0 --*/
+/*-----------------------------------------------------------------------------
+   No TL found with enough skill rating and recovery time. So, the employee
+   with maximum skill rating and sufficient recovery time is assigned to the
+   drive. If nobody has sufficient recovery time, then the employee with maximum
+   skill rating is assigned.
+-----------------------------------------------------------------------------*/
+ if tl_assigned = 'N' and emptemplist.count > 0 then
+   if drvlist(drive_index).min_skill_rating > 0 then
+     sort_emptemplist(emptemplist,'D','SKILL') ; -- Sort based on skill desc
+   end if ;
+   /* Get the team that has enough staff to start with */
+   select_best_team(drive_index,team_id);
+   for k_temp in 1..emptemplist.count loop
+     if check_facility(emptemplist(k_temp).staff_no,drvlist(drive_index).drive_id) = TRUE and
+     check_team(drive_index,k_temp,team_id) = TRUE and
+     check_recovery_time(drive_index,emptemplist(k_temp).staff_no) = TRUE then
+       assign_staff_to_drive(drive_index,emptemplist(k_temp).staff_no,'TMLDR','A') ;
+       v_tl_id := emptemplist(k_temp).staff_no ;
+       tl_assigned := 'Y' ;
+       exit ;
+     end if ;
+   end loop ;
+   if tl_assigned='N' then
+     for k_temp in 1..emptemplist.count loop
+       if check_facility(emptemplist(k_temp).staff_no,drvlist(drive_index).drive_id) = TRUE and
+       check_recovery_time(drive_index,emptemplist(k_temp).staff_no) = TRUE then
+       assign_staff_to_drive(drive_index,emptemplist(k_temp).staff_no,'TMLDR','A') ;
+       v_tl_id := emptemplist(k_temp).staff_no ;
+       tl_assigned := 'Y' ;
+       exit ;
+     end if ;
+   end loop ;
+ end if;
+-- following uncommented by MG
+  if tl_assigned = 'N' then
+    assign_staff_to_drive(drive_index,emptemplist(1).staff_no,'TMLDR','A') ;
+    v_tl_id := emptemplist(1).staff_no ;
+  end if ;
+--------------------
+ end if ;
+ write_log('At the end of assign_tl');
+end assign_tl;
+/*-- Checks whether this staff can do this job.
+     Parameters : Index in emplist PL/SQL table
+                  Job code  ----*/
+function check_job(emp_index in number,job_code in varchar2) return boolean is
+begin
+ if (job_code = 'TMLDR' and emplist(emp_index).tl_skill != 0 ) or
+    (job_code = 'CDRVR' and emplist(emp_index).coach_driver_skill != 0 ) or
+    (job_code = 'VDRVR' and emplist(emp_index).van_driver_skill != 0 ) or
+    (job_code = 'ATL' and emplist(emp_index).atl_skill != 0 ) then
+      return TRUE ;
+ else
+      return FALSE ;
+ end if ;
+end ;
+/*--- Checks whether staff is a OFF day candidate ----*/
+function check_off_day_candidate (emp_index in number) return boolean is
+begin
+ if emplist(emp_index).off_day_candidate = 'Y' then
+    return TRUE ;
+ else
+    return FALSE ;
+ end if ;
+end ;
+/*-- Checks whether staff has already been assigned today --*/
+function check_assign_today (emp_index in number) return boolean is
+begin
+ if emplist(emp_index).assigned_curdate = 'Y' then
+    return TRUE ;
+ else
+    return FALSE ;
+ end if ;
+end ;
+/*-- Checks unavailability of staff for a drive. Returns TRUE if unavailable -*/
+function check_unavl (emp_index in number,drive_index in number) return boolean is
+begin
+/*-- NONE means no unavailability. ALL means staff is unavailable all day. --*/
+  if emplist(emp_index).unavl_start_time = 'NONE' then
+        return FALSE ;
+  elsif emplist(emp_index).unavl_start_time = 'ALL' then
+        return TRUE ;
+  /*-- If From and To time of unavailability has been specified,
+       then check that they donot overlap with drive time  ---*/
+  elsif ((to_date(to_char(sysdate,'MM-DD-YYYY')||' '||to_char(drvlist(drive_index).drive_start_time,'HH24:MI'),'MM-DD-YYYY HH24:MI') >
+       to_date(to_char(sysdate,'MM-DD-YYYY')||' '||emplist(emp_index).unavl_start_time,'MM-DD-YYYY HH24:MI') ) and
+       (to_date(to_char(sysdate,'MM-DD-YYYY')||' '||to_char(drvlist(drive_index).drive_start_time,'HH24:MI'),'MM-DD-YYYY HH24:MI') >=
+        to_date(to_char(sysdate,'MM-DD-YYYY')||' '||emplist(emp_index).unavl_end_time,'MM-DD-YYYY HH24:MI') )) or
+        ((to_date(to_char(sysdate,'MM-DD-YYYY')||' '||to_char(drvlist(drive_index).drive_end_time,'HH24:MI'),'MM-DD-YYYY HH24:MI') <=
+          to_date(to_char(sysdate,'MM-DD-YYYY')||' '||emplist(emp_index).unavl_start_time,'MM-DD-YYYY HH24:MI') ) and
+        (to_date(to_char(sysdate,'MM-DD-YYYY')||' '||to_char(drvlist(drive_index).drive_end_time,'HH24:MI'),'MM-DD-YYYY HH24:MI') <
+         to_date(to_char(sysdate,'MM-DD-YYYY')||' '||emplist(emp_index).unavl_end_time,'MM-DD-YYYY HH24:MI') ) )   then
+          return FALSE;
+ else
+    return TRUE ;
+ end if ;
+end ;
+/*----------------------------------------------------------------------------
+  This function checks whether a staff has enough skill rating for a drive.
+  Returns FALSE if staff does not have enough skill rating.
+----------------------------------------------------------------------------*/
+function check_skill_rating(drive_index in number,v_staff_no in varchar2,v_job_code in varchar2) return boolean is
+ staff_skill number := 1;
+ tl_skill number := 0 ;
+ atl_skill number := 0 ;
+ drive_skill number ;
+ drive_proj_draw number ;
+begin
+ drive_skill := drvlist(drive_index).min_skill_rating ;
+ /*--- Get the overall skill rating for the staff ---*/
+ for k_temp in 1..emplist.count loop
+     if emplist(k_temp).staff_no = v_staff_no then
+        staff_skill := emplist(k_temp).overall_skill ;
+        tl_skill := emplist(k_temp).tl_skill ;
+        atl_skill := emplist(k_temp).atl_skill ;
+        exit ;
+     end if ;
+ end loop ;
+ if staff_skill < drive_skill then
+    return FALSE ;
+ end if ;
+ /*-- When checking for team leader, also check the skill level required
+  *   as defined by drive size. This is again decided based on whether
+      staff is an ATL or Team Leader.--*/
+ if v_job_code = 'TMLDR' then
+   if tl_skill > 0 then /*-- Staff is a team leader --*/
+      /*-- Get the required TL skill for the drive ---*/
+      begin
+         select skill_rating into drive_skill
+         from valid_skills
+         where job_code = 'TMLDR'
+         and chapter_id=g_chapter_id
+         and   drvlist(drive_index).proj_draw between nvl(min_proj_draw,0)
+         and   nvl(max_proj_draw,0) ;
+      exception
+         when no_data_found then drive_skill := 0 ;
+         when others  then write_log(to_char(sqlcode)||' '||sqlerrm||' Error 37') ; raise ;
+      end ;
+      if tl_skill < drive_skill then
+         return FALSE ;
+      else
+         return TRUE ;
+      end if ;
+   elsif atl_skill > 0 then /*-- Staff is an ATL --*/
+      /*-- Get the required ATL skill for the drive ---*/
+      begin
+         select skill_rating into drive_skill
+         from valid_skills
+         where job_code = 'ATL'
+         and chapter_id=g_chapter_id
+         and   drvlist(drive_index).proj_draw between nvl(min_proj_draw,0)
+         and   nvl(max_proj_draw,0) ;
+      exception
+         when no_data_found then drive_skill := 0 ;
+         when others  then write_log(to_char(sqlcode)||' '||sqlerrm||' Error 38') ; return FALSE ;
+      end ;
+      if atl_skill < drive_skill then
+         return FALSE ;
+      else
+         return TRUE ;
+      end if ;
+   else /*-- Staff is neither ATL or TL, so is not eligible to be Team Ldr --*/
+      return FALSE ;
+   end if ;  /*-- end if tl_skill > 0 --*/
+ else
+    return TRUE ;
+ end if ; /*-- End if v_job_code = 'TMLDR' --*/
+end check_skill_rating ;
+/*-- This function checks recovery time for the staff for this drive
+     Returns TRUE if recovery time is acceptable    --*/
+function check_team(drive_index in number,v_staff_no in varchar2,team_id varchar2) return boolean is
+teamsize number;
+begin
+write_log('In check_team');
+ if emplist(v_staff_no).team_id = team_id then
+    return TRUE ;
+ else
+    return FALSE ;
+ end if ;
+end ;
+function check_recovery_time(drive_index in number,v_staff_no in varchar2) return boolean is
+ param_recovery_time number ;
+ temp_schedule_id varchar2(20) ;
+ v_drive_id varchar2(10);
+ act_start_time date ;
+ act_end_time date ;
+ v_previous_drive_end date ;
+ v_next_drive_start date ;
+ max_end_time date ;
+begin
+ param_recovery_time := get_parameter('RECOV') ;
+ /*-- Get the end time of the drive on the previous day, to which the
+      staff was assigned. --*/
+ if curdate - 1 >= g_start_date then
+    temp_schedule_id := g_schedule_id ;
+ else
+  begin
+    select schedule_id into temp_schedule_id
+    from staff_schedule_hdr
+    where start_date = g_start_date - 7
+    and   end_date = g_end_date - 7
+    and chapter_id=g_chapter_id
+    and   status = 'FINAL' ;
+  exception
+    when no_data_found then goto check_next_day ; /*-- No schedule found --*/
+    when others  then write_log(to_char(sqlcode)||' '||sqlerrm||' Error 40') ; raise ;
+  end ;
+ end if ;
+ /*-- Select the drive ID on the previous day which has the
+      maximum end time  --*/
+ begin
+   select drive_id into v_drive_id
+   from drives
+   where drive_date = curdate - 1
+    and chapter_id=g_chapter_id
+    and   status = 'CNFRM'
+    and  drive_id in (select drive_id from staff_schedule_details
+                       where schedule_id = temp_schedule_id
+                       and   chapter_id=g_chapter_id
+                       and   staff_no = v_staff_no)
+    and   schedule_end_time = (select max(schedule_end_time) from drives
+                                where drive_date = curdate - 1
+                                and   chapter_id = g_chapter_id
+                                and   status = 'CNFRM'
+                                and  drive_id in
+                                     (select drive_id from staff_schedule_details
+                                      where schedule_id = temp_schedule_id
+                                       and   chapter_id=g_chapter_id
+                                       and   staff_no = v_staff_no)) ;
+ exception
+   when no_data_found then goto check_next_day ; /*-- No assignment found on previous date --*/
+   when others then write_log('Error 42 for '||v_staff_no);write_log(to_char(sqlcode)||' '||sqlerrm);return TRUE ;
+ end ;
+ calc_hours_for_drive(v_drive_id,act_start_time,act_end_time) ;
+ v_previous_drive_end := act_end_time ;
+ if (drvlist(drive_index).drive_start_time - v_previous_drive_end) * 24
+ < param_recovery_time then
+   return FALSE ;
+ end if ;
+ <<check_next_day>> /*-- Check next day for pre-assignment --*/
+ begin
+   select drive_id into v_drive_id
+   from drives
+   where drive_date = curdate + 1
+    and chapter_id=g_chapter_id
+   and   drive_id in (select drive_id from pre_assignments
+                     where chapter_id=g_chapter_id
+                     and   staff_no = v_staff_no)
+   and   status = 'CNFRM'
+   and   schedule_start_time =
+         (select min(schedule_start_time) from drives
+           where drive_date = curdate + 1
+           and chapter_id=g_chapter_id
+           and   drive_id in (select drive_id from pre_assignments
+                              where chapter_id=g_chapter_id
+                              and   staff_no = v_staff_no)
+           and   status = 'CNFRM' ) ;
+ exception
+   when no_data_found then return TRUE ;
+   when others then write_log('Error 43 for '||v_staff_no);write_log(to_char(sqlcode)||' '||sqlerrm);return TRUE ;
+ end ;
+ calc_hours_for_drive(v_drive_id,act_start_time,act_end_time) ;
+ v_next_drive_start := act_start_time ;
+ if (v_next_drive_start - drvlist(drive_index).drive_end_time) * 24
+ < param_recovery_time then
+   return FALSE ;
+ else
+   return TRUE ;
+ end if ;
+end check_recovery_time ;
+/*--- This procedure assigns the team members to the drive ---*/
+procedure assign_team_member (drive_index in number) is
+ tl_team varchar2(5) ;
+ tl_id varchar2(6) ;
+ tl_index number;
+ emptemplist emptabtemp ;
+begin
+ /*-- If all the people are already assigned, then return.
+      This may happen because of pre-assignment. ---*/
+ write_log('In assign_team_member for :'||drvlist(drive_index).drive_id||' Staff Reqd:'||to_char(drvlist(drive_index).staff_reqd));
+ if drvlist(drive_index).staff_reqd <= 0 then
+    return ;
+ end if ;
+ /*-- Find the team ID of the team leader assigned to this drive --*/
+ get_tl(drive_index,tl_id,tl_team,tl_index) ;
+ suitable_team := tl_team ;
+ list_eligible_staff(emptemplist,tl_team,drive_index,tl_index) ;
+ if emptemplist.count = 0 then
+    write_log('Returning from assign_team_member emptemplist.count = 0');
+    return ;
+ end if ;
+ /*-- Check if driver is already assigned --*/
+ begin
+   select 'x' into selection
+   from staff_schedule_details
+   where schedule_id = g_schedule_id
+   and   drive_id = drvlist(drive_index).drive_id
+   and   chapter_id = g_chapter_id
+   and   special_job_code in ('VDRVR','CDRVR') ;
+ exception
+   when no_data_found then
+     select_driver(emptemplist,tl_id,drive_index) ;
+   when too_many_rows then null;
+   when others then write_log('Err 57 '||to_char(sqlcode)||' '||sqlerrm);raise ;
+ end ;
+ select_other_members(drive_index) ;
+end assign_team_member ;
+/*-- This procedure gets the TL for the current drive. If a value
+     is not found for tl_team, it is set to 'X'.  --*/
+procedure get_tl(drive_index in number,tl_id out varchar2,tl_team out varchar2, tl_index out number) is
+ v_tl_id varchar2(6) ;
+begin
+ begin
+   select staff_no into v_tl_id
+   from staff_schedule_details
+   where drive_id = drvlist(drive_index).drive_id
+   and   job_code = 'TMLDR'
+    and chapter_id=g_chapter_id
+   and   schedule_id = g_schedule_id  and rownum=1;
+   tl_id := v_tl_id ;
+   tl_team := 'X' ;
+   tl_index := 1;
+   /*-- Get the team ID of the TL --*/
+   select team_id into tl_team from employees where staff_no=v_tl_id;
+   /*
+   for i_staff in 1..emplist.count loop
+     if emplist(i_staff).staff_no = v_tl_id then
+        tl_team := emplist(i_staff).team_id ;
+        tl_index :=i_staff;
+        exit ;
+     end if ;
+   end loop ;
+   */
+ exception
+   when no_data_found then tl_id := NULL ; tl_team := 'X' ;
+   when others then write_log('Error 60 '||to_char(sqlcode)||' '||sqlerrm);raise ;
+ end ;
+end get_tl ;
+/*-- This procedure makes list of eligible team members. ---*/
+procedure list_eligible_staff(emptemplist in out emptabtemp,tl_team in varchar2,drive_index in number,tl_index number) is
+ counter number := 1 ;
+ v_team_id varchar2(5) ;
+ cursor c1 is
+ select code from valid_master_codes
+ where code_type = 'TEAMS'
+ and   code != tl_team
+ and   sysdate between eff_date and nvl(term_date,sysdate+1) ;
+begin
+ write_log('Begin list_eligible_staff for drive:'||drvlist(drive_index).drive_id||' TL team found '||tl_team) ;
+ /*-- Make list of team members belonging to same team and still available --*/
+ emptemplist.delete ;
+ if tl_team != 'X' then
+ write_log('beginning loop');
+ for i_staff in 1..emplist.count loop
+     if check_term(i_staff)=FALSE and
+        (tl_team != 'X' ) and
+         emplist(i_staff).tl_skill = 0 then
+        if check_unavl(i_staff,drive_index) = FALSE and
+           check_facility(emplist(i_staff).staff_no,drvlist(drive_index).drive_id) = TRUE and
+         check_off_day_candidate(i_staff)  = FALSE and
+         check_recovery_time(drive_index,emplist(i_staff).staff_no) = TRUE and
+         check_assign_today(i_staff) = FALSE  then
+           copy_emp_to_temp(emptemplist,counter,emplist,i_staff) ;
+           counter := counter + 1 ;
+        end if ;
+    end if ;
+ end loop ; /*-- end loop of Make list of Team Members of same team --*/
+ /*-- If  TL's team does not have enough staff then check other teams --*/
+ end if;
+ if emptemplist.count >= drvlist(drive_index).staff_reqd then
+    suitable_team := tl_team ;
+ else /*-- Check other teams --*/
+  if tl_team!='X' then
+  if check_mix_team(tl_index)=TRUE then
+ write_log('after check_mix_team else');
+  for c1rec in c1 loop
+     /*-- Restart populating emptemplist --*/
+     if emptemplist.count > 0 then
+        emptemplist.delete ;
+     end if ;
+ write_log('Insideakdhfkjadhfkjdshfse');
+     counter := 1 ;
+     v_team_id := c1rec.code ;
+     write_log('Checking '||v_team_id) ;
+     for i_staff in 1..emplist.count loop
+         if check_term(i_staff)=FALSE and
+            emplist(i_staff).team_id = v_team_id and
+             emplist(i_staff).tl_skill = 0 then
+             if check_unavl(i_staff,drive_index) = FALSE and
+                check_facility(emplist(i_staff).staff_no,drvlist(drive_index).drive_id) = TRUE and
+              check_off_day_candidate(i_staff)  = FALSE and
+              check_assign_today(i_staff) = FALSE  then
+              write_log('akjdfkadf');
+                copy_emp_to_temp(emptemplist,counter,emplist,i_staff) ;
+                counter := counter + 1 ;
+             end if ;
+         end if ;
+     end loop ; /*-- end loop i_staff --*/
+     if emptemplist.count >= drvlist(drive_index).staff_reqd then
+        suitable_team := v_team_id ;
+        exit ;
+     end if ;
+   end loop ; /*-- end loop c1rec --*/
+ write_log('before end if');
+     end if;
+     end if;
+ end if ; /*-- end if counter < drvlist(drive_index).staff_reqd ---*/
+ /*-- If no suitable team found, then mix teams --*/
+ write_log('before mixed');
+ <<mixed_team>>
+ if suitable_team = 'X' then
+    write_log('Checking mixed team');
+    counter := 1 ;
+    if emptemplist.count > 0 then
+       emptemplist.delete ;
+    end if ;
+    for i_staff in 1..emplist.count loop
+       if check_term(i_staff)=FALSE and emplist(i_staff).tl_skill = 0 then
+          if check_unavl(i_staff,drive_index) = FALSE and
+             check_facility(emplist(i_staff).staff_no,drvlist(drive_index).drive_id) = TRUE and
+             check_off_day_candidate(i_staff)  = FALSE and
+             check_mix_team(i_staff)  = TRUE and
+             check_assign_today(i_staff) = FALSE  then
+               copy_emp_to_temp(emptemplist,counter,emplist,i_staff) ;
+               counter := counter + 1 ;
+          end if ;
+       end if ;
+     end loop ; /*-- end loop i_staff --*/
+     /*-- If still required list of members not found, then check people who
+          has potential OFF ---*/
+    for i_staff in 1..emplist.count loop
+         write_log('Checking Potential day off '||emplist(i_staff).staff_no) ;
+       if check_term(i_staff)=FALSE and emplist(i_staff).tl_skill = 0 and
+             check_facility(emplist(i_staff).staff_no,drvlist(drive_index).drive_id) = TRUE and
+             check_mix_team(i_staff)  = TRUE and
+           check_unavl(i_staff,drive_index) = FALSE and
+             check_off_day_candidate(i_staff)  = TRUE and
+             check_assign_today(i_staff) = FALSE  then
+               copy_emp_to_temp(emptemplist,counter,emplist,i_staff) ;
+               counter := counter + 1 ;
+       end if ;
+     end loop ; /*-- end loop i_staff --*/
+   end if ;
+   write_log('exit list_eligible');
+end list_eligible_staff ;
+procedure select_driver(emptemplist in emptabtemp,tl_id in varchar2,drive_index in number) is
+  v_emp_index number ;
+  tl_index number;
+  empdrvlist emptabtemp ;
+  empdrvlist1 emptabtemp ;
+  v_job_code varchar2(5) ;
+  counter number := 1 ;
+  driver_assigned varchar2(1) := 'N' ;
+  param_avg_hours number ;
+  drive_hours number ;
+  cursor c2 is
+  select code from valid_master_codes
+  where code_type='TEAMS'
+  and   code != suitable_team
+  and   sysdate between eff_date and nvl(term_date,sysdate+1);
+  original_suitable_team varchar2(5) ;
+begin
+ write_log('Suit. team:'||suitable_team);
+ original_suitable_team := suitable_team ;
+ empdrvlist := emptemplist ;
+ /*-- Locate the TL in PL/SQL table emplist if TL id is not null. If this is
+      coach drive and TL is a coach driver, then assign TL as driver  ---*/
+ if tl_id is not null then
+   for i_staff in 1..emplist.count loop
+      if emplist(i_staff).staff_no = tl_id then
+         v_emp_index := i_staff ;
+         tl_index := i_staff ;
+         exit ;
+      end if ;
+   end loop ;
+   if drvlist(drive_index).drive_type = 'C' and emplist(v_emp_index).coach_driver_skill > 0 then
+      write_log('Assigning TL as driver');
+      assign_driver(drive_index,tl_id,'CDRVR') ;
+      return ;
+   end if ;
+ end if;  /*--- end if tl_id is not null ----*/
+ if drvlist(drive_index).drive_type = 'C' then
+    v_job_code := 'CDRVR' ;
+ else
+    v_job_code := 'VDRVR' ;
+ end if ;
+ for i_staff in 1..empdrvlist.count loop
+     v_emp_index := empdrvlist(i_staff).emplist_index ;
+     if ((drvlist(drive_index).drive_type='C' and emplist(v_emp_index).coach_driver_skill > 0) or
+         (drvlist(drive_index).drive_type='I' and emplist(v_emp_index).van_driver_skill > 0)) then
+         copy_emp_to_temp(empdrvlist1,counter,emplist,v_emp_index) ;
+         counter := counter + 1 ;
+     end if ;
+ end loop ;
+ if empdrvlist1.count = 0 then /*- No driver found on list of eligible staff -*/
+    write_log('No driver found in first list');
+    goto continue_driver_assignment ;
+ elsif empdrvlist1.count = 1 then /*-- One driver found --*/
+    assign_staff_to_drive(drive_index,empdrvlist1(1).staff_no,'MEMBR','A');
+    assign_driver(drive_index,empdrvlist1(1).staff_no,v_job_code) ;
+    driver_assigned := 'Y' ;
+ else /*-- multiple drivers found --*/
+ write_log('Multiple drivers found') ;
+  param_avg_hours := get_parameter('AVGHR') ;
+  drive_hours := (drvlist(drive_index).drive_end_time - drvlist(drive_index).drive_start_time)*24 ;
+  if drive_hours > param_avg_hours then
+   sort_emptemplist(empdrvlist1,'A','HOURS') ; -- Sort based on hours ascending
+  else
+   sort_emptemplist(empdrvlist1,'D','HOURS') ; -- Sort based on hours descending
+  end if ;
+   for i_staff in 1..empdrvlist1.count loop
+       if empdrvlist1(i_staff).skill_rating >= drvlist(drive_index).min_skill_rating and check_recovery_time(drive_index,empdrvlist1(i_staff).staff_no)=TRUE then
+          assign_staff_to_drive(drive_index,empdrvlist1(i_staff).staff_no,'MEMBR','A');
+          assign_driver(drive_index,empdrvlist1(i_staff).staff_no,v_job_code) ;
+          driver_assigned := 'Y' ;
+          exit ;
+       end if ;
+   end loop ;
+ end if ;
+ if driver_assigned = 'Y' then
+    return ;
+ end if ;
+ <<continue_driver_assignment>>
+ if check_mix_team(tl_index) = TRUE then
+ empdrvlist1.delete ; counter := 1 ;
+ check_team_for_assigned_driver(drive_index,suitable_team,driver_assigned) ;
+ if driver_assigned = 'Y' then
+    return ;
+ end if ;
+ /*-- Here, we can first check all the teams that has enough staff for the
+      drive and try to find a driver in those teams --*/
+ /*-- Check other teams to select a driver. Do not consider
+      OFF day candidates in this pass --*/
+      /*
+ if suitable_team != 'X' then
+    for c2rec in c2 loop
+        chk_team_unassigned_drvr(c2rec.code,drive_index,driver_assigned,'Y') ;
+        if driver_assigned = 'Y' then
+           return ;
+        end if ;
+        write_log('Not found in unassigned drivers');
+        check_team_for_assigned_driver(drive_index,c2rec.code,driver_assigned) ;
+        if driver_assigned = 'Y' then
+           return ;
+        end if ;
+    end loop ;
+ else  /*-- Mixed team --
+        chk_team_unassigned_drvr('X',drive_index,driver_assigned,'Y') ;
+        if driver_assigned = 'Y' then
+           return ;
+        end if ;
+        check_team_for_assigned_driver(drive_index,'X',driver_assigned) ;
+        if driver_assigned = 'Y' then
+           return ;
+        end if ;
+ end if ;
+ */
+ end if;
+ /*-- Check OFF day candidates of the original suitable team --*/
+ chk_team_unassigned_drvr(original_suitable_team,drive_index,driver_assigned,'N') ;
+ if driver_assigned = 'Y' then
+   return ;
+ end if ;
+ /*-- Check OFF day candidates of the other teams ---*/
+ /*
+ if suitable_team != 'X'  then
+ if check_mix_team(tl_index) = TRUE then
+    for c2rec in c2 loop
+        chk_team_unassigned_drvr(c2rec.code,drive_index,driver_assigned,'N') ;
+        if driver_assigned = 'Y' then
+           return ;
+        end if ;
+    end loop ;
+ else
+        chk_team_unassigned_drvr('X',drive_index,driver_assigned,'N') ;
+        if driver_assigned = 'Y' then
+           return ;
+        end if ;
+ end if ;
+ end if;
+ */
+ /*-- If still driver is not assigned for a van drive and TL is a van
+      driver, then assign TL as driver --*/
+ if driver_assigned = 'N' and drvlist(drive_index).drive_type = 'I' then
+  if tl_id is not null then
+   for i_staff in 1..emplist.count loop
+      if emplist(i_staff).staff_no = tl_id then
+         v_emp_index := i_staff ;
+         exit ;
+      end if ;
+   end loop ;
+   if  emplist(v_emp_index).van_driver_skill > 0 then
+      write_log('Assigning TL as van driver');
+      assign_driver(drive_index,tl_id,'VDRVR') ;
+      driver_assigned := 'Y' ;
+   end if ;
+  end if;  /*--- end if tl_id is not null ----*/
+ end if ; /*-- driver_assigned = 'N' --*/
+end select_driver ;
+/*-- Check if any driver of the same team is already assigned to a
+     drive as a non-driver. If yes,then assign that driver to
+     the current drive, and fill that empty slot --*/
+procedure check_team_for_assigned_driver(drive_index in number,v_team_id in varchar2,driver_assigned in out varchar2) is
+  v_job_code varchar2(5) ;
+  temp_drive_id varchar2(10) ;
+  cursor stf is
+  select staff_no from staff_schedule_details
+  where drive_id = temp_drive_id
+  and   job_code = 'MEMBR'
+  and   schedule_id = g_schedule_id
+  and chapter_id=g_chapter_id
+  and   special_job_code is null
+  and   exists (select 'x' from employee_jobs
+                where  staff_no = staff_schedule_details.staff_no
+                and    job_code = decode(drvlist(drive_index).drive_type,'C','CDRVR','I','VDRVR')
+                and chapter_id=g_chapter_id
+                and    curdate between eff_date and nvl(term_date,curdate+1)) ;
+begin
+ write_log('In check_team_for_assigned_driver for team '||v_team_id);
+ if drvlist(drive_index).drive_type = 'C' then
+    v_job_code := 'CDRVR' ;
+ else
+    v_job_code := 'VDRVR' ;
+ end if ;
+ /*--- Checking already assigned drives to find a suitable staff --*/
+ for k_temp in 1..drive_index-1 loop
+   write_log('In check_team_for_assigned_driver for assigned :'||drvlist(k_temp).drive_id);
+   temp_drive_id := drvlist(k_temp).drive_id ;
+   for stfrec in stf loop
+       for i_staff in 1..emplist.count loop
+           if emplist(i_staff).staff_no = stfrec.staff_no then
+            if (v_team_id = 'X') or
+               (v_team_id != 'X' and emplist(i_staff).team_id = v_team_id) then
+             if check_skill_rating(drive_index,emplist(i_staff).staff_no,'MEMBR') = TRUE then
+              if check_recovery_time(drive_index,emplist(i_staff).staff_no) = TRUE and
+      check_facility(emplist(i_staff).staff_no,drvlist(drive_index).drive_id) = TRUE then
+               /*-- Checking whether it is suitable to unassign the staff
+                    from the pervious drive ---*/
+               write_log('Found this driver '||emplist(i_staff).staff_no);
+               if handle_unassignment(k_temp,emplist(i_staff).staff_no) = TRUE then
+                 assign_staff_to_drive(drive_index,emplist(i_staff).staff_no,'MEMBR','A');
+                 assign_driver(drive_index,emplist(i_staff).staff_no,v_job_code) ;
+                 driver_assigned := 'Y' ;
+                 goto out_of_loop ;
+               end if ;
+              end if ;
+             end if ;
+            end if ;
+            exit ;
+           end if ;
+       end loop ; /*-- end loop i_staff ---*/
+   end loop ; /*-- end loop stfrec ---*/
+ end loop ;
+ <<out_of_loop>>
+ null ;
+end check_team_for_assigned_driver ;
+/*-- Donot check for potential OFF day if off_day_flag is 'N' --*/
+procedure chk_team_unassigned_drvr(team_id in varchar2,drive_index in number,driver_assigned out varchar2,off_day_flag in varchar2) is
+empdrvlist emptabtemp ;
+counter number := 1 ;
+param_avg_hours number ;
+drive_hours number ;
+begin
+ write_log('Chking unassgned drivers from team:'||team_id||' and OFF_DAY_FLAG:'||off_day_flag);
+ for i_staff in 1..emplist.count loop
+     if check_term(i_staff)=FALSE and
+        ((team_id = 'X') or
+        (team_id != 'X' and emplist(i_staff).team_id = team_id)) then
+       if (emplist(i_staff).tl_skill=0) and ((drvlist(drive_index).drive_type='C' and emplist(i_staff).coach_driver_skill > 0) or
+         (drvlist(drive_index).drive_type='I' and emplist(i_staff).van_driver_skill > 0)) then
+          write_log('Checking parameters for '||emplist(i_staff).staff_no);
+          if check_unavl(i_staff,drive_index) = FALSE and
+             ((off_day_flag='Y' and check_off_day_candidate(i_staff)  = FALSE) or (off_day_flag = 'N' and check_off_day_candidate(i_staff) = TRUE)) and
+             check_facility(emplist(i_staff).staff_no,drvlist(drive_index).drive_id) = TRUE and
+             check_assign_today(i_staff) = FALSE  then
+               copy_emp_to_temp(empdrvlist,counter,emplist,i_staff) ;
+               counter := counter + 1 ;
+          end if ;
+      end if ;
+ end if ;
+ end loop ; /*-- End loop for i_staff --*/
+ param_avg_hours := get_parameter('AVGHR') ;
+ drive_hours := (drvlist(drive_index).drive_end_time - drvlist(drive_index).drive_start_time) * 24 ;
+ if drive_hours > param_avg_hours then
+   sort_emptemplist(empdrvlist,'A','HOURS') ; -- Sort based on hours ascending
+  else
+   sort_emptemplist(empdrvlist,'D','HOURS') ; -- Sort based on hours descending
+  end if ;
+  /*-- Assign the first driver with sufficient skill rating and recovery time --*/
+  for k_temp in 1..empdrvlist.count loop
+      if check_skill_rating(drive_index,empdrvlist(k_temp).staff_no,'MEMBR') = TRUE and
+      check_facility(empdrvlist(k_temp).staff_no,drvlist(drive_index).drive_id) = TRUE then
+       if check_recovery_time(drive_index,empdrvlist(k_temp).staff_no) = TRUE then
+               write_log('9999977');
+         assign_staff_to_drive(drive_index,empdrvlist(k_temp).staff_no,'MEMBR','A') ;
+               write_log('AAAAAAA');
+         if drvlist(drive_index).drive_type = 'I' then
+            assign_driver(drive_index,empdrvlist(k_temp).staff_no,'VDRVR') ;
+         elsif drvlist(drive_index).drive_type = 'C' then
+            assign_driver(drive_index,empdrvlist(k_temp).staff_no,'CDRVR') ;
+         end if ;
+         driver_assigned := 'Y' ;
+         exit ;
+      end if ;
+     end if ;
+  end loop ;
+end chk_team_unassigned_drvr ;
+procedure assign_driver(drive_index in number,v_staff_no in varchar2,v_job_code in varchar2) is
+begin
+ write_log('assigning driver '||v_staff_no||' to '||drvlist(drive_index).drive_id);
+ update staff_schedule_details
+ set special_job_code = v_job_code
+ where schedule_id = g_schedule_id
+ and chapter_id=g_chapter_id
+ and   drive_id = drvlist(drive_index).drive_id
+ and   staff_no = v_staff_no ;
+exception
+ when no_data_found then write_log('Error 70');return ;
+ when others then write_log('Error 80 '||to_char(sqlcode)||' '||sqlerrm); raise;
+end assign_driver ;
+/*-- This procedure selects the team members except the TL and driver --*/
+procedure select_other_members (drive_index in number) is
+tl_id varchar2(6) ;
+tl_team varchar2(5) ;
+driver_id varchar2(6) ;
+tl_index number;
+m_count number := 0;
+driver_team varchar2(6) ;
+driver_assigned varchar2(1) ;
+first_team_id varchar2(5) ;
+second_team_id varchar2(5) ;
+cursor c1 is
+select code from valid_master_codes
+where code_type = 'TEAMS'
+and sysdate between eff_date and nvl(term_date,sysdate+1);
+begin
+write_log('At start of select_other_members for drive:'||drvlist(drive_index).drive_id||' Staff reqd:'||to_char(drvlist(drive_index).staff_reqd));
+  /*-- If all the members are already assigned, then return --*/
+  if drvlist(drive_index).staff_reqd <= 0 then
+     return ;
+  end if ;
+  /*---- Get TL ID and TL team -----*/
+  get_tl(drive_index,tl_id,tl_team,tl_index) ;
+  /*-- Get driver team . rownum = 1 is done to take care of the
+       situation where more than one driver has been assigned for a
+       drive with more than one vehicle. --*/
+  begin
+    select staff_no into driver_id
+    from staff_schedule_details
+    where drive_id = drvlist(drive_index).drive_id
+    and   schedule_id = g_schedule_id
+     and chapter_id=g_chapter_id
+    and   special_job_code in ('VDRVR','CDRVR')
+    and rownum < 2;
+  exception
+    when no_data_found then driver_assigned := 'N' ;
+      when too_many_rows then null;
+   when others then write_log('Error 130 '||to_char(sqlcode)||' '||sqlerrm);raise ;
+  end ;
+  driver_team := 'X' ; -- Initialization
+  if driver_id is not null then
+     begin
+        select nvl(team_id,'X') into driver_team from employees
+        where staff_no = driver_id ;
+     exception
+        when no_data_found then write_log('Error 140');return ;
+        when others then write_log('Error 145 '||to_char(sqlcode)||' '||sqlerrm);raise;
+     end ;
+  end if ;
+  /*-- If TL team and the same as driver team, then that team is checked
+       first and then the other teams. If TL team and driver team is
+       different, then the driver team is checked first, then the TL
+       team and then the other teams. If no one team produces required
+       people, then teams are mixed. ---*/
+  -------- Above logic changed as per req by Goudar on 6/29/99 by mukesh
+  -------- Now TL team is checked first and then driver team -----------
+  -------- So, following order of execution reversed....................
+/*   first_team_id := driver_team ; */
+   second_team_id := tl_team ;
+   /*-- In else condition, check for average skill-- */
+   if drvlist(drive_index).min_skill_rating > 0 then
+      if tl_team != 'X' then
+        write_log('Checking TL team for minimum skill');
+        check_team_for_minimum_skill(tl_team,drive_index) ;
+        if drvlist(drive_index).staff_reqd = 0 then
+         return;
+        end if ;
+      end if ;
+      write_log('After Checking TL team for minimum skill');
+      if driver_team != 'X' then
+        write_log('Checking driver team for minimum skill');
+        check_team_for_minimum_skill(driver_team,drive_index) ;
+        if drvlist(drive_index).staff_reqd = 0 then
+         return;
+        end if ;
+      end if ;
+      write_log('After Checking driver team for minimum skill');
+      ---------- Following uncommented by mukesh ..... 6/99
+      for c1rec in c1 loop
+          if c1rec.code != tl_team and c1rec.code != driver_team then
+      ---------- Following added by mukesh ..... 6/99----------
+      -- Check if only one person to assign and driver not assigned, then exit
+      select count(*) into m_count
+        from staff_schedule_details
+       where schedule_id = g_schedule_id
+         and drive_id = drvlist(drive_index).drive_id
+         and special_job_code in ('VDRVR', 'CDRVR')
+         and chapter_id = g_chapter_id;
+      if m_count = 0 and drvlist(drive_index).staff_reqd = 1 then
+        -- Do not assign any more person to drive
+        return;
+      end if;
+      -- Check if only one person to assign and TL not assigned, then exit
+      select count(*) into m_count
+        from staff_schedule_details
+       where schedule_id = g_schedule_id
+         and drive_id = drvlist(drive_index).drive_id
+         and job_code in ('TMLDR')
+         and chapter_id = g_chapter_id;
+      if m_count = 0 and drvlist(drive_index).staff_reqd = 1 then
+        -- Do not assign any more person to drive
+        return;
+      end if;
+      ----------------------------------------------end of add----
+            check_team_for_minimum_skill(c1rec.code,drive_index) ;
+            if drvlist(drive_index).staff_reqd = 0 then
+               return;
+            end if ;
+          end if ;
+      end loop ;
+      check_team_for_minimum_skill('X',drive_index) ;
+      -----------------------------------------end of uncomment----
+   else  /*-- Check all combinations for average skill --*/
+     ----- Again following order of execution reversed, so as to check
+     ----- TL team before the driver team.------------------- Mukesh --
+    if tl_team != 'X' then
+      check_team_for_average_skill(tl_team,drive_index,'Y') ;
+      if drvlist(drive_index).staff_reqd = 0 then
+        return;
+      end if ;
+    end if ;
+    if driver_team != 'X' then
+      check_team_for_average_skill(driver_team,drive_index,'Y') ;
+      if drvlist(drive_index).staff_reqd = 0 then
+         return;
+      end if ;
+    end if ;
+      ---------- Following uncommented by mukesh ..... 6/99
+      for c1rec in c1 loop
+          if c1rec.code != tl_team and c1rec.code != driver_team then
+      ---------- Following added by mukesh ..... 6/99
+      -- Check if only one person to assign and driver not assigned, then exit
+      select count(*) into m_count
+        from staff_schedule_details
+       where schedule_id = g_schedule_id
+         and drive_id = drvlist(drive_index).drive_id
+         and special_job_code in ('VDRVR', 'CDRVR')
+         and chapter_id = g_chapter_id;
+      if m_count = 0 and drvlist(drive_index).staff_reqd = 1 then
+        -- Do not assign any more person to drive
+        return;
+      end if;
+      -- Check if only one person to assign and TL not assigned, then exit
+      select count(*) into m_count
+        from staff_schedule_details
+       where schedule_id = g_schedule_id
+         and drive_id = drvlist(drive_index).drive_id
+         and job_code in ('TMLDR')
+         and chapter_id = g_chapter_id;
+      if m_count = 0 and drvlist(drive_index).staff_reqd = 1 then
+        -- Do not assign any more person to drive
+        return;
+      end if;
+      ----------------------------------------------end of add----
+            check_team_for_average_skill(c1rec.code,drive_index,'Y') ;
+            if drvlist(drive_index).staff_reqd = 0 then
+               return;
+            end if ;
+          end if ;
+      end loop ;
+      check_team_for_average_skill('X',drive_index,'Y') ;
+      -----------------------------------------end of uncomment----
+      if drvlist(drive_index).staff_reqd = 0 then
+         return;
+      end if ;
+      /*-- People with potential OFF day --
+      check_team_for_average_skill('X',drive_index,'N') ;
+      */
+   end if ; /*-- End if for drvlist(drive_index).min_skill_rating > 0 --*/
+end select_other_members ;
+procedure check_team_for_minimum_skill(v_team_id in varchar2,drive_index in number) is
+ param_avg_hours number ;
+ drive_hours number ;
+ counter number := 1 ;
+ m_count number := 0 ;
+ emptemplist emptabtemp ;
+begin
+  for i_staff in 1..emplist.count loop
+    if check_term(i_staff)=FALSE and emplist(i_staff).tl_skill = 0 then
+       if ((emplist(i_staff).team_id = v_team_id and v_team_id != 'X') or
+           (v_team_id = 'X')) then
+         if check_off_day_candidate(i_staff)  = FALSE and
+            check_assign_today(i_staff) = FALSE and
+            check_unavl(i_staff,drive_index) = FALSE then
+              copy_emp_to_temp(emptemplist,counter,emplist,i_staff) ;
+              counter := counter + 1 ;
+         end if ;
+       end if ;
+    end if ;
+  end loop ;
+  if emptemplist.count = 0 then
+     return ;
+  end if ;
+  param_avg_hours := get_parameter('AVGHR') ;
+  drive_hours := drvlist(drive_index).drive_end_time - drvlist(drive_index).drive_start_time ;
+  if drive_hours > param_avg_hours then
+   sort_emptemplist(emptemplist,'A','HOURS') ; -- Sort based on hours ascending
+  else
+   sort_emptemplist(emptemplist,'D','HOURS') ; -- Sort based on hours descending
+  end if ;
+  for i_staff in 1..emptemplist.count loop
+      if check_skill_rating(drive_index,emptemplist(i_staff).staff_no,'MEMBR') = TRUE and
+      check_facility(emptemplist(i_staff).staff_no,drvlist(drive_index).drive_id) = TRUE then
+       write_log('Considering Bloodline staff:'||emptemplist(i_staff).staff_no);
+       if check_recovery_time(drive_index,emptemplist(i_staff).staff_no) = TRUE then
+               write_log('BBBBBBB');
+      ---------- Following added by mukesh ..... 6/99
+      -- Check if only one person to assign and driver not assigned, then exit
+      select count(*) into m_count
+        from staff_schedule_details
+       where schedule_id = g_schedule_id
+         and drive_id = drvlist(drive_index).drive_id
+         and special_job_code in ('VDRVR', 'CDRVR')
+         and chapter_id = g_chapter_id;
+      if m_count = 0 and drvlist(drive_index).staff_reqd = 1 then
+        -- Do not assign any more person to drive
+        return;
+      end if;
+      -- Check if only one person to assign and TL not assigned, then exit
+      select count(*) into m_count
+        from staff_schedule_details
+       where schedule_id = g_schedule_id
+         and drive_id = drvlist(drive_index).drive_id
+         and job_code in ('TMLDR')
+         and chapter_id = g_chapter_id;
+      if m_count = 0 and drvlist(drive_index).staff_reqd = 1 then
+        -- Do not assign any more person to drive
+        return;
+      end if;
+      ------------------------------------------------------------
+         assign_staff_to_drive(drive_index,emptemplist(i_staff).staff_no,'MEMBR','A') ;
+               write_log('CCCCCCC');
+         /*-- If all staff assigned, then return --*/
+         if drvlist(drive_index).staff_reqd = 0 then
+               return ;
+         end if ;
+       else
+         write_log('Could not assign staff:'||emptemplist(i_staff).staff_no);
+       end if ;
+      end if ;
+  end loop ;
+end check_team_for_minimum_skill ;
+procedure check_team_for_average_skill(v_team_id in varchar2,drive_index in number,off_day_flag in varchar2) is
+ param_avg_hours number ;
+ drive_hours number ;
+ staff_reqd number ;
+ staff_total number ;
+ buffer number ;
+ counter number := 1;
+ emptemplist emptabtemp ;
+ emp_index empindtyp ;
+ loop_counter number := 0 ;
+ param_avg_skill number ;
+ avg_skill number ;
+begin
+  write_log('In check_team_for_average: staff reqd:'||to_char(drvlist(drive_index).staff_reqd)||' Team:'||v_team_id);
+  write_log('Team checked:'||v_team_id);
+  for i_staff in 1..emplist.count loop
+    if check_term(i_staff)=FALSE and emplist(i_staff).tl_skill = 0 and
+       check_facility(emplist(i_staff).staff_no,drvlist(drive_index).drive_id) = TRUE then
+       if ((v_team_id != 'X' and emplist(i_staff).team_id = v_team_id) or
+          (v_team_id = 'X')) then
+         if ((off_day_flag='Y' and check_off_day_candidate(i_staff)  = FALSE) or
+             (off_day_flag='N' and check_off_day_candidate(i_staff)=TRUE)) and
+            check_assign_today(i_staff) = FALSE and
+            check_unavl(i_staff,drive_index) = FALSE and
+            check_recovery_time(drive_index,emplist(i_staff).staff_no) = TRUE then
+              copy_emp_to_temp(emptemplist,counter,emplist,i_staff) ;
+              counter := counter + 1 ;
+         end if ;
+       end if ;
+    end if ;
+  end loop ;
+  if emptemplist.count = 0 then
+     return ;
+  end if ;
+  /*-- If the teams are not already mixed, then there is a chance that
+       all the staff may be found from another team. So return if
+       this team does not have enough staff. If teams are already
+       mixed, then this is the last chance, so assign as many
+       staff as possible. -----*/
+  if v_team_id != 'X' and emptemplist.count < drvlist(drive_index).staff_reqd then
+     return ;
+  end if ;
+  param_avg_hours := get_parameter('AVGHR') ;
+  drive_hours := drvlist(drive_index).drive_end_time - drvlist(drive_index).drive_start_time ;
+  if drive_hours > param_avg_hours then
+   sort_emptemplist(emptemplist,'A','HOURS') ; -- Sort based on hours ascending
+  else
+   sort_emptemplist(emptemplist,'D','HOURS') ; -- Sort based on hours descending
+  end if ;
+/*-- Check all combinations --*/
+  param_avg_skill := get_parameter('AVGSK');
+  write_log('Start combination***********') ;
+  write_log('Total list');
+  write_log('----------');
+  for a1 in 1..emptemplist.count loop
+      write_log(emptemplist(a1).staff_no) ;
+  end loop ;
+  staff_reqd := drvlist(drive_index).staff_reqd ;
+  staff_total := emptemplist.count;
+  /*--- If staff_total is less than staff_reqd then that is the maximum
+        number of staff that can be assigned. So the staff_reqd is made
+        equal to staff_total ---*/
+  if staff_reqd > staff_total then
+    staff_reqd := staff_total ;
+  end if ;
+  /*-- Initialize empdrvlist --*/
+  for a1 in 1..staff_reqd loop
+      emp_index(a1) := a1 ;
+      write_log('In loop a1:'||to_char(a1));
+  end loop ;
+  write_log('emp_index count:'||to_char(emp_index.count));
+  /*-- Start infinite loop --*/
+  loop
+    write_log('Trying drive:'||drvlist(drive_index).drive_id);
+    avg_skill := get_average_skill(emptemplist,emp_index,drive_index) ;
+    if avg_skill >= param_avg_skill then
+       for i_temp in 1..emp_index.count loop
+      if check_term(i_temp)=FALSE and
+         check_facility(emptemplist(emp_index(i_temp)).staff_no,drvlist(drive_index).drive_id) = TRUE then
+           assign_staff_to_drive(drive_index,emptemplist(emp_index(i_temp)).staff_no,'MEMBR','A');
+      end if;
+       end loop ;
+       exit ;
+    end if ;
+    loop_counter := loop_counter + 1 ;
+    if loop_counter = 100 then
+       write_log('Forceful exit');
+       return ;
+    end if ;
+    for a1 in 1..staff_reqd loop
+        buffer := a1 ;
+        counter := 1 ;
+        for a2 in 1..staff_reqd loop
+            if emp_index(a1) + 1 = emp_index(a2) then
+               counter := 0 ;
+            end if ;
+        end loop ;
+        if counter = 1 then
+           exit ;
+        end if ;
+    end loop ; /*-- end for a1 --*/
+    if (buffer = staff_reqd and emp_index(staff_reqd)=staff_total) then
+       exit ;
+    end if ;
+    emp_index(buffer):= emp_index(buffer)+ 1 ;
+    for a3 in 1..buffer-1 loop
+        emp_index(a3):= a3 ;
+    end loop ;
+  end loop ; /*-- end infinite loop--*/
+end check_team_for_average_skill ;
+/*--------------------------------------------------------------------------
+  The emp_index PL/SQL table contains the list of people being
+     considered for the drive in addition to the staff already assigned.
+     This function considers the skill of people already assigned and the people
+     being considered for the drive .
+--------------------------------------------------------------------------*/
+function get_average_skill(emptemplist in emptabtemp,emp_index in empindtyp,drive_index in number) return number is
+ cur_skill number ;
+ sum_skill number := 0 ;
+ counter number := 0 ;
+ already_assigned_count number := 0 ;
+ cursor c1 is
+ select staff_no from staff_schedule_details
+ where schedule_id = g_schedule_id
+ and   drive_id = drvlist(drive_index).drive_id
+ and chapter_id=g_chapter_id ;
+ avg_skill number ;
+begin
+ write_log('In get_average_skill Emptemplist count:'||to_char(emptemplist.count)) ;
+ for i_temp in 1..emp_index.count loop
+       write_log('Considering skill of '||emptemplist(emp_index(i_temp)).staff_no) ;
+     sum_skill := sum_skill + emptemplist(emp_index(i_temp)).skill_rating ;
+ end loop ;
+ /*-- Check skill of people already assigned to this drive --*/
+ for c1rec in c1 loop
+     begin
+        select nvl(skill_rating,1) into cur_skill from employee_jobs
+        where staff_no = c1rec.staff_no
+        and   job_code = 'OVRAL'
+       and chapter_id=g_chapter_id
+        and   sysdate between eff_date and nvl(term_date,sysdate+1);
+     exception
+        when no_data_found then cur_skill := 1 ;
+        when others then write_log('Error 150'); return 0;
+     end ;
+     sum_skill := sum_skill + cur_skill ;
+     already_assigned_count := already_assigned_count + 1 ;
+ end loop ;
+ avg_skill := sum_skill / (emp_index.count + already_assigned_count) ;
+ return avg_skill ;
+end get_average_skill ;
+/*-- This function will handle cases where a staff is being unassigned from
+     a drive he/she was already assigned to and being assigned to a new drive.
+     It will return TRUE if unassignment is possible, and will return FALSE
+     if not possible. If unassignment is possible, it will do the
+     unassignment and assign another staff at the empty place. --*/
+function handle_unassignment(drive_index in number,v_staff_no in varchar2) return boolean is
+  special_job_code varchar2(5) ;
+  v_team_id varchar2(5) ;
+  check_team_id varchar2(5);
+  suitable_staff_no varchar2(6) ;
+  cursor c1 is select ssd.staff_no staff_no,team_id
+  from staff_schedule_details ssd,employees
+  where drive_id = drvlist(drive_index).drive_id
+  and   job_code != 'TMLDR'
+  and   schedule_id = g_schedule_id
+  and   ssd.staff_no = employees.staff_no
+  and ssd.chapter_id=g_chapter_id
+  and   employees.chapter_id = g_chapter_id ;
+  counter number := 1 ;
+  cursor c2 is select code
+  from valid_master_codes
+  where code_type = 'TEAMS'
+  and   code != check_team_id
+  and   sysdate between eff_date and nvl(term_date,sysdate+1) ;
+  emp_index number ;
+begin
+  for k in 1..emplist.count loop
+      if emplist(k).staff_no = v_staff_no then
+         emp_index := k ;
+         exit ;
+      end if ;
+  end loop ;
+  if check_facility(emplist(emp_index).staff_no,drvlist(drive_index).drive_id) = FALSE then
+     return FALSE ;
+  end if ;
+  write_log('Trying to unassign '||v_staff_no||' from '||drvlist(drive_index).drive_id) ;
+  /*-- Determine whether the staff was assigned as a driver --*/
+  begin
+    select nvl(special_job_code,'NONE') into special_job_code
+    from staff_schedule_details
+    where staff_no = v_staff_no
+    and   drive_id = drvlist(drive_index).drive_id
+    and   schedule_id = g_schedule_id
+    and chapter_id=g_chapter_id ;
+  exception
+    when no_data_found then write_log('Error 200 for drive '||drvlist(drive_index).drive_id||' for staff '||v_staff_no) ; return FALSE;
+    when others then write_log('Error 205') ; return FALSE;
+  end ;
+ /*-- Determine if all the staff except TL was from a particular team --*/
+ counter := 1 ;
+  for c1rec in c1 loop
+      if check_team_id != c1rec.team_id and counter > 1 then
+         check_team_id := 'X' ;
+         exit ;
+      end if ;
+      check_team_id := c1rec.team_id ;
+      counter := counter + 1 ;
+  end loop ;
+  write_log('All staff are from team '||check_team_id);
+  /*----------------------------------------------------------------------
+    Start checking the list of employees. If check_team_id != 'X', then
+    check check_team_id first. Employee should pass check_unavl,
+    check_assign_today,check_off_day candidate. If special_job_code is
+    'VDRVR' or 'CDRVR', then employee should pass check_job also.
+    If drive has minimum skill rating specified, then check for skill rating
+    and recovery time . If none found, then check other teams. If found, do
+    unassignment and fill up blank position. If not found, then check all
+    teams (starting with check_team_id) but check only potential_off_day
+    candidates. If still not found, return FALSE.
+    Else, for staff with enough recovery time, check for average skill. If
+    found, do unassignment and fill blank position.
+    If none found, check other teams. If still none found, check all teams
+    (starting with check_team_id) but check only potential off day
+    candidates. If still not found, then return FALSE.
+  -----------------------------------------------------------------------*/
+ if check_team_id != 'X' then
+  find_suitable_staff(check_team_id,suitable_staff_no,special_job_code,drive_index) ;
+  if suitable_staff_no != 'NONE' then
+     assign_and_unassign(drive_index,v_staff_no,suitable_staff_no,special_job_code) ;
+     return TRUE ;
+  end if ;
+  for c2rec in c2 loop
+    find_suitable_staff(c2rec.code,suitable_staff_no,special_job_code,drive_index) ;
+    if suitable_staff_no != 'NONE' then
+     assign_and_unassign(drive_index,v_staff_no,suitable_staff_no,special_job_code) ;
+     return TRUE ;
+    end if ;
+  end loop ;
+  find_suitable_staff('X',suitable_staff_no,special_job_code,drive_index) ;
+  if suitable_staff_no != 'NONE' then
+   assign_and_unassign(drive_index,v_staff_no,suitable_staff_no,special_job_code) ;
+   return TRUE ;
+  end if ;
+ else /*-- check_team_id = 'X' --*/
+  find_suitable_staff('X',suitable_staff_no,special_job_code,drive_index) ;
+  if suitable_staff_no != 'NONE' then
+   assign_and_unassign(drive_index,v_staff_no,suitable_staff_no,special_job_code) ;
+   return TRUE ;
+  end if ;
+ end if ; /*-- end if check_team_id != 'X' --*/
+ return FALSE ;
+end ;
+procedure find_suitable_staff(v_team_id in varchar2,suitable_staff_no out varchar2,special_job_code in varchar2,drive_index in number) is
+ param_avg_skill number ;
+ drive_hours number ;
+ param_avg_hours number ;
+ emp_index empindtyp ;
+ emptemplist emptabtemp ;
+ avg_skill number ;
+ counter number := 1 ;
+begin
+  param_avg_skill := get_parameter('AVGSK');
+  suitable_staff_no := 'NONE' ;
+  /*-- Handle_unassignment is not done for TL position, that's why TL
+       skill is checked so that TL does not get assigned as team members.
+       OFF day candidate flag is not checked because this staff was
+       already assigned to another drive. --*/
+  for i_staff in 1..emplist.count loop
+   if check_term(i_staff)=FALSE and
+      ((v_team_id != 'X' and emplist(i_staff).team_id = v_team_id) or
+      (v_team_id = 'X' and check_mix_team(i_staff) = TRUE)) then
+    if emplist(i_staff).tl_skill = 0 then
+     if emplist(i_staff).team_id = v_team_id then
+      if ((special_job_code = 'VDRVR' and check_job(i_staff,'VDRVR') = TRUE) or
+          (special_job_code = 'CDRVR' and check_job(i_staff,'CDRVR') = TRUE) or
+          (special_job_code not in ('VDRVR','CDRVR'))) and
+         check_assign_today(i_staff) = FALSE and
+         check_unavl(i_staff,drive_index) = FALSE and
+         check_recovery_time(drive_index,emplist(i_staff).staff_no) = TRUE then
+              copy_emp_to_temp(emptemplist,counter,emplist,i_staff) ;
+              counter := counter + 1 ;
+      end if ;
+     end if;
+    end if ;
+   end if ;
+  end loop ;
+   if emptemplist.count = 0 then
+       return ;
+   end if ;
+  param_avg_hours := get_parameter('AVGHR') ;
+  drive_hours := drvlist(drive_index).drive_end_time - drvlist(drive_index).drive_start_time ;
+    if drive_hours > param_avg_hours then
+     sort_emptemplist(emptemplist,'A','HOURS') ; -- Sort on hours ascending
+    else
+     sort_emptemplist(emptemplist,'D','HOURS') ; -- Sort on hours descending
+    end if ;
+    for i_temp in 1..emptemplist.count loop
+        if drvlist(drive_index).min_skill_rating > 0 then /*-- Min. skill --*/
+           if emptemplist(i_temp).skill_rating >= drvlist(drive_index).min_skill_rating then
+              suitable_staff_no := emptemplist(i_temp).staff_no ;
+              return ;
+           end if ;
+        else /*-- Avg. skill --*/
+          emp_index(1) := i_temp ;
+          avg_skill := get_average_skill(emptemplist,emp_index,drive_index) ;
+          if avg_skill >= param_avg_skill and check_term(i_temp)=FALSE and
+         check_facility(emptemplist(i_temp).staff_no,drvlist(drive_index).drive_id) = TRUE then
+             write_log('found suitable');
+             suitable_staff_no := emptemplist(i_temp).staff_no ;
+             return ;
+        end if ;
+       end if ;
+    end loop ;
+end find_suitable_staff ;
+procedure assign_and_unassign(drive_index in number,old_staff_no in varchar2,new_staff_no in varchar2,special_job_code in varchar2) is
+begin
+ begin
+  delete from staff_schedule_details
+  where  schedule_id = g_schedule_id
+    and chapter_id=g_chapter_id
+  and    drive_id    = drvlist(drive_index).drive_id
+  and    staff_no = old_staff_no ;
+ exception
+  when no_data_found then write_log('Error 250');return ;
+  when others then write_log('Error 260');return ;
+ end ;
+               write_log('EEEEEEC');
+ assign_staff_to_drive(drive_index,new_staff_no,'MEMBR','A') ;
+               write_log('FFFFFFC');
+ if special_job_code in ('VDRVR','CDRVR') then
+    assign_driver(drive_index,new_staff_no,special_job_code) ;
+ end if ;
+end assign_and_unassign;
+/*-- Considers the piggybacks of the day one by one and copies the staff
+     assignment of the piggybacked drive --*/
+procedure schedule_piggyback_drives is
+  counter number ;
+  lBOD    date;
+  lEOD    date;
+  cursor c1 is
+  select staff_no,job_code,special_job_code,assign_mode
+  from staff_schedule_details
+  where schedule_id = g_schedule_id
+  and   drive_id =  piggylist(counter).piggybacked_to
+  and   chapter_id = g_chapter_id ;
+  act_start date ;
+  act_end date ;
+begin
+ for piggy_count in 1..piggylist.count loop
+     counter := piggy_count ;
+     /*-- First clear out any records for that drive --*/
+     begin
+       delete from staff_schedule_details
+       where schedule_id = g_schedule_id
+       and   drive_id = piggylist(piggy_count).piggyback_drive
+       and   chapter_id = g_chapter_id ;
+     exception
+       when no_data_found then null ;
+       when others then write_log('Error 310') ;raise;
+     end ;
+     for c1rec in c1 loop
+        -- Calculate the BOD, EOD
+    bod_eod(piggylist(piggy_count).piggyback_drive, c1rec.job_code, lBOD, lEOD);
+        insert into staff_schedule_details
+        (chapter_id,schedule_id,drive_id,staff_no,
+         job_code,special_job_code,assign_mode,program_id,
+         actual_bod, save_bod, actual_eod, save_eod, comments)
+        values
+        (g_chapter_id,g_schedule_id,piggylist(piggy_count).piggyback_drive,
+       c1rec.staff_no, c1rec.job_code,c1rec.special_job_code,c1rec.assign_mode,
+       'DON_STAFF_SCHEDULE', lBOD, lBOD, lEOD, lEOD, g_comments) ;
+        for i_temp in 1..emplist.count loop
+          if emplist(i_temp).staff_no = c1rec.staff_no then
+             calc_hours_for_drive(piggylist(piggy_count).piggyback_drive,act_start,act_end) ;
+             emplist(i_temp).hours := emplist(i_temp).hours + (act_end - act_start) * 24 ;
+             exit ;
+          end if ;
+        end loop ;  /*-- End loop i_temp --*/
+     end loop ; /*-- End loop c1rec --*/
+ end loop ; /*-- End loop piggy_count --*/
+end schedule_piggyback_drives ;
+/*-- This procedure creates entry in staff_schedule_details table ---*/
+procedure assign_staff_to_drive(v_drive_index in varchar2,
+   v_staff_no in varchar2,v_job_code in varchar2,v_assign_mode in varchar2) is
+l_actual_bod date;
+l_save_bod   date;
+l_actual_eod date;
+l_save_eod   date;
+ begin
+   write_log('Assigning '||v_staff_no||' to '||drvlist(v_drive_index).drive_id);
+   if v_assign_mode != 'P' then
+     -- calculate BOD and EOD
+     bod_eod(drvlist(v_drive_index).drive_id,v_job_code,l_save_bod,l_save_eod);
+     l_actual_bod := l_save_bod;
+     l_actual_eod := l_save_eod;
+   else
+     l_actual_bod := g_actual_bod;
+     l_actual_eod := g_actual_eod;
+     l_save_bod := g_save_bod;
+     l_save_eod := g_save_eod;
+   end if;
+   insert into staff_schedule_details
+   (chapter_id,schedule_id,drive_id,staff_no,
+    job_code,assign_mode,program_id,
+    actual_bod, save_bod, actual_eod, save_eod, comments)
+   values
+   (g_chapter_id,g_schedule_id,drvlist(v_drive_index).drive_id,v_staff_no,
+    v_job_code,v_assign_mode,'DON_STAFF_SCHEDULE',
+    l_actual_bod, l_save_bod, l_actual_eod, l_save_eod, g_comments) ;
+   for i_temp in 1..emplist.count loop
+     if emplist(i_temp).staff_no = v_staff_no then
+        emplist(i_temp).assigned_curdate := 'Y' ;
+        emplist(i_temp).hours := emplist(i_temp).hours + (drvlist(v_drive_index).drive_end_time - drvlist(v_drive_index).drive_start_time)*24 ;
+     end if ;
+   end loop ;
+   drvlist(v_drive_index).staff_reqd := drvlist(v_drive_index).staff_reqd - 1 ;
+ exception
+   when others then write_log('Error 25') ; raise ;
+end assign_staff_to_drive ;
+procedure reverse_emplist_order is
+  emp_reverse_list emptabtyp ;
+  counter number ;
+begin
+ if emp_reverse_list.count > 0 then
+    emp_reverse_list.delete ;
+ end if ;
+ counter := emplist.count ;
+ for i in 1..counter loop
+    emp_reverse_list(i) := emplist(counter-i+1) ;
+ end loop ;
+ for i in 1..counter loop
+   emplist(i) := emp_reverse_list(i) ;
+ end loop ;
+end reverse_emplist_order ;
+procedure print_assignment is
+ staff_reqd number ;
+ cursor c1 is select drives.drive_id drive_id,drive_date,drive_type from drives, drive_estimated_resources drv1
+ where drive_date between g_start_date and g_end_date
+ and   drives.chapter_id=g_chapter_id
+ and   drv1.chapter_id=g_chapter_id
+ and drives.drive_id=drv1.drive_id
+ and resource_code='STAFF'
+ and   drive_type in ('I','C')
+ and   status = 'CNFRM'
+ order by drive_date asc,number_reqd desc ;
+ temp_drive_id varchar2(10) ;
+ cursor c2 is select staff_no,job_code,nvl(special_job_code,'N') special_job_code
+ from staff_schedule_details
+ where schedule_id = g_schedule_id
+ and   drive_id = temp_drive_id
+ and chapter_id=g_chapter_id ;
+begin
+ write_log('Printing assignment') ;
+ for c1rec in c1 loop
+     write_log('--------------------------------------------');
+     begin
+       select number_reqd into staff_reqd
+       from drive_estimated_resources
+       where drive_id = c1rec.drive_id
+       and    resource_code = 'STAFF'
+       and chapter_id=g_chapter_id ;
+     exception
+       when  no_data_found then write_log('999') ;
+       when others then write_log('1000');
+     end ;
+     write_log('Date:'||to_char(c1rec.drive_date,'MM-DD-YYYY')||' Drive ID:'||c1rec.drive_id||' Drv type:'||c1rec.drive_type||' Staff:'||to_char(staff_reqd)) ;
+     temp_drive_id := c1rec.drive_id ;
+     for c2rec in c2 loop
+        write_log(' Staff no.:'||c2rec.staff_no||' Primary job:'||c2rec.job_code||' Spl. Job:'||c2rec.special_job_code) ;
+     end loop ;
+ end loop ;
+end print_assignment ;
+procedure copy_emp_to_temp(emptemplist in out emptabtemp,
+                           temp_counter in number,
+                           emplist in emptabtyp,
+                           emp_counter in number) is
+begin
+   emptemplist(temp_counter).staff_no := emplist(emp_counter).staff_no ;
+   emptemplist(temp_counter).hours := emplist(emp_counter).hours ;
+   emptemplist(temp_counter).skill_rating := emplist(emp_counter).overall_skill ;
+   emptemplist(temp_counter).emplist_index := emp_counter ;
+end copy_emp_to_temp ;
+procedure BOD_EOD (drive in varchar2, jobcode in varchar2, BOD out date,
+                   EOD out date) IS
+ st_time  date;
+ ed_time  date;
+ stbt     number;
+ tt       number;
+ sub_time number;
+ add_time number;
+ BEGIN
+   BEGIN
+     SELECT dr.schedule_start_time, dr.schedule_end_time,
+            nvl(dr.schedule_stup_bkdown_time,30), nvl(dr.sch_travel_time,60)
+       INTO st_time, ed_time, stbt, tt
+       FROM drives dr
+-- MG 7/19/99       FROM drives dr, locations lc
+-- MG 7/19/99      WHERE dr.location_id = lc.location_id
+      WHERE dr.drive_id = drive ;
+     stbt := stbt/(2*24*60);
+     tt := tt/(24*60);
+   EXCEPTION
+     WHEN NO_DATA_FOUND THEN
+       stbt := 0  ;
+       tt := 0  ;
+     WHEN others THEN
+       stbt := 0  ;
+       tt := 0  ;
+   END;
+   BEGIN
+     SELECT NVL(SORT_SEQUENCE_2, 15), nvl(SORT_SEQUENCE_3,0)
+     INTO sub_time, add_time
+       FROM valid_master_codes
+      WHERE code_type = 'JOBTY'
+        AND code = jobcode;
+     sub_time := sub_time/(24*60) ;
+     add_time := add_time/(24*60) ;
+   EXCEPTION
+     WHEN NO_DATA_FOUND THEN
+       sub_time := 0  ;
+       add_time := 0  ;
+   END;
+   BOD := st_time - stbt - sub_time - tt;
+   EOD := ed_time + stbt + add_time + tt;
+END bod_eod;
+function mix_facility return number is
+ cursor c1 is
+ select dr.drive_id drive_id,dr.drive_date drive_date,
+        count(distinct facility_code)
+ from drives dr,staff_schedule_details ssd,employees emp
+ where dr.drive_date between g_start_date and g_end_date
+   and  dr.chapter_id = g_chapter_id
+   and  dr.drive_type in ('I','C')
+   and  dr.status = 'CNFRM'
+   and  ssd.schedule_id = g_schedule_id
+   and  ssd.chapter_id = g_chapter_id
+   and  ssd.drive_id = dr.drive_id
+   and  emp.staff_no = ssd.staff_no
+   and  emp.chapter_id = g_chapter_id
+   and  sysdate between emp.eff_date and nvl(emp.term_date,sysdate+1)
+having count(distinct facility_code) > 1
+ group by dr.drive_id,dr.drive_date
+ order by drive_date asc;
+ count_rec number := 0 ;
+ mixfc number := 0 ;
+begin
+  for c1rec in c1 loop
+    count_rec := count_rec + 1 ;
+  end loop ;
+  if count_rec > 0 then
+    begin
+      SELECT NVL(NUMERAL_VALUE,0)*COUNT_rec
+        into mixfc
+        FROM  VALID_MASTER_CODES
+       WHERE CODE_TYPE = 'SCOST'
+         AND  CODE  = 'MIXFC';
+    exception
+      WHEN NO_DATA_FOUND THEN
+        mixfc := 0;
+    end;
+  else
+    mixfc := 0;
+  end if;
+  return mixfc;
+end mix_facility;
+function mix_team return number is
+ cursor c1 is
+   select dr.drive_id drive_id,dr.drive_date drive_date,count(distinct team_id)
+     from drives dr,staff_schedule_details ssd,employees emp
+    where dr.drive_date between g_start_date and g_end_date
+      and  dr.chapter_id = g_chapter_id
+      and  dr.drive_type in ('I','C')
+      and  dr.status = 'CNFRM'
+      and  ssd.schedule_id = g_schedule_id
+      and  ssd.chapter_id = g_chapter_id
+      and  ssd.drive_id = dr.drive_id
+      and  emp.staff_no = ssd.staff_no
+      and  emp.chapter_id = g_chapter_id
+      and  sysdate between emp.eff_date and nvl(emp.term_date,sysdate+1)
+   having count(distinct team_id) > 1
+    group by dr.drive_id,dr.drive_date
+    order by drive_date asc;
+  count_rec number := 0 ;
+  mixtm number := 0 ;
+begin
+  for c1rec in c1
+  loop
+    count_rec := count_rec + 1 ;
+  end loop ;
+  if count_rec > 0 then
+    begin
+      SELECT NVL(NUMERAL_VALUE,0)*COUNT_rec
+        into mixtm
+        FROM  VALID_MASTER_CODES
+       WHERE CODE_TYPE = 'SCOST'
+         AND  CODE  = 'MIXTM';
+    exception
+      WHEN NO_DATA_FOUND THEN
+        mixtm := 0 ;
+    end;
+  else
+    mixtm := 0 ;
+  end if;
+  return mixtm;
+end mix_team;
+function no_off return number is
+ cursor c1 is
+   select staff_no
+     from employees
+---- where emp_class = 'MSTAF'  -- commented by MG, added following instead
+ where emp_class in (select code from valid_master_codes
+                where code_type = 'AUTAS'
+                  and sysdate between eff_date and nvl(term_date, sysdate+2))
+ -------------------------------------------------------------------------
+      and  chapter_id = g_chapter_id;
+ curdate     date := g_start_date;
+ date_range  number ;
+ selection   VARCHAR2(1) ;
+ no_off_flag VARCHAR2(1) ;
+ count_rec   number := 0 ;
+ nooff       number := 0 ;
+begin
+  date_range := g_end_date - g_start_date;
+  for c1rec in c1 loop
+    no_off_flag := 'Y' ;
+    for i in 0..date_range
+    loop
+      begin
+        select 'x' into selection
+          from staff_schedule_details
+         where schedule_id = g_schedule_id
+           and chapter_id = g_chapter_id
+           and staff_no =  c1rec.staff_no
+           and drive_id in (select drive_id from drives
+                           where drive_date = curdate + i
+                            and  chapter_id = g_chapter_id
+                            and  drive_type in ('I','C')
+                            and  status = 'CNFRM')
+           and rownum = 1 ;
+      exception
+         when no_data_found then no_off_flag := 'N' ; exit ;
+         when others then write_log('Error in NO-OFF');
+      end ;
+    end loop ; /*-- end loop for i --*/
+    if no_off_flag = 'Y' then
+       count_rec := count_rec + 1 ;
+    end if ;
+  end loop ; /*-- end loop c1rec --*/
+  if count_rec > 0 then
+    begin
+      SELECT NVL(NUMERAL_VALUE,0)*COUNT_rec
+        into nooff
+        FROM VALID_MASTER_CODES
+       WHERE CODE_TYPE = 'SCOST'
+         AND CODE  = 'NOOFF';
+    exception
+      WHEN NO_DATA_FOUND THEN
+        nooff := 0 ;
+    end;
+  else
+    nooff := 0;
+  end if ;
+  return nooff;
+end no_off;
+procedure overtime_undertime(p_ovtim out number, p_untim out number) is
+  cursor c1 is
+    select staff_no
+      from employees
+     where emp_class in ( select code from valid_master_codes
+                   where code_type = 'MANAS'
+                     and sysdate between eff_date and nvl(term_date, sysdate+2))
+       and emp_class != 'FSTAF'
+       and chapter_id = g_chapter_id
+       and nvl(term_date, g_start_date) >= g_start_date
+       and schedule_from_date is not null
+       and schedule_from_date <= g_end_date;
+  hours       number := 0;
+  count_ot    number := 0 ;
+  count_ut    number := 0 ;
+  total_ot    number := 0 ;
+  total_ut    number := 0 ;
+  tot_hrs     varchar2(20);
+BEGIN
+  for c1rec in c1
+  loop
+    don_mcal_common.staff_weekly_hours(g_schedule_id, c1rec.staff_no,
+                        g_chapter_id, tot_hrs);
+    hours := (substr(tot_hrs, 1, instr(tot_hrs,':')-1)) * 60 + substr(tot_hrs, instr(tot_hrs,':')+1, 2);
+    if hours > 40*60 then
+      count_ot := count_ot + 1 ;
+      total_ot := total_ot + (hours-(40*60)) ;
+    end if;
+    if hours < 32*60 then
+      count_ut := count_ut + 1 ;
+      total_ut := total_ut + ((32*60)-hours) ;
+    end if ;
+  end loop ;
+  if count_ot > 0 then
+    begin
+      SELECT NVL(NUMERAL_VALUE,0)*COUNT_ot
+        into p_ovtim
+        FROM  VALID_MASTER_CODES
+       WHERE CODE_TYPE = 'SCOST'
+         AND  CODE  = 'OVTIM';
+    exception
+      WHEN NO_DATA_FOUND THEN
+       p_ovtim := 0 ;
+    end;
+  else
+    p_ovtim := 0;
+  end if;
+  if count_ut > 0 then
+    begin
+      SELECT NVL(NUMERAL_VALUE,0)*COUNT_ut
+        into p_untim
+        FROM  VALID_MASTER_CODES
+       WHERE CODE_TYPE = 'SCOST'
+         AND  CODE  = 'UNTIM';
+    exception
+      WHEN NO_DATA_FOUND THEN
+       p_untim := 0 ;
+    end;
+  else
+    p_untim := 0;
+  end if ;
+END overtime_undertime;
+function partial_assignments return number is
+ cursor c1 is
+--  CHANGED FOR Y2K BY CSW 3JUN99
+--  select drives.drive_id,to_char(drive_date,'MM-DD-RR') drive_date,drive_type,
+  select drives.drive_id,to_char(drive_date,'MM-DD-YYYY') drive_date,drive_type,
+         nvl(number_reqd,0) number_reqd
+  from   drives,drive_estimated_resources der
+  where  drive_date between g_start_date and g_end_date
+   and   drive_type in ('I','C')
+   and   status = 'CNFRM'
+   and   drives.chapter_id = g_chapter_id
+   and   der.drive_id = drives.drive_id
+   and   der.resource_code = 'STAFF'
+   and   der.chapter_id = g_chapter_id
+   order by drive_date ;
+  staff_required  number;
+  staff_assigned  number ;
+  parta           number ;
+  tl_assigned     varchar2(1) ;
+  driver_assigned varchar2(1) ;
+  counter         number := 0 ;
+BEGIN
+  for c1rec in c1 loop
+    /*-- Get number of staff assigned to the drive --*/
+    begin
+      select nvl(count(*),0) into staff_assigned
+        from staff_schedule_details
+       where schedule_id = g_schedule_id
+         and drive_id = c1rec.drive_id
+         and chapter_id = g_chapter_id ;
+    exception
+      when others then
+        write_log('Error in getting get_part_assign_drives');
+        raise ;
+    end ;
+    /*-- Check whether TL is assigned --*/
+    begin
+      select 'Y' into tl_assigned
+        from staff_schedule_details
+       where schedule_id = g_schedule_id
+         and drive_id = c1rec.drive_id
+         and job_code = 'TMLDR'
+         and chapter_id = g_chapter_id
+         and rownum = 1 ;
+    exception
+      when no_data_found then tl_assigned := 'N' ;
+      when others then
+         write_log('Error in getting get_part_assign_drives');
+        raise ;
+    end ;
+    /*-- Check whether driver is assigned --*/
+    begin
+      select 'Y' into driver_assigned
+        from staff_schedule_details
+       where schedule_id = g_schedule_id
+         and drive_id = c1rec.drive_id
+         and  special_job_code is not null
+         and  chapter_id = g_chapter_id
+         and  rownum = 1 ;
+    exception
+      when no_data_found then driver_assigned := 'N' ;
+      when others then
+        write_log('Error in getting get_part_assign_drives');
+        raise ;
+    end ;
+    /*-- Decide whether to display the record --*/
+    if staff_assigned < c1rec.number_reqd or tl_assigned = 'N' or driver_assigned = 'N' then
+      counter := counter + 1 ;
+    end if;
+  end loop;
+  if counter > 0 then
+    begin
+      SELECT NVL(NUMERAL_VALUE,0)*COUNTER
+        into parta
+        FROM VALID_MASTER_CODES
+       WHERE CODE_TYPE = 'SCOST'
+         AND CODE  = 'PARTA';
+    exception
+      WHEN NO_DATA_FOUND THEN
+        parta := 0 ;
+    end;
+  else
+    parta := 0;
+  end if;
+  return parta;
+END partial_assignments;
+function recovery_time return number is
+  cursor c1 is
+    select staff_no
+      from employees
+---- where emp_class = 'MSTAF'  -- commented by MG, added following instead
+ where emp_class in (select code from valid_master_codes
+                where code_type = 'AUTAS'
+                  and sysdate between eff_date and nvl(term_date, sysdate+2))
+ -------------------------------------------------------------------------
+       and chapter_id = g_chapter_id
+       and sysdate between eff_date and nvl(term_date,sysdate+1) ;
+  loop_counter      number ;
+  v_staff_no        varchar2(6) ;
+  curdate           date := g_start_date ;
+  cursor c2 is
+    select drive_id,schedule_start_time,schedule_end_time
+      from drives
+     where drive_date = curdate + loop_counter
+       and chapter_id = g_chapter_id
+       and drive_id in (select drive_id from staff_schedule_details
+                         where schedule_id = g_schedule_id
+                           and chapter_id  = g_chapter_id
+                           and staff_no    = v_staff_no)
+       and status = 'CNFRM' ;
+  v_start_time      date ;
+  v_end_time        date ;
+  prev_start_time   date ;
+  prev_end_time     date ;
+  act_start_time    date ;
+  act_end_time      date ;
+  recov_time        varchar2(50);
+  date_range        number ;
+  count_recs        number := 0 ;
+  count_drives_in_day number ;
+  count_drives_in_week number ;
+  v_sch_start       date ;
+  v_sch_end         date ;
+  v_stbk            number ;
+  v_location_id     varchar2(10) ;
+  v_travel_time     number ;
+  counter           number := 0;
+  recov             number := 0;
+  min_recov_time    number ;
+begin
+  begin
+    select nvl(to_number(parameter_value),0) into min_recov_time
+      from valid_parameters
+     where parameter_code = 'RECOV';
+       --and chapter_id = g_chapter_id ;
+  exception
+    when others then
+      -- write_log ('Error in recovery time');
+      raise;
+  end ;
+  date_range := g_end_date - g_start_date;
+  for c1rec in c1 loop
+    v_staff_no := c1rec.staff_no ;
+    count_drives_in_week := 0 ;
+    for i in 0..date_range loop
+      loop_counter := i ;
+      count_drives_in_day := 0 ;
+      for c2rec in c2 loop /*-- looping to check all drives on the day --*/
+      /*-- Get the drive timings --*/
+        begin
+          select schedule_start_time, schedule_end_time,
+                 nvl(schedule_stup_bkdown_time,0),location_id
+            into v_sch_start,v_sch_end,v_stbk,v_location_id
+            from drives
+           where drive_id = c2rec.drive_id
+             and chapter_id = g_chapter_id ;
+        exception
+          when no_data_found then v_stbk := 0 ;
+          when others then
+            -- write_log('Error in drive timings');
+            raise;
+        end ;
+        begin
+          select nvl(travel_time,0) into v_travel_time
+            from locations
+           where location_id = v_location_id
+             and  chapter_id = g_chapter_id ;
+        exception
+          when no_data_found then v_travel_time := 0 ;
+          when others then
+            -- write_log ('Error in travel time');
+            raise;
+      end ;
+      act_start_time := v_sch_start - v_travel_time/60/24 - (0.5*v_stbk)/60/24 ;
+      act_end_time := v_sch_end + v_travel_time/60/24 + (0.5*v_stbk)/60/24 ;
+      count_drives_in_day := count_drives_in_day + 1 ;
+      if count_drives_in_day > 1 then
+        if act_end_time > v_end_time then
+          v_end_time := act_end_time ;
+        end if ;
+        if act_start_time < v_start_time then
+          v_start_time := act_start_time ;
+        end if ;
+      else /*-- First drive on the day, set the v_start_time and v_end_time -*/
+        v_end_time := act_end_time ;
+        v_start_time := act_start_time ;
+      end if ;
+      end loop ; /*-- end loop c2rec --*/
+      if count_drives_in_day > 0 then
+        count_drives_in_week := count_drives_in_week + 1 ;
+        if count_drives_in_week > 1 then
+          if (v_start_time - prev_end_time) * 24 < min_recov_time then
+            /*-- Recovery time violated, show this record --*/
+            counter := counter +1;
+          end if ;
+          prev_end_time := v_end_time ;
+          prev_start_time := v_start_time ;
+        else
+          prev_end_time := v_end_time ;
+          prev_start_time := v_start_time ;
+        end if ;
+      end if ;
+    end loop ; /*-- End loop for i --*/
+  end loop ; /*-- end loop c1rec --*/
+  if counter > 0 then
+    begin
+      SELECT NVL(NUMERAL_VALUE,0)*COUNTER
+        into recov
+        FROM VALID_MASTER_CODES
+       WHERE CODE_TYPE = 'SCOST'
+         AND  CODE  = 'RECOV';
+    exception
+      WHEN NO_DATA_FOUND THEN
+        recov := 0 ;
+    end;
+  else
+    recov := 0;
+  end if;
+  return recov;
+END recovery_time;
+END DON_STAFF_SCHEDULE ;
+/
+
+CREATE OR REPLACE PUBLIC SYNONYM DON_STAFF_SCHEDULE FOR DON_STAFF_SCHEDULE;
+
+GRANT EXECUTE ON DON_STAFF_SCHEDULE TO LT_DONOR,UTIL,LTAPI,OPS$VISTA;

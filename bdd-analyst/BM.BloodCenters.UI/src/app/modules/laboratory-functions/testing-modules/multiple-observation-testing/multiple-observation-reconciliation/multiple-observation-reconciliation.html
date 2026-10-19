@@ -1,0 +1,413 @@
+<div class="page-container">
+  <div class="layout-wrapper">
+    <div class="main-content">
+      <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+      <div class="scrollable-content">
+      <!-- Search Card -->
+      <div class="search-card">
+        <form [formGroup]="filterForm" class="search-card__form">
+          <div class="search-card__fields">
+
+            <!-- Worksheet ID (first — worksheet-first flow) -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="search-card__field">
+              <mat-label>Worksheet ID <span class="required">*</span></mat-label>
+              <mat-select formControlName="worksheetId">
+                @if (isLoadingWorksheets) {
+                  <mat-option disabled>
+                    <span class="panel-loading"><mat-spinner diameter="20"></mat-spinner><span>Loading...</span></span>
+                  </mat-option>
+                } @else if (worksheets().length === 0) {
+                  <mat-option disabled>No data available</mat-option>
+                } @else {
+                  <mat-option>
+                    <ngx-mat-select-search [formControl]="worksheetSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel=""></ngx-mat-select-search>
+                  </mat-option>
+                  @for (opt of filteredWorksheets(); track opt.tbId) {
+                    <mat-option [value]="opt.tbId">{{ opt.tbId }}</mat-option>
+                  }
+                  @if (filteredWorksheets().length === 0) {
+                    <mat-option disabled>No matches found</mat-option>
+                  }
+                }
+              </mat-select>
+            </mat-form-field>
+
+            <!-- Test ID -->
+            <mat-form-field appearance="fill" subscriptSizing="dynamic" class="search-card__field">
+              <mat-label>Test ID <span class="required">*</span></mat-label>
+              <mat-select formControlName="testId">
+                @if (isLoadingTests) {
+                  <mat-option disabled>
+                    <span class="panel-loading"><mat-spinner diameter="20"></mat-spinner><span>Loading...</span></span>
+                  </mat-option>
+                } @else if (tests().length === 0) {
+                  <mat-option disabled>No data available</mat-option>
+                } @else {
+                  <mat-option>
+                    <ngx-mat-select-search [formControl]="testIdSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel=""></ngx-mat-select-search>
+                  </mat-option>
+                  @for (opt of filteredTests(); track opt.testId) {
+                    <mat-option [value]="opt.testId">{{ opt.testId }}</mat-option>
+                  }
+                  @if (filteredTests().length === 0) {
+                    <mat-option disabled>No matches found</mat-option>
+                  }
+                }
+              </mat-select>
+            </mat-form-field>
+
+            <!-- Description -->
+            <div class="search-card__description">
+              <label class="search-card__description-label">Description</label>
+              <div class="search-card__description-value">{{ testDetails()?.tbId || '-' }}</div>
+            </div>
+
+            <!-- Test Type -->
+            <div class="search-card__description">
+              <label class="search-card__description-label">Test Type</label>
+              <div class="search-card__description-value">{{ testDetails()?.testType || '-' }}</div>
+            </div>
+
+            <!-- Type Description -->
+            <div class="search-card__description">
+              <label class="search-card__description-label">Description</label>
+              <div class="search-card__description-value">{{ testDetails()?.testTypeDesc || '-' }}</div>
+            </div>
+
+          </div>
+        </form>
+      </div>
+
+      <!-- Data Area -->
+      @if (hasSearched && pendingTests().length > 0) {
+        <div class="data-card">
+          @if (isLoading) {
+            <div class="data-loading">
+              <mat-spinner diameter="36"></mat-spinner>
+            </div>
+          } @else {
+            <!-- Three-Panel Layout -->
+            <div class="three-panel-layout">
+
+              <!-- Left Panel: Unit IDs -->
+              <div class="panel panel--unit-ids">
+                <div class="panel-spacer"></div>
+                <div class="panel-scroll">
+                  <table class="data-table" role="grid" aria-label="Unit IDs">
+                    <thead>
+                      <tr><th>Unit ID</th></tr>
+                    </thead>
+                    <tbody>
+                      @for (unit of pendingTests(); track unit.unitId) {
+                        <tr class="unit-row"
+                            [class.unit-row--selected]="selectedUnit()?.unitId === unit.unitId"
+                            (click)="onSelectUnit(unit)">
+                          <td>
+                            {{ unit.unitId }}{{ unit.chkDigit ? '-' + unit.chkDigit : '' }}
+                            @if (reconciledUnits().has(unit.unitId)) {
+                              <mat-icon class="unit-status--done">check_circle</mat-icon>
+                            }
+                          </td>
+                        </tr>
+                      }
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Middle Panel: Observation Bands -->
+              <div class="panel panel--observations">
+                <div class="panel-actions">
+                  @if (isObservationEditMode()) {
+                    <button type="button" class="btn-cancel" (click)="onObservationCancel()" [disabled]="savingObservations()">
+                      <mat-icon>close</mat-icon> CANCEL
+                    </button>
+                    <button type="button" class="btn-save" (click)="onObservationSave()" [disabled]="savingObservations()">
+                      @if (savingObservations()) {
+                        <mat-spinner diameter="18"></mat-spinner>
+                      } @else {
+                        <mat-icon>check</mat-icon>
+                      }
+                      SAVE
+                    </button>
+                  } @else {
+                    <button type="button" class="btn-add-edit" (click)="onObservationEditMode()">
+                      ADD ROW / EDIT TABLE
+                    </button>
+                  }
+                  <div class="panel-search">
+                    <mat-icon>search</mat-icon>
+                    <input [formControl]="observationSearch" placeholder="Search" />
+                  </div>
+                </div>
+
+                <div class="panel-scroll">
+                  @if (isLoadingDetails) {
+                    <div class="data-loading"><mat-spinner diameter="24"></mat-spinner></div>
+                  } @else {
+                    <table class="data-table" role="grid" aria-label="Observation bands">
+                      <thead>
+                        <tr>
+                          <th>Band</th>
+                          <th>T1</th>
+                          <th>T2</th>
+                          <th>Sup</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        @if (isObservationEditMode()) {
+                          @for (row of observationEditRows; track $index) {
+                            <tr>
+                              <td>{{ row.bandName }}</td>
+                              <td>{{ row.tech1BandVal }}</td>
+                              <td>{{ row.tech2BandVal }}</td>
+                              <td>
+                                <select class="cell-select" [(ngModel)]="row.superBandVal">
+                                  <option value="">--</option>
+                                  @for (opt of validResults(); track opt.result) {
+                                    <option [value]="opt.result">{{ opt.result }}</option>
+                                  }
+                                </select>
+                              </td>
+                            </tr>
+                          }
+                        } @else {
+                          @for (row of filteredBandDetails(); track $index) {
+                            <tr>
+                              <td>{{ row.bandName }}</td>
+                              <td>{{ row.tech1BandVal }}</td>
+                              <td>{{ row.tech2BandVal }}</td>
+                              <td>{{ row.superBandVal }}</td>
+                            </tr>
+                          }
+                        }
+                      </tbody>
+                    </table>
+                  }
+                </div>
+              </div>
+
+              <!-- Right Panel: Tech Results + Other Bands -->
+              <div class="panel panel--right">
+                @if (testDetails(); as details) {
+                  <!-- Tech Cards (separate) -->
+                  <div class="tech-cards">
+                    <div class="tech-card">
+                      <h3 class="tech-card__title">Tech 1</h3>
+                      <div class="tech-card__fields">
+                        <div class="tech-card__field">
+                          <span class="tech-card__label">Result Code</span>
+                          <span class="tech-card__value">{{ displayValue(details.tech1Intp) }}</span>
+                        </div>
+                        <div class="tech-card__field">
+                          <span class="tech-card__label">Description</span>
+                          <span class="tech-card__value">{{ displayValue(details.tech1IntpDesc) }}</span>
+                        </div>
+                        <div class="tech-card__field">
+                          <span class="tech-card__label">User ID</span>
+                          <span class="tech-card__value">{{ displayValue(details.tech1User) }}</span>
+                        </div>
+                        <div class="tech-card__field">
+                          <span class="tech-card__label">Date</span>
+                          <span class="tech-card__value">{{ formatDate(details.tech1Date) }}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="tech-card">
+                      <h3 class="tech-card__title">Tech 2</h3>
+                      <div class="tech-card__fields">
+                        <div class="tech-card__field">
+                          <span class="tech-card__label">Result Code</span>
+                          <span class="tech-card__value">{{ displayValue(details.tech2Intp) }}</span>
+                        </div>
+                        <div class="tech-card__field">
+                          <span class="tech-card__label">Description</span>
+                          <span class="tech-card__value">{{ displayValue(details.tech2IntpDesc) }}</span>
+                        </div>
+                        <div class="tech-card__field">
+                          <span class="tech-card__label">User ID</span>
+                          <span class="tech-card__value">{{ displayValue(details.tech2User) }}</span>
+                        </div>
+                        <div class="tech-card__field">
+                          <span class="tech-card__label">Date</span>
+                          <span class="tech-card__value">{{ formatDate(details.tech2Date) }}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Result Section (separate card) -->
+                  <div class="result-card">
+                    <mat-form-field appearance="fill" subscriptSizing="dynamic" class="result-field">
+                      <mat-label>Result</mat-label>
+                      <mat-select [formControl]="resultCodeCtrl">
+                        @for (opt of validInterpretations(); track opt.result) {
+                          <mat-option [value]="opt.result">{{ opt.result }} - {{ opt.resultDesc }}</mat-option>
+                        }
+                      </mat-select>
+                    </mat-form-field>
+                    <div class="result-description">
+                      <span class="result-description__label">Description</span>
+                      <span class="result-description__value">{{ resultDescription() || '-' }}</span>
+                    </div>
+                  </div>
+
+                  <!-- Other Detected Bands -->
+                  @if (details.otherBandsEnabled === 'Y' || details.otherBandsEnabled === true) {
+                    <div class="other-bands-section">
+                      <div class="other-bands-header">
+                        <h3 class="other-bands-title">Other Detected Bands</h3>
+                        <div class="other-bands-actions">
+                          @if (isOtherBandsEditMode()) {
+                            <button type="button" class="btn-cancel" (click)="onOtherBandsCancel()" [disabled]="savingOtherBands()">
+                              <mat-icon>close</mat-icon> CANCEL
+                            </button>
+                            <button type="button" class="btn-save" (click)="onOtherBandsSave()" [disabled]="savingOtherBands()">
+                              @if (savingOtherBands()) {
+                                <mat-spinner diameter="18"></mat-spinner>
+                              } @else {
+                                <mat-icon>check</mat-icon>
+                              }
+                              SAVE
+                            </button>
+                          } @else {
+                            <button type="button" class="btn-add-edit" (click)="onOtherBandsEditMode()">
+                              ADD ROW / EDIT TABLE
+                            </button>
+                          }
+                          <div class="panel-search panel-search--small">
+                            <mat-icon>search</mat-icon>
+                            <input [formControl]="otherBandsSearch" placeholder="Search by" />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div class="panel-scroll">
+                        <table class="data-table other-bands-table" role="grid" aria-label="Other detected bands">
+                          <thead>
+                            <tr>
+                              <th colspan="2" class="col-group-header">Tech 1</th>
+                              <th colspan="2" class="col-group-header">Tech 2</th>
+                              <th colspan="2" class="col-group-header">Supervisor</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            @if (isOtherBandsEditMode()) {
+                              @for (row of otherBandsEditRows; track $index) {
+                                <tr>
+                                  <td>{{ row.tech1Band1 || '-' }}</td>
+                                  <td>{{ row.tech1Band2 || '-' }}</td>
+                                  <td>{{ row.tech2Band1 || '-' }}</td>
+                                  <td>{{ row.tech2Band2 || '-' }}</td>
+                                  <td>
+                                    <select class="cell-select" [(ngModel)]="row.supBand1">
+                                      <option value="">--</option>
+                                      @for (opt of validTestBands(); track opt.bandName) {
+                                        <option [value]="opt.bandName">{{ opt.bandName }}</option>
+                                      }
+                                    </select>
+                                  </td>
+                                  <td>
+                                    <select class="cell-select" [(ngModel)]="row.supBand2">
+                                      <option value="">--</option>
+                                      @for (opt of validTestBands(); track opt.bandName) {
+                                        <option [value]="opt.bandName">{{ opt.bandName }}</option>
+                                      }
+                                    </select>
+                                  </td>
+                                </tr>
+                              }
+                            } @else {
+                              @for (row of filteredOtherBands(); track $index) {
+                                <tr>
+                                  <td>{{ row.tech1Band1 || '-' }}</td>
+                                  <td>{{ row.tech1Band2 || '-' }}</td>
+                                  <td>{{ row.tech2Band1 || '-' }}</td>
+                                  <td>{{ row.tech2Band2 || '-' }}</td>
+                                  <td>{{ row.supBand1 || '-' }}</td>
+                                  <td>{{ row.supBand2 || '-' }}</td>
+                                </tr>
+                              }
+                            }
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  }
+                }
+              </div>
+            </div>
+
+            <!-- Notes Section -->
+            <div class="notes-section">
+              <h3 class="notes-title">Notes</h3>
+
+              <div class="note-input-row">
+                <mat-form-field appearance="fill" class="note-textarea">
+                  <mat-label>{{ editingNoteId() ? 'Edit Notes' : 'Add Notes' }}</mat-label>
+                  <textarea
+                    matInput
+                    [(ngModel)]="notesText"
+                    rows="3"
+                    maxlength="240">
+                  </textarea>
+                </mat-form-field>
+                <button type="button" class="btn-save add-note-btn"
+                        (click)="editingNoteId() ? onUpdateNote() : onAddNote()"
+                        [disabled]="!notesText.trim() || !selectedUnit()">
+                  {{ editingNoteId() ? 'UPDATE' : 'ADD' }}
+                </button>
+              </div>
+
+              <!-- Existing Note -->
+              @if (noteData(); as note) {
+                <div class="note-card">
+                  <div class="note-card__header">
+                    <div class="note-card__user">
+                      <div class="note-card__avatar">{{ getInitials(note.insertUser || '') }}</div>
+                      <div class="note-card__info">
+                        <span class="note-card__name">{{ note.insertUser }}</span>
+                        <span class="note-card__meta">1.0 | {{ formatDate(note.insertDate) }}</span>
+                      </div>
+                    </div>
+                    <div class="note-card__actions">
+                      <button type="button" class="btn-note-action" (click)="onEditNote()">EDIT</button>
+                      <button type="button" class="btn-note-action btn-note-action--delete" (click)="onDeleteNote()">DELETE</button>
+                    </div>
+                  </div>
+                  <div class="note-card__label">Notes</div>
+                  <p class="note-card__text">{{ note.note }}</p>
+                </div>
+              }
+            </div>
+
+          }
+        </div>
+      }
+
+      <!-- Empty States -->
+      @if (!hasSearched && !isLoading) {
+        <div class="data-card">
+          <div class="empty-state-container">
+            <div class="empty-state-icon" aria-hidden="true"><mat-icon>search</mat-icon></div>
+            <h3 class="empty-state-title">No Results to Display</h3>
+            <p class="empty-state-message">Select a Worksheet ID and Test ID to begin.</p>
+          </div>
+        </div>
+      }
+
+      @if (hasSearched && !isLoading && pendingTests().length === 0) {
+        <div class="data-card">
+          <div class="empty-state-container">
+            <div class="empty-state-icon" aria-hidden="true"><mat-icon>search_off</mat-icon></div>
+            <h3 class="empty-state-title">No Results Found</h3>
+            <p class="empty-state-message">No pending tests found for the selected criteria.</p>
+          </div>
+        </div>
+      }
+
+      </div>
+    </div>
+  </div>
+</div>

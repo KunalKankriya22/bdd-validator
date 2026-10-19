@@ -1,0 +1,1382 @@
+CREATE OR REPLACE PACKAGE donor_questionnaire
+/*-----------------------------------------------------------------------------
+PACKAGE		  :Donor Questionnaire
+PURPOSE   	:	Package to calcuate if the donor is eligible to use the abbreviated donor history form.
+DEVELOPER 	:	Ashok Vardhan
+DEV. DATE 	:	25 Jun 2013
+NOTES     	:	Initial version.
+VER       	:	01
+COMMENTS    : SCR 20692 is misspelled in modification history - should have been 20609
+
+Modification History
+-------------------------------------------------------------------------------
+Modified by	 |     on	      |	   Version	  |  Remarks
+-------------------------------------------------------------------------------
+Ashok        |  06/25/2013  |     01        |  SCR 11942 - Abbreviated Questionnaire for Onsite Module.
+Ashok        |  06/25/2013  |     02        |  IM 9657 - Added code to check if any donation history is missing
+                                            |  in abbreviated_questionnaire_history table and to update the missing records.
+Ashok        |  06/25/2013  |     03        |  IM 9693 - Modified program logic to not consider a deferral as a succesful donation
+Ashok	     |  11/04/2013  |     04        |  Modified donor_questionnaire_history to donor_hhq_history (Mobile PC issue in creating api table)
+Ashok	     |  12/02/2013  | 	  05	    | Version numbers issue - took an old version and rechecked in.
+Ashok	     |  07/17/2014  | 	  06	    | V06, don_6M_cnt CURSOR commented out.
+Ashok	     |  08/08/2014  | 	  07	    | V07, SCR 20692; valid_don_types routine added, calc_qtype signature modified.
+Ashok	     |  08/11/2014  | 	  08	    | V08, SCR 20692; calc_qtype (check_elig_criteria) modified.
+Ashok	     |  08/14/2014  | 	  08	    | V08, SCR 20692; calc_qtype (check_elig_criteria) modified and still working on it.
+Ashok	     |  09/09/2014  | 	  08	    | V08, SCR 20692; missing_donation_cur modified.
+Ashok      |  09/09/2014  |     09      | V09, SCR 20692; check_elig_criteria modified to also consider backoffice registrations where donor responses
+                                          -- are not recorded in donor_responses and health_history tables.  Use donations - coll_date and donation type
+                                          -- to determine the template effective dates.
+Ashok      |  09/11/2014  |     09      | V09, SCR 20692; donor_hhq_history table to go back and bring all the previous donations
+                                          -- instead of just 24months.
+Ashok      |  09/12/2014  |     09      | V09, SCR 20692; Removed hardcoding of 'atleast one donation within a timeframe' criteria.
+Ashok      |  09/17/2014  |     09      | V09, SCR 20692; Modified valid_don_types cursor stmt to incluse eff_date and term_date checks for valid_don_types.
+Ashok      |  02/19/2015  |     10      | V10, IM 10398;
+Ashok      |  03/09/2016  |     11      | V11, IM 213
+Ashok      |  02/19/2019  |     12      | V12 -- MLT   1796 (generate_questions added for ONSITE)*************
+Ashok      |  05/24/2019  |     13      | V13 -- MLT   2165 (generate_questions - insert dummy donor response)
+Ashok      |  07/01/2019  |     14      | V14 -- MLT   2293 (generate_questions - 'AL' hardcoding removed)
+Ashok      |  07/05/2019  |     15      | V15 -- MLT   2299 (generate_questions - new column read_more_flag added to onsite_donor_responses)
+Ashok      |  07/17/2019  |     16      | V16 -- ODR Routine queries modified to look at timezone.
+Ashok      |  07/22/2019  |     17      | V17 -- generate_questions routine modified to only generate the screener ask D questions. -- MLT 2386.
+Ashok      |  07/24/2019  |     18      | V18 -- MLT 2285 - new column added to onsite_donor_respones and populated (QUESTION_DELAY_SECONDS)
+Ashok      |  08/01/2019  |     19      | V19 -- MLT 2426 QUES_dESC_ABBR added, all questions are inserted into odr table.  Based on the response from user,
+                                              -- either all questions are administered or only abrreviated.
+Ashok      |  09/20/2019  |     20      | V20 -- MLT 2597 PARENT_RESP_FLAG column added to onsite_donor_responses table.
+Ashok      |  10/15/2020  |     21      | V21 -- MLT 3688 GENERATE_QUESTIONS routine modified to implement differnt seq for aDHQ. Search for V21.
+Ashok      |  10/19/2020  |     22      | V22 -- MLT 3752 calc_qtype routine modified to remove the hardcoding of 2 for template modification scenario.
+Ashok      |  10/19/2020  |     23      | V23 -- Removed a check where only one backoffice registration is captured in donor_hhq_history table.
+-----------------------------------------------------------------------------*/
+AS
+
+
+PROCEDURE calc_qtype(donor_id_in IN VARCHAR2, coll_date_in IN DATE, don_type_in IN VARCHAR2, qtype_out OUT VARCHAR2, comments_out OUT VARCHAR2, reset_flag_out OUT VARCHAR2, err_out OUT VARCHAR2);
+FUNCTION freqType RETURN VARCHAR2;
+FUNCTION freqValue RETURN NUMBER;
+FUNCTION freqDefValue RETURN NUMBER;
+FUNCTION addFreq(source_date_in IN DATE, freq_for_in IN VARCHAR2 DEFAULT NULL) RETURN DATE;
+FUNCTION subFreq(source_date_in IN DATE, freq_for_in IN VARCHAR2 DEFAULT NULL) RETURN DATE;
+PROCEDURE valid_don_types (in_donTypeList IN VARCHAR2, out_donTypeList OUT VARCHAR2, out_ErrDonType OUT VARCHAR2);  -- Called from ADHQ screen (VDIABBRQ)
+PROCEDURE generate_questions(p_transaction_id IN VARCHAR2, p_selected_qtype IN VARCHAR2, p_abbr_flag OUT VARCHAR2, p_status OUT VARCHAR2) ;
+
+END donor_questionnaire;
+
+/
+
+
+CREATE OR REPLACE PACKAGE BODY donor_questionnaire
+AS
+  gl_donor_id VARCHAR2(10) := NULL;
+  gl_coll_date DATE := NULL;
+  gl_freq_value NUMBER := NULL;
+  gl_freqDefValue NUMBER := NULL; -- V07
+  gl_freq_type VARCHAR2(1) := NULL;
+  gl_fDHQ_cnt NUMBER := NULL;
+  --gl_fDHQmin_cnt NUMBER := NULL; -- V09; 09/12/2014 -- IM 213
+  gl_DHQmin_cnt NUMBER := NULL; -- IM 213
+  gl_inter VARCHAR2(5) := NULL;
+  gl_qtype VARCHAR2(1);
+  gl_don_types VARCHAR2(500);
+  gl_don_type VARCHAR2(5);
+
+
+  -- Returns frequency type - defined in abbr_elig_criteria.
+  FUNCTION freqType RETURN VARCHAR2 IS
+    CURSOR elig_criteria_cur IS
+     SELECT NVL(freq_type,'D')
+       FROM abbr_elig_criteria
+      WHERE SYSDATE BETWEEN eff_date and NVL(term_date, SYSDATE+1);
+    l_freq_type VARCHAR2(1);
+  BEGIN
+    OPEN elig_criteria_cur;
+    FETCH elig_criteria_cur INTO l_freq_type;
+    CLOSE elig_criteria_cur;
+
+    RETURN l_freq_type;
+  END freqType;
+
+  -- Returns frequency value - defined in abbr_elig_critera.
+  FUNCTION freqValue RETURN NUMBER IS
+    CURSOR elig_criteria_cur IS
+     SELECT NVL(freq_between_donations,0)
+       FROM abbr_elig_criteria
+      WHERE SYSDATE BETWEEN eff_date and NVL(term_date, SYSDATE+1);
+    l_freq_value VARCHAR2(1);
+  BEGIN
+    OPEN elig_criteria_cur;
+    FETCH elig_criteria_cur INTO l_freq_value;
+    CLOSE elig_criteria_cur;
+
+    RETURN l_freq_value;
+  END freqValue;
+
+
+  -- Returns Def frequency value - defined in abbr_elig_critera. -- Added for V07
+  FUNCTION freqDefValue RETURN NUMBER IS
+    CURSOR elig_criteria_cur IS
+     SELECT NVL(deferral_period,0)
+       FROM abbr_elig_criteria
+      WHERE SYSDATE BETWEEN eff_date and NVL(term_date, SYSDATE+1);
+    l_freq_value VARCHAR2(1);
+  BEGIN
+    OPEN elig_criteria_cur;
+    FETCH elig_criteria_cur INTO l_freq_value;
+    CLOSE elig_criteria_cur;
+
+    RETURN l_freq_value;
+  END freqDefValue;
+
+
+  -- Adds frequency defined in abbr_elig_criteria to input date parameter.
+  FUNCTION addFreq(source_date_in IN DATE, freq_for_in IN VARCHAR2 DEFAULT NULL) RETURN DATE
+  IS
+    l_target_date DATE;
+  BEGIN
+    /* -- V07
+    IF gl_freq_type IS NULL THEN
+      gl_freq_type := freqType;
+    END IF;
+
+    IF gl_freq_value IS NULL THEN
+      gl_freq_value := freqValue;
+    END IF;
+    */
+
+    -- V07
+    gl_freq_type :=  NVL(gl_freq_type, freqType);
+
+    IF NVL(freq_for_in,'@#') = 'D' THEN
+      gl_freq_value := NVL(gl_freqDefValue, freqDefValue);
+    ELSE
+      gl_freq_value := NVL(gl_freq_value, freqValue);
+    END IF;
+    -- V07
+
+    IF gl_freq_type = 'D' THEN
+        l_target_date := source_date_in + gl_freq_value;
+    ELSIF gl_freq_type = 'W' THEN
+        l_target_date := source_date_in + (gl_freq_value * 7);
+    ELSIF gl_freq_type = 'M' THEN
+        l_target_date := ADD_MONTHS(source_date_in, gl_freq_value);
+    ELSIF gl_freq_type = 'Y' THEN
+        l_target_date := ADD_MONTHS(source_date_in, (gl_freq_value * 12));
+    END IF;
+
+    RETURN l_target_date;
+  END addFreq;
+
+ -- Substracts frequency defined in abbr_elig_criteria from input parmater date.
+  FUNCTION subFreq(source_date_in IN DATE, freq_for_in IN VARCHAR2 DEFAULT NULL) RETURN DATE
+  IS
+    l_target_date DATE;
+  BEGIN
+    /* -- V07
+    IF gl_freq_type IS NULL THEN
+      gl_freq_type := freqType;
+    END IF;
+
+    IF gl_freq_value IS NULL THEN
+      gl_freq_value := freqValue;
+    END IF;
+    */
+
+    -- V07
+    gl_freq_type :=  NVL(gl_freq_type, freqType);
+
+    IF NVL(freq_for_in,'@#') = 'D' THEN -- For deferral freq.
+      gl_freq_value := NVL(gl_freqDefValue, freqDefValue);
+    ELSE
+      gl_freq_value := NVL(gl_freq_value, freqValue);
+    END IF;
+    -- V07
+
+    IF gl_freq_type = 'D' THEN
+        l_target_date := source_date_in - gl_freq_value;
+    ELSIF gl_freq_type = 'W' THEN
+        l_target_date := source_date_in - (gl_freq_value * 7);
+    ELSIF gl_freq_type = 'M' THEN
+        l_target_date := ADD_MONTHS(source_date_in, -gl_freq_value);
+    ELSIF gl_freq_type = 'Y' THEN
+        l_target_date := ADD_MONTHS(source_date_in, -(gl_freq_value * 12));
+    END IF;
+    RETURN l_target_date;
+  END subFreq;
+
+  --- Main routine in the package.  Donor ID and Coll Date are passed as input.
+  --- Questionnaire type is calculated and assigned to out parameter.
+  PROCEDURE calc_qtype(donor_id_in IN VARCHAR2, coll_date_in IN DATE, don_type_in IN VARCHAR2, qtype_out OUT VARCHAR2, comments_out OUT VARCHAR2, reset_flag_out OUT VARCHAR2, err_out OUT VARCHAR2)
+  AS
+  /* 1) Calculates the type of Questionnaire that the donor is eligible for.
+     2) Question type out variable can be either 'A' ('Abbreviated - aDHQ') OR 'F' ('Full - fDHQ').
+  */
+    l_donor_id VARCHAR2(10);
+    l_coll_date DATE;
+    l_qtype VARCHAR2(1) := NULL;
+    l_reset_flag VARCHAR2(1);
+    l_comments VARCHAR2(2000);
+    exit_error EXCEPTION;
+    exit_process EXCEPTION;
+
+    -- Checks Abbr. eligibility critera.
+    -- 1) Checks if two fDHQ are available.
+    -- 2) Checks if one fDHQ is within last six months.
+    -- 3) Checks for any deferrals on donor and unit.
+    PROCEDURE check_elig_criteria(pl_qtype_out OUT VARCHAR2, pl_comments_out OUT VARCHAR2, pl_reset_out OUT VARCHAR2) IS
+    -- Check for number of fDHQ's.
+    -- V07 added donation type condition in fDHQ_cnt query. Count only donation types that can be counted
+    -- V07 for abbreviated eligibility calculation. (Donation types are configured in ADHQ screen to have similar full questionnaire.)
+    CURSOR fDHQ_cnt IS
+      SELECT COUNT(1)
+        FROM donor_hhq_history dqh, donations d
+       WHERE dqh.transaction_id = d.transaction_id
+         --AND (d.unit_id IS NOT NULL OR d.deferral_id IS NOT NULL) -- IM:9693; 09/20/2013;
+         AND d.unit_id IS NOT NULL -- IM:9693; 09/20/2013;
+         AND dqh.donor_id = gl_donor_id
+         AND d.coll_date < gl_coll_date
+         AND NVL(dqh.calc_af_qtype,'X') = 'F'
+         AND d.donation_type IN (SELECT DISTINCT TRIM(regexp_substr(gl_don_types,'[^,]+', 1, LEVEL)) don_type
+                                   FROM dual
+                                  CONNECT BY regexp_substr(gl_don_types, '[^,]+', 1, LEVEL) IS NOT NULL
+                                 );
+
+      -- Check if one fDHQ is within last six months.
+      -- IM 213 Changes
+      /*
+        -- Modified cursors's name to dhq_6M_cnt
+        -- min_donations = '2' and freq_between_donations = 6M
+        -- => atleast 2 donations within the last six months.
+        -- => Original cursor checks for atleast 2 fDHQ donations,
+        --    modified it to check for atleast 2 donations.
+      */
+      --CURSOR fDHQ_6M_cnt(start_date_in IN DATE) IS -- IM 213
+        CURSOR dhq_6M_cnt(start_date_in IN DATE) IS -- IM 213
+        SELECT COUNT(1)
+          FROM donor_hhq_history dqh, donations d
+         WHERE dqh.transaction_id = d.transaction_id
+           --AND (d.unit_id IS NOT NULL OR d.deferral_id IS NOT NULL) -- -- IM:9693; 09/20/2013;
+           AND d.unit_id IS NOT NULL -- -- IM:9693; 09/20/2013;
+           AND dqh.donor_id = gl_donor_id
+           AND d.coll_date BETWEEN start_date_in AND gl_coll_date
+           AND NVL(dqh.calc_af_qtype, 'X') IN ('A','F'); -- IM 213
+           --AND NVL(dqh.calc_af_qtype, 'X') = 'F'; -- IM 213
+
+      -- IM:9693; 09/20/2013; -- New check added.  there must be two successful donations within last 6 months.
+      -- Check if two succesful donations within last six months.
+      -- V06, Commented on 07/17/2014; Interpreted requirement incorrectly. This check is not necessary.
+      /*
+      CURSOR don_6M_cnt(start_date_in IN DATE) IS
+        SELECT COUNT(1)
+          FROM donor_hhq_history dqh, donations d
+         WHERE dqh.transaction_id = d.transaction_id
+           --AND (d.unit_id IS NOT NULL OR d.deferral_id IS NOT NULL) -- -- IM:9693; 09/20/2013;
+           AND d.unit_id IS NOT NULL -- -- IM:9693; 09/20/2013;
+           AND dqh.donor_id = gl_donor_id
+           AND d.coll_date BETWEEN start_date_in AND gl_coll_date
+           AND NVL(dqh.calc_af_qtype, 'X') IN ('A', 'F');
+       */
+
+     -- Get the last donation questionnaire type.
+     CURSOR last_Donation_qtype IS
+      SELECT dqh.calc_af_qtype, d.transaction_id
+        FROM donor_hhq_history dqh, donations d
+       WHERE dqh.transaction_id = d.transaction_id
+         AND (d.unit_id IS NOT NULL OR d.deferral_id IS NOT NULL)
+         AND dqh.donor_id = gl_donor_id
+         AND d.coll_date < gl_coll_date
+         ORDER BY d.coll_date DESC;
+ /*
+        -- Check for deferrals on Donor.
+        CURSOR donorDef_cur(pl_transaction_id VARCHAR2) IS
+          SELECT COUNT(1)
+            FROM donor_interdictions di
+           WHERE di.donor_id = gl_donor_id
+             AND di.transaction_id = pl_transaction_id
+             AND di.release_date IS NOT NULL
+             --AND gl_coll_date BETWEEN eff_date AND NVL(term_date, gl_coll_date)
+             AND term_date > addfreq(eff_date);
+  */
+    /*
+    ||    This cursor returns all temporary deferrals on the donor which were/are
+    ||    in effect;
+    */
+       CURSOR donorDef_cur(pl_transaction_id VARCHAR2) IS
+          SELECT COUNT(1) --trunc(di.term_date)+1 term_date, di.inter_code
+            FROM donor_interdictions di, valid_interdictions vi
+           WHERE di.donor_id = gl_donor_id
+             AND di.inter_code = vi.inter_code
+             AND di.transaction_id = pl_transaction_id
+             AND vi.deferral_flag = 'Y'
+             AND di.release_date is null
+             AND di.term_date is not null
+             AND di.term_date > addfreq(di.eff_date, 'D'); -- V07, 'D' added indicating that freq is deferral freq.
+
+        -- Check for deferrals on Unit.
+        CURSOR unitDef_cur(pl_transaction_id VARCHAR2) IS
+          SELECT COUNT(1)
+            FROM donation_interdictions di, donations d
+           WHERE di.transaction_id = d.transaction_id
+             AND di.transaction_id = pl_transaction_id
+             AND di.release_date IS NOT NULL
+             --AND gl_coll_date BETWEEN TRUNC(di.insert_date) AND NVL(di.term_date, gl_coll_date)
+             AND di.term_date > addfreq(TRUNC(di.insert_date), 'D'); -- V07, 'D' added indicating that freq is deferral freq.
+
+
+      -- V07 changes;
+      -- Below cursor to go back to previous two donations that were to be counted for full questionnaire and get the transaction ID.
+      CURSOR prev_don_cur IS
+      SELECT distinct d.transaction_id, d.coll_date
+        FROM donor_hhq_history dqh, donations d
+       WHERE dqh.transaction_id = d.transaction_id
+         --AND (d.unit_id IS NOT NULL OR d.deferral_id IS NOT NULL) -- IM:9693; 09/20/2013;
+         AND d.unit_id IS NOT NULL -- IM:9693; 09/20/2013;
+         AND dqh.donor_id = gl_donor_id
+         AND d.coll_date < gl_coll_date
+         AND NVL(dqh.calc_af_qtype,'X') = 'F'
+         AND d.donation_type IN (SELECT DISTINCT TRIM(regexp_substr(gl_don_types,'[^,]+', 1, LEVEL)) don_type
+                                   FROM dual
+                                  CONNECT BY regexp_substr(gl_don_types, '[^,]+', 1, LEVEL) IS NOT NULL
+                                 )
+        ORDER BY coll_date DESC;
+
+
+      l_dondef_cnt NUMBER;
+      l_unitdef_cnt NUMBER;
+      l_last_trn_id VARCHAR2(10);
+
+     l_cnt NUMBER;
+     l_6M_cnt NUMBER;
+     l_don_6M_cnt NUMBER; -- IM:9693; 09/20/2013;
+     l_last_qtype VARCHAR2(1) := NULL;
+     l_qtype VARCHAR2(1);
+     l_comments VARCHAR2(1000);
+     exit_criteria EXCEPTION;
+    BEGIN
+      pl_qtype_out := NULL;
+      pl_comments_out := NULL;
+      pl_reset_out := NULL;
+
+      -- Donor must have 2 fDHQs.
+      OPEN fDHQ_cnt;
+      FETCH fDHQ_cnt INTO l_cnt;
+      CLOSE fDHQ_cnt;
+
+      IF l_cnt < gl_fDHQ_cnt THEN
+        l_qtype := 'F';
+        l_comments:= 'Failed number of fDHQ conditions critera, so fDHQ';
+        RAISE exit_criteria;
+      END IF;
+
+
+      -- V10 -- IM 10398 -- below block added on 02/20/2015
+    --- 2) Check if time since last donation has passed 6Months (frq defined in eligCritera Configuration).
+    -- checkLastDonation
+      DECLARE
+        l_last_coll_date DATE;
+        CURSOR last_donation_cur IS
+          SELECT max(coll_date)
+            FROM donations
+           WHERE donor_id = gl_donor_id
+             --AND (unit_id IS NOT NULL OR deferral_id IS NOT NULL)
+             AND unit_id IS NOT NULL -- IM:9693; 09/20/2013
+             AND coll_date < gl_coll_date;
+      BEGIN
+        -- Get the last donation date.
+        OPEN last_donation_cur;
+        FETCH last_donation_cur INTO l_last_coll_date;
+        CLOSE last_donation_cur;
+
+
+       -- Check if it is within the time frame defined for Abbr elig critera.
+        IF gl_coll_date > addFreq(l_last_coll_date) THEN
+          l_qtype := 'F';
+          l_reset_flag := 'Y';
+          l_comments := 'Outside the time frame defined in abbr_elig_critera.  ( >6 months since last donation )';
+          RAISE exit_criteria;
+        END IF;
+      END;
+     -----------------------------------------------------
+
+      /* -- IM 213
+      -- Donor must have atleast one fDHQ within last 6 months.
+      OPEN fDHQ_6M_cnt(subFreq(gl_coll_date));
+      FETCH fDHQ_6M_cnt INTO l_6M_cnt;
+      CLOSE fDHQ_6M_cnt;
+
+      --IF l_6M_cnt < 1 THEN
+      IF l_6M_cnt < gl_fDHQmin_cnt THEN -- V09; 09/12/2014;
+        l_qtype := 'F';
+        l_comments := 'Atleast ' || gl_fDHQmin_cnt ||' fDHQ donation(s) must be within the configured timeframe.';
+        RAISE exit_criteria;
+      END IF;
+
+      */ -- IM 213
+
+      -- IM 213
+      OPEN dhq_6M_cnt(subFreq(gl_coll_date));
+      FETCH dhq_6M_cnt INTO l_6M_cnt;
+      CLOSE dhq_6M_cnt;
+
+
+      --IF l_6M_cnt < 1 THEN
+      IF l_6M_cnt < gl_DHQmin_cnt THEN -- V09; 09/12/2014;
+        l_qtype := 'F';
+        l_comments := 'Atleast ' || gl_DHQmin_cnt ||' DHQ donation(s) must be within the configured timeframe.'; -- IM 213
+        RAISE exit_criteria;
+      END IF;
+
+      /* -- V06, Commented on 07/17/2014; Interpreted requirement incorrectly. This check is not necessary.
+      -- IM:9693; 09/20/2013;
+      -- Donor must have two donations within last 6 months;
+      OPEN don_6M_cnt(subFreq(gl_coll_date));
+      FETCH don_6M_cnt INTO l_don_6M_cnt;
+      CLOSE don_6M_cnt;
+
+      IF l_don_6M_cnt < gl_fDHQ_cnt THEN
+        l_qtype := 'F';
+        l_comments := 'Failed two successful donations within last 6 Months';
+        RAISE exit_criteria;
+      END IF;
+     -- End change for IM:9693; 09/20/2013
+      */
+
+
+      -- Check last donation.
+      OPEN last_donation_qtype;
+      FETCH last_donation_qtype INTO l_last_qtype, l_last_trn_id;
+      CLOSE last_donation_qtype;
+
+   -- Commented out on 09/20/2013; IM:9693;
+   /*
+      IF NVL(l_last_qtype, '$') = 'F' THEN
+        l_qtype := 'A';
+        l_comments := 'More than two fDHQ donations and one in last six months. fDHQ to aDHQ';
+        RAISE exit_criteria;
+      END IF;
+   */
+      -- Check donor deferrals
+      BEGIN
+        OPEN donorDef_cur(l_last_trn_id);
+        FETCH donorDef_cur INTO l_dondef_cnt;
+        CLOSE donorDef_cur;
+
+        IF l_dondef_cnt > 0 THEN
+          l_qtype := 'F';
+          l_comments := 'Deferral with duaration greater than freq (6 Months) - Donor.';
+          l_reset_flag := 'Y';
+          RAISE exit_criteria;
+        END IF;
+
+        -- Check unit deferrals
+        OPEN unitDef_cur(l_last_trn_id);
+        FETCH unitDef_cur INTO l_unitDef_cnt;
+        CLOSE unitDef_cur;
+
+        IF l_unitDef_cnt > 0 THEN
+          l_qtype := 'F';
+          l_comments := 'Deferral with duration greater than freq (6 Months) - Unit.';
+          l_reset_flag := 'Y';
+          RAISE exit_criteria;
+        END IF;
+      END;
+
+      ---- V08; 08/11/2014
+      DECLARE
+        -- Use the transaction ID from above cursor to get the questionnaire template ID used for the donation.
+        CURSOR tmpl_cur(pl_trn_id VARCHAR2) IS
+          SELECT template_id
+            FROM health_history
+           WHERE transaction_id = pl_trn_id;
+
+        -- V09; added on 09/09/2014
+        -- Use the transaction ID to get the questionnaire template ID used for the donation.  -- For backoffice registration.
+        CURSOR tmpl_bo_cur(pl_trn_id VARCHAR2) IS
+          SELECT coll_date, donation_type
+            FROM donations
+           WHERE transaction_id = pl_trn_id;
+
+        -- V09; added on 09/09/2014
+        -- Use the transaction ID from above cursor to get the questionnaire template ID used for the donation.
+        CURSOR tmplID_bo_cur(pl_coll_date DATE, pl_don_type VARCHAR2) IS
+          SELECT template_id
+            FROM health_history_template
+           WHERE donation_type = pl_don_type
+             AND pl_coll_date BETWEEN eff_date AND NVL(term_date, pl_coll_date + 1);
+
+
+        -- Use the quesitonnaire template and verify if the template has been modified or not.
+        -- If modified, the donation can not be counted for full questionnaire.
+        CURSOR tmpl_check_cur(pl_tmpl_id VARCHAR2) IS
+          SELECT 1
+            FROM health_history_template
+           WHERE gl_coll_date BETWEEN eff_date AND NVL(term_date, gl_coll_date +1)
+             AND template_id = pl_tmpl_id;
+
+      --- End V07 changes.
+        l_counter NUMBER;
+        l_tmpl_id VARCHAR2(10);
+        l_dummy PLS_INTEGER;
+        l_rec_found BOOLEAN := FALSE;
+        l_coll_date DATE;
+        l_don_type VARCHAR2(5);
+      BEGIN
+        l_counter := 0;
+        FOR prev_don_rec IN prev_don_cur LOOP
+          --l_counter := l_counter + 1;
+          IF l_counter >= gl_fDHQ_cnt THEN -- 2 --V22
+            EXIT;
+          ELSE
+            l_tmpl_id := NULL; -- V09; 09/09/2014
+            OPEN tmpl_cur(prev_don_rec.transaction_id);
+            FETCH tmpl_cur INTO l_tmpl_id;
+            CLOSE tmpl_cur;
+
+            -- V09; 09/09/2014 -- This is for back office registrations where transactions are not recorded in health_history
+            IF l_tmpl_id IS NULL THEN
+              -- get the collection date and donation type (for back office registrations).
+              OPEN tmpl_bo_cur(prev_don_rec.transaction_id);
+              FETCH tmpl_bo_cur INTO l_coll_date, l_don_type;
+              CLOSE tmpl_bo_cur;
+
+              IF l_coll_date IS NOT NULL AND l_don_type IS NOT NULL THEN
+                OPEN tmplID_bo_cur(l_coll_date, l_don_type);
+                FETCH tmplID_bo_cur INTO l_tmpl_id;
+                CLOSE tmplID_bo_cur;
+              END IF;
+            END IF;
+            -- End V09 Change;
+
+            IF l_tmpl_id IS NOT NULL THEN
+              OPEN tmpl_check_cur(l_tmpl_id);
+              FETCH tmpl_check_cur INTO l_dummy;
+              l_rec_found := tmpl_check_cur%FOUND;
+              CLOSE tmpl_check_cur;
+
+              IF l_rec_found THEN -- template is not modified, so can be counted for fDHQ
+                l_counter := l_counter + 1; --V08
+              ELSE
+                -- can not be counted for fDHQ.
+                l_qtype := 'F';
+                l_comments:= 'Template modified - ' || l_tmpl_id;   -- V09; added l_tmpl_id for debugging.
+                RAISE exit_criteria;
+                EXIT;
+              END IF;
+            END IF; -- l_tmpl_id not null condition.
+          END IF; -- l_counter condition.
+
+        END LOOP;
+
+        IF l_counter < gl_fDHQ_cnt THEN --2 -- V22
+          l_qtype := 'F';
+          l_comments:= 'Template is modified - ' || l_tmpl_id;   -- V09; added l_tmpl_id for debugging.
+          RAISE exit_criteria;
+        END IF;
+      END;
+
+      pl_qtype_out := 'A';
+      pl_comments_out := 'Met all criteria.  Eligible for aDHQ';
+
+
+    EXCEPTION
+      WHEN exit_criteria THEN
+        pl_qtype_out := l_qtype;
+        pl_comments_out := l_comments;
+        pl_reset_out := l_reset_flag;
+    END check_elig_criteria;
+    /****************************************************************/
+    /****************************************************************/
+
+  BEGIN  -- Main routine cacl_qtype begins here.
+    qtype_out := NULL;
+    err_out := NULL;
+    reset_flag_out := NULL;
+    -- initialize
+    gl_donor_id := donor_id_in;
+    gl_coll_date := TRUNC(NVL(coll_date_in, SYSDATE));
+    gl_don_type := don_type_in; -- V07
+
+    -- Check if all parameters are set and intialize----------------;
+    DECLARE
+      CURSOR elig_criteria_cur IS
+       SELECT freq_between_donations, freq_type, no_of_donations, inter_wrong_question,
+               deferral_period, dhq_don_types, -- V07 -- added deferral_period, dhq_don_types
+               min_donations -- V09; 09/12/2014;
+         FROM abbr_elig_criteria
+        WHERE SYSDATE BETWEEN eff_date and NVL(term_date, SYSDATE+1);
+    -- 1) Calcualate time since last donation.
+    BEGIN
+      OPEN elig_criteria_cur;
+      FETCH elig_criteria_cur INTO gl_freq_value, gl_freq_type, gl_fDHQ_cnt, gl_inter, gl_freqDefValue, gl_don_types, gl_DHQmin_cnt; --V07 -- added gl_freqDefValue, gl_don_types
+      CLOSE elig_criteria_cur;
+
+      IF gl_freq_value IS NULL OR gl_freq_type IS NULL OR gl_freqDefValue IS NULL THEN -- V07 -- added gl_freqDefValue
+        --DBMS_OUTPUT.PUT_LINE('Frequency for Abbreviate Eligibility Critera is not configured');
+        err_out := 'Frequency for Abbreviate Eligibility Critera is not configured';
+        RAISE exit_error;
+      END IF;
+
+      IF gl_fDHQ_cnt IS NULL THEN
+        --DBMS_OUTPUT.PUT_LINE('No. of Donations is not set in abbreviated Eligibility Criteria configuration');
+        err_out := 'No. of Donations is not set in abbreviated Eligibility Criteria configuration';
+        RAISE exit_error;
+      END IF;
+
+      IF gl_DHQmin_cnt IS NULL THEN
+        --DBMS_OUTPUT.PUT_LINE('No. of Donations is not set in abbreviated Eligibility Criteria configuration');
+        err_out := 'No. of min Donations is not set in abbreviated Eligibility Criteria configuration';
+        RAISE exit_error;
+      END IF;
+    END;
+    ---------------------------------------------------
+
+    --- 1) Check if it is first donation.
+    DECLARE
+      l_cnt NUMBER;
+    BEGIN
+      SELECT count(*) INTO l_cnt
+        FROM donations
+       WHERE donor_id = gl_donor_id
+         AND unit_id IS NOT NULL -- IM:9693; 09/20/2013; (do not count deferrals)
+         AND TRUNC(coll_date) <= TRUNC(gl_coll_date);
+
+      --IF l_cnt = 1 THEN
+      IF l_cnt = 0 THEN -- IM:9693
+        l_qtype := 'F';
+        --l_reset_flag := 'Y';
+        l_comments := 'First Time Donation';
+        RAISE exit_process;
+      END IF;
+    END;
+
+
+    -- V07
+    -- 1.5) Check if the current donation's donation type can be counted for abbreviated.
+    DECLARE
+      l_cnt NUMBER;
+    BEGIN
+      SELECT COUNT(1) INTO l_cnt
+        FROM (SELECT DISTINCT TRIM(regexp_substr(gl_don_types,'[^,]+', 1, LEVEL)) don_type
+                 FROM dual
+               CONNECT BY regexp_substr(gl_don_types, '[^,]+', 1, LEVEL) IS NOT NULL
+              )
+      WHERE don_type = gl_don_type;
+
+      IF l_cnt = 0 THEN -- donation type is not in the list of donation types configured in abbreviated elig criteria (ADHQ).
+        l_qtype := 'F';
+        --l_reset_flag := 'Y';
+        l_comments := 'Donation type is not in the list of configured donations types in ADHQ screen';
+        RAISE exit_process;
+      END IF;
+    END;
+    ----- End V07 changes.
+
+    ---
+    ---
+    -- V10 -- IM 10398, commented below block on 02/19/2015;  This check is not required here and it is moved to check_elig_criteria.
+    -- It is safe to remove this block of code from here.  Scenarios that resulted in the issue is below.
+    /*
+      1)      02-17-13 - fDHQ
+      2)      08-18-13 . fDHQ  ( >6M)
+      3)      02-18-14 . aDHQ (=6M)[Marsha Senter]  yes -----THIS PIECE OF CODE CALCULATES THIS TO BE FDHQ BECAUSE OF >6M AND RESET FLAG - 'Y'
+      4)      08-19-14 . fDHQ (>6M)
+      5)      02-19-15 . fDHQ (=6M)
+      6)      08-19-15 . aDHQ  (=6M)[Marsha Senter]  yes
+
+      1)      02-17-13 - fDHQ
+      2)      08-18-13 . fDHQ (>6M)
+      3)      02-18-14 . aDHQ  (=6M)[Marsha Senter] yes  -----THIS PIECE OF CODE CALCULATES THIS TO BE FDHQ BECAUSE OF >6M AND RESET FLAG - 'Y'
+      4)      08-19-14 - fDHQ  (>6M)
+      5)      03-19-15 . fDHQ  (>6M)
+      6)      09-19-15 . aDHQ (=6M)[Marsha Senter] yes -----THIS PIECE OF CODE CALCULATES THIS TO BE FDHQ BECAUSE OF >6M AND RESET FLAG - 'Y'
+    */
+    --
+    /*
+    --- 2) Check if time since last donation has passed 6Months (frq defined in eligCritera Configuration).
+    -- checkLastDonation
+    DECLARE
+      l_last_coll_date DATE;
+      CURSOR last_donation_cur IS
+        SELECT max(coll_date)
+          FROM donations
+         WHERE donor_id = gl_donor_id
+           --AND (unit_id IS NOT NULL OR deferral_id IS NOT NULL)
+           AND unit_id IS NOT NULL -- IM:9693; 09/20/2013
+           AND coll_date < gl_coll_date;
+    BEGIN
+      -- Get the last donation date.
+      OPEN last_donation_cur;
+      FETCH last_donation_cur INTO l_last_coll_date;
+      CLOSE last_donation_cur;
+
+
+     -- Check if it is within the time frame defined for Abbr elig critera.
+      IF gl_coll_date > addFreq(l_last_coll_date) THEN
+        l_qtype := 'F';
+        l_reset_flag := 'Y';
+        l_comments := 'Outside the time frame defined in abbr_elig_critera.  ( >6 months since last donation )';
+        RAISE exit_process;
+      END IF;
+    END;
+
+    */
+
+    -- for cases where last donation is within the time frame defined in abbr_elig_critera (with in 6 months).
+
+    -- 2.5 IM:9657;  For scenario where there is no record in the donor_hhq_history.  This happens when the first
+    -- few donations were clean donations but were not recorded in dqh table because abbreviated questionnaire is not implemented then.
+
+    DECLARE
+      -- Check if any record in dqh.
+      CURSOR dqh_count_cur IS
+        SELECT count(1)
+          FROM donor_hhq_history dqh
+         WHERE dqh.transaction_id IS NOT NULL
+           AND dqh.donor_id = gl_donor_id;
+
+      -- check if any record in donations
+      CURSOR don_count_cur IS
+        SELECT COUNT(1)
+          FROM donations d
+         WHERE d.donor_id = gl_donor_id
+           AND (d.unit_id IS NOT NULL OR d.deferral_id IS NOT NULL) -- IM:9693; 09/20/2013; no change here
+           AND d.coll_date BETWEEN subFreq(gl_coll_date) AND gl_coll_date;
+
+      -- Get records that are in donation but not found in dqh.
+      CURSOR missing_donation_cur IS
+        SELECT d.transaction_id, d.donor_id
+          FROM donations d
+         WHERE (d.unit_id IS NOT NULL OR d.deferral_id IS NOT NULL) -- -- IM:9693; 09/20/2013; no change here
+           AND d.donor_id = gl_donor_id
+           AND d.transaction_id NOT IN (SELECT dhq.transaction_id -- V23 added subquery
+                                          FROM donor_hhq_history dhq
+                                         WHERE dhq.donor_id = gl_donor_id)
+           --AND d.coll_date BETWEEN subFreq(gl_coll_date) AND gl_coll_date
+           --AND d.coll_date BETWEEN ADD_MONTHS(gl_coll_date, -24) AND gl_coll_date -- V08 -- 09/09/2014; -- V09 --09/11/2014;
+        ORDER BY d.coll_date DESC;
+
+      l_dqh_cnt NUMBER;
+      l_don_cnt NUMBER;
+    BEGIN
+
+      -- V23
+      --OPEN dqh_count_cur;
+      --FETCH dqh_count_cur INTO l_dqh_cnt;
+      --CLOSE dqh_count_cur;
+
+      -- Only if no records are found in dqh table.
+      -- IF l_dqh_cnt = 0 THEN  -- V23 (Only capturing one backoffice registration because of the check, so commented out to capture all backoffice registrations)
+        OPEN don_count_cur;
+        FETCH don_count_cur INTO l_don_cnt;
+        CLOSE don_count_cur;
+
+        -- Only if records are found in donation table.
+        IF l_don_cnt <> 0 THEN
+          -- Get only records for the last 6 months and insert.
+          FOR don_rec IN missing_donation_cur LOOP
+            INSERT INTO donor_hhq_history(donor_id, transaction_id, calc_af_qtype, actual_af_qtype,
+                                                    reset_flag, comments, program_id, insert_date, insert_user,
+                                                    audit_key, online_id)
+            VALUES(don_rec.donor_id, don_rec.transaction_id, 'F', 'F',
+                   NULL, 'Missing records - updated from db pkg', 'DONOR_QUESTIONNAIRE', SYSDATE, NULL, NULL, NULL);
+          END LOOP;
+          COMMIT;
+        END IF;
+      -- END IF; -- V23
+    END;
+    -----------
+
+    -- for cases where last donation is within the time frame defined in abbr_elig_critera (with in 6 months).
+    -- 3) Check for any flag in last 6 months.
+    -- V07 added donation type condition in mandatory_fDHQ_cnt_cur query. Count only donation types that can be counted
+    -- V07 for abbreviated eligibility calculation. (Donation types are configured in ADHQ screen to have similar full questionnaire.)
+    DECLARE
+      l_reset_cnt NUMBER;
+      l_cnt NUMBER;
+      l_reset_coll_date DATE;
+      l_cur_found BOOLEAN;
+      CURSOR reset_flag_check_cur IS
+      SELECT d.coll_date
+        FROM donor_hhq_history dqh, donations d
+       WHERE dqh.transaction_id = d.transaction_id
+         AND NVL(dqh.reset_flag, 'N') = 'Y'
+         AND (d.unit_id IS NOT NULL OR d.deferral_id IS NOT NULL)-- IM:9693; 09/20/2013 -- no change here
+         AND dqh.donor_id = gl_donor_id
+         --AND d.coll_date BETWEEN subFreq(gl_coll_date) AND gl_coll_date  -- IM 10398
+         AND d.coll_date < gl_coll_date -- IM 10398, reset flag can be set and the second donation can be greater than 6M, so commented out above BETWEEN condition.
+      ORDER BY d.coll_date DESC;
+
+      -- modified for V07
+      CURSOR mandatory_fDHQ_cnt_cur(start_date_in IN DATE) IS
+      SELECT COUNT(1)
+       FROM donor_hhq_history dqh, donations d
+      WHERE dqh.transaction_id = d.transaction_id
+        AND dqh.calc_af_qtype = 'F'
+        --AND (d.unit_id IS NOT NULL OR d.deferral_id IS NOT NULL)
+        AND d.unit_id IS NOT NULL -- IM:9693; 09/20/2013 -- mandatory fDHQ must be succesful donations.
+        AND dqh.donor_id = gl_donor_id
+        AND d.coll_date BETWEEN start_date_in AND gl_coll_date
+        AND d.donation_type IN (SELECT DISTINCT TRIM(regexp_substr(gl_don_types,'[^,]+', 1, LEVEL)) don_type
+                                   FROM dual
+                                  CONNECT BY regexp_substr(gl_don_types, '[^,]+', 1, LEVEL) IS NOT NULL
+                                );
+    BEGIN
+      -- Check whether reset flag is set and if set, get the latest collection date on which the flag is set.
+      OPEN reset_flag_check_cur;
+      FETCH reset_flag_check_cur INTO l_reset_coll_date;
+      l_cur_found := reset_flag_check_cur%FOUND;
+      CLOSE reset_flag_check_cur;
+
+      IF l_cur_found THEN
+        -- Check if mandatory fDHQ condition is met.  It is defined in abbr_elig_critera - no_of_donations.
+        OPEN mandatory_fDHQ_cnt_cur(l_reset_coll_date);
+        FETCH mandatory_fDHQ_cnt_cur INTO l_cnt;
+        CLOSE mandatory_fDHQ_cnt_cur;
+
+        IF l_cnt < gl_fDHQ_cnt THEN
+          l_qtype := 'F';
+          l_comments:= 'Number of mandatory fDHQ (successful) donations condition not met, so fDHQ';
+          RAISE exit_process;
+        ELSE
+          check_elig_criteria(l_qtype, l_comments, l_reset_flag);
+        END IF;
+      ELSE
+        check_elig_criteria(l_qtype, l_comments, l_reset_flag);
+      END IF;
+
+      -- Check_elig_critera above will return either 'A', or 'F'.
+      qtype_out := l_qtype;
+      comments_out := l_comments;
+      reset_flag_out := l_reset_flag;
+      --dbms_output.put_line('reset flag 1 ' || l_reset_flag);
+    END;
+  EXCEPTION
+    WHEN exit_process THEN
+      qtype_out := l_qtype; -- used just to exit the routine as the type of questionnaire is already calculated.
+      comments_out := l_comments;
+      reset_flag_out := l_reset_flag;
+      --dbms_output.put_line('reset flag ' || l_reset_flag);
+    WHEN exit_error THEN
+      NULL;  -- Error out variable is set before raising this exception.
+  END calc_qtype;
+
+  -- This procedure is used to validate a comma seperated donation type input string.
+  -- It returns the invalid donation type when found.
+  -- Called from ADHQ screen (VDIABBRQ)
+  PROCEDURE valid_don_types (in_donTypeList IN VARCHAR2, out_donTypeList OUT VARCHAR2, out_ErrDonType OUT VARCHAR2) IS
+    l_donTypeList VARCHAR2(500);
+    ltab_lname dbms_utility.lname_array;
+    ln_len     BINARY_INTEGER;
+    l_dummy    PLS_INTEGER;
+    l_rec_found BOOLEAN := FALSE;
+    l_ErrDonType VARCHAR2(10) := NULL;
+
+    -- Did not use eff date and term dates in the query.  A terminated don type may be effective
+    -- 6 months back and may also be required for aBHQ eligibility calcuations.
+    CURSOR donType_Cur(pl_donType VARCHAR2) IS
+      SELECT 1
+        FROM valid_donation_types
+       WHERE donation_type = pl_donType
+         AND donation_type <> '99'
+         AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE+1); -- 09/17/2014;
+  BEGIN
+
+  -- 0) Check for nulls
+  IF in_donTypeList IS NULL THEN
+    l_ErrDonType := 'NULL';
+  ELSIF TRIM(REPLACE(in_donTypeList, ',')) IS NULL THEN
+    l_ErrDonType := in_donTypeList;
+  ELSE
+
+    -- 1) Clean the input comma seperated donation type string by removing spaces and duplicates.
+    -- Eg: 'DI, DI, AU,AL' is converted to 'DI,AU,AL'
+    SELECT listagg(don_type,',') WITHIN GROUP (ORDER BY don_type) INTO l_donTypeList
+    FROM (SELECT DISTINCT TRIM(regexp_substr(in_donTypeList,'[^,]+', 1, LEVEL)) don_type FROM dual
+                            CONNECT BY regexp_substr(in_donTypeList, '[^,]+', 1, LEVEL) IS NOT NULL);
+
+
+    -- 2) Validate each element of the comma seperated donation type string against valid_donation_types table.
+     dbms_utility.comma_to_table(list   => l_donTypeList
+                                ,tablen => ln_len
+                                ,tab    => ltab_lname);
+
+      FOR i IN 1 .. ln_len LOOP
+        --dbms_output.put_line('element ' || i || ' is ' || ltab_lname(i));
+        OPEN dontype_cur(ltab_lname(i));
+        FETCH dontype_cur INTO l_dummy;
+        l_rec_found := dontype_cur%FOUND;
+        CLOSE dontype_cur;
+
+        IF NOT l_rec_found THEN
+          -- dbms_output.put_line('error element ' || i || ' is ' || ltab_lname(i));
+          -- store the invalid don type in a temporary variable.
+          l_ErrDonType := ltab_lname(i);
+          EXIT;
+        END IF;
+     END LOOP;
+  END IF; -- in_donTypeList not null;
+
+     out_donTypeList := l_donTypeList;
+     out_ErrDonType := l_ErrDonType;
+
+  END valid_don_types;
+
+
+
+PROCEDURE generate_questions(p_transaction_id IN VARCHAR2, p_selected_qtype IN VARCHAR2, p_abbr_flag OUT VARCHAR2, p_status OUT VARCHAR2)
+  AS
+    PRAGMA autonomous_transaction;
+
+    gl_donor_id DONORS.DONOR_ID%TYPE;
+    gl_gender   DONORS.GENDER%TYPE;
+    gl_don_type DONATIONS.DONATION_TYPE%TYPE;
+    gl_coll_date DONATIONS.COLL_DATE%TYPE;
+    gl_abbr_flag VARCHAR2(1);
+
+    gl_chapter_id DONATIONS.CHAPTER_ID%TYPE;
+    gd_local_dt   DATE;
+
+    l_random_flag VARCHAR2(1);
+    l_qtype_calc VARCHAR2(1);-- Abbr SCR
+    l_qtype_comments VARCHAR2(1000);-- Abbr SCR
+    l_qtype_reset_flag VARCHAR2(1);-- Abbr SCR
+    l_error VARCHAR2(2000); --Abbr SCR
+
+    CURSOR hh_template_cur(don_type_in IN VARCHAR2) IS
+    SELECT hht.randomization_flag
+      FROM health_history_template hht
+     WHERE hht.donation_type = don_type_in
+       AND gl_coll_date BETWEEN hht.eff_date AND NVL(hht.term_date, gl_coll_date+10);
+
+    -- SCR 20609; 07/15/2014
+    -- This function returns abbreviated question description if it is configured in valid_hh_questions table, otherwise returns NULL;
+    -- Commented on 03/01/2019 (too many cursors - replaced with single update stmt)
+    /*
+    FUNCTION abbr_QDesc(qCode_in IN VARCHAR2) RETURN VARCHAR2 IS
+      CURSOR hht_cur IS
+       SELECT abbr_flag
+         FROM health_history_template
+        WHERE question_code = qCode_in
+         AND donation_type = gl_don_type
+         AND SYSDATE BETWEEN eff_date AND NVL(term_date, SYSDATE+1);
+
+      CURSOR vhq_cur IS
+      SELECT question_description
+        FROM valid_hh_questions
+       WHERE question_code = qCode_in || '-A';
+
+      l_qDesc VARCHAR2(1000) := NULL;
+      l_abbrFlag VARCHAR2(1);
+    BEGIN
+        -- check if the question is setup for abbreviated questionnaire in health_history_template.
+        OPEN hht_cur;
+        FETCH hht_cur INTO l_abbrFlag;
+        CLOSE hht_cur;
+
+        IF NVL(l_abbrFlag,'N') = 'Y' THEN
+          -- Get abbreviated question description if it is configured from valid_hh_quesetions table
+          OPEN vhq_cur;
+          FETCH vhq_cur INTO l_qDesc;
+          CLOSE vhq_cur;
+        END IF;
+      RETURN l_qDesc;
+    END abbr_QDesc;
+    ------------------
+    */
+
+    PROCEDURE odr_random_insert IS
+      /* Get the sequence number and question code for parent quesiton that have child questions */
+       CURSOR wdr_cur IS
+         SELECT sort_sequence, question_code
+           FROM onsite_donor_responses
+          WHERE transaction_id = p_transaction_id
+            AND sub_question_flag = 'Y' ;
+    BEGIN
+      /* Insert only parent questions - do not insert child quesitons */
+      INSERT INTO onsite_donor_responses
+              (transaction_id,
+               template_id,
+               question_code,
+               question_description,
+               gender,
+               sub_question_flag,
+               parent_question_code,
+               parent_resp_flag, -- V20
+               insert_date,
+               abbr_question_flag,
+               sort_sequence
+               )
+            SELECT p_transaction_id,
+                   hht.template_id,
+                   hht.question_code,
+                   hht.question_description,
+                   hht.gender,
+                   hht.sub_question_flag,
+                   hht.parent_question_code,
+                   hht.parent_resp_flag, -- V20
+                   systimestamp,
+                   DECODE(gl_abbr_flag, 'Y', hht.abbr_flag, NULL),
+                   ROW_NUMBER() OVER (PARTITION BY 1 ORDER BY dbms_random.value)
+              FROM health_history_template hht
+             WHERE hht.donation_type = gl_don_type
+               AND (hht.gender = 'A' OR hht.gender = gl_gender)
+               -- AND NVL(abbr_flag, 'N') IN ('Y', gl_abbr_flag) -- Abbr SCR -- MLT 2426
+               AND NVL(screener_ask, 'X') = 'D' -- MLT 2386
+               AND gl_coll_date BETWEEN eff_date AND NVL(term_date, gl_coll_date + 10)
+               AND parent_question_code IS NULL;
+
+      /* For each parent question that has child questions, insert the child quesitons.  If parent question has sequence 5, child
+      question will have sequence 5.1, 5.2 ...  */
+      FOR wdr_rec IN wdr_cur LOOP
+          INSERT INTO onsite_donor_responses
+            (transaction_id,
+             template_id,
+             question_code,
+             question_description,
+             gender,
+             sub_question_flag,
+             parent_question_code,
+             parent_resp_flag, -- V20             
+             insert_date,
+             abbr_question_flag,
+             sort_sequence
+             )
+          SELECT   p_transaction_id,
+                   hht.template_id,
+                   hht.question_code,
+                   hht.question_description,
+                   hht.gender,
+                   hht.sub_question_flag,
+                   hht.parent_question_code,
+                   hht.parent_resp_flag, -- V20                   
+                   systimestamp,
+                   DECODE(gl_abbr_flag, 'Y', hht.abbr_flag, NULL),
+                   wdr_rec.sort_sequence || '.' || ROW_NUMBER() OVER (PARTITION BY PARENT_QUESTION_CODE ORDER BY hht.sort_sequence)
+              FROM health_history_template hht
+             WHERE hht.donation_type = gl_don_type
+               AND (hht.gender = 'A' OR hht.gender = gl_gender)
+               AND NVL(abbr_flag, 'N') IN ('Y', gl_abbr_flag) -- Abbr SCR -- MLT 2426 -- V21 (uncommented)
+               AND gl_coll_date BETWEEN eff_date AND NVL(term_date, gl_coll_date+10)
+               AND parent_question_code = wdr_rec.question_code;
+     END LOOP;
+    END odr_random_insert;
+
+    PROCEDURE odr_insert IS
+    BEGIN
+      INSERT INTO onsite_donor_responses
+          (transaction_id,
+           template_id,
+           question_code,
+           question_description,
+           gender,
+           sub_question_flag,
+           parent_question_code,
+           parent_resp_flag, -- V20
+           insert_date,
+           abbr_question_flag,
+           sort_sequence
+           )
+        SELECT p_transaction_id,
+               hht.template_id,
+               hht.question_code,
+               hht.question_description,
+               hht.gender,
+               hht.sub_question_flag,
+               hht.parent_question_code,
+               hht.parent_resp_flag, -- V20
+               systimestamp,
+               DECODE(gl_abbr_flag, 'Y', hht.abbr_flag, NULL),
+               DECODE(gl_abbr_flag, 'Y', hht.abbr_disp_seq, hht.display_order) -- use abbr_disp_seq for aDHQ otherwise use display_order. -- V21
+          FROM health_history_template hht
+         WHERE hht.donation_type = gl_don_type
+           AND (hht.gender = 'A' OR hht.gender = gl_gender)
+           AND NVL(abbr_flag, 'N') IN ('Y', gl_abbr_flag) -- Abbr SCR -- MLT 2426 -- V21 (uncommented)
+           AND NVL(screener_ask, 'X') = 'D' -- MLT 2386
+           AND gl_coll_date BETWEEN hht.eff_date AND NVL(hht.term_date, gl_coll_date+10);
+    END odr_insert;
+
+    FUNCTION abbr_enabled RETURN BOOLEAN IS
+      CURSOR hh_template_cur IS
+      SELECT 1
+        FROM health_history_template
+       WHERE donation_type = gl_don_type
+         AND NVL(abbr_flag, 'N') = 'Y'
+         AND gl_coll_date BETWEEN eff_date AND NVL(term_date, gl_coll_date +10);
+      l_dummy PLS_INTEGER;
+      l_cur_found BOOLEAN;
+    BEGIN
+      OPEN hh_template_cur;
+      FETCH hh_template_cur INTO l_dummy;
+      l_cur_found := hh_template_cur%FOUND;
+      CLOSE hh_template_cur;
+
+      RETURN l_cur_found;
+    END abbr_enabled;
+
+  BEGIN
+   p_status := 'OK';
+   p_abbr_flag := 'N';
+    -- Step 1 (Validate transaction ID)
+    begin
+      select d.donor_id, d.gender, dn.donation_type, dn.coll_date, dn.chapter_id
+        into gl_donor_id, gl_gender, gl_don_type, gl_coll_date, gl_chapter_id
+        from donors d, donations dn
+       where d.donor_id = dn.donor_id
+         and dn.transaction_id = p_transaction_id;
+    exception
+      when others then
+        p_status := 'Error in retrieving Transaction information.';
+        RETURN;
+    end;
+
+    IF gl_donor_id IS NULL OR
+       gl_gender IS NULL OR
+       gl_don_type IS NULL OR
+       gl_coll_date IS NULL OR
+       gl_chapter_id IS NULL
+    THEN
+       p_status := 'Required information missing';
+       RETURN;
+    END IF;
+
+    gd_local_dt := lifetrack_timezone_convert.get_local_time(gl_chapter_id, SYSDATE);
+
+    -- Step 2 -- Calcualte abbr. vs full.
+    l_qtype_calc := 'F'; -- Default to Full questionnaire
+    IF abbr_enabled THEN
+      donor_questionnaire.calc_qtype(  donor_id_in     => gl_donor_id ,
+                                       coll_date_in    => gl_coll_date,
+                                       don_type_in     => gl_don_type,
+                                       qtype_out       => l_qtype_calc,
+                                       comments_out    => l_qtype_comments,
+                                       reset_flag_out  => l_qtype_reset_flag,
+                                       err_out         => l_error
+                                     );
+
+      IF l_error IS NOT NULL THEN
+        l_qtype_calc := 'F';
+        l_qtype_comments := l_error;
+      END IF;
+
+      --
+      INSERT INTO donor_hhq_history
+      (donor_id, transaction_id, online_id, calc_af_qtype, actual_af_qtype,
+      reset_flag, comments, program_id, insert_date, insert_user, audit_key)
+      VALUES
+      (gl_donor_id, p_transaction_id, null, l_qtype_calc, p_selected_qtype, --V21
+       l_qtype_reset_flag, l_qtype_comments, 'DONOR_QUESTIONNAIRE', SYSDATE, USER, NULL
+      );
+    END IF;
+
+    IF l_qtype_calc = 'A' AND p_selected_qtype = 'A' THEN   -- V21
+      gl_abbr_flag := 'Y';
+    ELSE
+      gl_abbr_flag := 'N';
+    END IF;
+
+    -- step 3 -- check randomization and insert into onsite_donor_responses.
+
+    l_random_flag := 'N'; -- default
+    OPEN hh_template_cur(gl_don_type);
+    FETCH hh_template_cur INTO l_random_flag;
+    CLOSE hh_template_cur;
+
+    IF l_random_flag = 'Y' THEN
+      /* procedure added to insert questions in random order.  Modified this logic to fix the issue where
+        child questions are displayed before parent questions
+      */
+      odr_random_insert;
+    ELSE
+      odr_insert;
+    END IF;
+
+    /* -- commented on 03/01/2019. It has too many cursors;
+    -- step 4 (update question description)
+     --
+     IF gl_abbr_flag = 'Y' THEN -- abbreviated questionnaire will be administered.
+       DECLARE
+          CURSOR wdr_cur IS
+            SELECT question_code
+              FROM onsite_donor_responses
+             WHERE transaction_id = p_transaction_id;
+          l_QDesc VARCHAR2(2000) := NULL;
+       BEGIN
+          FOR wdr_rec IN wdr_cur
+          LOOP
+             l_QDesc := abbr_QDesc(wdr_rec.question_code); -- returns abbreviated Question Description if configured, otherwise returns NULL.
+             IF l_QDesc IS NOT NULL THEN
+                -- Update descriptions with the new abbreivated descriptions
+                UPDATE onsite_donor_responses
+                   SET question_description = l_QDesc
+                 WHERE transaction_id = p_transaction_id
+                   AND question_code = wdr_rec.question_code;
+             END IF;
+          END LOOP;
+       END;
+     END IF;
+     */
+
+    -- step 4 (update question description AND abbr_question_flag for abbreviated questionnaire)
+     --
+    IF gl_abbr_flag = 'Y' THEN -- abbreviated questionnaire will be administered.
+      p_abbr_flag := 'Y';
+
+      update onsite_donor_responses odr
+        set ques_desc_abbr =
+        (select vhq.question_description
+          from health_history_template ht, valid_hh_questions vhq
+         where ht.question_code||'-A' = vhq.question_code
+          and ht.donation_type = gl_don_type
+          and ht.abbr_flag = 'Y'
+          and vhq.question_code = odr.question_code ||'-A'
+          and gl_coll_date between vhq.eff_date and nvl(vhq.term_date, gl_coll_date+10)
+          and gl_coll_date between  ht.eff_date and nvl(ht.term_date, gl_coll_date+10)
+          and rownum = 1
+          )
+        where transaction_id = p_transaction_id
+          and exists
+          ( select 1
+              from health_history_template ht, valid_hh_questions vhq
+             where ht.question_code||'-A' = vhq.question_code
+              and ht.donation_type = gl_don_type
+              and ht.abbr_flag = 'Y'
+              and vhq.question_code = odr.question_code ||'-A'
+              and gl_coll_date between vhq.eff_date and nvl(vhq.term_date, gl_coll_date+10)
+              and gl_coll_date between  ht.eff_date and nvl(ht.term_date, gl_coll_date+10)
+          );
+    END IF;
+
+    -- DELETE -A only questions for FULL QUESTIONNAIRE. -- V21
+    IF gl_abbr_flag = 'N' THEN
+        DELETE FROM onsite_donor_responses odr
+          WHERE odr.transaction_id = p_transaction_id
+            AND EXISTS (SELECT 1
+                          FROM health_history_template ht
+                         WHERE ht.donation_type = gl_don_type
+                           AND SUBSTR(ht.question_code, -2)= '-A'
+                           AND ht.question_code = odr.question_code
+                           AND ht.abbr_flag = 'Y'
+                           AND gl_coll_date BETWEEN ht.eff_date and nvl(ht.term_date, gl_coll_date+10)
+                       );         
+
+    END IF;
+
+    -- delete for both aDHQ and fDHQ scenarios , if sort_sequence is NULL. -- V21
+    DELETE FROM onsite_donor_responses
+      WHERE transaction_id = p_transaction_id
+        AND sort_sequence IS NULL;
+
+
+     -- step 5 (Update read more info if read more is enabled.)
+     DECLARE
+        nCnt NUMBER;
+     BEGIN
+       SELECT COUNT(1) into nCnt
+         FROM valid_parameters
+        WHERE parameter_code = 'READ_MORE'
+          AND UPPER(parameter_value) = 'Y'
+          AND gd_local_dt BETWEEN eff_date AND NVL(term_date, gd_local_dt + 1);
+
+        IF nCnt <> 0 THEN
+          UPDATE onsite_donor_responses odr
+            SET (read_more_desc, read_more_flag) =
+            (SELECT vhq.question_description, read_more_flag
+              FROM valid_hh_questions vhq
+             WHERE vhq.question_code = odr.question_code ||'-D'
+               AND gl_coll_date BETWEEN vhq.eff_date and nvl(term_date, gl_coll_date+10)
+               AND rownum = 1
+              )
+            WHERE transaction_id = p_transaction_id
+            AND EXISTS
+              (SELECT 1
+                FROM valid_hh_questions vhq
+               WHERE vhq.question_code = odr.question_code ||'-D'
+                 AND gl_coll_date BETWEEN vhq.eff_date and nvl(term_date, gl_coll_date+10)
+              );
+         END IF;
+     END;
+
+     -- Step 6 (populate question_delay_seconds onsite_donor_responses) -- MLT 2285
+     DECLARE
+        resp_delay_value NUMBER := 0;
+        res_dly_new_value NUMBER := 0;
+       -- no errors returned if the paramter code is not defined.
+       FUNCTION get_sysparm_value(p_parm_code IN VARCHAR2) RETURN NUMBER IS
+         l_value valid_parameters.parameter_value%TYPE;
+         ln_return NUMBER;
+       BEGIN
+         SELECT parameter_value into l_value
+           FROM valid_parameters
+          WHERE parameter_code = p_parm_code
+            AND gd_local_dt BETWEEN eff_date AND NVL(term_date, gd_local_dt + 1);  
+
+         ln_return := NVL(TRIM(l_value),0);
+
+         RETURN  ln_return;  
+       EXCEPTION
+         WHEN OTHERS THEN
+           RETURN 0;  
+       END get_sysparm_value;
+
+     BEGIN
+       resp_delay_value := get_sysparm_value('RESP_DELAY');
+       res_dly_new_value := get_sysparm_value('RES_DLY_NW');
+
+       -- update goes by question code.  If question was answered previously by the donor, update the time to resp_delay_value.
+       -- if the question was not answered previously, use res_dly_new_value as the delay time.
+       UPDATE onsite_donor_responses odr
+         SET odr.question_delay_seconds =        
+             ( SELECT DECODE(count(1), 0, res_dly_new_value, resp_delay_value)
+               FROM health_history hh
+              WHERE hh.chapter_id = gl_chapter_id
+                AND hh.question_code = odr.question_code
+                AND hh.transaction_id IN (SELECT dn.transaction_id FROM donations dn WHERE dn.donor_id = gl_donor_id)
+             )
+        WHERE odr.transaction_id = p_transaction_id
+          AND EXISTS 
+            (SELECT DECODE(COUNT(1), 0, 1, 1)
+               FROM health_history hh
+              WHERE hh.chapter_id = gl_chapter_id
+                AND hh.question_code = odr.question_code
+                AND hh.transaction_id IN (SELECT dn.transaction_id FROM donations dn WHERE dn.donor_id = gl_donor_id)
+            );       
+     END;
+
+
+     -- step 7 (insert a dummy donor response)
+     DECLARE
+        t_count NUMBER;
+     BEGIN
+        begin
+          select count(*)
+            into t_count
+            from donor_responses
+           where transaction_id = p_transaction_id
+             and question_code = 'DUMMY';
+        exception
+          when others then
+               p_status := 'Error in retrieving Transaction information from donor_responses.';
+               RETURN;
+        end;
+
+        if t_count = 0 then
+          insert into donor_responses
+            (transaction_id,
+             question_code,
+             resp_completed_flag)
+          values
+            (p_transaction_id,
+             'DUMMY',
+             null);
+        end if;
+     END;
+     ----------------------
+
+     COMMIT;
+  EXCEPTION
+    WHEN OTHERS THEN
+      p_status := SUBSTR(SQLERRM, 1, 300);
+  END generate_questions;
+
+
+
+END donor_questionnaire;
+
+/

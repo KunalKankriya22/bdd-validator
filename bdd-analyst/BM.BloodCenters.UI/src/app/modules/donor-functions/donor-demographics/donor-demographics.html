@@ -1,0 +1,574 @@
+<!-- SIDE PANEL MODE -->
+@if (isSidePanelMode) {
+  <app-side-panel-base
+    [title]="panelTitle()"
+    [width]="'100%'"
+    [showFooter]="currentSubPanel() === 'main'"
+    [footerButtons]="sidePanelButtons()"
+    (closePanel)="onCancel()"
+    (buttonClick)="onSidePanelButtonClick($event)">
+
+    <ng-container panelHeaderFields>
+      @if (currentSubPanel() !== 'main') {
+        <div class="sub-panel-back-header">
+          <button mat-icon-button (click)="onSubPanelBack()" aria-label="Back to demographics">
+            <mat-icon>arrow_back</mat-icon>
+          </button>
+        </div>
+      } @else {
+        <ng-container *ngTemplateOutlet="headerInfo"></ng-container>
+      }
+    </ng-container>
+
+    <ng-container panelContent>
+      @switch (currentSubPanel()) {
+        @case ('main') {
+          <ng-container *ngTemplateOutlet="mainContent"></ng-container>
+        }
+        @case ('international') {
+          <div class="sub-panel-content">
+            <app-international-address-form
+              [existingAddress]="intlAddressService.getInternationalAddress()"
+              (applied)="onIntlAddressApplied($event)"
+              (saved)="onIntlAddressApplied($event)"
+              (cancelled)="onSubPanelCancel()">
+            </app-international-address-form>
+          </div>
+        }
+        @case ('alternate') {
+          @if (alternateInjector) {
+            <div class="sub-panel-content">
+              <ng-container *ngComponentOutlet="AlternateDemographicsComponent; injector: alternateInjector"></ng-container>
+            </div>
+          }
+        }
+      }
+    </ng-container>
+  </app-side-panel-base>
+}
+
+<!-- DIALOG MODE -->
+@else {
+  <div class="donor-demographics-dialog" role="dialog" aria-labelledby="dialog-title">
+    <!-- Dialog Header -->
+    <div class="dialog-header">
+      <h2 id="dialog-title" class="dialog-title">Donor Demographics</h2>
+      <button
+        mat-icon-button
+        class="close-button"
+        (click)="onCancel()"
+        aria-label="Close dialog">
+        <mat-icon>close</mat-icon>
+      </button>
+    </div>
+
+    <!-- Loading State -->
+    @if (loading()) {
+      <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+        <mat-spinner diameter="40" aria-label="Loading donor demographics"></mat-spinner>
+        <span class="loading-text">Loading donor demographics...</span>
+      </div>
+    }
+
+    <!-- Error State -->
+    @if (error() && !loading()) {
+      <div class="error-container" role="alert" aria-live="assertive">
+        <mat-icon aria-hidden="true">error</mat-icon>
+        <p>{{ error() }}</p>
+        <button mat-raised-button color="primary" (click)="loadDemographics()">
+          Retry
+        </button>
+      </div>
+    }
+
+    <!-- Form Content -->
+    @if (!loading() && !error() && donorData()) {
+      <ng-container *ngTemplateOutlet="headerInfo"></ng-container>
+      <ng-container *ngTemplateOutlet="formContent"></ng-container>
+
+      <!-- Dialog Actions -->
+      <div class="dialog-actions" role="group" aria-label="Dialog actions">
+        <button
+          mat-stroked-button
+          class="action-btn"
+          type="button"
+          (click)="onRedisplay()"
+          [disabled]="loading() || saving()">
+          REDISPLAY
+        </button>
+        <button
+          mat-stroked-button
+          class="action-btn"
+          type="button"
+          (click)="onCancel()">
+          CANCEL
+        </button>
+        <button
+          mat-flat-button
+          class="save-btn"
+          type="submit"
+          (click)="onSave()"
+          [disabled]="saving() || !formDirty() || readOnly">
+          @if (saving()) {
+            <mat-spinner diameter="20"></mat-spinner>
+          } @else {
+            SAVE
+          }
+        </button>
+      </div>
+    }
+  </div>
+}
+
+<!-- ============ SHARED TEMPLATES ============ -->
+
+<!-- Header Info (Name, DOB, Sex, ABO) -->
+<ng-template #headerInfo>
+  @if (!loading() && !error() && donorData()) {
+    <div class="header-info">
+      <div class="info-row">
+        <div class="info-field">
+          <span class="label">Name</span>
+          <span class="value">{{ donorData()?.header?.name || '-' }}</span>
+        </div>
+        <div class="info-field">
+          <span class="label">DOB</span>
+          <span class="value">{{ (donorData()?.header?.dateOfBirth | date:'dd-MMM-yyyy') || '-' }}</span>
+        </div>
+        <div class="info-field">
+          <span class="label">Sex</span>
+          <span class="value">{{ donorData()?.header?.sex || '-' }}</span>
+        </div>
+        <div class="info-field">
+          <span class="label">ABO</span>
+          <span class="value">{{ donorData()?.header?.abo || '-' }}</span>
+        </div>
+      </div>
+    </div>
+  }
+</ng-template>
+
+<!-- Main Content (loading/error/form for side panel body) -->
+<ng-template #mainContent>
+  @if (loading()) {
+    <div class="loading-container" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="40" aria-label="Loading donor demographics"></mat-spinner>
+      <span class="loading-text">Loading donor demographics...</span>
+    </div>
+  }
+
+  @if (error() && !loading()) {
+    <div class="error-container" role="alert" aria-live="assertive">
+      <mat-icon aria-hidden="true">error</mat-icon>
+      <p>{{ error() }}</p>
+      <button mat-raised-button color="primary" (click)="loadDemographics()">
+        Retry
+      </button>
+    </div>
+  }
+
+  @if (!loading() && !error() && donorData()) {
+    <ng-container *ngTemplateOutlet="formContent"></ng-container>
+  }
+</ng-template>
+
+<!-- Form Content (shared between dialog and side panel) -->
+<ng-template #formContent>
+  <div class="dialog-content">
+    <form
+      [formGroup]="form"
+      (ngSubmit)="onSave()"
+      (click)="onFormClick($event)"
+      novalidate>
+
+      <!-- Address + Phones + Buttons -->
+      <div class="form-section">
+        <!-- Address Row 1: Street, Suite/Apt, City, Zip -->
+        <div class="form-row four-col">
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Street Address</mat-label>
+            <input
+              matInput
+              id="streetName"
+              formControlName="streetName"
+              maxlength="50"
+              style="text-transform: uppercase"
+              (blur)="forceUpperCase('streetName')"
+              required
+              aria-required="true"
+              [attr.aria-invalid]="f['streetName'].invalid && (f['streetName'].touched || submitted())"
+              [attr.aria-describedby]="f['streetName'].invalid && (f['streetName'].touched || submitted()) ? 'streetName-error' : null">
+            @if (f['streetName'].invalid && (f['streetName'].touched || submitted())) {
+              <mat-error id="streetName-error">
+                @if (f['streetName'].errors?.['required']) {
+                  Street Address is required
+                }
+                @if (f['streetName'].errors?.['maxlength']) {
+                  Street Address cannot exceed 50 characters
+                }
+              </mat-error>
+            }
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Suite/Apt</mat-label>
+            <input
+              matInput
+              formControlName="suiteApt"
+              maxlength="10"
+              style="text-transform: uppercase"
+              (blur)="forceUpperCase('suiteApt')">
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>City</mat-label>
+            @if (cityOptions().length > 1) {
+              <mat-select
+                formControlName="city"
+                (selectionChange)="onCitySelected($event.value)">
+                @for (opt of cityOptions(); track opt.city) {
+                  <mat-option [value]="opt.city">{{ opt.city }}</mat-option>
+                }
+              </mat-select>
+            } @else {
+              <input
+                matInput
+                formControlName="city"
+                style="text-transform: uppercase"
+                (blur)="forceUpperCase('city'); onCityBlur()">
+            }
+            @if (f['city'].invalid && (f['city'].touched || submitted())) {
+              <mat-error>
+                @if (f['city'].errors?.['minlength']) {
+                  City name must be at least 3 characters
+                }
+                @if (f['city'].errors?.['cityNotFound']) {
+                  City not found in reference data
+                }
+              </mat-error>
+            }
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Zip</mat-label>
+            <input
+              matInput
+              formControlName="zip"
+              maxlength="5"
+              inputmode="numeric"
+              (keypress)="onlyNumbers($event)"
+              (input)="onZipInput($event)"
+              (paste)="onPasteNumbers($event)">
+            @if (f['zip'].hasError('required')) {
+              <mat-error>Zip Code is required</mat-error>
+            }
+            @if (f['zip'].hasError('invalidZip')) {
+              <mat-error>Invalid Zip Code. No city found for this zip.</mat-error>
+            }
+            @if (f['zip'].hasError('pattern')) {
+              <mat-error>Zip Code must contain only digits</mat-error>
+            }
+          </mat-form-field>
+        </div>
+
+        <!-- Address Row 2: State, County (UAT #3: label was "Country", should be "County") -->
+        <div class="form-row four-col">
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>State</mat-label>
+            <input
+              matInput
+              formControlName="state"
+              maxlength="5"
+              readonly>
+          </mat-form-field>
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>County</mat-label>
+            <input
+              matInput
+              formControlName="county"
+              maxlength="40"
+              readonly>
+          </mat-form-field>
+          <div></div>
+          <div></div>
+        </div>
+
+        <!-- Phone Row: Home, Work, Mobile with checkboxes + Email -->
+        <div class="phone-email-row">
+          <div class="phone-with-checkbox">
+            <mat-form-field appearance="fill" class="phone-field">
+              <mat-label>Home Phone Number</mat-label>
+              <input
+                matInput
+                formControlName="homePhoneNumber"
+                maxlength="20"
+                placeholder="(+927) 123-1212"
+                (input)="onPhoneInput($event)"
+                (blur)="onPhoneBlur('homePhoneNumber')">
+              @if (f['homePhoneNumber'].invalid && (f['homePhoneNumber'].touched || submitted())) {
+                <mat-error>{{ getPhoneError('homePhoneNumber') }}</mat-error>
+              }
+            </mat-form-field>
+            <mat-checkbox
+              formControlName="homePreferred"
+              class="preferred-checkbox"
+              aria-label="Home phone is preferred contact">
+              Preferred?
+            </mat-checkbox>
+          </div>
+
+          <div class="phone-with-checkbox">
+            <mat-form-field appearance="fill" class="phone-field">
+              <mat-label>Work Phone Number</mat-label>
+              <input
+                matInput
+                formControlName="workPhoneNumber"
+                maxlength="20"
+                placeholder="(+927) 123-1212"
+                (input)="onPhoneInput($event)"
+                (blur)="onPhoneBlur('workPhoneNumber')">
+              @if (f['workPhoneNumber'].invalid && (f['workPhoneNumber'].touched || submitted())) {
+                <mat-error>{{ getPhoneError('workPhoneNumber') }}</mat-error>
+              }
+            </mat-form-field>
+            <mat-checkbox
+              formControlName="workPreferred"
+              class="preferred-checkbox"
+              aria-label="Work phone is preferred contact">
+              Preferred?
+            </mat-checkbox>
+          </div>
+
+          <div class="phone-with-checkbox">
+            <mat-form-field appearance="fill" class="phone-field">
+              <mat-label>Mobile Phone Number</mat-label>
+              <input
+                matInput
+                formControlName="mobilePhoneNumber"
+                maxlength="20"
+                placeholder="(+927) 123-1212"
+                (input)="onPhoneInput($event)"
+                (blur)="onPhoneBlur('mobilePhoneNumber')">
+              @if (f['mobilePhoneNumber'].invalid && (f['mobilePhoneNumber'].touched || submitted())) {
+                <mat-error>{{ getPhoneError('mobilePhoneNumber') }}</mat-error>
+              }
+            </mat-form-field>
+            <mat-checkbox
+              formControlName="mobilePreferred"
+              class="preferred-checkbox"
+              aria-label="Mobile phone is preferred contact">
+              Preferred?
+            </mat-checkbox>
+          </div>
+
+          <mat-form-field appearance="fill" class="email-field">
+            <mat-label>Email Address</mat-label>
+            <input
+              matInput
+              formControlName="email"
+              type="email"
+              maxlength="128">
+            @if (f['email'].invalid && (f['email'].touched || submitted())) {
+              <mat-error>
+                @if (f['email'].errors?.['email']) {
+                  Please enter a valid email address
+                }
+                @if (f['email'].errors?.['maxlength']) {
+                  Email cannot exceed 128 characters
+                }
+              </mat-error>
+            }
+          </mat-form-field>
+        </div>
+
+        <!-- Address Action Buttons -->
+        <div class="address-actions">
+          <button
+            mat-stroked-button
+            class="action-btn"
+            type="button"
+            (click)="onInternationalAddress()"
+            [disabled]="readOnly">
+            INTERNATIONAL ADDRESS
+          </button>
+          <button
+            mat-stroked-button
+            class="action-btn"
+            type="button"
+            (click)="onAlternateAddress()"
+            [disabled]="readOnly">
+            ALTERNATE ADDRESS
+          </button>
+        </div>
+      </div>
+
+      <!-- Personal Info Section -->
+      <div class="form-section">
+        <div class="form-row four-col">
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Primary Language</mat-label>
+            <mat-select formControlName="language">
+              <mat-option>
+                <ngx-mat-select-search [formControl]="languageSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No match"></ngx-mat-select-search>
+              </mat-option>
+              @for (lang of filteredLanguages; track lang.code) {
+                <mat-option [value]="lang.code">{{ lang.description }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Alias</mat-label>
+            <input
+              matInput
+              formControlName="alias"
+              maxlength="15"
+              style="text-transform: uppercase"
+              (blur)="forceUpperCase('alias')">
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Suffix</mat-label>
+            <input
+              matInput
+              formControlName="suffix"
+              maxlength="5"
+              style="text-transform: uppercase"
+              (blur)="forceUpperCase('suffix')">
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Ethnicity</mat-label>
+            <mat-select formControlName="ethnicity">
+              <mat-option>
+                <ngx-mat-select-search [formControl]="ethnicitySearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No match"></ngx-mat-select-search>
+              </mat-option>
+              @for (eth of filteredEthnicities; track eth.code) {
+                <mat-option [value]="eth.code">{{ eth.description }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+        </div>
+
+        <div class="form-row four-col">
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Salutation</mat-label>
+            <mat-select formControlName="salutation">
+              <mat-option>
+                <ngx-mat-select-search [formControl]="salutationSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No match"></ngx-mat-select-search>
+              </mat-option>
+              @for (sal of filteredSalutations; track sal.code) {
+                <mat-option [value]="sal.code">{{ sal.description }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Claimed Donations</mat-label>
+            <input
+              matInput
+              formControlName="claimedDonations"
+              type="number">
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Height</mat-label>
+            <mat-select formControlName="height">
+              <mat-option>
+                <ngx-mat-select-search [formControl]="heightSearchCtrl" placeholderLabel="Search..." noEntriesFoundLabel="No match"></ngx-mat-select-search>
+              </mat-option>
+              @for (h of filteredHeights; track h.code) {
+                <mat-option [value]="h.code">{{ h.description }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Weight</mat-label>
+            <input
+              matInput
+              formControlName="weight"
+              type="number"
+              inputmode="numeric"
+              maxlength="4"
+              (keypress)="onlyNumbers($event)"
+              (paste)="onPasteNumbers($event)"
+              (input)="limitWeightLength($event)">
+            @if (f['weight'].invalid && (f['weight'].touched || submitted())) {
+              <mat-error>
+                @if (f['weight'].errors?.['min']) {
+                  Weight must be at least 1
+                }
+                @if (f['weight'].errors?.['notInteger']) {
+                  Weight must be an integer
+                }
+              </mat-error>
+            }
+          </mat-form-field>
+        </div>
+      </div>
+
+      <!-- Employer Section (UAT #7: maxlength, #6: zip numeric, #9: clear on change, #11: auto-populate) -->
+      <div class="form-section employer-section">
+        <div class="form-row four-col">
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Donor Employer</mat-label>
+            <input
+              matInput
+              formControlName="employerName"
+              maxlength="50"
+              style="text-transform: uppercase"
+              (blur)="forceUpperCase('employerName')">
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>City</mat-label>
+            @if (employerCityOptions().length > 1) {
+              <mat-select
+                formControlName="employerCity"
+                (selectionChange)="onEmployerCitySelected($event.value)">
+                @for (opt of employerCityOptions(); track opt.city) {
+                  <mat-option [value]="opt.city">{{ opt.city }}</mat-option>
+                }
+              </mat-select>
+            } @else {
+              <input
+                matInput
+                formControlName="employerCity"
+                maxlength="40"
+                style="text-transform: uppercase"
+                (blur)="forceUpperCase('employerCity')">
+            }
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>Zip</mat-label>
+            <input
+              matInput
+              formControlName="employerZip"
+              maxlength="5"
+              inputmode="numeric"
+              (keypress)="onlyNumbers($event)"
+              (input)="onZipInput($event)"
+              (paste)="onPasteNumbers($event)">
+            @if (f['employerZip'].hasError('invalidZip')) {
+              <mat-error>Invalid Zip Code. No city found for this zip.</mat-error>
+            }
+            @if (f['employerZip'].hasError('pattern')) {
+              <mat-error>Zip Code must contain only digits</mat-error>
+            }
+          </mat-form-field>
+
+          <mat-form-field appearance="fill" class="form-field">
+            <mat-label>State</mat-label>
+            <input
+              matInput
+              formControlName="employerState"
+              maxlength="2"
+              readonly>
+          </mat-form-field>
+        </div>
+      </div>
+    </form>
+  </div>
+</ng-template>

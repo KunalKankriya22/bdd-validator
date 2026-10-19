@@ -1,0 +1,384 @@
+<div class="drive-details-query-page">
+  <!-- Visually hidden h1 for proper heading hierarchy -->
+  <h1 class="cdk-visually-hidden">Drive Details Query</h1>
+
+  <!-- PAGE HEADER WITH BREADCRUMB -->
+  <app-page-header-with-breadcrumb [config]="headerConfig"></app-page-header-with-breadcrumb>
+
+  <!-- FILTER CARD -->
+  <div class="filter-card">
+    <form [formGroup]="filterForm" (ngSubmit)="onRetrieve()" class="filter-form">
+      <div class="filter-row">
+        <!-- Select (All Drives / Past / Future) -->
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Select <span class="required-indicator">*</span></mat-label>
+          <mat-select formControlName="selectFilter">
+            @for (option of selectFilterOptions; track option.value) {
+              <mat-option [value]="option.value">{{ option.label }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Sponsor ID -->
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Sponsor ID</mat-label>
+          <mat-select formControlName="sponsorId" (selectionChange)="onSponsorChange($event.value)" panelClass="two-line-select-panel">
+            <!-- Custom trigger to show only Sponsor ID when selected -->
+            <mat-select-trigger>
+              {{ filterForm.get('sponsorId')?.value }}
+            </mat-select-trigger>
+
+            <!-- Search option -->
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="sponsorSearchControl"
+                placeholderLabel="Search sponsor..."
+                noEntriesFoundLabel="No sponsors found">
+              </ngx-mat-select-search>
+            </mat-option>
+
+            <!-- Two-line sponsor options -->
+            @for (sponsor of filteredSponsors; track sponsor.sponsorId) {
+              <mat-option [value]="sponsor.sponsorId" class="option-two-line">
+                <span class="option-primary">{{ sponsor.name?.trim() || '--' }}</span>
+                <span class="option-secondary">{{ sponsor.sponsorId?.trim() || '--' }}</span>
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Sponsor Name (Read-only) -->
+        <mat-form-field appearance="fill" class="filter-field readonly-field">
+          <mat-label>Sponsor Name</mat-label>
+          <input matInput
+                 #sponsorNameInput
+                 [value]="selectedSponsorName || '--'"
+                 readonly
+                 (mouseenter)="checkSponsorNameTruncation(sponsorNameInput)"
+                 (focus)="sponsorNameInput.blur()"
+                 [matTooltip]="selectedSponsorName"
+                 [matTooltipDisabled]="!isSponsorNameTruncated || !selectedSponsorName"
+                 matTooltipPosition="above" />
+        </mat-form-field>
+
+        <!-- Drive Date -->
+        <mat-form-field appearance="fill" class="filter-field" [class.has-error]="getDriveDateError()">
+          <mat-label>Drive Date</mat-label>
+          <input matInput #driveDateInput [matDatepicker]="driveDatePicker" formControlName="driveDate" (blur)="onDateBlur('driveDate', driveDateInput)" />
+          <mat-datepicker-toggle matIconSuffix [for]="driveDatePicker"></mat-datepicker-toggle>
+          <mat-datepicker #driveDatePicker></mat-datepicker>
+          <mat-hint class="custom-error" *ngIf="getDriveDateError()">{{ getDriveDateError() }}</mat-hint>
+        </mat-form-field>
+
+        <!-- Drive ID -->
+        <mat-form-field appearance="fill" class="filter-field">
+          <mat-label>Drive ID <span class="required-indicator">*</span></mat-label>
+          <mat-select formControlName="driveId" (selectionChange)="onDriveChange($event.value)">
+            <mat-option>
+              <ngx-mat-select-search
+                [formControl]="driveSearchControl"
+                placeholderLabel="Search drive..."
+                noEntriesFoundLabel="No drives found">
+              </ngx-mat-select-search>
+            </mat-option>
+            @for (drive of filteredDrives; track drive.driveId) {
+              <mat-option [value]="drive.driveId">{{ drive.driveId }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Drive Created Date (Read-only) -->
+        <mat-form-field appearance="fill" class="filter-field readonly-field">
+          <mat-label>Drive Created Date</mat-label>
+          <input matInput #driveCreatedDateInput [value]="selectedDriveCreatedDate || '--'" readonly (focus)="driveCreatedDateInput.blur()" />
+        </mat-form-field>
+
+        <!-- RETRIEVE Button -->
+        <div class="filter-field button-field">
+          <button mat-raised-button type="submit" class="btn-retrieve"
+                  [disabled]="!filterForm.value.selectFilter || !filterForm.value.driveId || filterForm.invalid || isLoading">
+            RETRIEVE
+          </button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <!-- CONTENT AREA -->
+  <div class="content-area">
+    <!-- MAIN CONTENT -->
+    <div class="main-content">
+      <!-- LOADING STATE -->
+      @if (isLoading) {
+        <div class="loading-container">
+          <mat-spinner diameter="50" color="accent"></mat-spinner>
+          <p class="loading-text">Loading drive details...</p>
+        </div>
+      }
+
+      <!-- EMPTY STATE -->
+      @if (!hasSearched && !isLoading) {
+        <div class="empty-state-container">
+          <div class="empty-state-icon" aria-hidden="true">
+            <mat-icon>edit</mat-icon>
+          </div>
+          <h3 class="empty-state-title">No Drives Selected</h3>
+          <p class="empty-state-message">
+            Please select a Drive ID to view associated drive and deferral records.
+          </p>
+        </div>
+      }
+
+      <!-- DRIVE DETAILS (after retrieve) -->
+      @if (hasSearched && !isLoading) {
+        <div class="drive-details-content">
+          <!-- RECRUITMENT & CLASSIFICATION DETAILS -->
+          <section class="details-section">
+            <h2 class="section-title">Recruitment & Classification Details</h2>
+            <div class="details-grid">
+              <div class="detail-item">
+                <span class="detail-label">Recruiter ID</span>
+                <span #recruiterId class="detail-value" (mouseenter)="checkTruncation('recruiterId', recruiterId)" [matTooltip]="getFieldValue(driveDetails?.recruiterId)" [matTooltipDisabled]="!isFieldTruncated('recruiterId')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.recruiterId) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Recruiter Name</span>
+                <span #recruiterName class="detail-value" (mouseenter)="checkTruncation('recruiterName', recruiterName)" [matTooltip]="getFieldValue(driveDetails?.recruiterName)" [matTooltipDisabled]="!isFieldTruncated('recruiterName')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.recruiterName) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Drive Coordinator</span>
+                <span #driveCoordinator class="detail-value" (mouseenter)="checkTruncation('driveCoordinator', driveCoordinator)" [matTooltip]="getFieldValue(driveDetails?.driveCoordinator)" [matTooltipDisabled]="!isFieldTruncated('driveCoordinator')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.driveCoordinator) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Phone Number</span>
+                <span #phoneNumber class="detail-value" (mouseenter)="checkTruncation('phoneNumber', phoneNumber)" [matTooltip]="getFieldValue(driveDetails?.phoneNumber)" [matTooltipDisabled]="!isFieldTruncated('phoneNumber')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.phoneNumber) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Status</span>
+                <span #status class="detail-value" (mouseenter)="checkTruncation('status', status)" [matTooltip]="getFieldValue(driveDetails?.status)" [matTooltipDisabled]="!isFieldTruncated('status')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.status) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Category</span>
+                <span #category class="detail-value" (mouseenter)="checkTruncation('category', category)" [matTooltip]="getFieldValue(driveDetails?.category)" [matTooltipDisabled]="!isFieldTruncated('category')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.category) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Type</span>
+                <span #type class="detail-value" (mouseenter)="checkTruncation('type', type)" [matTooltip]="getFieldValue(driveDetails?.type)" [matTooltipDisabled]="!isFieldTruncated('type')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.type) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Sponsor Category</span>
+                <span #sponsorCategory class="detail-value" (mouseenter)="checkTruncation('sponsorCategory', sponsorCategory)" [matTooltip]="getFieldValue(driveDetails?.sponsorCategory)" [matTooltipDisabled]="!isFieldTruncated('sponsorCategory')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.sponsorCategory) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Territory</span>
+                <span #territory class="detail-value" (mouseenter)="checkTruncation('territory', territory)" [matTooltip]="getFieldValue(driveDetails?.territory)" [matTooltipDisabled]="!isFieldTruncated('territory')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.territory) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Licensed Drive</span>
+                <span #licensedDrive class="detail-value" (mouseenter)="checkTruncation('licensedDrive', licensedDrive)" [matTooltip]="getFieldValue(driveDetails?.licensedDrive)" [matTooltipDisabled]="!isFieldTruncated('licensedDrive')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.licensedDrive) }}</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- LOCATION INFORMATION -->
+          <section class="details-section">
+            <div class="section-header-row">
+              <h2 class="section-title">Location Information</h2>
+              <button mat-stroked-button type="button" class="btn-location-notes" (click)="openLocationNotesPanel()">
+                LOCATION NOTES
+              </button>
+            </div>
+            <div class="details-grid">
+              <div class="detail-item">
+                <span class="detail-label">Location</span>
+                <span #location class="detail-value" (mouseenter)="checkTruncation('location', location)" [matTooltip]="getFieldValue(driveDetails?.location)" [matTooltipDisabled]="!isFieldTruncated('location')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.location) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Address</span>
+                <span #address class="detail-value" (mouseenter)="checkTruncation('address', address)" [matTooltip]="getFieldValue(driveDetails?.address)" [matTooltipDisabled]="!isFieldTruncated('address')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.address) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Distance</span>
+                <span #distance class="detail-value" (mouseenter)="checkTruncation('distance', distance)" [matTooltip]="getFieldValue(driveDetails?.distance)" [matTooltipDisabled]="!isFieldTruncated('distance')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.distance) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Directions</span>
+                <span #directions class="detail-value" (mouseenter)="checkTruncation('directions', directions)" [matTooltip]="getFieldValue(driveDetails?.direction)" [matTooltipDisabled]="!isFieldTruncated('directions')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.direction) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Facility</span>
+                <span #facility class="detail-value" (mouseenter)="checkTruncation('facility', facility)" [matTooltip]="getFieldValue(driveDetails?.facility)" [matTooltipDisabled]="!isFieldTruncated('facility')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.facility) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Last Printed</span>
+                <span #lastPrinted class="detail-value" (mouseenter)="checkTruncation('lastPrinted', lastPrinted)" [matTooltip]="getFieldValue(driveDetails?.lastPeriod)" [matTooltipDisabled]="!isFieldTruncated('lastPrinted')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.lastPeriod) }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Last Modified</span>
+                <span #lastModified class="detail-value" (mouseenter)="checkTruncation('lastModified', lastModified)" [matTooltip]="getFieldValue(driveDetails?.lastModified)" [matTooltipDisabled]="!isFieldTruncated('lastModified')" matTooltipPosition="above">{{ getFieldValue(driveDetails?.lastModified) }}</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- DRIVE ANALYSIS -->
+          <section class="details-section">
+            <h2 class="section-title">Drive Analysis</h2>
+            <table class="drive-analysis-table">
+              <thead>
+                <tr>
+                  <th>Resource</th>
+                  <th>SHOW</th>
+                  <th>DRAW</th>
+                  <th>DFRL</th>
+                  <th>Start</th>
+                  <th>End</th>
+                  <th>Set/Brk</th>
+                  <th>Travel</th>
+                  <th>CPU</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Projected</td>
+                  <td>{{ driveDetails?.projectedShow ?? '--' }}</td>
+                  <td>{{ driveDetails?.projectedDraw ?? '--' }}</td>
+                  <td>{{ driveDetails?.projectedDeferral ?? '--' }}</td>
+                  <td>{{ driveDetails?.scheduleStartTime ?? '--' }}</td>
+                  <td>{{ driveDetails?.scheduleEndTime ?? '--' }}</td>
+                  <td>{{ driveDetails?.scheduleSetupBreakdown ?? '--' }}</td>
+                  <td>{{ driveDetails?.projectedTravelTime ?? '--' }}</td>
+                  <td>{{ formatCpu(driveDetails?.projectedCpu) }}</td>
+                </tr>
+                <tr>
+                  <td>Actual</td>
+                  <td>{{ driveDetails?.actualShow ?? '--' }}</td>
+                  <td>{{ driveDetails?.actualDraw ?? '--' }}</td>
+                  <td>{{ driveDetails?.actualDeferral ?? '--' }}</td>
+                  <td>{{ driveDetails?.actualStartTime ?? '--' }}</td>
+                  <td>{{ driveDetails?.actualEndTime ?? '--' }}</td>
+                  <td>{{ driveDetails?.actualSetupBreakdown ?? '--' }}</td>
+                  <td>{{ driveDetails?.actualTravelTime ?? '--' }}</td>
+                  <td>{{ formatCpu(driveDetails?.actualCpu) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+
+          <!-- NOTES -->
+          <section class="details-section notes-section">
+            <h2 class="section-title">Notes</h2>
+            <div class="notes-list">
+              @for (note of notes; track note.noteSequence) {
+                <div class="note-card">
+                  <div class="note-header">
+                    <div class="note-avatar">
+                      <mat-icon>person</mat-icon>
+                    </div>
+                    <div class="note-meta">
+                      <span class="note-user">{{ formatUserName(note.userName, note.userId) }}</span>
+                      <span class="note-version">{{ formatVersion(note.noteSequence) }} | {{ formatNoteDate(note.insertDate) }}</span>
+                    </div>
+                  </div>
+                  <p class="note-text">{{ note.notes }}</p>
+                </div>
+              }
+            </div>
+          </section>
+        </div>
+      }
+    </div>
+
+    <!-- QUICK LINKS SIDEBAR -->
+    <aside class="quick-links-sidebar">
+      <app-quick-links
+        [title]="quickLinksTitle"
+        [links]="quickLinks"
+        [disabled]="!hasSearched"
+        disabledTooltip="Please retrieve drive details first"
+        (linkClick)="onQuickLinkClick($event)">
+      </app-quick-links>
+    </aside>
+  </div>
+
+  <!-- SIDE PANELS -->
+
+  <!-- Location Notes Panel -->
+  @if (locationNotesPanelOpen) {
+    <div class="side-panel-backdrop" (click)="closeLocationNotesPanel()"></div>
+  }
+  <div class="side-panel-container" [class.open]="locationNotesPanelOpen">
+    @if (locationNotesPanelOpen) {
+      <app-location-notes-panel
+        [driveId]="filterForm.value.driveId || ''"
+        [locationId]="driveDetails?.locationId || ''"
+        [locationName]="driveDetails?.location || ''"
+        (closePanel)="closeLocationNotesPanel()">
+      </app-location-notes-panel>
+    }
+  </div>
+
+  <!-- Drive Checklist Panel -->
+  @if (driveChecklistPanelOpen) {
+    <div class="side-panel-backdrop" (click)="closeDriveChecklistPanel()"></div>
+  }
+  <div class="side-panel-container" [class.open]="driveChecklistPanelOpen">
+    @if (driveChecklistPanelOpen) {
+      <app-drive-checklist-panel
+        [driveId]="filterForm.value.driveId || ''"
+        (closePanel)="closeDriveChecklistPanel()">
+      </app-drive-checklist-panel>
+    }
+  </div>
+
+  <!-- Drive Resources Panel -->
+  @if (driveResourcesPanelOpen) {
+    <div class="side-panel-backdrop" (click)="closeDriveResourcesPanel()"></div>
+  }
+  <div class="side-panel-container" [class.open]="driveResourcesPanelOpen">
+    @if (driveResourcesPanelOpen) {
+      <app-drive-resources-panel
+        [driveId]="filterForm.value.driveId || ''"
+        [scheduleId]="driveDetails?.scheduleId || undefined"
+        (closePanel)="closeDriveResourcesPanel()">
+      </app-drive-resources-panel>
+    }
+  </div>
+
+  <!-- Pickup Schedule Panel -->
+  @if (pickupSchedulePanelOpen) {
+    <div class="side-panel-backdrop" (click)="closePickupSchedulePanel()"></div>
+  }
+  <div class="side-panel-container" [class.open]="pickupSchedulePanelOpen">
+    @if (pickupSchedulePanelOpen) {
+      <app-pickup-schedule-panel
+        [driveId]="filterForm.value.driveId || ''"
+        (closePanel)="closePickupSchedulePanel()">
+      </app-pickup-schedule-panel>
+    }
+  </div>
+
+  <!-- Drive Supplies Panel -->
+  @if (driveSuppliesPanelOpen) {
+    <div class="side-panel-backdrop" (click)="closeDriveSuppliesPanel()"></div>
+  }
+  <div class="side-panel-container" [class.open]="driveSuppliesPanelOpen">
+    @if (driveSuppliesPanelOpen) {
+      <app-drive-supplies-panel
+        [driveId]="filterForm.value.driveId || ''"
+        (closePanel)="closeDriveSuppliesPanel()">
+      </app-drive-supplies-panel>
+    }
+  </div>
+
+  <!-- Drive Procedures Panel -->
+  @if (driveProceduresPanelOpen) {
+    <div class="side-panel-backdrop" (click)="closeDriveProceduresPanel()"></div>
+  }
+  <div class="side-panel-container" [class.open]="driveProceduresPanelOpen">
+    @if (driveProceduresPanelOpen) {
+      <app-drive-procedures-panel
+        [driveId]="filterForm.value.driveId || ''"
+        (closePanel)="closeDriveProceduresPanel()">
+      </app-drive-procedures-panel>
+    }
+  </div>
+</div>

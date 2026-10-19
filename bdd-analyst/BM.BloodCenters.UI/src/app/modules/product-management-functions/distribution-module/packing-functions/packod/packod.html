@@ -1,0 +1,213 @@
+<app-page-header-with-breadcrumb [config]="headerConfig()" />
+
+<section class="packod-container" aria-label="Pack Inv Rejects To Discard">
+
+  <!-- Header Panel -->
+  <div class="header-panel">
+    <form [formGroup]="form" aria-label="Packing filters">
+
+      <!-- Row 1: Destination / Address / Order / Product Type / Description -->
+      <div class="header-row header-row--filters">
+        <mat-form-field appearance="fill" class="header-field">
+          <mat-label>Discard Destination</mat-label>
+          <mat-select formControlName="consigneeId" required>
+            <mat-option>
+              <ngx-mat-select-search [formControl]="consigneeSearchCtrl"
+                placeholderLabel="Search consignees..."
+                noEntriesFoundLabel="No consignees found" />
+            </mat-option>
+            @for (c of filteredConsignees(); track c.consigneeId) {
+              <mat-option [value]="c.consigneeId">{{ c.consigneeId }} - {{ c.name }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <dl class="info-field">
+          <dt class="field-label">Address</dt>
+          <dd class="field-value">{{ selectedConsigneeAddress() || '-' }}</dd>
+        </dl>
+
+        <mat-form-field appearance="fill" class="header-field">
+          <mat-label>Discard Order</mat-label>
+          <mat-select formControlName="orderId">
+            <mat-option [value]="null">-</mat-option>
+            @for (o of orders(); track o.orderNo) {
+              <mat-option [value]="o.orderNo">{{ o.orderNo }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <mat-form-field appearance="fill" class="header-field">
+          <mat-label>Product Type</mat-label>
+          <mat-select formControlName="productType">
+            <mat-option>
+              <ngx-mat-select-search [formControl]="productTypeSearchCtrl"
+                placeholderLabel="Search product types..."
+                noEntriesFoundLabel="No data available" />
+            </mat-option>
+            <mat-option [value]="null">All</mat-option>
+            @for (pt of filteredProductTypes(); track pt.productType) {
+              <mat-option [value]="pt.productType">{{ pt.productType }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <dl class="info-field">
+          <dt class="field-label">Description</dt>
+          <dd class="field-value">{{ selectedProductTypeDesc() || '-' }}</dd>
+        </dl>
+      </div>
+
+      <!-- Row 2: Pick Slip / Box ID -->
+      <div class="header-row header-row--options">
+        <dl class="info-field">
+          <dt class="field-label">Pick Slip ID</dt>
+          <dd class="field-value">{{ pickSlipId() }}</dd>
+        </dl>
+
+        <mat-form-field appearance="fill" class="header-field header-field-box">
+          <mat-label>Box ID</mat-label>
+          <mat-select formControlName="boxId">
+            <mat-option>
+              <ngx-mat-select-search [formControl]="boxSearchCtrl"
+                placeholderLabel="Search boxes..."
+                noEntriesFoundLabel="No open boxes found" />
+            </mat-option>
+            @for (b of filteredBoxes(); track b.boxId) {
+              <mat-option [value]="b.boxId">{{ b.boxId }} ({{ b.productCount }} items)</mat-option>
+            }
+          </mat-select>
+          <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+        </mat-form-field>
+      </div>
+
+    </form>
+  </div>
+
+  <!-- Action Bar + Entry (connected card) -->
+  <div class="scan-card">
+  <div class="action-bar" role="toolbar" aria-label="Packing actions">
+    <div class="action-bar-left">
+      <span class="action-bar-label">Box ID</span>
+      @if (currentBoxId()) {
+        <span class="current-box-label">{{ currentBoxId() }}</span>
+      }
+    </div>
+    <div class="action-bar-right">
+      <button type="button" class="btn-clear"
+        (click)="clearAll()" aria-label="Clear all">
+        CLEAR ALL
+      </button>
+      <button type="button" class="btn-stroked"
+        (click)="onViewBoxContents()"
+        [disabled]="!currentBoxId()" aria-label="View box contents">
+        VIEW BOX CONTENTS
+      </button>
+      <button type="button" class="btn-stroked"
+        (click)="onCloseBox()"
+        [disabled]="!canCloseBox() || loading()" aria-label="Close box">
+        CLOSE BOX
+      </button>
+      <button type="button" class="btn-stroked"
+        (click)="onCreateNewBox()"
+        aria-label="Create new box">
+        CREATE NEW BOX
+      </button>
+      <button type="button" class="btn-filled"
+        (click)="onSave()"
+        [disabled]="!canSave() || loading()" aria-label="Save">
+        SAVE
+      </button>
+    </div>
+  </div>
+
+  <!-- Entry / Scan Row -->
+  <div class="entry-section" role="group" aria-label="Scan entry fields">
+      <div class="entry-row">
+
+        <app-unit-id-field
+          #unitIdField
+          [label]="'Unit ID'"
+          [placeholder]="'Scan or type Unit ID'"
+          [validateFfValue]="'N'"
+          [required]="true"
+          [showBarcodeIcon]="true"
+          [disabled]="!form.get('consigneeId')?.value"
+          (postValidate)="onPostValidate($event)"
+          (cleared)="onUnitIdCleared()"
+          class="entry-field sf--unit">
+        </app-unit-id-field>
+
+        <app-scan-select-field
+          #productCodeField
+          [label]="'Product Code'"
+          [placeholder]="'Scan or select product code'"
+          [required]="true"
+          [showBarcodeIcon]="true"
+          [disabled]="!currentUnitId()"
+          [scanPatterns]="SCAN_PATTERNS.PRODUCT"
+          [options]="productCodeOptions()"
+          [parseFn]="parseProductCode"
+          (valueChanged)="onProductCodeChanged($event)"
+          (cleared)="onProductCodeCleared()"
+          class="entry-field sf--product">
+        </app-scan-select-field>
+
+        <app-scan-select-field
+          #aboRhField
+          [label]="'ABORh'"
+          [placeholder]="'Scan or select ABORh'"
+          [required]="true"
+          [showBarcodeIcon]="true"
+          [disabled]="!selectedProductCode()"
+          [scanPatterns]="SCAN_PATTERNS.ABO"
+          [options]="aboRhOptions()"
+          [parseFn]="parseAboRh"
+          (valueChanged)="onAboRhChanged($event)"
+          (cleared)="onAboRhCleared()"
+          class="entry-field sf--abo">
+        </app-scan-select-field>
+
+        <mat-form-field appearance="fill" class="entry-field sf--expiry">
+          <mat-label>Expiration Date and Time</mat-label>
+          <input matInput
+            [value]="expiryDisplay()"
+            placeholder="DD-MMM-YYYY HH:MM"
+            autocomplete="off"
+            spellcheck="false"
+            class="upper-input"
+            [disabled]="!selectedAboRh()">
+          <img matSuffix src="assets/images/icons/Scan.svg" alt="" aria-hidden="true" class="scan-icon" />
+        </mat-form-field>
+
+        <button type="button" (click)="clearEntry()"
+          class="btn-clear clear-entry-btn" aria-label="Clear entry fields">
+          CLEAR ALL
+        </button>
+
+      </div>
+  </div>
+  </div>
+
+  <!-- Products Table -->
+  <div class="table-section">
+    <app-data-table
+      [config]="tableConfig()"
+      [data]="packedProducts()"
+      [loading]="loading()"
+      (pageChange)="onPageChange($event)" />
+  </div>
+
+</section>
+
+<!-- Box Contents Side Panel -->
+@if (boxContentsPanelOpen()) {
+  <div class="side-panel-container" cdkTrapFocus cdkTrapFocusAutoCapture
+    role="dialog" aria-label="Box Contents">
+    <app-packod-view-box-contents-panel
+      [boxId]="currentBoxId()"
+      [contents]="boxContents()"
+      (panelClosed)="onBoxContentsPanelClosed()">
+    </app-packod-view-box-contents-panel>
+  </div>
+}

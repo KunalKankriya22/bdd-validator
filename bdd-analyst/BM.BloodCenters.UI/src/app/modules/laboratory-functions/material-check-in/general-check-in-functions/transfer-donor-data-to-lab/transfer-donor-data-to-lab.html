@@ -1,0 +1,512 @@
+<div class="transfer-donor-layout" role="main">
+
+  <!-- Page Header with Breadcrumb -->
+  <app-page-header-with-breadcrumb [config]="headerConfig" />
+
+  <!-- Global loading overlay -->
+  @if (isLoading()) {
+    <div class="global-loading-overlay" role="status" aria-live="polite" aria-busy="true">
+      <mat-spinner diameter="36" aria-label="Loading"></mat-spinner>
+      <span class="sr-only">Loading, please wait...</span>
+    </div>
+  }
+
+  <div class="page-content">
+
+    <!-- ═══════════════════════════════════════════════════
+         FILTER PANEL
+         ═══════════════════════════════════════════════════ -->
+    <div class="filter-panel" role="search" aria-label="Retrieve filter panel">
+
+      <!-- Row 1: all filter fields -->
+      <form [formGroup]="filterForm" class="filter-row">
+
+        <!-- Check-In Type * -->
+        <mat-form-field
+          appearance="fill"
+          floatLabel="always"
+          class="filter-field filter-field--check-in-type"
+          subscriptSizing="dynamic">
+          <mat-label>Check-In Type</mat-label>
+          <mat-select
+            #checkInTypeSelect
+            formControlName="checkInType"
+            [id]="elementId('checkInType')"
+            aria-label="Check-In Type, required"
+            required
+            (selectionChange)="onCheckInTypeChange($event.value)">
+            <mat-select-trigger>{{ getSelectedCheckInLabel() }}</mat-select-trigger>
+            <mat-option (keydown)="onSelectSearchKeydown($event, checkInTypeSelect)">
+              <ngx-mat-select-search
+                [formControl]="checkInTypeSearch"
+                placeholderLabel="Search...">
+              </ngx-mat-select-search>
+            </mat-option>
+            @if (showNoTypesFound()) {
+              <mat-option disabled class="no-results-option">No types found</mat-option>
+            }
+            @for (opt of filteredCheckInTypeOptions(); track opt.value) {
+              <mat-option [value]="opt.value">
+                <span class="option-label">{{ opt.label }}</span>
+                <span class="option-desc">{{ opt.description }}</span>
+              </mat-option>
+            }
+          </mat-select>
+          @if (hasFieldError('checkInType')) {
+            <mat-error>Required</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Batch ID — always visible; disabled when type = T (Tubes Only) -->
+        <mat-form-field
+          appearance="fill"
+          floatLabel="always"
+          class="filter-field filter-field--batch"
+          hideRequiredMarker
+          subscriptSizing="dynamic">
+          <mat-label>Batch ID<span
+              class="required-marker"
+              aria-hidden="true">{{ batchLabelMarker() ? ' ' + batchLabelMarker() : '' }}</span>
+          </mat-label>
+          <mat-select
+            #batchSelect
+            formControlName="batchId"
+            [id]="elementId('batchId')"
+            aria-label="Batch ID"
+            (selectionChange)="onBatchSelected($event.value)">
+            @if (isBatchEnabled()) {
+              <mat-option (keydown)="onSelectSearchKeydown($event, batchSelect)">
+                <ngx-mat-select-search
+                  [formControl]="batchSearchControl"
+                  placeholderLabel="Search...">
+                </ngx-mat-select-search>
+              </mat-option>
+              <mat-option [value]="null" class="batch-clear-option">— None —</mat-option>
+              @if (showNoBatchesFound()) {
+                <mat-option disabled class="no-results-option">No batches found</mat-option>
+              }
+              @for (batch of filteredBatchOptions(); track batch.batchId) {
+                <mat-option [value]="batch.batchId">
+                  {{ batch.batchId }}
+                  @if (batch.unitCount > 0) {
+                    <span class="batch-unit-count">({{ batch.unitCount }})</span>
+                  }
+                </mat-option>
+              }
+            }
+          </mat-select>
+          @if (hasFieldError('batchId')) {
+            <mat-error>Required</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Min Temperature -->
+        <mat-form-field
+          appearance="fill"
+          floatLabel="always"
+          class="filter-field filter-field--temp"
+          subscriptSizing="dynamic">
+          <mat-label>Min Temperature</mat-label>
+          <input matInput formControlName="minTemp"
+            type="number" inputmode="decimal"
+            aria-label="Minimum Temperature"
+            (blur)="onMinTempBlur()" />
+          @if (filterForm.get('minTemp')?.hasError('tempRange')) {
+            <mat-error>Must not exceed Max Temp</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Max Temperature — defaults to 37.5 when Min Temp is entered -->
+        <mat-form-field
+          appearance="fill"
+          floatLabel="always"
+          class="filter-field filter-field--temp"
+          subscriptSizing="dynamic">
+          <mat-label>Max Temperature</mat-label>
+          <input matInput formControlName="maxTemp"
+            type="number" inputmode="decimal"
+            aria-label="Maximum Temperature"
+            (blur)="onMaxTempBlur()" />
+        </mat-form-field>
+
+        <!-- Collection Date -->
+        <mat-form-field
+          appearance="fill"
+          floatLabel="always"
+          class="filter-field filter-field--date"
+          hideRequiredMarker
+          subscriptSizing="dynamic">
+          <mat-label>Collection Date<span
+              class="required-marker"
+              aria-hidden="true">{{ isCollectionDateRequired() ? ' *' : '' }}</span>
+          </mat-label>
+          <input
+            #collectionDateInput
+            matInput
+            [matDatepicker]="collDatePicker"
+            formControlName="collectionDate"
+            [id]="elementId('collectionDate')"
+            placeholder="DD-MMM-YYYY"
+            [max]="maxDate"
+            [required]="isCollectionDateRequired()"
+            aria-label="Collection Date"
+            (input)="onCollectionDateInput($event)" />
+          <mat-datepicker-toggle matIconSuffix [for]="collDatePicker"
+            aria-label="Open collection date calendar">
+          </mat-datepicker-toggle>
+          <mat-datepicker #collDatePicker></mat-datepicker>
+          @if (getCollectionDateError().length > 0) {
+            <mat-error>{{ getCollectionDateError() }}</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Drive ID — searchable dropdown -->
+        <mat-form-field
+          appearance="fill"
+          floatLabel="always"
+          class="filter-field filter-field--drive"
+          subscriptSizing="dynamic">
+          <mat-label>Drive ID</mat-label>
+          <mat-select
+            #driveSelect
+            formControlName="driveId"
+            [id]="elementId('driveId')"
+            aria-label="Drive ID"
+            required
+            panelClass="drive-select-panel"
+            (selectionChange)="onDriveSelected($event.value)">
+            <mat-select-trigger>{{ filterForm.get('driveId')?.value || '' }}</mat-select-trigger>
+            <mat-option (keydown)="onSelectSearchKeydown($event, driveSelect)">
+              <ngx-mat-select-search
+                [formControl]="driveSearchControl"
+                placeholderLabel="Search drive...">
+              </ngx-mat-select-search>
+            </mat-option>
+            @if (showNoDrivesFound()) {
+              <mat-option disabled class="no-results-option">No drives found</mat-option>
+            }
+            @for (drive of filteredDriveOptions(); track drive.driveId) {
+              <mat-option [value]="drive.driveId" class="option-two-line">
+                <span class="option-primary">{{ drive.driveId }}</span>
+                <span class="option-secondary">{{ drive.siteName }}</span>
+                <span class="option-secondary">{{ drive.groupSiteId }}</span>
+              </mat-option>
+            }
+          </mat-select>
+          @if (hasFieldError('driveId')) {
+            <mat-error>Required</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Shipper Number — loaded when Drive ID is selected -->
+        <mat-form-field
+          appearance="fill"
+          floatLabel="always"
+          class="filter-field filter-field--shipper"
+          subscriptSizing="dynamic">
+          <mat-label>Shipper Number</mat-label>
+          <mat-select
+            #shipperSelect
+            formControlName="shipperNumber"
+            [id]="elementId('shipperNumber')"
+            [attr.aria-label]="checkInTypeSignal() !== 'T' ? 'Shipper Number, required' : 'Shipper Number'"
+            [required]="checkInTypeSignal() !== 'T'"
+            (keydown.tab)="onShipperTriggerTab()">
+            <mat-option (keydown)="onShipperTab($event, shipperSelect)">
+              <ngx-mat-select-search
+                [formControl]="shipperSearchControl"
+                placeholderLabel="Search...">
+              </ngx-mat-select-search>
+            </mat-option>
+            @if (showNoShippersFound()) {
+              <mat-option disabled class="no-results-option">No shippers found</mat-option>
+            }
+            @for (shipper of filteredShipperOptions(); track shipper.shipperNo) {
+              <mat-option [value]="shipper.shipperNo">{{ shipper.shipperNo }}</mat-option>
+            }
+          </mat-select>
+          @if (hasFieldError('shipperNumber')) {
+            <mat-error>Required</mat-error>
+          }
+        </mat-form-field>
+
+        <!-- Buttons inline with filter fields -->
+        <div class="filter-actions" role="group" aria-label="Filter actions">
+          <button
+            mat-button
+            type="button"
+            class="clear-button"
+            (click)="clearAll()"
+            [disabled]="isLoading()"
+            aria-label="Clear all filters">
+            CLEAR ALL
+          </button>
+        </div>
+
+      </form>
+
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════
+         CONTENT AREA
+         ═══════════════════════════════════════════════════ -->
+
+    <!-- Initial state: full-width empty card before header is completed (Figma initial state) -->
+    @if (showEmptyPlaceholder()) {
+      <div class="panel empty-placeholder" role="region" aria-label="No results">
+        <div class="empty-state">
+          <span class="empty-state__icon-circle" aria-hidden="true">
+            <mat-icon>search</mat-icon>
+          </span>
+          <p class="empty-state__title">No Results to Display</p>
+          <p class="empty-state__subtitle">Please enter search criteria to view results</p>
+        </div>
+      </div>
+    }
+
+    <!-- Two-panel layout — revealed when user tabs from Shipper Number -->
+    @if (panelsVisible()) {
+      <div class="panels-area">
+
+      <!-- ════════════════════════
+           LEFT — Scan Units
+           ════════════════════════ -->
+      <div class="panel left-panel" role="region" aria-label="Scan Units panel">
+
+        <div
+          class="panel-header"
+          [class.panel-header--error]="panelStatus() === 'ERROR'"
+          [class.panel-header--warning]="panelStatus() === 'WARNING'">
+          <span class="panel-title">Scan Units</span>
+          @if (panelStatus() === 'ERROR') {
+            <span class="panel-status panel-status--error" role="alert" aria-live="assertive">
+              <mat-icon aria-hidden="true">error</mat-icon>
+              Maximum Bleed Error
+            </span>
+          }
+          @if (panelStatus() === 'WARNING') {
+            <span class="panel-status panel-status--warning" role="alert" aria-live="polite">
+              <mat-icon aria-hidden="true">warning</mat-icon>
+              Slow Bleed Warning
+            </span>
+          }
+        </div>
+
+        <div class="unit-table" role="table" aria-label="Retrieved units">
+
+          <div class="unit-table-head" role="row">
+            <div class="col-unit-id" role="columnheader">
+              Unit ID ({{ unitCount }})
+              <mat-icon class="sort-icon" aria-hidden="true">arrow_downward</mat-icon>
+            </div>
+            <div class="col-protocol" role="columnheader">Protocol</div>
+          </div>
+
+          <!-- Unit ID entry row (validated via app-unit-id-field) -->
+          <div class="unit-id-entry-row">
+            <div class="col-unit-id">
+              <app-unit-id-field
+                #unitIdField
+                [required]="false"
+                label="Enter Unit ID"
+                hintDefault="Type or scan a unit ID"
+                (validated)="onScanUnitIdValidated($event)">
+              </app-unit-id-field>
+              @if (hasScanError()) {
+                <div
+                  class="scan-tooltip"
+                  [class.scan-tooltip--error]="!!scanValidationError() || !!scanMaxBleedError()"
+                  [class.scan-tooltip--warning]="!!scanValidationWarning()"
+                  role="alert">
+                  {{ scanValidationError() || scanMaxBleedError() || scanValidationWarning() }}
+                </div>
+              }
+            </div>
+            <div class="col-protocol"></div>
+          </div>
+
+          <!-- Data rows / Empty state — scrollable body -->
+          <div class="unit-table-body" role="rowgroup">
+            @if (retrievedUnits().length === 0) {
+              <div class="unit-table-empty" role="row">
+                <div class="empty-state" role="cell">
+                  <mat-icon class="empty-state__icon" aria-hidden="true">search</mat-icon>
+                  <p class="empty-state__title">No Results to Display</p>
+                  <p class="empty-state__subtitle">Please enter search criteria to view results</p>
+                </div>
+              </div>
+            } @else {
+              @for (unit of retrievedUnits(); track unit.unitId) {
+                <div class="unit-row-wrapper">
+                  <div
+                    class="unit-row"
+                    [ngClass]="unitRowClass(unit)"
+                    role="row"
+                    tabindex="0"
+                    (click)="onUnitRowClick(unit)"
+                    (keyup.enter)="onUnitRowClick(unit)"
+                    (keyup.space)="onUnitRowClick(unit)">
+                    <div class="col-unit-id" role="cell">
+                      <span>{{ unit.unitId }}</span>
+                      @if (unit.uiStatus === 'TRANSFERRED') {
+                        <span class="status-chip status-chip--transferred" aria-label="Transferred">✓</span>
+                      }
+                      @if (unit.uiStatus === 'SCANNED') {
+                        <span class="status-chip status-chip--scanned" aria-label="Ready to save">●</span>
+                      }
+                      @for (code of (unit.uiInterdictions || []); track code) {
+                        <span class="status-chip status-chip--interdiction" [attr.aria-label]="'Interdiction code: ' + code">{{ code }}</span>
+                      }
+                      @if (unit.uiWarnings && unit.uiWarnings.length > 0) {
+                        <button
+                          class="warning-info-btn"
+                          type="button"
+                          [class.warning-info-btn--active]="activeWarningUnitId() === unit.unitId"
+                          aria-label="View transfer warnings"
+                          (click)="toggleWarningPanel(unit.unitId, $event)">
+                          <mat-icon>info</mat-icon>
+                        </button>
+                      }
+                    </div>
+                    <div class="col-protocol" role="cell">{{ unit.procedureCode || unit.donationType }}</div>
+                  </div>
+
+                  @if (activeWarningUnitId() === unit.unitId && unit.uiWarnings && unit.uiWarnings.length > 0) {
+                    <div class="warning-panel" role="dialog" aria-modal="true" aria-label="Transfer warnings" [attr.aria-labelledby]="'warning-panel-title-' + unit.unitId">
+                      <div class="warning-panel__header">
+                        <span class="warning-panel__title" [id]="'warning-panel-title-' + unit.unitId">Transfer Warnings</span>
+                        <button
+                          type="button"
+                          mat-icon-button
+                          class="warning-panel__close"
+                          aria-label="Close warnings"
+                          (click)="closeWarningPanel($event)">
+                          <mat-icon>close</mat-icon>
+                        </button>
+                      </div>
+                      <ul class="warning-panel__list">
+                        @for (w of unit.uiWarnings; track w.code) {
+                          <li class="warning-panel__item">
+                            <span class="warning-panel__code">[{{ w.code }}]</span>
+                            <span class="warning-panel__message">{{ w.message }}</span>
+                          </li>
+                        }
+                      </ul>
+                    </div>
+                  }
+                </div>
+              }
+            }
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ══════════════════════════════
+           RIGHT — Interfaced Details
+           ══════════════════════════════ -->
+      <div class="panel right-panel" role="region" aria-label="Interfaced Details panel">
+
+        @if (hasDonationDetails()) {
+          <div class="interfaced-details">
+
+            <div class="details-header">
+              <span class="details-title">Interfaced Details : {{ donationDetails()?.unitId }}</span>
+            </div>
+
+            <div class="details-grid">
+
+              @if (donationDetails()?.bleedStartTime) {
+                <div class="detail-item">
+                  <span class="detail-label">Bleed Start Time</span>
+                  <span class="detail-value">{{ formatDateTime(donationDetails()?.bleedStartTime) }}</span>
+                </div>
+              }
+              @if (donationDetails()?.bleedEndTime) {
+                <div class="detail-item">
+                  <span class="detail-label">Bleed End Time</span>
+                  <span class="detail-value">{{ formatDateTime(donationDetails()?.bleedEndTime) }}</span>
+                </div>
+              }
+              @if (donationDetails()?.bleedStartTimeL2) {
+                <div class="detail-item">
+                  <span class="detail-label">Bleed Start Time</span>
+                  <span class="detail-value">{{ formatDateTime(donationDetails()?.bleedStartTimeL2) }}</span>
+                </div>
+              }
+              @if (donationDetails()?.bleedEndTimeL2) {
+                <div class="detail-item">
+                  <span class="detail-label">Bleed End Time</span>
+                  <span class="detail-value">{{ formatDateTime(donationDetails()?.bleedEndTimeL2) }}</span>
+                </div>
+              }
+              @if (donationDetails()?.bleedStartTimeR1) {
+                <div class="detail-item">
+                  <span class="detail-label">Bleed Start Time</span>
+                  <span class="detail-value">{{ formatDateTime(donationDetails()?.bleedStartTimeR1) }}</span>
+                </div>
+              }
+              @if (donationDetails()?.bleedEndTimeR) {
+                <div class="detail-item">
+                  <span class="detail-label">Bleed End Time</span>
+                  <span class="detail-value">{{ formatDateTime(donationDetails()?.bleedEndTimeR) }}</span>
+                </div>
+              }
+              @if (donationDetails()?.bleedStartTimeR2) {
+                <div class="detail-item">
+                  <span class="detail-label">Bleed Start Time</span>
+                  <span class="detail-value">{{ formatDateTime(donationDetails()?.bleedStartTimeR2) }}</span>
+                </div>
+              }
+              @if (donationDetails()?.bleedEndTimeR2) {
+                <div class="detail-item">
+                  <span class="detail-label">Bleed End Time</span>
+                  <span class="detail-value">{{ formatDateTime(donationDetails()?.bleedEndTimeR2) }}</span>
+                </div>
+              }
+
+              <div class="detail-item">
+                <span class="detail-label">Catalog Number</span>
+                <span class="detail-value">{{ donationDetails()?.catalogNumber || '—' }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Lot Number</span>
+                <span class="detail-value">{{ donationDetails()?.lotNumber || '—' }}</span>
+              </div>
+
+              <div class="detail-item detail-item--full">
+                <span class="detail-label">Attributes</span>
+                @if (donationDetails()!.attributes.length > 0) {
+                  <div class="attribute-chips">
+                    @for (attr of donationDetails()!.attributes; track attr) {
+                      <span class="attribute-chip">{{ attr }}</span>
+                    }
+                  </div>
+                } @else {
+                  <span class="detail-value">—</span>
+                }
+              </div>
+
+              <div class="detail-item detail-item--full">
+                <span class="detail-label">Equipment</span>
+                <span class="detail-value">{{ (donationDetails()?.equipType ? donationDetails()?.equipType + '  ' : '') + (donationDetails()?.equipReference || '—') }}</span>
+              </div>
+
+            </div>
+          </div>
+        } @else {
+          <div class="empty-state-centered">
+            <mat-icon class="empty-icon" aria-hidden="true">search</mat-icon>
+            <p class="empty-title">No Results to Display</p>
+            <p class="empty-subtitle">Please enter search criteria to view results</p>
+          </div>
+        }
+
+      </div>
+    </div>
+
+    } <!-- end @if (panelsVisible()) -->
+
+
+  </div>
+</div>

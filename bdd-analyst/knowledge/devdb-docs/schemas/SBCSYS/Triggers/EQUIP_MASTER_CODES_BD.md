@@ -1,0 +1,30 @@
+---
+tags:
+  - trigger
+  - SBCSYS
+---
+# EQUIP_MASTER_CODES_BD
+
+**Schema**: [[schemas/SBCSYS/SBCSYS|SBCSYS]]
+**Table**: [[schemas/SBCSYS/Tables/EQUIP_MASTER_CODES|EQUIP_MASTER_CODES]]
+**Type**: BEFORE EACH ROW
+**Event**: DELETE
+**Status**: ENABLED
+
+## Trigger Body
+
+```plsql
+begin
+    insert into equip_master_codes_audit
+	  (CODE_TYPE, CODE, CODE_DESC, EFF_DATE , TERM_DATE,
+	  LAST_MODIFIED_DATE, MODIFIED_BY, PROGRAM_ID, AUDIT_KEY,
+	  AUDIT_INSERT_USER , AUDIT_INSERT_DATE )
+	values
+	(
+	 :old.code_type,:old.code,:old.code_desc,
+		 :old.eff_date,:old.term_date,:old.last_modified_date,
+		 :old.modified_by,
+		 'DELETE',:old.audit_key, lt_user_session.get_userid,sysdate
+	 );
+end;
+```

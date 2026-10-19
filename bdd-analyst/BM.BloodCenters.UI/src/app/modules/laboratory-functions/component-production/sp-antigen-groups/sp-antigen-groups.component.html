@@ -1,0 +1,263 @@
+<div class="main-content">
+  <!-- Card 1: Filter Card -->
+  <div class="filter-card">
+    <div class="controls" [formGroup]="filterForm">
+      <!-- Antigen Group Code Dropdown -->
+      <mat-form-field appearance="fill" class="filter-field">
+        <mat-label>Antigen Group Code</mat-label>
+        <mat-select formControlName="antigenGroupCode">
+          <mat-option value="">All</mat-option>
+          <mat-option *ngFor="let group of antigenGroupOptions" [value]="group.code">
+            {{ group.code }}{{ group.description ? ' - ' + group.description : '' }}
+          </mat-option>
+        </mat-select>
+      </mat-form-field>
+
+      <!-- Description (readonly display) -->
+      <div class="field-display-card">
+        <div class="field-label">Description</div>
+        <div class="field-value">
+          {{ filterForm.get('description')?.value || '-' }}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 2: Table Card -->
+  <div class="table-card" #tableCard>
+    <!-- Table Header -->
+    <div class="table-header">
+      <div class="table-header__left">
+        @if (isEditOrAddMode && showValidationError) {
+          <div class="validation-error-inline">
+            <mat-icon>error</mat-icon>
+            <span>Please address the fields indicated below.</span>
+          </div>
+        }
+      </div>
+      <div class="table-header__actions">
+        @if (!isEditOrAddMode && !hasError && !isLoading) {
+          <button type="button" mat-stroked-button class="add-edit-btn" (click)="enterEditMode()">
+            ADD ROW / EDIT TABLE
+          </button>
+          <app-search-bar
+            [config]="searchConfig"
+            (search)="onSearch($event)">
+          </app-search-bar>
+        }
+        @if (isEditOrAddMode) {
+          <div class="edit-mode-actions">
+            <button type="button" mat-stroked-button class="add-new-row-btn" (click)="addNewRow()">
+              <mat-icon>add</mat-icon>
+              ADD NEW ANTIGEN TEST
+            </button>
+            <span class="btn-divider"></span>
+            <button type="button" mat-stroked-button class="cancel-btn" [disabled]="isSaving" (click)="cancelEdit()">
+              <mat-icon>close</mat-icon>
+              CANCEL
+            </button>
+            <button type="button" mat-raised-button class="save-btn"
+              [disabled]="isSaving || !hasAnyDirtyForms || showValidationError"
+              (click)="saveAll()">
+              <mat-icon>done</mat-icon>
+              SAVE
+            </button>
+          </div>
+        }
+      </div>
+    </div>
+
+    <!-- Loading -->
+    @if (isLoading) {
+      <div class="state-container">
+        <mat-spinner diameter="40"></mat-spinner>
+        <p>Loading antigen groups...</p>
+      </div>
+    }
+
+    <!-- Error State -->
+    @if (hasError && !isLoading) {
+      <div class="state-container">
+        <mat-icon class="state-icon state-icon--error">error_outline</mat-icon>
+        <p>{{ errorMessage }}</p>
+        <button type="button" mat-raised-button color="primary" (click)="loadTableData()">Retry</button>
+      </div>
+    }
+
+    <!-- Empty State -->
+    @if (!isLoading && !hasError && filteredDataSource.length === 0 && !isEditOrAddMode) {
+      <div class="state-container">
+        <mat-icon class="state-icon">inbox</mat-icon>
+        <p class="state-title">No Results to Display</p>
+        <p class="state-subtitle">No antigen groups found for the selected criteria</p>
+      </div>
+    }
+
+    <!-- Inline Editable Table -->
+    @if ((filteredDataSource.length > 0 && !isLoading && !hasError) || isEditOrAddMode) {
+      <div class="table-wrapper">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Test ID</th>
+              <th>Description</th>
+              <th>Result</th>
+              <th>Effective Date</th>
+              <th>Termination Date</th>
+              <th>Modification Date</th>
+              @if (isEditOrAddMode && newRows.length > 0) {
+                <th class="col-actions"></th>
+              }
+            </tr>
+          </thead>
+          <tbody>
+            <!-- New Rows -->
+            @for (row of newRows; track row.id; let ni = $index) {
+              <tr class="editable-row" [formGroup]="row.form">
+                <td>
+                  <mat-form-field appearance="fill" class="inline-field"
+                    [class.mat-form-field-invalid]="row.form.get('testId')?.invalid && row.form.get('testId')?.touched">
+                    <mat-select formControlName="testId" placeholder="Test ID">
+                      @for (opt of testIdOptions; track opt.key) {
+                        <mat-option [value]="opt.key">{{ opt.value }}</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                </td>
+                <td>
+                  <div class="readonly-cell">{{ row.form.get('description')?.value || '-' }}</div>
+                </td>
+                <td>
+                  <mat-form-field appearance="fill" class="inline-field"
+                    [class.mat-form-field-invalid]="row.form.get('result')?.invalid && row.form.get('result')?.touched">
+                    <mat-select formControlName="result" placeholder="Result">
+                      @for (opt of resultOptions; track opt.key) {
+                        <mat-option [value]="opt.value">{{ opt.value }}</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+                </td>
+                <td>
+                  <mat-form-field appearance="fill" class="inline-field date-field"
+                    [class.mat-form-field-invalid]="hasDateError(row.form, 'effDate')"
+                    [matTooltip]="getDateErrorMessage(row.form, 'effDate')"
+                    matTooltipPosition="below"
+                    matTooltipClass="validation-tooltip">
+                    <input matInput [matDatepicker]="newEffP" formControlName="effDate"
+                      placeholder="DD-MMM-YYYY" [min]="minDate" autocomplete="off" />
+                    <mat-datepicker-toggle matIconSuffix [for]="newEffP"></mat-datepicker-toggle>
+                    <mat-datepicker #newEffP [startAt]="minDate"></mat-datepicker>
+                    @if (getDateErrorMessage(row.form, 'effDate')) {
+                      <mat-error>{{ getDateErrorMessage(row.form, 'effDate') }}</mat-error>
+                    }
+                  </mat-form-field>
+                </td>
+                <td>
+                  <mat-form-field appearance="fill" class="inline-field date-field"
+                    [class.mat-form-field-invalid]="hasDateError(row.form, 'termDate')"
+                    [matTooltip]="getDateErrorMessage(row.form, 'termDate')"
+                    matTooltipPosition="above"
+                    matTooltipClass="validation-tooltip">
+                    <input matInput [matDatepicker]="newTermP" formControlName="termDate"
+                      placeholder="DD-MMM-YYYY" [min]="minDate"
+                      [matDatepickerFilter]="row.terminationDateFilter" autocomplete="off" />
+                    <mat-datepicker-toggle matIconSuffix [for]="newTermP"></mat-datepicker-toggle>
+                    <mat-datepicker #newTermP [startAt]="minDate"></mat-datepicker>
+                    @if (getDateErrorMessage(row.form, 'termDate')) {
+                      <mat-error>{{ getDateErrorMessage(row.form, 'termDate') }}</mat-error>
+                    }
+                  </mat-form-field>
+                </td>
+                <td>
+                  <div class="readonly-cell">{{ formatDate(row.form.get('modificationDate')?.value) }}</div>
+                </td>
+                <td class="col-actions">
+                  <button mat-icon-button class="delete-btn" (click)="removeNewRow(ni)">
+                    <mat-icon>delete</mat-icon>
+                  </button>
+                </td>
+              </tr>
+            }
+
+            <!-- Existing Data Rows -->
+            @for (row of filteredDataSource; track $index; let i = $index) {
+              @if (isEditOrAddMode && editableRows[i]) {
+                <tr class="editable-row" [formGroup]="editableRows[i]">
+                  <td>
+                    <mat-form-field appearance="fill" class="inline-field"
+                      [class.mat-form-field-invalid]="editableRowsMeta[i].form.get('testId')?.invalid && editableRowsMeta[i].form.get('testId')?.touched">
+                      <mat-select formControlName="testId">
+                        @for (opt of testIdOptions; track opt.key) {
+                          <mat-option [value]="opt.key">{{ opt.value }}</mat-option>
+                        }
+                      </mat-select>
+                    </mat-form-field>
+                  </td>
+                  <td>
+                    <div class="readonly-cell">{{ editableRowsMeta[i].form.get('description')?.value || '-' }}</div>
+                  </td>
+                  <td>
+                    <mat-form-field appearance="fill" class="inline-field"
+                      [class.mat-form-field-invalid]="editableRowsMeta[i].form.get('result')?.invalid && editableRowsMeta[i].form.get('result')?.touched">
+                      <mat-select formControlName="result">
+                        @for (opt of resultOptions; track opt.key) {
+                          <mat-option [value]="opt.value">{{ opt.value }}</mat-option>
+                        }
+                      </mat-select>
+                    </mat-form-field>
+                  </td>
+                  <td>
+                    <mat-form-field appearance="fill" class="inline-field date-field"
+                      [class.mat-form-field-invalid]="hasDateError(editableRowsMeta[i].form, 'effDate')"
+                      [matTooltip]="getDateErrorMessage(editableRowsMeta[i].form, 'effDate')"
+                      matTooltipPosition="below"
+                      matTooltipClass="validation-tooltip">
+                      <input matInput [matDatepicker]="editEffP" formControlName="effDate"
+                        placeholder="DD-MMM-YYYY" [min]="minDate" autocomplete="off" />
+                      <mat-datepicker-toggle matIconSuffix [for]="editEffP"></mat-datepicker-toggle>
+                      <mat-datepicker #editEffP [startAt]="minDate"></mat-datepicker>
+                      @if (getDateErrorMessage(editableRowsMeta[i].form, 'effDate')) {
+                        <mat-error>{{ getDateErrorMessage(editableRowsMeta[i].form, 'effDate') }}</mat-error>
+                      }
+                    </mat-form-field>
+                  </td>
+                  <td>
+                    <mat-form-field appearance="fill" class="inline-field date-field"
+                      [class.mat-form-field-invalid]="hasDateError(editableRowsMeta[i].form, 'termDate')"
+                      [matTooltip]="getDateErrorMessage(editableRowsMeta[i].form, 'termDate')"
+                      matTooltipPosition="above"
+                      matTooltipClass="validation-tooltip">
+                      <input matInput [matDatepicker]="editTermP" formControlName="termDate"
+                        placeholder="DD-MMM-YYYY" [min]="minDate"
+                        [matDatepickerFilter]="editableRowsMeta[i].terminationDateFilter" autocomplete="off" />
+                      <mat-datepicker-toggle matIconSuffix [for]="editTermP"></mat-datepicker-toggle>
+                      <mat-datepicker #editTermP [startAt]="minDate"></mat-datepicker>
+                      @if (getDateErrorMessage(editableRowsMeta[i].form, 'termDate')) {
+                        <mat-error>{{ getDateErrorMessage(editableRowsMeta[i].form, 'termDate') }}</mat-error>
+                      }
+                    </mat-form-field>
+                  </td>
+                  <td>
+                    <div class="readonly-cell">{{ formatDate(editableRowsMeta[i].form.get('modificationDate')?.value) }}</div>
+                  </td>
+                  @if (newRows.length > 0) {
+                    <td class="col-actions"></td>
+                  }
+                </tr>
+              } @else {
+                <tr>
+                  <td>{{ row.testId }}</td>
+                  <td>{{ row.description }}</td>
+                  <td>{{ row.result }}</td>
+                  <td>{{ formatDate(row.effDate) }}</td>
+                  <td>{{ formatDate(row.termDate) }}</td>
+                  <td>{{ formatDate(row.modificationDate) }}</td>
+                </tr>
+              }
+            }
+          </tbody>
+        </table>
+      </div>
+    }
+  </div>
+</div>
